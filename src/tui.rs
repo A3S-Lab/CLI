@@ -27,6 +27,9 @@ use a3s_tui::style::{Color, Style};
 use a3s_tui::{Event, KeyCode, KeyModifiers, Model, ProgramBuilder};
 use tokio::sync::{mpsc, Mutex};
 
+/// Theme accent — ShuAn OS blue. Single source of truth for the UI accent color.
+const ACCENT: Color = Color::Rgb(37, 99, 235);
+
 /// Shared, single-consumer receiver for the active agent run. Wrapped so the
 /// pump command can own a clone; pumps run sequentially, so the mutex never
 /// actually contends.
@@ -158,7 +161,7 @@ impl Model for App {
             Msg::Term(Event::Resize { width, height }) => {
                 self.width = width;
                 self.height = height;
-                self.viewport.resize(width, height.saturating_sub(7));
+                self.viewport.resize(width, height.saturating_sub(5));
                 self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(2));
                 self.rebuild_viewport();
             }
@@ -301,15 +304,15 @@ impl Model for App {
         let status = StatusBar::new()
             .left(&status_text)
             .right(&right)
-            .fg(Color::White)
-            .bg(Color::BrightBlack)
+            .fg(Color::BrightWhite)
+            .bg(ACCENT)
             .view(self.width);
 
         let viewport_view = self.viewport.view();
         let separator = Style::new()
             .fg(Color::BrightBlack)
             .render(&"─".repeat(self.width as usize));
-        let prompt = Style::new().fg(Color::BrightGreen).bold().render("❯ ");
+        let prompt = Style::new().fg(ACCENT).bold().render("❯ ");
         let input_view = format!("{}{}", prompt, self.textarea.view());
 
         Layout::vertical()
@@ -365,7 +368,7 @@ impl App {
         self.messages.push(
             Style::new()
                 .bold()
-                .fg(Color::BrightGreen)
+                .fg(ACCENT)
                 .render(&format!("❯ {trimmed}")),
         );
         self.textarea.clear();
@@ -890,7 +893,7 @@ pub async fn run() -> anyhow::Result<()> {
                 "user" => Some(
                     Style::new()
                         .bold()
-                        .fg(Color::BrightGreen)
+                        .fg(ACCENT)
                         .render(&format!("❯ {}", text.trim())),
                 ),
                 "assistant" => Some(text),
@@ -933,7 +936,7 @@ pub async fn run() -> anyhow::Result<()> {
 
     let app = App {
         session,
-        viewport: Viewport::new(width, height.saturating_sub(7)),
+        viewport: Viewport::new(width, height.saturating_sub(5)),
         textarea: Textarea::new()
             .with_height(3)
             .with_width(width)
