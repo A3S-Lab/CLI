@@ -880,6 +880,8 @@ pub async fn run() -> anyhow::Result<()> {
         )?,
     };
 
+    let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
+
     // Seed the transcript with any resumed conversation (user + assistant text).
     let initial_messages: Vec<String> = session
         .history()
@@ -896,7 +898,12 @@ pub async fn run() -> anyhow::Result<()> {
                         .fg(ACCENT)
                         .render(&format!("❯ {}", text.trim())),
                 ),
-                "assistant" => Some(text),
+                // Render historical assistant turns as markdown, like live ones.
+                "assistant" => {
+                    let mut md = StreamingMarkdown::new((width as usize).saturating_sub(2));
+                    md.push(&text);
+                    Some(md.view())
+                }
                 _ => None,
             }
         })
@@ -911,7 +918,6 @@ pub async fn run() -> anyhow::Result<()> {
         return run_smoke(session).await;
     }
 
-    let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
     let keymap = Keymap::new()
         .bind(
             KeyBinding::new(KeyCode::PageUp),
