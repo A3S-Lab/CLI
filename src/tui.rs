@@ -2,7 +2,7 @@
 //!
 //! Built on the `a3s-tui` TEA framework: it drives an [`AgentSession`] via
 //! `session.stream()` and renders the resulting [`AgentEvent`] stream as a live
-//! chat transcript, mapping tool-confirmation events to an approve/deny modal.
+//! chat transcript, with an inline (y/n/a) approval prompt for tool calls.
 //!
 //! Streaming bridge: `session.stream()` yields a `tokio::mpsc` receiver. A
 //! self-re-issuing "pump" command reads one event, turns it into a `Msg`, and
@@ -15,7 +15,6 @@ use std::time::Duration;
 use a3s_code_core::hitl::TimeoutAction;
 use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions};
 use a3s_tui::cmd::{self, Cmd};
-use a3s_tui::components::modal::{Modal, ModalMsg};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{Spinner, StatusBar, Textarea, Viewport};
@@ -61,7 +60,6 @@ enum Msg {
     StreamError(String),
     SpinnerTick,
     ModalConfirm(usize),
-    ModalDismiss,
     Resume,
     Interrupted,
     Quit,
@@ -106,7 +104,6 @@ struct App {
     state: State,
     messages: Vec<String>,
     rx: Option<SharedRx>,
-    modal: Option<Modal>,
     pending_tool: Option<(String, String)>,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
@@ -162,13 +159,14 @@ impl Model for App {
                 self.width = width;
                 self.height = height;
                 self.viewport.resize(width, height.saturating_sub(5));
+                self.textarea.set_width(width.saturating_sub(2));
                 self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(2));
                 self.rebuild_viewport();
             }
 
             Msg::Term(Event::Key(key)) => {
                 if self.state == State::Awaiting {
-                    return self.handle_modal_key(&key);
+                    return self.handle_approval_key(&key);
                 }
                 if let Some(action) = self.keymap.resolve(&key) {
                     let m = match action {
@@ -245,7 +243,6 @@ impl Model for App {
             }
 
             Msg::ModalConfirm(idx) => {
-                self.modal = None;
                 let approved = idx == 0;
                 self.state = State::Streaming;
                 if let Some((tool_id, name)) = self.pending_tool.take() {
@@ -267,8 +264,6 @@ impl Model for App {
                 }
             }
 
-            Msg::ModalDismiss => return Some(cmd::msg(Msg::ModalConfirm(1))),
-
             Msg::Resume => {
                 if let Some(rx) = self.rx.clone() {
                     return Some(pump(rx));
@@ -281,16 +276,10 @@ impl Model for App {
     }
 
     fn view(&self) -> String {
-        if self.state == State::Awaiting {
-            if let Some(modal) = &self.modal {
-                return modal.view(self.width, self.height);
-            }
-        }
-
-        let status_text = match self.state {
-            State::Streaming => format!(" {} working... (Esc interrupt)", self.spinner.view()),
-            State::Idle => " a3s-code".to_string(),
-            State::Awaiting => " awaiting approval...".to_string(),
+        let left = match self.state {
+            State::Streaming => " a3s-code · working",
+            State::Awaiting => " a3s-code · approval needed",
+            State::Idle => " a3s-code",
         };
         let mut right = String::new();
         if let Some(model) = &self.model {
@@ -302,7 +291,7 @@ impl Model for App {
         }
         right.push_str("Ctrl+C quit ");
         let status = StatusBar::new()
-            .left(&status_text)
+            .left(left)
             .right(&right)
             .fg(Color::BrightWhite)
             .bg(ACCENT)
@@ -312,14 +301,39 @@ impl Model for App {
         let separator = Style::new()
             .fg(Color::BrightBlack)
             .render(&"─".repeat(self.width as usize));
+
+        // Activity line, fixed directly above the input: spinner while the agent
+        // works, an inline approval prompt while awaiting, empty when idle.
+        let activity = match self.state {
+            State::Streaming => Style::new().fg(ACCENT).render(&format!(
+                "  {} Working…  ·  Esc to interrupt",
+                self.spinner.view()
+            )),
+            State::Awaiting => {
+                let tool = self
+                    .pending_tool
+                    .as_ref()
+                    .map(|(_, n)| n.as_str())
+                    .unwrap_or("tool");
+                Style::new().fg(Color::Yellow).bold().render(&format!(
+                    "  ⏵ Allow {tool}?   (y)es   (n)o   (a)lways   ·   Esc denies"
+                ))
+            }
+            State::Idle => String::new(),
+        };
+
         let prompt = Style::new().fg(ACCENT).bold().render("❯ ");
         let input_view = format!("{}{}", prompt, self.textarea.view());
 
+        // Bottom: loading/approval line, then the input framed by a border above
+        // and below it.
         Layout::vertical()
             .item(&status, Constraint::Fixed(1))
             .item(&viewport_view, Constraint::Fill)
+            .item(&activity, Constraint::Fixed(1))
             .item(&separator, Constraint::Fixed(1))
-            .item(&input_view, Constraint::Fixed(3))
+            .item(&input_view, Constraint::Fixed(1))
+            .item(&separator, Constraint::Fixed(1))
             .render(self.height)
     }
 }
@@ -473,15 +487,15 @@ impl App {
                 }
                 self.state = State::Awaiting;
                 self.pending_tool = Some((tool_id, tool_name.clone()));
-                let pretty =
-                    serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
-                let body = format!("Tool: {tool_name}\n{}", truncate(&pretty, 400));
-                self.modal = Some(
-                    Modal::new()
-                        .title("Approve tool call?")
-                        .body(&body)
-                        .options(vec!["Allow", "Deny"]),
-                );
+                // Show what's being approved inline in the transcript; the
+                // compact y/n/a prompt lives on the activity line above input.
+                let head = match arg_summary(&args) {
+                    Some(summary) => format!("  ⏵ requests: {tool_name} {summary}"),
+                    None => format!("  ⏵ requests: {tool_name}"),
+                };
+                self.push_line(&Style::new().fg(Color::Yellow).bold().render(&head));
+                self.rebuild_viewport();
+                self.viewport.update(ViewportMsg::Bottom);
                 return None; // wait for the user; do not pump
             }
             AgentEvent::End {
@@ -589,24 +603,18 @@ impl App {
         self.viewport.set_content(&format!("{full}\n"));
     }
 
-    fn handle_modal_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
-        if let Some(modal) = &mut self.modal {
-            match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    modal.update(ModalMsg::Prev);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    modal.update(ModalMsg::Next);
-                }
-                KeyCode::Enter => {
-                    let idx = modal.confirm();
-                    return Some(cmd::msg(Msg::ModalConfirm(idx)));
-                }
-                KeyCode::Esc => return Some(cmd::msg(Msg::ModalDismiss)),
-                _ => {}
+    /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
+    /// a = allow + enable auto-approve for the rest of the session.
+    fn handle_approval_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(cmd::msg(Msg::ModalConfirm(0))),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(Msg::ModalConfirm(1))),
+            KeyCode::Char('a' | 'A') => {
+                self.auto_approve = true;
+                Some(cmd::msg(Msg::ModalConfirm(0)))
             }
+            _ => None,
         }
-        None
     }
 }
 
@@ -944,8 +952,8 @@ pub async fn run() -> anyhow::Result<()> {
         session,
         viewport: Viewport::new(width, height.saturating_sub(5)),
         textarea: Textarea::new()
-            .with_height(3)
-            .with_width(width)
+            .with_height(1)
+            .with_width(width.saturating_sub(2)) // room for the "❯ " prompt
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
         streaming: StreamingMarkdown::new((width as usize).saturating_sub(2)),
@@ -953,7 +961,6 @@ pub async fn run() -> anyhow::Result<()> {
         state: State::Idle,
         messages: initial_messages,
         rx: None,
-        modal: None,
         pending_tool: None,
         history: Vec::new(),
         history_pos: None,
