@@ -797,9 +797,44 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Find the A3S config: `$A3S_CONFIG_FILE`, then `.a3s/config.acl` walking up
+/// from the current directory (project-local), then `~/.a3s/config.acl`
+/// (user-global) — so `a3s code` works from anywhere once a global config exists.
+fn find_config() -> Option<String> {
+    if let Ok(p) = std::env::var("A3S_CONFIG_FILE") {
+        if !p.is_empty() {
+            return Some(p);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let mut dir: Option<&std::path::Path> = Some(cwd.as_path());
+        while let Some(d) = dir {
+            let candidate = d.join(".a3s/config.acl");
+            if candidate.is_file() {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+            dir = d.parent();
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let candidate = std::path::Path::new(&home).join(".a3s/config.acl");
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 pub async fn run() -> anyhow::Result<()> {
-    let config_path =
-        std::env::var("A3S_CONFIG_FILE").unwrap_or_else(|_| ".a3s/config.acl".to_string());
+    let config_path = find_config().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no A3S config found.\n\nLooked for: $A3S_CONFIG_FILE, .a3s/config.acl in this \
+             directory or a parent, and ~/.a3s/config.acl.\n\nCreate one, e.g.:\n  \
+             mkdir -p ~/.a3s\n  $EDITOR ~/.a3s/config.acl\n\nMinimal example:\n  \
+             default_model = \"openai/gpt-4o\"\n  providers \"openai\" {{\n    apiKey = \
+             \"sk-...\"\n  }}\n\nOr point at an existing file: A3S_CONFIG_FILE=/path/config.acl a3s code"
+        )
+    })?;
     let agent = Agent::new(config_path.clone())
         .await
         .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?;
