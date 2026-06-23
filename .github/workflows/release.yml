@@ -5,7 +5,19 @@ on:
 permissions:
   contents: write
 jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
+                 --notes "a3s ${GITHUB_REF_NAME} — umbrella CLI dispatcher" --verify-tag
   binaries:
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +40,7 @@ jobs:
           archive: a3s-$tag-$target
           token: ${{ secrets.GITHUB_TOKEN }}
   crate:
+    needs: create-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,8 +49,4 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            cargo publish
-          else
-            echo "CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"
-          fi
+          if [ -n "${CARGO_REGISTRY_TOKEN:-}" ]; then cargo publish; else echo "no CARGO_REGISTRY_TOKEN — skipping crates.io"; fi
