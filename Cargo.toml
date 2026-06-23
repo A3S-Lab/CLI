@@ -1,17 +1,25 @@
 [package]
 name = "a3s"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
-description = "a3s — umbrella CLI for the A3S platform; dispatches `a3s <tool>` to the matching `a3s-<tool>` binary"
+description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
 repository = "https://github.com/A3S-Lab/Cli"
 homepage = "https://github.com/A3S-Lab/a3s"
-keywords = ["a3s", "cli", "agent", "dispatch"]
+keywords = ["a3s", "cli", "agent", "tui", "coding"]
 categories = ["command-line-utilities"]
 
 [[bin]]
 name = "a3s"
 path = "src/main.rs"
+
+[dependencies]
+a3s-code-core = "4.2.1"
+a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "a276aeb5a18e44e8e173fa42087b526336027260" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+anyhow = "1"
+serde_json = "1"
+similar = "2"
 
 [profile.release]
 opt-level = "z"
