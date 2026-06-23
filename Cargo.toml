@@ -1,0 +1,19 @@
+[package]
+name = "a3s"
+version = "0.1.4"
+edition = "2021"
+description = "a3s — umbrella CLI for the A3S platform; dispatches `a3s <tool>` to the matching `a3s-<tool>` binary"
+license = "MIT"
+repository = "https://github.com/A3S-Lab/Cli"
+homepage = "https://github.com/A3S-Lab/a3s"
+keywords = ["a3s", "cli", "agent", "dispatch"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "a3s"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
