@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.2.6"
+version = "0.3.0"
 dependencies = [
  "a3s-code-core",
  "a3s-tui",
@@ -157,7 +157,7 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/TUI.git?rev=3de18195074270eb526e2a25df7e1f4b790957dd#3de18195074270eb526e2a25df7e1f4b790957dd"
+source = "git+https://github.com/A3S-Lab/TUI.git?rev=b448edc274171927cd174ea26ad17b4e70df4d59#b448edc274171927cd174ea26ad17b4e70df4d59"
 dependencies = [
  "comrak",
  "crossterm",
