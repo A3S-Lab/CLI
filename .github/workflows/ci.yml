@@ -12,3 +12,16 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
+
+  # Validate the TUI compiles for Windows + macOS so all three desktop
+  # platforms can run `a3s code` (Linux is covered by `check` above).
+  cross:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
