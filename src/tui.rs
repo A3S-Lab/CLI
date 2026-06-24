@@ -1003,7 +1003,7 @@ fn scan_relay(cwd: &str) -> Vec<RelaySession> {
 
     // Newest first, then keep only the most recent few per agent — users care
     // about recent sessions, not the whole history.
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|e| std::cmp::Reverse(e.mtime));
     const PER_AGENT: usize = 8;
     let mut kept: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
     out.retain(|s| {
@@ -1047,7 +1047,7 @@ fn gather_jsonl(
 fn collect_jsonl(dir: &std::path::Path, agent: &'static str, out: &mut Vec<RelaySession>) {
     let mut paths: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
     gather_jsonl(dir, 0, 6, &mut paths);
-    paths.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+    paths.sort_by_key(|e| std::cmp::Reverse(e.1)); // newest first
     paths.truncate(12);
     for (p, mtime) in paths {
         // Most-recent task (tail); fall back to the initial prompt (head).
@@ -5109,7 +5109,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 Some((id, mtime))
             })
             .collect();
-        saved.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+        saved.sort_by_key(|e| std::cmp::Reverse(e.1)); // newest first
         match &explicit_id {
             Some(id) if !saved.iter().any(|(s, _)| s == id) => {
                 eprintln!("a3s: session '{id}' not found in {}", store_dir.display());
