@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 a3s-code-core = "4.2.1"
-a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "686062552d67f6729b4f5e9ca11334f966e797df" }
+a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "3de18195074270eb526e2a25df7e1f4b790957dd" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 anyhow = "1"
 serde_json = "1"

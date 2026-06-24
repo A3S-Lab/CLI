@@ -9,15 +9,16 @@
 //! the update handler issues the next pump — feeding the async event stream into
 //! the synchronous TEA update loop one event at a time.
 
+use std::collections::BinaryHeap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use a3s_code_core::hitl::TimeoutAction;
 use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
-use a3s_tui::components::{Spinner, StatusBar, Textarea, Viewport};
+use a3s_tui::components::{Spinner, Textarea, Viewport};
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
@@ -28,6 +29,247 @@ use tokio::sync::{mpsc, Mutex};
 
 /// Theme accent — ShuAn OS blue. Single source of truth for the UI accent color.
 const ACCENT: Color = Color::Rgb(37, 99, 235);
+
+/// Built-in slash commands shown in the `/` menu.
+const SLASH_COMMANDS: &[(&str, &str)] = &[
+    ("/model", "switch provider / model"),
+    ("/config", "edit .a3s/config.acl in your editor"),
+    ("/btw", "ask a background side-question (/btw <prompt>)"),
+    ("/help", "show commands and shortcuts"),
+    ("/clear", "reset the conversation"),
+    ("/auto", "switch to auto-approve mode"),
+    ("/exit", "quit a3s code"),
+];
+
+/// Open `path` in the user's editor without taking over the TUI terminal: a
+/// known GUI editor from $VISUAL/$EDITOR, else the OS default text-editor opener.
+fn open_in_editor(path: &str) -> bool {
+    // Detached spawn with the TUI's terminal hidden from the child, so a GUI
+    // launcher can't print to (and corrupt) the alt-screen.
+    let spawn = |bin: &str, pre: &[&str]| -> bool {
+        std::process::Command::new(bin)
+            .args(pre)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+    const GUI: &[&str] = &[
+        "code", "cursor", "zed", "subl", "codium", "atom", "mate", "gedit", "windsurf",
+    ];
+    // 1. An explicit GUI editor from $VISUAL/$EDITOR.
+    if let Ok(ed) = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")) {
+        let bin = ed.split_whitespace().next().unwrap_or("");
+        let base = bin.rsplit('/').next().unwrap_or(bin);
+        if GUI.contains(&base) && spawn(bin, &[]) {
+            return true;
+        }
+    }
+    // 2. Common GUI editor CLIs on PATH (VS Code first).
+    for ed in ["code", "cursor", "zed", "subl", "codium", "windsurf"] {
+        if spawn(ed, &[]) {
+            return true;
+        }
+    }
+    // 3. The OS default app for the file, then a plain text editor as last resort.
+    #[cfg(target_os = "macos")]
+    {
+        spawn("open", &[]) || spawn("open", &["-t"])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        spawn("xdg-open", &[])
+    }
+}
+
+/// Slash commands whose name starts with `input` (input begins with `/`).
+fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
+    SLASH_COMMANDS
+        .iter()
+        .filter(|(cmd, _)| cmd.starts_with(input))
+        .copied()
+        .collect()
+}
+
+/// A dim bottom status line with `left` and `right` justified to `width`.
+fn status_line(left: &str, right: &str, width: usize) -> String {
+    let used = a3s_tui::style::visible_len(left) + a3s_tui::style::visible_len(right);
+    let gap = width.saturating_sub(used);
+    Style::new()
+        .fg(Color::BrightBlack)
+        .render(&format!("{left}{}{right}", " ".repeat(gap)))
+}
+
+/// Pad a (possibly styled) string with spaces to `width` display columns.
+fn pad_to(s: &str, width: usize) -> String {
+    let vis = a3s_tui::style::visible_len(s);
+    if vis >= width {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(width - vis))
+    }
+}
+
+/// Prefix a message block with a colored ● gutter on its first line and align
+/// the rest under the text — marks user (blue) vs assistant (green) messages.
+fn gutter(color: Color, content: &str) -> String {
+    let dot = Style::new().fg(color).bold().render("●");
+    let margin = " ".repeat(PAD);
+    content
+        .lines()
+        .enumerate()
+        .map(|(i, line)| {
+            if i == 0 {
+                format!("{margin}{dot} {line}")
+            } else {
+                format!("{margin}  {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Current git branch of `dir` (cheap: parse `.git/HEAD`), if any.
+fn git_branch(dir: &str) -> Option<String> {
+    let head = std::fs::read_to_string(format!("{dir}/.git/HEAD")).ok()?;
+    head.strip_prefix("ref: refs/heads/")
+        .map(|b| b.trim().to_string())
+}
+
+/// Left margin for the whole UI (inner padding).
+const PAD: usize = 2;
+
+/// Fixed session id so relaunching in the same directory continues the chat.
+const SESSION_ID: &str = "tui-default";
+
+/// Run mode, cycled with Shift+Tab.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    /// Approve every tool call.
+    Default,
+    /// Read-only tools auto-approved; writes still prompt (exploration/planning).
+    Plan,
+    /// Auto-approve every tool call.
+    Auto,
+}
+
+impl Mode {
+    fn next(self) -> Self {
+        match self {
+            Mode::Default => Mode::Plan,
+            Mode::Plan => Mode::Auto,
+            Mode::Auto => Mode::Default,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Mode::Default => "default · approve each",
+            Mode::Plan => "plan · auto-read",
+            Mode::Auto => "auto · approve all",
+        }
+    }
+
+    fn glyph(self) -> &'static str {
+        match self {
+            Mode::Default => "⏵",
+            Mode::Plan => "✎",
+            Mode::Auto => "⏵⏵",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Mode::Default => Color::BrightWhite,
+            Mode::Plan => Color::Cyan,
+            Mode::Auto => Color::Green,
+        }
+    }
+
+    /// Whether a tool call is auto-approved in this mode.
+    fn auto_approves(self, tool: &str) -> bool {
+        match self {
+            Mode::Auto => true,
+            Mode::Plan => is_readonly_tool(tool),
+            Mode::Default => false,
+        }
+    }
+}
+
+/// "1m 05s" / "42s".
+fn fmt_elapsed(d: Duration) -> String {
+    let s = d.as_secs();
+    if s >= 60 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{s}s")
+    }
+}
+
+/// "79.9k" / "512".
+fn humanize(n: usize) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Render `text` with a 3-char bright band sweeping left→right (loading shimmer).
+/// `phase` advances each frame; the band cycles across the text with a gap.
+fn shimmer(text: &str, phase: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    let head = phase % (chars.len() + 6);
+    let mut out = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        let lit = head >= i && head - i < 3;
+        let s = if lit {
+            Style::new().fg(Color::BrightWhite).bold()
+        } else {
+            Style::new().fg(ACCENT)
+        };
+        out.push_str(&s.render(&c.to_string()));
+    }
+    out
+}
+
+fn is_readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "read" | "grep" | "ls" | "glob" | "find" | "search" | "web_search" | "web_fetch"
+    )
+}
+
+/// A user message queued while the agent is busy. Priority queue: lower `prio`
+/// runs first, FIFO within a priority.
+struct Queued {
+    prio: u8,
+    seq: u64,
+    text: String,
+}
+
+impl PartialEq for Queued {
+    fn eq(&self, o: &Self) -> bool {
+        self.prio == o.prio && self.seq == o.seq
+    }
+}
+impl Eq for Queued {}
+impl Ord for Queued {
+    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+        // BinaryHeap is a max-heap; invert so lowest prio, then lowest seq, pops first.
+        o.prio.cmp(&self.prio).then(o.seq.cmp(&self.seq))
+    }
+}
+impl PartialOrd for Queued {
+    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(o))
+    }
+}
 
 /// Shared, single-consumer receiver for the active agent run. Wrapped so the
 /// pump command can own a clone; pumps run sequentially, so the mutex never
@@ -62,18 +304,16 @@ enum Msg {
     ModalConfirm(usize),
     Resume,
     Interrupted,
-    Quit,
+    /// Output of a `!`-prefixed shell command.
+    ShellOutput(String),
+    /// Answer from a `/btw` background side-thread.
+    SideNote(String),
 }
 
 impl From<Event> for Msg {
     fn from(event: Event) -> Self {
-        match &event {
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers,
-            }) if modifiers.contains(KeyModifiers::CONTROL) => Msg::Quit,
-            _ => Msg::Term(event),
-        }
+        // Ctrl+C is handled in the key loop (double-press to quit), not here.
+        Msg::Term(event)
     }
 }
 
@@ -94,6 +334,25 @@ fn spinner_tick() -> Cmd<Msg> {
 
 struct App {
     session: Arc<AgentSession>,
+    /// Agent + session-rebuild bits, kept so `/model` can switch models by
+    /// resuming the session under a new model (no in-place model setter exists).
+    agent: Arc<Agent>,
+    store: Arc<dyn a3s_code_core::store::SessionStore>,
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    /// This session's id (for model-switch resume + the exit hint).
+    session_id: String,
+    /// "provider/model" ids from the config, for the /model picker.
+    models: Vec<String>,
+    /// Context-window size per model id, for the ctx% indicator.
+    model_ctx: std::collections::HashMap<String, u32>,
+    /// Context window of the active model (0 = unknown).
+    context_limit: u32,
+    /// Prompt tokens of the last turn = current context fill.
+    last_prompt_tokens: usize,
+    /// Selected index in the /model panel; `Some` means the panel is open.
+    model_menu: Option<usize>,
+    /// First Ctrl+C arms quit; a second within the window exits.
+    quit_armed: Option<Instant>,
     viewport: Viewport,
     textarea: Textarea,
     spinner: Spinner,
@@ -119,11 +378,26 @@ struct App {
     /// Live stdout of the in-progress tool (e.g. a running command), shown
     /// dimmed under the action and cleared when the tool completes.
     tool_output: String,
-    /// When true, tool-confirmation prompts are auto-approved (Codex-style
-    /// approval mode), toggled with `/auto`.
-    auto_approve: bool,
+    /// When the current run started, for the live elapsed-time indicator.
+    stream_started: Option<Instant>,
+    /// Name of the tool currently executing (shown live with a blinking dot).
+    running_tool: Option<String>,
+    /// Animation counter for the blinking running-tool dot (advances per tick).
+    blink_tick: u8,
+    /// Run mode (Shift+Tab cycles default → plan → auto).
+    mode: Mode,
+    /// User messages submitted while the agent is busy, run when it frees up.
+    queue: BinaryHeap<Queued>,
+    /// Monotonic counter for FIFO ordering within a queue priority.
+    seq: u64,
+    /// Turns completed this session, for the status-bar task counter.
+    completed: usize,
     /// Working directory shown for context.
     cwd: String,
+    /// Git branch of the workspace (if any), shown in the bottom status bar.
+    branch: Option<String>,
+    /// Selected index in the `/` command menu.
+    slash_sel: usize,
     width: u16,
     height: u16,
     keymap: Keymap<Action>,
@@ -134,15 +408,7 @@ impl Model for App {
 
     fn init(&mut self) -> Option<Cmd<Msg>> {
         if self.messages.is_empty() {
-            let welcome = Style::new()
-                .fg(Color::BrightBlack)
-                .italic()
-                .render(&format!(
-                    "  A3S Code — {}\n  Type a message and press Enter.\n  \
-                 ↑/↓ history · Esc interrupt · /help · Ctrl+C quit\n",
-                    self.cwd
-                ));
-            self.viewport.set_content(&welcome);
+            self.viewport.set_content(&self.banner());
         } else {
             // Resumed session — show the prior conversation, scrolled to the end.
             self.rebuild_viewport();
@@ -153,20 +419,45 @@ impl Model for App {
 
     fn update(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
-            Msg::Quit => return Some(cmd::quit()),
-
             Msg::Term(Event::Resize { width, height }) => {
                 self.width = width;
                 self.height = height;
-                self.viewport.resize(width, height.saturating_sub(5));
-                self.textarea.set_width(width.saturating_sub(2));
-                self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(2));
+                self.viewport.resize(width, height.saturating_sub(7));
+                self.textarea
+                    .set_width(width.saturating_sub((PAD + 2) as u16));
+                self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
                 self.rebuild_viewport();
             }
 
             Msg::Term(Event::Key(key)) => {
+                // Ctrl+C: arm on the first press, exit on a second within 2s.
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match self.quit_armed {
+                        Some(t) if t.elapsed() < Duration::from_secs(2) => return Some(cmd::quit()),
+                        _ => {
+                            self.quit_armed = Some(Instant::now());
+                            self.push_line(
+                                &Style::new()
+                                    .fg(Color::Yellow)
+                                    .render("  press Ctrl+C again to exit"),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                // Shift+Tab cycles run mode in any state.
+                if key.code == KeyCode::BackTab {
+                    self.mode = self.mode.next();
+                    return None;
+                }
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
+                }
+                // /model picker takes keys while open.
+                if self.model_menu.is_some() {
+                    if let Some(result) = self.handle_model_key(&key) {
+                        return result;
+                    }
                 }
                 if let Some(action) = self.keymap.resolve(&key) {
                     let m = match action {
@@ -178,17 +469,21 @@ impl Model for App {
                     self.viewport.update(m);
                     return None;
                 }
-                if self.state == State::Streaming {
-                    // Esc interrupts the in-progress run.
-                    if key.code == KeyCode::Esc {
-                        self.push_line(&Style::new().fg(Color::Yellow).render("  ⎋ interrupting…"));
-                        let session = self.session.clone();
-                        return Some(cmd::cmd(move || async move {
-                            session.cancel().await;
-                            Msg::Interrupted
-                        }));
+                // Esc interrupts the in-progress run (input stays usable otherwise).
+                if self.state == State::Streaming && key.code == KeyCode::Esc {
+                    self.push_line(&Style::new().fg(Color::Yellow).render("  ⎋ interrupting…"));
+                    let session = self.session.clone();
+                    return Some(cmd::cmd(move || async move {
+                        session.cancel().await;
+                        Msg::Interrupted
+                    }));
+                }
+                // Slash-command menu: ↑/↓ select, Enter run, Tab complete, Esc
+                // dismiss — takes priority over history recall while open.
+                if self.slash_menu_open() {
+                    if let Some(result) = self.handle_slash_key(&key) {
+                        return result;
                     }
-                    return None;
                 }
                 // ↑/↓ recall prompt history (single-line input only, so multi-line
                 // editing keeps normal cursor movement).
@@ -199,6 +494,8 @@ impl Model for App {
                     self.history_recall(key.code == KeyCode::Up);
                     return None;
                 }
+                // Input is always live (you can keep typing while the agent works);
+                // a submit while busy is queued and run when the current turn ends.
                 if let Some(TextareaMsg::Submit(text)) = self.textarea.handle_key(&key) {
                     return Some(cmd::msg(Msg::Submit(text)));
                 }
@@ -230,12 +527,16 @@ impl Model for App {
             Msg::StreamEnded => {
                 if self.state == State::Streaming {
                     self.finalize_streaming();
+                    self.completed += 1;
                 }
                 self.finish();
+                // Run the next queued message (submitted while busy), if any.
+                return self.drain_queue();
             }
 
             Msg::SpinnerTick => {
                 self.spinner.tick();
+                self.blink_tick = self.blink_tick.wrapping_add(1);
                 if self.state == State::Streaming {
                     self.update_viewport_with_stream();
                     return Some(spinner_tick());
@@ -270,45 +571,54 @@ impl Model for App {
                 }
             }
 
+            Msg::ShellOutput(text) => {
+                let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
+                self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
+            }
+
+            Msg::SideNote(text) => {
+                self.push_line(&gutter(
+                    Color::Magenta,
+                    &format!("↘ by the way\n{}", text.trim()),
+                ));
+            }
+
             _ => {}
         }
         None
     }
 
     fn view(&self) -> String {
-        let left = match self.state {
-            State::Streaming => " a3s-code · working",
-            State::Awaiting => " a3s-code · approval needed",
-            State::Idle => " a3s-code",
-        };
-        let mut right = String::new();
-        if let Some(model) = &self.model {
-            right.push_str(model);
-            right.push_str(" · ");
-        }
-        if self.total_tokens > 0 {
-            right.push_str(&format!("{} tok · ", self.total_tokens));
-        }
-        right.push_str("Ctrl+C quit ");
-        let status = StatusBar::new()
-            .left(left)
-            .right(&right)
-            .fg(Color::BrightWhite)
-            .bg(ACCENT)
-            .view(self.width);
-
+        let width = self.width as usize;
         let viewport_view = self.viewport.view();
-        let separator = Style::new()
-            .fg(Color::BrightBlack)
-            .render(&"─".repeat(self.width as usize));
+        let separator = Style::new().fg(Color::BrightBlack).render(&format!(
+            "{}{}",
+            " ".repeat(PAD),
+            "─".repeat(width.saturating_sub(2 * PAD))
+        ));
 
-        // Activity line, fixed directly above the input: spinner while the agent
-        // works, an inline approval prompt while awaiting, empty when idle.
+        // Activity line directly above the input: spinner while the agent works,
+        // an inline approval prompt while awaiting, empty when idle.
         let activity = match self.state {
-            State::Streaming => Style::new().fg(ACCENT).render(&format!(
-                "  {} Working…  ·  Esc to interrupt",
-                self.spinner.view()
-            )),
+            State::Streaming => {
+                let spin = Style::new().fg(ACCENT).render(&self.spinner.view());
+                let working = shimmer("Working…", self.blink_tick as usize);
+                let mut tail = String::new();
+                if let Some(t0) = self.stream_started {
+                    // Live token estimate: finalized total + ~chars/4 for the
+                    // in-flight reasoning + answer (snaps to exact usage on End).
+                    let est = self.total_tokens
+                        + self.streaming.raw_content().chars().count() / 4
+                        + self.thinking.chars().count() / 4;
+                    tail.push_str(&format!(" ({}", fmt_elapsed(t0.elapsed())));
+                    if est > 0 {
+                        tail.push_str(&format!(" · ↑ ~{} tokens", humanize(est)));
+                    }
+                    tail.push(')');
+                }
+                let tail = Style::new().fg(ACCENT).render(&tail);
+                format!("  {spin} {working}{tail}")
+            }
             State::Awaiting => {
                 let tool = self
                     .pending_tool
@@ -323,27 +633,370 @@ impl Model for App {
         };
 
         let prompt = Style::new().fg(ACCENT).bold().render("❯ ");
-        let input_view = format!("{}{}", prompt, self.textarea.view());
+        let input_view = format!("{}{}{}", " ".repeat(PAD), prompt, self.textarea.view());
 
-        // Bottom: loading/approval line, then the input framed by a border above
-        // and below it.
-        Layout::vertical()
-            .item(&status, Constraint::Fixed(1))
+        // Bottom status bar (two lines): cwd/branch + model/tokens, then mode + hints.
+        let dir = self.cwd.rsplit('/').next().unwrap_or(&self.cwd);
+        let mut ctx = format!("  {dir}");
+        if let Some(b) = &self.branch {
+            ctx.push_str(&format!("  ⎇ {b}"));
+        }
+        // Live task bar: completed turns + currently running/queued (the input queue).
+        let pending = self.queue.len();
+        let active = usize::from(self.state == State::Streaming);
+        if self.completed > 0 || pending + active > 0 {
+            ctx.push_str(&format!("  ·  ✓ {} done", self.completed));
+            if pending + active > 0 {
+                ctx.push_str(&format!("  ⏳ {} running", pending + active));
+            }
+        }
+        let mut info = String::new();
+        if let Some(m) = &self.model {
+            info.push_str(m); // provider/model
+        }
+        if self.context_limit > 0 {
+            let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
+            info.push_str(&format!("  ·  ctx: {pct}%"));
+        } else if self.total_tokens > 0 {
+            info.push_str(&format!("  ·  {} tok", self.total_tokens));
+        }
+        info.push_str("  ");
+        let status1 = status_line(&ctx, &info, width);
+        let mode_part = Style::new().fg(self.mode.color()).bold().render(&format!(
+            "  {} {}",
+            self.mode.glyph(),
+            self.mode.label()
+        ));
+        let hints = Style::new()
+            .fg(Color::BrightBlack)
+            .render("Shift+Tab mode · /help · ↑↓ history · Esc · Ctrl+C quit  ");
+        let used = a3s_tui::style::visible_len(&mode_part) + a3s_tui::style::visible_len(&hints);
+        let status2 = format!(
+            "{mode_part}{}{hints}",
+            " ".repeat(width.saturating_sub(used))
+        );
+
+        let spacer = String::new(); // gap between the transcript and the loading line
+        let composed = Layout::vertical()
             .item(&viewport_view, Constraint::Fill)
+            .item(&spacer, Constraint::Fixed(1))
             .item(&activity, Constraint::Fixed(1))
             .item(&separator, Constraint::Fixed(1))
             .item(&input_view, Constraint::Fixed(1))
             .item(&separator, Constraint::Fixed(1))
-            .render(self.height)
+            .item(&status1, Constraint::Fixed(1))
+            .item(&status2, Constraint::Fixed(1))
+            .render(self.height);
+
+        let composed = self.overlay_slash_menu(composed);
+        self.overlay_model_menu(composed)
+    }
+
+    fn cursor(&self) -> Option<(u16, u16)> {
+        // Real cursor at the input insertion point whenever the input is live —
+        // idle OR streaming (you can keep typing while the agent works). Hidden
+        // only during an approval prompt.
+        if self.state == State::Awaiting {
+            return None;
+        }
+        let row = self.height.saturating_sub(4); // input line: …input, border, status×2
+        let col = (PAD + 2) as u16 + self.textarea.cursor_display_col() as u16; // PAD + "❯ "
+        Some((col, row))
     }
 }
 
 impl App {
+    /// True when the `/` command menu should be shown (idle, single-line input
+    /// starting with `/` that matches at least one command).
+    fn slash_menu_open(&self) -> bool {
+        let input = self.textarea.value();
+        self.state == State::Idle
+            && input.starts_with('/')
+            && !input.contains('\n')
+            && !slash_candidates(&input).is_empty()
+    }
+
+    /// Keys while the slash menu is open: ↑/↓ select, Enter run, Tab complete,
+    /// Esc dismiss. Returns `Some(handled)` to consume the key.
+    fn handle_slash_key(&mut self, key: &KeyEvent) -> Option<Option<Cmd<Msg>>> {
+        let cands = slash_candidates(&self.textarea.value());
+        if cands.is_empty() {
+            return None;
+        }
+        let last = cands.len() - 1;
+        self.slash_sel = self.slash_sel.min(last);
+        match key.code {
+            KeyCode::Up => {
+                self.slash_sel = self.slash_sel.saturating_sub(1);
+                Some(None)
+            }
+            KeyCode::Down => {
+                self.slash_sel = (self.slash_sel + 1).min(last);
+                Some(None)
+            }
+            KeyCode::Enter => {
+                let cmd = cands[self.slash_sel].0;
+                self.slash_sel = 0;
+                self.textarea.clear();
+                // /model opens its picker directly (stays open); others just run.
+                if cmd == "/model" {
+                    self.open_model_menu();
+                    return Some(None);
+                }
+                Some(Some(cmd::msg(Msg::Submit(cmd.to_string()))))
+            }
+            KeyCode::Tab => {
+                // Fill into the input (trailing space closes the menu) to add args.
+                self.textarea
+                    .set_value(&format!("{} ", cands[self.slash_sel].0));
+                self.slash_sel = 0;
+                Some(None)
+            }
+            KeyCode::Esc => {
+                self.textarea.clear();
+                self.slash_sel = 0;
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
+    /// Overlay the `/` command menu just above the input box.
+    /// Overlay `menu` rows just above the input box (last row on the activity line).
+    fn overlay_list(&self, composed: String, menu: &[String]) -> String {
+        if menu.is_empty() {
+            return composed;
+        }
+        let mut rows: Vec<String> = composed.lines().map(str::to_string).collect();
+        let bottom = (self.height as usize).saturating_sub(6);
+        let start = bottom.saturating_sub(menu.len().saturating_sub(1));
+        for (i, ml) in menu.iter().enumerate() {
+            let row = start + i;
+            if row < rows.len() {
+                rows[row] = ml.clone();
+            }
+        }
+        rows.join("\n")
+    }
+
+    fn overlay_slash_menu(&self, composed: String) -> String {
+        if !self.slash_menu_open() {
+            return composed;
+        }
+        let cands = slash_candidates(&self.textarea.value());
+        let sel = self.slash_sel.min(cands.len() - 1);
+        let width = self.width as usize;
+        let menu: Vec<String> = cands
+            .iter()
+            .enumerate()
+            .map(|(i, (cmd, desc))| {
+                let raw = pad_to(&format!("  {cmd:<9} {desc}"), width);
+                if i == sel {
+                    Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+                } else {
+                    Style::new().fg(Color::BrightBlack).render(&raw)
+                }
+            })
+            .collect();
+        self.overlay_list(composed, &menu)
+    }
+
+    /// Open the /model picker on the current model (no-op if none configured).
+    fn open_model_menu(&mut self) {
+        if self.models.is_empty() {
+            self.push_line(
+                &Style::new()
+                    .fg(Color::Red)
+                    .render("  no models configured in config.acl"),
+            );
+            return;
+        }
+        let cur = self.model.as_deref();
+        let idx = self
+            .models
+            .iter()
+            .position(|m| Some(m.as_str()) == cur)
+            .unwrap_or(0);
+        self.model_menu = Some(idx);
+    }
+
+    /// Keys while the /model panel is open: ↑/↓ select, Enter switch, Esc close.
+    fn handle_model_key(&mut self, key: &KeyEvent) -> Option<Option<Cmd<Msg>>> {
+        let sel = self.model_menu?;
+        let last = self.models.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Up => {
+                self.model_menu = Some(sel.saturating_sub(1));
+                Some(None)
+            }
+            KeyCode::Down => {
+                self.model_menu = Some((sel + 1).min(last));
+                Some(None)
+            }
+            KeyCode::Enter => {
+                let model = self.models[sel.min(last)].clone();
+                self.model_menu = None;
+                self.switch_model(&model);
+                Some(None)
+            }
+            KeyCode::Esc => {
+                self.model_menu = None;
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
+    /// Switch the active model by resuming the session under it (history kept).
+    fn switch_model(&mut self, model: &str) {
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(Color::Yellow)
+                    .render("  finish the current turn before switching models"),
+            );
+            return;
+        }
+        let opts = SessionOptions::new()
+            .with_session_store(self.store.clone())
+            .with_session_id(self.session_id.as_str())
+            .with_confirmation_policy(self.confirmation.clone())
+            .with_auto_save(true)
+            .with_model(model);
+        match self.agent.resume_session(self.session_id.as_str(), opts) {
+            Ok(s) => {
+                self.session = Arc::new(s);
+                self.model = Some(model.to_string());
+                self.context_limit = self.model_ctx.get(model).copied().unwrap_or(0);
+                self.push_line(
+                    &Style::new()
+                        .fg(Color::Green)
+                        .render(&format!("  ⇄ switched to {model}")),
+                );
+            }
+            Err(e) => self.push_line(
+                &Style::new()
+                    .fg(Color::Red)
+                    .render(&format!("  failed to switch model: {e}")),
+            ),
+        }
+    }
+
+    fn overlay_model_menu(&self, composed: String) -> String {
+        let Some(sel) = self.model_menu else {
+            return composed;
+        };
+        if self.models.is_empty() {
+            return composed;
+        }
+        let width = self.width as usize;
+        let mut menu = vec![pad_to(
+            &Style::new()
+                .fg(ACCENT)
+                .bold()
+                .render("  Select model — ↑/↓ · Enter · Esc"),
+            width,
+        )];
+        for (i, m) in self.models.iter().enumerate().take(12) {
+            let cur = Some(m.as_str()) == self.model.as_deref();
+            let raw = pad_to(&format!("  {} {m}", if cur { "●" } else { " " }), width);
+            menu.push(if i == sel.min(self.models.len() - 1) {
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+            } else {
+                Style::new().fg(Color::BrightBlack).render(&raw)
+            });
+        }
+        self.overlay_list(composed, &menu)
+    }
+
     fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return None;
         }
+        // `!cmd` runs a shell command directly (not through the agent).
+        if let Some(rest) = trimmed.strip_prefix('!') {
+            let cmd = rest.trim().to_string();
+            if cmd.is_empty() {
+                return None;
+            }
+            self.messages.push(gutter(
+                ACCENT,
+                &Style::new().bold().render(&format!("! {cmd}")),
+            ));
+            self.textarea.clear();
+            self.rebuild_viewport();
+            return Some(cmd::cmd(move || async move {
+                let out = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await;
+                let text = match out {
+                    Ok(o) => {
+                        let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                        s.push_str(&String::from_utf8_lossy(&o.stderr));
+                        if s.trim().is_empty() {
+                            format!("(exit {})", o.status.code().unwrap_or(-1))
+                        } else {
+                            s
+                        }
+                    }
+                    Err(e) => format!("failed to run: {e}"),
+                };
+                Msg::ShellOutput(text)
+            }));
+        }
+        // `/btw <prompt>` runs a background side-thread (separate ephemeral
+        // session, the main conversation as context) without disturbing the
+        // current turn; its answer arrives as a side note.
+        if let Some(rest) = trimmed.strip_prefix("/btw") {
+            let q = rest.trim().to_string();
+            self.textarea.clear();
+            if q.is_empty() {
+                self.push_line(
+                    &Style::new()
+                        .fg(Color::BrightBlack)
+                        .render("  usage: /btw <question>"),
+                );
+                return None;
+            }
+            self.messages
+                .push(gutter(Color::Magenta, &format!("↘ by the way: {q}")));
+            self.rebuild_viewport();
+            let agent = self.agent.clone();
+            let workspace = self.cwd.clone();
+            let history = self.session.history();
+            return Some(cmd::cmd(move || async move {
+                // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
+                let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                    .with_timeout(500, TimeoutAction::Reject);
+                let sess = match agent.session(
+                    workspace,
+                    Some(SessionOptions::new().with_confirmation_policy(conf)),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => return Msg::SideNote(format!("(/btw failed: {e})")),
+                };
+                let mut answer = String::new();
+                if let Ok((mut rx, _join)) = sess.stream(&q, Some(&history)).await {
+                    while let Some(ev) = rx.recv().await {
+                        match ev {
+                            AgentEvent::TextDelta { text } => answer.push_str(&text),
+                            AgentEvent::End { text, .. } => {
+                                if answer.trim().is_empty() {
+                                    answer = text;
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Msg::SideNote(answer)
+            }));
+        }
+        // Slash commands run inline in any state.
         match trimmed {
             "/exit" | "/quit" => return Some(cmd::quit()),
             "/clear" => {
@@ -353,25 +1006,39 @@ impl App {
                 return None;
             }
             "/help" => {
-                self.messages
-                    .push(Style::new().fg(Color::BrightBlack).render(
-                        "  commands: /clear reset · /auto toggle auto-approve · /exit quit\n  \
-                     Enter send · ↑/↓ history · Esc interrupt · Ctrl+C quit · PgUp/PgDn scroll",
-                    ));
+                self.messages.push(gutter(
+                    Color::BrightBlack,
+                    "commands: /clear reset · /auto auto-approve · /exit quit\n\
+                     Enter send · Shift+Tab cycle mode · ↑/↓ history · Esc interrupt · PgUp/PgDn scroll",
+                ));
                 self.textarea.clear();
                 self.rebuild_viewport();
                 return None;
             }
             "/auto" => {
-                self.auto_approve = !self.auto_approve;
-                let state = if self.auto_approve { "on" } else { "off" };
-                self.messages.push(
-                    Style::new()
-                        .fg(Color::Yellow)
-                        .render(&format!("  ⚡ auto-approve: {state}")),
-                );
+                self.mode = Mode::Auto;
                 self.textarea.clear();
                 self.rebuild_viewport();
+                return None;
+            }
+            "/config" => {
+                self.textarea.clear();
+                let line = match find_config() {
+                    Some(path) if open_in_editor(&path) => {
+                        format!("opened {path} in your editor")
+                    }
+                    Some(path) => {
+                        format!("config: {path} (couldn't launch an editor — open it manually)")
+                    }
+                    None => "no config found — create ~/.a3s/config.acl".to_string(),
+                };
+                self.messages.push(gutter(Color::BrightBlack, &line));
+                self.rebuild_viewport();
+                return None;
+            }
+            "/model" => {
+                self.textarea.clear();
+                self.open_model_menu();
                 return None;
             }
             _ => {}
@@ -379,20 +1046,32 @@ impl App {
 
         self.history.push(trimmed.to_string());
         self.history_pos = None;
-        self.messages.push(
-            Style::new()
-                .bold()
-                .fg(ACCENT)
-                .render(&format!("❯ {trimmed}")),
-        );
+        // Show the user message with a blue dot gutter, then run now (if idle) or
+        // queue it (if the agent is busy).
+        self.messages.push(gutter(ACCENT, trimmed));
         self.textarea.clear();
+        if self.state == State::Idle {
+            self.start_stream(trimmed.to_string())
+        } else {
+            self.seq += 1;
+            self.queue.push(Queued {
+                prio: 1,
+                seq: self.seq,
+                text: trimmed.to_string(),
+            });
+            self.push_line(&Style::new().fg(Color::BrightBlack).render("    ⋯ queued"));
+            None
+        }
+    }
+
+    /// Begin streaming a prompt (the user message must already be on screen).
+    fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
         self.streaming.clear();
         self.state = State::Streaming;
+        self.stream_started = Some(Instant::now());
         self.spinner.start();
         self.rebuild_viewport();
-
         let session = self.session.clone();
-        let prompt = trimmed.to_string();
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 match session.stream(prompt.as_str(), None).await {
@@ -402,6 +1081,12 @@ impl App {
             }),
             spinner_tick(),
         ]))
+    }
+
+    /// Pop the next queued message and start streaming it, if any.
+    fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
+        let next = self.queue.pop()?;
+        self.start_stream(next.text)
     }
 
     fn on_agent_event(&mut self, event: AgentEvent) -> Option<Cmd<Msg>> {
@@ -415,10 +1100,12 @@ impl App {
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolStart { name, .. } => {
+                // Finalize any assistant text; show the tool live with a blinking
+                // dot. The final "• action / └ result" lands on ToolEnd.
                 self.finalize_streaming();
                 self.tool_args.clear();
                 self.tool_output.clear();
-                self.push_line(&Style::new().fg(Color::Cyan).render(&format!("  ⚙ {name}")));
+                self.running_tool = Some(name);
             }
             AgentEvent::ToolInputDelta { delta } => {
                 self.tool_args.push_str(&delta);
@@ -434,6 +1121,7 @@ impl App {
                 metadata,
                 ..
             } => {
+                self.running_tool = None;
                 let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
                 self.push_line(&render_tool_end(
                     &name,
@@ -470,7 +1158,7 @@ impl App {
                 args,
                 ..
             } => {
-                if self.auto_approve {
+                if self.mode.auto_approves(&tool_name) {
                     self.push_line(
                         &Style::new()
                             .fg(Color::BrightBlack)
@@ -506,14 +1194,12 @@ impl App {
                 }
                 self.finalize_streaming();
                 self.total_tokens += usage.total_tokens;
+                // Latest prompt size = how full the context window is (for ctx%).
+                if usage.prompt_tokens > 0 {
+                    self.last_prompt_tokens = usage.prompt_tokens;
+                }
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
-                }
-                if usage.total_tokens > 0 {
-                    self.push_line(&Style::new().fg(Color::BrightBlack).render(&format!(
-                        "  ⏱ {} tokens (prompt {}, completion {})",
-                        usage.total_tokens, usage.prompt_tokens, usage.completion_tokens
-                    )));
                 }
                 self.finish();
                 return None;
@@ -538,7 +1224,7 @@ impl App {
     fn finalize_streaming(&mut self) {
         let rendered = self.streaming.view();
         if !rendered.trim().is_empty() {
-            self.messages.push(rendered);
+            self.messages.push(gutter(Color::Green, &rendered));
         }
         self.streaming.clear();
         self.thinking.clear();
@@ -547,6 +1233,7 @@ impl App {
 
     fn finish(&mut self) {
         self.state = State::Idle;
+        self.stream_started = None;
         self.spinner.stop();
         self.rx = None;
         self.rebuild_viewport();
@@ -587,7 +1274,22 @@ impl App {
         }
         let rendered = self.streaming.view();
         if !rendered.is_empty() {
-            blocks.push(rendered);
+            blocks.push(gutter(Color::Green, &rendered));
+        }
+        // Currently-executing tool: "● action…" with a blinking dot.
+        if let Some(name) = &self.running_tool {
+            let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
+            let action = tool_action_summary(name, args.as_ref());
+            let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
+            let dot = Style::new()
+                .fg(if on {
+                    Color::Yellow
+                } else {
+                    Color::BrightBlack
+                })
+                .bold()
+                .render("●");
+            blocks.push(format!("{}{} {}…", " ".repeat(PAD), dot, action));
         }
         // Live stdout of the running tool — show the tail like a terminal.
         if !self.tool_output.trim().is_empty() {
@@ -598,9 +1300,39 @@ impl App {
         self.viewport.set_content(&blocks.join("\n\n"));
     }
 
+    /// First-run welcome: ASCII-art logo, version, model, and tips.
+    fn banner(&self) -> String {
+        let art = r#" █████╗ ██████╗ ███████╗     ██████╗ ██████╗ ██████╗ ███████╗
+██╔══██╗╚════██╗██╔════╝    ██╔════╝██╔═══██╗██╔══██╗██╔════╝
+███████║ █████╔╝███████╗    ██║     ██║   ██║██║  ██║█████╗
+██╔══██║ ╚═══██╗╚════██║    ██║     ██║   ██║██║  ██║██╔══╝
+██║  ██║██████╔╝███████║    ╚██████╗╚██████╔╝██████╔╝███████╗
+╚═╝  ╚═╝╚═════╝ ╚══════╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝"#;
+        let margin = " ".repeat(PAD);
+        let art = art
+            .lines()
+            .map(|l| format!("{margin}{l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let logo = Style::new().fg(ACCENT).bold().render(&art);
+        let model = self.model.as_deref().unwrap_or("no model configured");
+        let meta = Style::new().fg(Color::BrightBlack).render(&format!(
+            "{margin}a3s-code v{}  ·  {model}  ·  {}",
+            env!("CARGO_PKG_VERSION"),
+            self.cwd
+        ));
+        let tips = Style::new()
+            .fg(Color::BrightBlack)
+            .italic()
+            .render(&format!(
+            "{margin}Type a message · / for commands · Shift+Tab cycles mode · Ctrl+C twice to exit"
+        ));
+        format!("\n{logo}\n\n{meta}\n{tips}\n")
+    }
+
     fn rebuild_viewport(&mut self) {
         let full = self.messages.join("\n\n");
-        self.viewport.set_content(&format!("{full}\n"));
+        self.viewport.set_content(&format!("\n{full}\n")); // top padding
     }
 
     /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
@@ -610,7 +1342,7 @@ impl App {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(cmd::msg(Msg::ModalConfirm(0))),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(Msg::ModalConfirm(1))),
             KeyCode::Char('a' | 'A') => {
-                self.auto_approve = true;
+                self.mode = Mode::Auto;
                 Some(cmd::msg(Msg::ModalConfirm(0)))
             }
             _ => None,
@@ -674,22 +1406,19 @@ fn render_tool_end(
             return render_diff(path, before, after);
         }
     }
-    let status = if exit_code == 0 { "✓" } else { "✗" };
-    // Show the tool's primary argument (command/path/pattern) so the action log
-    // reads like Codex — "✓ bash — npm test" rather than just "✓ bash".
-    let header = Style::new()
-        .fg(Color::BrightBlack)
-        .render(&match args.and_then(arg_summary) {
-            Some(summary) => format!("  {status} {name} — {summary}"),
-            None => format!("  {status} {name}"),
-        });
-    let head = output.lines().take(8).collect::<Vec<_>>().join("\n");
-    if head.trim().is_empty() {
-        return header;
-    }
-    // If the output is file/code content (read/edit on a known extension),
-    // syntax-highlight it; otherwise show it dimmed.
-    if exit_code == 0 {
+    let ok = exit_code == 0;
+    let margin = " ".repeat(PAD);
+    // Header: "• Ran <command>" / "• Read <path>" — bullet colored by outcome.
+    let bullet = Style::new()
+        .fg(if ok { Color::Green } else { Color::Red })
+        .bold()
+        .render("•");
+    let action = tool_action_summary(name, args);
+    let header = format!("{margin}{bullet} {}", Style::new().render(&action));
+
+    // For a successful file read on a known language, show the highlighted file
+    // content under the action (keeps the nice read preview).
+    if ok {
         if let Some(lang) = args
             .and_then(|a| {
                 a.get("file_path")
@@ -698,17 +1427,55 @@ fn render_tool_end(
             })
             .and_then(lang_from_path)
         {
-            let fenced = format!("```{lang}\n{head}\n```");
-            let rendered = a3s_tui::markdown::Markdown::new()
-                .with_width(width.saturating_sub(4).max(20))
-                .render(&fenced);
-            return format!("{header}\n{rendered}");
+            let head = output.lines().take(8).collect::<Vec<_>>().join("\n");
+            if !head.trim().is_empty() {
+                let fenced = format!("```{lang}\n{head}\n```");
+                let rendered = a3s_tui::markdown::Markdown::new()
+                    .with_width(width.saturating_sub(PAD + 4).max(20))
+                    .render(&fenced);
+                return format!("{header}\n{rendered}");
+            }
         }
     }
-    format!(
-        "{header}\n{}",
-        Style::new().fg(Color::BrightBlack).render(&head)
-    )
+
+    // Otherwise a "└ <first line>" summary with a "… +N lines" overflow marker.
+    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
+        return header;
+    }
+    let first_color = if ok { Color::BrightBlack } else { Color::Red };
+    let connector = Style::new().fg(Color::BrightBlack).render("└");
+    let mut out = format!(
+        "{header}\n{margin}  {connector} {}",
+        Style::new().fg(first_color).render(lines[0])
+    );
+    if lines.len() > 1 {
+        let more = lines.len() - 1;
+        out.push_str(&format!(
+            "\n{margin}    {}",
+            Style::new()
+                .fg(Color::BrightBlack)
+                .render(&format!("… +{more} lines"))
+        ));
+    }
+    out
+}
+
+/// Verb + target for a tool call, e.g. "Ran npm test", "Read src/main.rs".
+fn tool_action_summary(name: &str, args: Option<&serde_json::Value>) -> String {
+    let target = args.and_then(arg_summary).unwrap_or_default();
+    match name {
+        "bash" | "shell" | "run" | "exec" => format!("Ran {target}"),
+        "read" | "cat" => format!("Read {target}"),
+        "write" | "create" => format!("Wrote {target}"),
+        "edit" | "patch" | "apply_patch" => format!("Edited {target}"),
+        "grep" | "search" => format!("Searched {target}"),
+        "ls" | "glob" | "find" => format!("Listed {target}"),
+        "web_search" => format!("Searched the web: {target}"),
+        "web_fetch" => format!("Fetched {target}"),
+        _ if target.is_empty() => name.to_string(),
+        _ => format!("{name} {target}"),
+    }
 }
 
 /// Map a file path to a syntect language token for fenced rendering.
@@ -836,7 +1603,15 @@ fn find_config() -> Option<String> {
     None
 }
 
-pub async fn run() -> anyhow::Result<()> {
+pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
+    // `a3s code resume <id>` resumes a specific session; otherwise the default.
+    let session_id = if args.first().map(String::as_str) == Some("resume") {
+        args.get(1)
+            .cloned()
+            .unwrap_or_else(|| SESSION_ID.to_string())
+    } else {
+        SESSION_ID.to_string()
+    };
     let config_path = find_config().ok_or_else(|| {
         anyhow::anyhow!(
             "no A3S config found.\n\nLooked for: $A3S_CONFIG_FILE, .a3s/config.acl in this \
@@ -846,10 +1621,32 @@ pub async fn run() -> anyhow::Result<()> {
              \"sk-...\"\n  }}\n\nOr point at an existing file: A3S_CONFIG_FILE=/path/config.acl a3s code"
         )
     })?;
-    let agent = Agent::new(config_path.clone())
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?;
+    let agent = Arc::new(
+        Agent::new(config_path.clone())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?,
+    );
     let workspace = std::env::current_dir()?.to_string_lossy().to_string();
+
+    // Configured "provider/model" ids (+ context windows) + the default model.
+    let mut models: Vec<String> = Vec::new();
+    let mut model_ctx: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut default_model: Option<String> = None;
+    if let Ok(cfg) =
+        a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(&config_path))
+    {
+        for (p, m) in cfg.list_models() {
+            let id = format!("{}/{}", p.name, m.id);
+            model_ctx.insert(id.clone(), m.limit.context);
+            models.push(id);
+        }
+        default_model = cfg.default_model.clone();
+    }
+    let context_limit = default_model
+        .as_ref()
+        .and_then(|m| model_ctx.get(m))
+        .copied()
+        .unwrap_or(0);
 
     // Persistent, resumable session: stored under <cwd>/.a3s/tui-sessions and
     // keyed by a fixed id, so relaunching in the same directory continues the
@@ -860,7 +1657,6 @@ pub async fn run() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("failed to open session store {store_dir:?}: {e}"))?,
     );
-    const SESSION_ID: &str = "tui-default";
     // Enable HITL confirmation so file-modifying tools (write/edit/patch) can
     // run — they require a confirmation manager, otherwise they fail with
     // "requires confirmation but no HITL confirmation manager is configured".
@@ -869,7 +1665,7 @@ pub async fn run() -> anyhow::Result<()> {
     let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
         .with_timeout(3_600_000, TimeoutAction::Reject);
     let session = match agent.resume_session(
-        SESSION_ID,
+        session_id.as_str(),
         SessionOptions::new()
             .with_session_store(store.clone())
             .with_confirmation_policy(confirmation.clone())
@@ -881,8 +1677,8 @@ pub async fn run() -> anyhow::Result<()> {
             Some(
                 SessionOptions::new()
                     .with_session_store(store.clone())
-                    .with_session_id(SESSION_ID)
-                    .with_confirmation_policy(confirmation)
+                    .with_session_id(session_id.as_str())
+                    .with_confirmation_policy(confirmation.clone())
                     .with_auto_save(true),
             ),
         )?,
@@ -900,17 +1696,12 @@ pub async fn run() -> anyhow::Result<()> {
                 return None;
             }
             match m.role.as_str() {
-                "user" => Some(
-                    Style::new()
-                        .bold()
-                        .fg(ACCENT)
-                        .render(&format!("❯ {}", text.trim())),
-                ),
-                // Render historical assistant turns as markdown, like live ones.
+                // Same gutter (● dot + indent) as live messages.
+                "user" => Some(gutter(ACCENT, text.trim())),
                 "assistant" => {
-                    let mut md = StreamingMarkdown::new((width as usize).saturating_sub(2));
+                    let mut md = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
                     md.push(&text);
-                    Some(md.view())
+                    Some(gutter(Color::Green, &md.view()))
                 }
                 _ => None,
             }
@@ -950,13 +1741,23 @@ pub async fn run() -> anyhow::Result<()> {
 
     let app = App {
         session,
-        viewport: Viewport::new(width, height.saturating_sub(5)),
+        agent: agent.clone(),
+        store: store.clone(),
+        confirmation,
+        session_id: session_id.clone(),
+        models,
+        model_ctx,
+        context_limit,
+        last_prompt_tokens: 0,
+        model_menu: None,
+        quit_armed: None,
+        viewport: Viewport::new(width, height.saturating_sub(7)),
         textarea: Textarea::new()
             .with_height(1)
-            .with_width(width.saturating_sub(2)) // room for the "❯ " prompt
+            .with_width(width.saturating_sub((PAD + 2) as u16)) // PAD margin + "❯ "
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
-        streaming: StreamingMarkdown::new((width as usize).saturating_sub(2)),
+        streaming: StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2)),
         thinking: String::new(),
         state: State::Idle,
         messages: initial_messages,
@@ -964,12 +1765,20 @@ pub async fn run() -> anyhow::Result<()> {
         pending_tool: None,
         history: Vec::new(),
         history_pos: None,
-        model: None,
+        model: default_model,
         total_tokens: 0,
         tool_args: String::new(),
         tool_output: String::new(),
-        auto_approve: false,
-        cwd: workspace,
+        stream_started: None,
+        running_tool: None,
+        blink_tick: 0,
+        mode: Mode::Default,
+        queue: BinaryHeap::new(),
+        seq: 0,
+        completed: 0,
+        branch: git_branch(&workspace),
+        slash_sel: 0,
+        cwd: workspace.clone(),
         width,
         height,
         keymap,
@@ -981,6 +1790,9 @@ pub async fn run() -> anyhow::Result<()> {
         .with_fps(30)
         .run()
         .await?;
+
+    // Session is auto-saved under this directory; show how to come back.
+    println!("\n  session saved · resume it with:  a3s code resume {session_id}\n");
     Ok(())
 }
 

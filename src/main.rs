@@ -8,16 +8,18 @@ mod tui;
 fn usage() {
     println!("a3s {} — A3S coding agent CLI\n", env!("CARGO_PKG_VERSION"));
     println!("usage:");
-    println!("  a3s code         launch the interactive coding agent (TUI)");
-    println!("  a3s --version    show version");
-    println!("  a3s --help       show this help");
+    println!("  a3s code                  launch the interactive coding agent (TUI)");
+    println!("  a3s code resume <id>      resume a saved session by id");
+    println!("  a3s --version             show version");
+    println!("  a3s --help                show this help");
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
-        Some("code") => tui::run().await,
+        // Pass any trailing args (e.g. `resume <id>`) through to the TUI.
+        Some("code") => tui::run(args.collect()).await,
         Some("-V") | Some("--version") => {
             println!("a3s {}", env!("CARGO_PKG_VERSION"));
             Ok(())
