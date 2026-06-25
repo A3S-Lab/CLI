@@ -89,6 +89,10 @@ impl App {
                 .with_goal_tracking(true)
                 .with_max_tool_rounds(40);
         }
+        // Signed in via /login → route the model through the account token.
+        if let Some(client) = self.auth_client() {
+            opts = opts.with_llm_client(client);
+        }
         opts
     }
 

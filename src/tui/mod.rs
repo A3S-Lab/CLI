@@ -39,6 +39,7 @@ mod util;
 use config::*;
 use gitutil::*;
 use image::*;
+use panels::login::{AuthProvider, Login, LoginPhase};
 use render::*;
 use skills::*;
 use syntax::*;
@@ -51,6 +52,8 @@ const ACCENT: Color = Color::Rgb(37, 99, 235);
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "switch provider / model"),
+    ("/login", "sign in with a Claude or Codex account"),
+    ("/logout", "sign out (remove the saved account token)"),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
@@ -79,6 +82,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/update", "/init",
+    "/login", "/logout",
 ];
 
 /// Workspace files for the `@` picker (git-tracked, gitignore-respected).
@@ -784,6 +788,9 @@ struct App {
     got_delta: bool,
     /// Set while `/compact` is summarizing — drives the progress bar + blocks input.
     compacting: Option<Instant>,
+    /// Last time the streaming viewport was rebuilt — throttles the O(n) rebuild
+    /// to ~30fps so a flood of deltas doesn't starve animation on the 1 loop.
+    last_paint: Option<Instant>,
     /// Live reasoning ("thinking") text for the current turn, shown dimmed above
     /// the answer and cleared when the answer is finalized.
     thinking: String,
@@ -837,6 +844,10 @@ struct App {
     ide: Option<Ide>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
+    /// `/login` full-screen account sign-in panel (Some when open).
+    login: Option<Login>,
+    /// Active account credential (provider + token), injected as the LLM client.
+    auth: Option<(AuthProvider, String)>,
     /// `/help` overlay panel is showing.
     help_open: bool,
     /// Turns completed this session, for the status-bar task counter.
@@ -925,6 +936,10 @@ impl Model for App {
                 if self.help_open {
                     self.help_open = false;
                     return None;
+                }
+                // /login panel takes all keys while open.
+                if self.login.is_some() {
+                    return self.login_key(&key);
                 }
                 // /git panel takes all keys while open.
                 if self.git.is_some() {
@@ -1229,6 +1244,7 @@ impl Model for App {
                     && self.top.is_none()
                     && self.ide.is_none()
                     && self.git.is_none()
+                    && self.login.is_none()
                     && !self.help_open
                 {
                     self.anim = self.anim.wrapping_add(1);
@@ -1445,6 +1461,9 @@ impl Model for App {
         if self.help_open {
             return self.render_help();
         }
+        if let Some(l) = &self.login {
+            return self.render_login(l);
+        }
         if let Some(g) = &self.git {
             return self.render_git(g);
         }
@@ -1524,30 +1543,30 @@ impl Model for App {
             ))
         } else {
             match self.state {
-            State::Streaming => {
-                // Pulsing sparkle + "Thinking…" with live elapsed + token count.
-                let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
-                let spark = Style::new().fg(ACCENT).render(&g.to_string());
-                let working = shimmer("Working…", self.blink_tick as usize);
-                let mut tail = String::new();
-                if let Some(t0) = self.stream_started {
-                    // Live token estimate: finalized total + ~chars/4 for the
-                    // in-flight reasoning + answer (snaps to exact usage on End).
-                    let est = self.total_tokens
-                        + self.streaming.raw_content().chars().count() / 4
-                        + self.thinking.chars().count() / 4;
-                    tail.push_str(&format!(" ({}", fmt_elapsed(t0.elapsed())));
-                    if est > 0 {
-                        tail.push_str(&format!(" · ↓ {} tokens", humanize(est)));
+                State::Streaming => {
+                    // Pulsing sparkle + "Thinking…" with live elapsed + token count.
+                    let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
+                    let spark = Style::new().fg(ACCENT).render(&g.to_string());
+                    let working = shimmer("Working…", self.blink_tick as usize);
+                    let mut tail = String::new();
+                    if let Some(t0) = self.stream_started {
+                        // Live token estimate: finalized total + ~chars/4 for the
+                        // in-flight reasoning + answer (snaps to exact usage on End).
+                        let est = self.total_tokens
+                            + self.streaming.raw_content().chars().count() / 4
+                            + self.thinking.chars().count() / 4;
+                        tail.push_str(&format!(" ({}", fmt_elapsed(t0.elapsed())));
+                        if est > 0 {
+                            tail.push_str(&format!(" · ↓ {} tokens", humanize(est)));
+                        }
+                        tail.push(')');
                     }
-                    tail.push(')');
+                    let tail = Style::new().fg(ACCENT).render(&tail);
+                    format!("  {spark} {working}{tail}")
                 }
-                let tail = Style::new().fg(ACCENT).render(&tail);
-                format!("  {spark} {working}{tail}")
-            }
-            // The approval options panel (overlay_approval) is the UI now.
-            State::Awaiting => String::new(),
-            State::Idle => String::new(),
+                // The approval options panel (overlay_approval) is the UI now.
+                State::Awaiting => String::new(),
+                State::Idle => String::new(),
             }
         };
 
@@ -1674,6 +1693,7 @@ impl Model for App {
         if self.state == State::Awaiting
             || self.top.is_some()
             || self.git.is_some()
+            || self.login.is_some()
             || self.help_open
         {
             return None;
@@ -1928,6 +1948,30 @@ impl App {
                 self.rebuild_viewport();
                 return None;
             }
+            "/login" => {
+                self.textarea.clear();
+                // Default the selection to Codex (the supported provider).
+                self.login = Some(Login {
+                    sel: 1,
+                    phase: LoginPhase::Pick,
+                    input: String::new(),
+                });
+                return None;
+            }
+            "/logout" => {
+                self.textarea.clear();
+                panels::login::clear_creds();
+                self.auth = None;
+                if let Ok((s, _)) = self.rebuild_session(None) {
+                    self.session = std::sync::Arc::new(s);
+                }
+                self.push_line(
+                    &Style::new()
+                        .fg(Color::BrightBlack)
+                        .render("  ◆ signed out — using config.acl credentials"),
+                );
+                return None;
+            }
             "/config" => {
                 self.textarea.clear();
                 // Resolve the config; if there's none, generate a starter so the
@@ -2132,6 +2176,7 @@ impl App {
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
         self.streaming.clear();
         self.got_delta = false; // track if this turn streamed any text deltas
+        self.last_paint = None; // first delta of the turn paints immediately
         self.plan.clear(); // fresh plan per turn; planning events refill it
         self.running_task = Some(prompt.clone());
         self.state = State::Streaming;
@@ -2473,6 +2518,15 @@ impl App {
     }
 
     fn update_viewport_with_stream(&mut self) {
+        // Throttle this O(n) rebuild to ~30fps. A fast stream emits deltas far
+        // faster than that; rebuilding the whole transcript each time starves
+        // the animation ticks on the single-threaded loop (the "时快时慢" jitter).
+        if let Some(t) = self.last_paint {
+            if t.elapsed() < Duration::from_millis(33) {
+                return;
+            }
+        }
+        self.last_paint = Some(Instant::now());
         let mut blocks: Vec<String> = self.messages.clone();
         if !self.thinking.trim().is_empty() {
             let body = indent(&format!("💭 {}", self.thinking.trim()), PAD);
@@ -2530,10 +2584,10 @@ impl App {
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
     }
 
-    /// Rows the input box needs — grows with embedded newlines (Shift+Enter),
-    /// capped so a huge paste can't eat the screen.
+    /// Rows the input box needs — the textarea auto-grows its own height with
+    /// embedded newlines (Shift+Enter), so the layout just mirrors it.
     pub(crate) fn input_height(&self) -> u16 {
-        (self.textarea.value().split('\n').count() as u16).clamp(1, 8)
+        self.textarea.height()
     }
 
     /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
@@ -2895,12 +2949,14 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         viewport: Viewport::new(width, height.saturating_sub(7)),
         textarea: Textarea::new()
             .with_height(1)
+            .with_auto_grow(8) // box grows with Shift+Enter newlines (no scroll)
             .with_width(width.saturating_sub((PAD + 2) as u16)) // PAD margin + "❯ "
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
         streaming: StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2)),
         got_delta: false,
         compacting: None,
+        last_paint: None,
         thinking: String::new(),
         state: State::Idle,
         messages: initial_messages,
@@ -2928,6 +2984,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_kill: None,
         ide: None,
         git: None,
+        login: None,
+        auth: panels::login::load_creds(),
         help_open: false,
         completed: 0,
         branch: git_branch(&workspace),
@@ -2958,10 +3016,19 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         app.rebuild_viewport();
     }
 
+    // A saved /login account → rebuild once so the initial session uses it.
+    if app.auth.is_some() {
+        if let Ok((s, _)) = app.rebuild_session(None) {
+            app.session = std::sync::Arc::new(s);
+        }
+    }
+
     ProgramBuilder::new(app)
         .with_alt_screen()
-        // No mouse capture: lets the terminal handle text selection + copy.
-        // Scroll the transcript with PgUp/PgDn / Shift+End instead.
+        // Mouse capture so the wheel/trackpad scrolls the transcript (alt-screen
+        // has no native scrollback). Native text selection still works while
+        // holding Option (macOS/iTerm) or Shift (most terminals).
+        .with_mouse_support()
         .with_fps(30)
         .run()
         .await?;
@@ -3021,8 +3088,8 @@ mod tests {
     #[test]
     fn non_edit_tool_renders_status_line() {
         let out = render_tool_end("bash", 0, "hello\nworld", None, None, 80);
-        // Action-verb summary ("Ran …") + the output; no diff marker.
-        assert!(out.contains("Bash") && out.contains("hello"));
+        // Action-verb header ("Ran") + the output; no diff marker.
+        assert!(out.contains("Ran") && out.contains("hello"));
         assert!(!out.contains('✎'), "no diff marker for non-edit tools");
     }
 
@@ -3030,7 +3097,7 @@ mod tests {
     fn tool_end_shows_primary_arg_summary() {
         let args = serde_json::json!({ "command": "npm test", "timeout": 60 });
         let out = render_tool_end("bash", 0, "ok\n", None, Some(&args), 80);
-        assert!(out.contains("Bash"), "tool label for bash");
+        assert!(out.contains("Ran"), "action verb for bash");
         assert!(out.contains("npm test"), "shows the command argument");
     }
 

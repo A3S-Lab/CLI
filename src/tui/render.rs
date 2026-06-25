@@ -41,7 +41,10 @@ pub(crate) fn render_tool_end(
         .render("•");
     let arg = args.and_then(arg_summary).unwrap_or_default();
     let header = if arg.is_empty() {
-        format!("{margin}{dot} {}", Style::new().bold().render(tool_verb(name)))
+        format!(
+            "{margin}{dot} {}",
+            Style::new().bold().render(tool_verb(name))
+        )
     } else {
         format!(
             "{margin}{dot} {} {}",
