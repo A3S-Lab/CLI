@@ -1,10 +1,13 @@
-//! `/login`: full-screen account sign-in (Phase 0 — paste a token).
+//! Account auth for `/model`: detect a local Claude Code / Codex login, persist
+//! the active choice, and build an OpenAI-compatible client that injects the
+//! account's Bearer token. (There's no `/login` command — `/model` drives this
+//! via tabs once a local login is detected.)
 //!
-//! Codex (ChatGPT account) is the supported path: the pasted token is injected
-//! as `Authorization: Bearer` to the ChatGPT backend through the OpenAI-compatible
-//! client (which honors custom headers). Claude is experimental — api.anthropic.com
-//! speaks a different wire format than the OpenAI client, so account tokens won't
-//! work until a dedicated Anthropic client lands.
+//! Codex (ChatGPT account) is the supported path: the token goes as
+//! `Authorization: Bearer` to the ChatGPT backend through the OpenAI client
+//! (which honors custom headers). Claude is experimental — api.anthropic.com
+//! speaks a different wire format than the OpenAI client, so its account token
+//! won't work until a dedicated Anthropic client lands.
 
 use super::super::*;
 use a3s_code_core::llm::{create_client_with_config, LlmClient, LlmConfig};
@@ -58,27 +61,6 @@ impl AuthProvider {
     }
 }
 
-fn provider_at(sel: usize) -> AuthProvider {
-    if sel == 0 {
-        AuthProvider::Claude
-    } else {
-        AuthProvider::Codex
-    }
-}
-
-pub(crate) enum LoginPhase {
-    Pick,
-    Paste,
-    Done(String),
-    Error(String),
-}
-
-pub(crate) struct Login {
-    pub(crate) sel: usize, // 0 Claude, 1 Codex
-    pub(crate) phase: LoginPhase,
-    pub(crate) input: String,
-}
-
 // ---- credential store: ~/.a3s/credentials.json (mode 0600) ----
 fn creds_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/credentials.json"))
@@ -92,7 +74,7 @@ pub(crate) fn load_creds() -> Option<(AuthProvider, String)> {
     Some((provider, token))
 }
 
-fn save_creds(provider: AuthProvider, token: &str) {
+pub(crate) fn save_creds(provider: AuthProvider, token: &str) {
     if let Some(p) = creds_path() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -109,7 +91,7 @@ fn save_creds(provider: AuthProvider, token: &str) {
 }
 
 /// Reuse an already-signed-in token from the local Claude Code / Codex CLIs, so
-/// `/login` doesn't make the user paste anything when they're already logged in.
+/// `/model` can offer those accounts without the user pasting anything.
 pub(crate) fn detect_local(provider: AuthProvider) -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let home = std::path::Path::new(&home);
@@ -134,10 +116,10 @@ pub(crate) fn detect_local(provider: AuthProvider) -> Option<String> {
 }
 
 impl App {
-    /// An OpenAI-compatible client carrying the OAuth Bearer token, if signed in.
-    /// Both providers route through the OpenAI client (it honors a custom
-    /// `Authorization` header). The empty default api_key is never sent — the
-    /// header wins.
+    /// An OpenAI-compatible client carrying the account Bearer token, if signed
+    /// in via `/model`. Both providers route through the OpenAI client (it
+    /// honors a custom `Authorization` header). The empty default api_key is
+    /// never sent — the header wins.
     pub(crate) fn auth_client(&self) -> Option<Arc<dyn LlmClient>> {
         let (provider, token) = self.auth.as_ref()?;
         let model = self
@@ -154,182 +136,5 @@ impl App {
             ..LlmConfig::default()
         };
         Some(create_client_with_config(cfg))
-    }
-
-    /// Keys while the `/login` panel is open.
-    pub(crate) fn login_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
-        let login = self.login.as_mut()?;
-        match &login.phase {
-            LoginPhase::Pick => match key.code {
-                KeyCode::Up => login.sel = login.sel.saturating_sub(1),
-                KeyCode::Down => login.sel = (login.sel + 1).min(1),
-                KeyCode::Enter => {
-                    let provider = provider_at(login.sel);
-                    // Reuse the local Claude Code / Codex login if present;
-                    // otherwise fall back to pasting a token.
-                    if let Some(token) = detect_local(provider) {
-                        self.finish_login(provider, token, "local login");
-                    } else if let Some(l) = self.login.as_mut() {
-                        l.phase = LoginPhase::Paste;
-                    }
-                }
-                KeyCode::Esc => self.login = None,
-                _ => {}
-            },
-            LoginPhase::Paste => match key.code {
-                KeyCode::Char(c) => login.input.push(c),
-                KeyCode::Backspace => {
-                    login.input.pop();
-                }
-                KeyCode::Esc => self.login = None,
-                KeyCode::Enter => {
-                    let provider = provider_at(login.sel);
-                    let token = login.input.trim().to_string();
-                    if token.is_empty() {
-                        login.phase = LoginPhase::Error("no token entered".into());
-                    } else {
-                        self.finish_login(provider, token, "pasted token");
-                    }
-                }
-                _ => {}
-            },
-            LoginPhase::Done(_) | LoginPhase::Error(_) => self.login = None,
-        }
-        None
-    }
-
-    /// Persist the token, set it active, rebuild the session, and report.
-    fn finish_login(&mut self, provider: AuthProvider, token: String, via: &str) {
-        save_creds(provider, &token);
-        self.auth = Some((provider, token));
-        match self.rebuild_session(None) {
-            Ok((s, _)) => {
-                self.session = Arc::new(s);
-                let who = if provider == AuthProvider::Codex {
-                    "Codex"
-                } else {
-                    "Claude (experimental)"
-                };
-                if let Some(l) = self.login.as_mut() {
-                    l.phase = LoginPhase::Done(format!("signed in · {who} · {via}"));
-                }
-            }
-            Err(e) => {
-                if let Some(l) = self.login.as_mut() {
-                    l.phase = LoginPhase::Error(e);
-                }
-            }
-        }
-    }
-
-    /// Full-screen `/login` render (mirrors the other panels' full-height view).
-    pub(crate) fn render_login(&self, login: &Login) -> String {
-        let w = self.width as usize;
-        let mut lines: Vec<String> = vec![
-            String::new(),
-            format!("  {}", Style::new().fg(ACCENT).bold().render("Sign in")),
-            String::new(),
-        ];
-        match &login.phase {
-            LoginPhase::Pick => {
-                for i in 0..2 {
-                    let provider = provider_at(i);
-                    let label = if i == 0 {
-                        "Claude account (subscription)"
-                    } else {
-                        "Codex / ChatGPT account"
-                    };
-                    let detected = detect_local(provider).is_some();
-                    let note = match (i, detected) {
-                        (0, true) => "✓ found local login · experimental",
-                        (0, false) => "paste a token · experimental",
-                        (_, true) => "✓ using your local Codex login",
-                        (_, false) => "paste a token",
-                    };
-                    let marker = if i == login.sel { "❯" } else { " " };
-                    let row = if i == login.sel {
-                        Style::new()
-                            .fg(Color::BrightWhite)
-                            .bold()
-                            .render(&format!("  {marker} {label}"))
-                    } else {
-                        Style::new()
-                            .fg(Color::White)
-                            .render(&format!("  {marker} {label}"))
-                    };
-                    let note_color = if detected {
-                        Color::Green
-                    } else {
-                        Color::BrightBlack
-                    };
-                    lines.push(format!(
-                        "{row}  {}",
-                        Style::new().fg(note_color).render(note)
-                    ));
-                }
-                lines.push(String::new());
-                lines.push(format!(
-                    "  {}",
-                    Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("↑/↓ select · enter · esc cancel")
-                ));
-            }
-            LoginPhase::Paste => {
-                let (who, hint) = if login.sel == 0 {
-                    ("Claude", "run `claude setup-token` and paste it here")
-                } else {
-                    ("Codex", "paste your Codex / ChatGPT access token")
-                };
-                lines.push(format!(
-                    "  {} {}",
-                    Style::new().bold().render(who),
-                    Style::new()
-                        .fg(Color::BrightBlack)
-                        .render(&format!("— {hint}"))
-                ));
-                lines.push(String::new());
-                let masked = "•".repeat(login.input.chars().count().min(48));
-                lines.push(format!("  {}▏", Style::new().fg(ACCENT).render(&masked)));
-                lines.push(String::new());
-                lines.push(format!(
-                    "  {}",
-                    Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("enter to save · esc cancel")
-                ));
-            }
-            LoginPhase::Done(m) => {
-                lines.push(format!(
-                    "  {} {m}",
-                    Style::new().fg(Color::Green).bold().render("✓")
-                ));
-                lines.push(String::new());
-                lines.push(format!(
-                    "  {}",
-                    Style::new().fg(Color::BrightBlack).render("press any key")
-                ));
-            }
-            LoginPhase::Error(m) => {
-                lines.push(format!(
-                    "  {} {m}",
-                    Style::new().fg(Color::Red).bold().render("✗")
-                ));
-                lines.push(String::new());
-                lines.push(format!(
-                    "  {}",
-                    Style::new().fg(Color::BrightBlack).render("press any key")
-                ));
-            }
-        }
-        while lines.len() < self.height as usize {
-            lines.push(String::new());
-        }
-        lines.truncate(self.height as usize);
-        lines
-            .iter()
-            .map(|l| pad_to(l, w))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }

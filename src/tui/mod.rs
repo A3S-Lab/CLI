@@ -39,7 +39,7 @@ mod util;
 use config::*;
 use gitutil::*;
 use image::*;
-use panels::login::{AuthProvider, Login, LoginPhase};
+use panels::login::AuthProvider;
 use render::*;
 use skills::*;
 use syntax::*;
@@ -51,8 +51,10 @@ const ACCENT: Color = Color::Rgb(37, 99, 235);
 
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
-    ("/model", "switch provider / model"),
-    ("/login", "sign in with a Claude or Codex account"),
+    (
+        "/model",
+        "switch model (←/→ for Claude/GPT accounts if signed in)",
+    ),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
@@ -81,7 +83,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/update", "/init",
-    "/login",
 ];
 
 /// Workspace files for the `@` picker (git-tracked, gitignore-respected).
@@ -738,6 +739,8 @@ struct App {
     last_prompt_tokens: usize,
     /// Selected index in the /model panel; `Some` means the panel is open.
     model_menu: Option<usize>,
+    /// Active tab in the /model panel (0 = config; account tabs when signed in).
+    model_tab: usize,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
@@ -843,9 +846,8 @@ struct App {
     ide: Option<Ide>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
-    /// `/login` full-screen account sign-in panel (Some when open).
-    login: Option<Login>,
     /// Active account credential (provider + token), injected as the LLM client.
+    /// Set by signing in through the `/model` account tabs.
     auth: Option<(AuthProvider, String)>,
     /// `/help` overlay panel is showing.
     help_open: bool,
@@ -935,10 +937,6 @@ impl Model for App {
                 if self.help_open {
                     self.help_open = false;
                     return None;
-                }
-                // /login panel takes all keys while open.
-                if self.login.is_some() {
-                    return self.login_key(&key);
                 }
                 // /git panel takes all keys while open.
                 if self.git.is_some() {
@@ -1243,7 +1241,6 @@ impl Model for App {
                     && self.top.is_none()
                     && self.ide.is_none()
                     && self.git.is_none()
-                    && self.login.is_none()
                     && !self.help_open
                 {
                     self.anim = self.anim.wrapping_add(1);
@@ -1459,9 +1456,6 @@ impl Model for App {
     fn view(&self) -> String {
         if self.help_open {
             return self.render_help();
-        }
-        if let Some(l) = &self.login {
-            return self.render_login(l);
         }
         if let Some(g) = &self.git {
             return self.render_git(g);
@@ -1705,7 +1699,6 @@ impl Model for App {
         if self.state == State::Awaiting
             || self.top.is_some()
             || self.git.is_some()
-            || self.login.is_some()
             || self.help_open
         {
             return None;
@@ -1713,9 +1706,7 @@ impl Model for App {
         // Below the input: separator + 2 status lines + the bottom task panel.
         // The input itself spans `input_height` rows; the cursor sits on its row.
         let below = 3 + self.task_lines().len() as u16;
-        let row = self
-            .height
-            .saturating_sub(below + self.input_height())
+        let row = self.height.saturating_sub(below + self.input_height())
             + self.textarea.cursor_row() as u16;
         let col = (PAD + 2) as u16 + self.textarea.cursor_display_col() as u16; // PAD + "❯ "
         Some((col, row))
@@ -1961,16 +1952,6 @@ impl App {
                 self.mode = Mode::Auto;
                 self.textarea.clear();
                 self.rebuild_viewport();
-                return None;
-            }
-            "/login" => {
-                self.textarea.clear();
-                // Default the selection to Codex (the supported provider).
-                self.login = Some(Login {
-                    sel: 1,
-                    phase: LoginPhase::Pick,
-                    input: String::new(),
-                });
                 return None;
             }
             "/config" => {
@@ -2928,6 +2909,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         context_limit,
         last_prompt_tokens: 0,
         model_menu: None,
+        model_tab: 0,
         effort: 2, // high
         effort_panel: None,
         theme_panel: None,
@@ -2985,8 +2967,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_kill: None,
         ide: None,
         git: None,
-        login: None,
-        auth: panels::login::load_creds(),
+        // Remembered account choice — prefer a fresh token from the vendor CLI.
+        auth: panels::login::load_creds()
+            .map(|(p, stored)| (p, panels::login::detect_local(p).unwrap_or(stored))),
         help_open: false,
         completed: 0,
         branch: git_branch(&workspace),
