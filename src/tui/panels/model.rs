@@ -1,16 +1,7 @@
 //! `/model` picker (with account tabs) + `/effort` rebuild logic + overlays.
 
 use super::super::*;
-use super::login::{has_local_login, AuthProvider};
-
-// Account-backend model menus (the ChatGPT / Anthropic account backends don't
-// expose a list, so these are sensible defaults — pick what your plan supports).
-const CLAUDE_MODELS: &[&str] = &[
-    "claude-opus-4-20250514",
-    "claude-sonnet-4-20250514",
-    "claude-3-5-haiku-20241022",
-];
-const GPT_MODELS: &[&str] = &["gpt-5-codex", "gpt-5", "o4-mini"];
+use super::login::{claude_models, has_local_login, AuthProvider};
 
 /// A tab in the `/model` picker: config models, or a signed-in account's models.
 struct ModelTab {
@@ -39,7 +30,7 @@ impl App {
             tabs.push(ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
-                models: CLAUDE_MODELS.iter().map(|s| s.to_string()).collect(),
+                models: claude_models(), // from ~/.claude.json
                 provider: Some(AuthProvider::Claude),
             });
         }
@@ -47,7 +38,7 @@ impl App {
             tabs.push(ModelTab {
                 label: "Codex",
                 color: CODEX_COLOR,
-                models: GPT_MODELS.iter().map(|s| s.to_string()).collect(),
+                models: crate::codex::codex_models(), // from ~/.codex/models_cache.json
                 provider: Some(AuthProvider::Codex),
             });
         }

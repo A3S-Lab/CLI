@@ -2442,10 +2442,11 @@ impl App {
         let rendered = self.streaming.view();
         if !rendered.trim().is_empty() {
             let block = gutter(Color::Green, &rendered);
-            // Safety net against duplicate output: skip if it's identical to the
-            // last block already shown (e.g. a re-finalize, or an agent that
-            // re-emits its preamble verbatim).
-            if self.messages.last() != Some(&block) {
+            // Safety net against duplicate output: skip if this exact block
+            // already appeared in the last few messages (a re-finalize, or an
+            // agent that re-emits earlier text — e.g. its preamble after a tool).
+            let recent_dup = self.messages.iter().rev().take(4).any(|m| m == &block);
+            if !recent_dup {
                 self.messages.push(block);
             }
         }

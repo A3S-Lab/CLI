@@ -21,6 +21,34 @@ const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const UA: &str = "codex_cli_rs (a3s)";
 
+/// The user-facing Codex models from the local cache (`~/.codex/models_cache.json`),
+/// `visibility == "list"`, ordered by the CLI's `priority`. Falls back to a
+/// single sane default if the cache is missing.
+pub fn codex_models() -> Vec<String> {
+    fn from_cache() -> Option<Vec<String>> {
+        let home = std::env::var_os("HOME")?;
+        let path = std::path::Path::new(&home).join(".codex/models_cache.json");
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+        let mut list: Vec<(i64, String)> = v
+            .get("models")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| {
+                if m.get("visibility").and_then(|x| x.as_str()) != Some("list") {
+                    return None;
+                }
+                let slug = m.get("slug").and_then(|x| x.as_str())?.to_string();
+                let prio = m.get("priority").and_then(|x| x.as_i64()).unwrap_or(999);
+                Some((prio, slug))
+            })
+            .collect();
+        list.sort_by_key(|(p, _)| *p);
+        let out: Vec<String> = list.into_iter().map(|(_, s)| s).collect();
+        (!out.is_empty()).then_some(out)
+    }
+    from_cache().unwrap_or_else(|| vec!["gpt-5.5".to_string()])
+}
+
 pub struct CodexClient {
     access_token: String,
     account_id: String,

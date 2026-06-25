@@ -21,6 +21,42 @@ impl AuthProvider {
     }
 }
 
+/// The Claude model(s) configured in the local Claude Code login
+/// (`~/.claude.json`), found by walking the JSON for `"model": "claude-…"`.
+pub(crate) fn claude_models() -> Vec<String> {
+    fn walk(v: &serde_json::Value, out: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (k, val) in map {
+                    if k == "model" {
+                        if let Some(s) = val.as_str() {
+                            if s.starts_with("claude") && !out.iter().any(|m| m == s) {
+                                out.push(s.to_string());
+                            }
+                        }
+                    }
+                    walk(val, out);
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let path = std::path::Path::new(&home).join(".claude.json");
+        if let Ok(txt) = std::fs::read_to_string(path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) {
+                walk(&v, &mut out);
+            }
+        }
+    }
+    if out.is_empty() {
+        out.push("claude-sonnet-4".to_string());
+    }
+    out
+}
+
 /// True when the local Claude Code / Codex CLI has a stored login.
 pub(crate) fn has_local_login(provider: AuthProvider) -> bool {
     let Some(home) = std::env::var_os("HOME") else {
