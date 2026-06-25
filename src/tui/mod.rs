@@ -558,19 +558,20 @@ impl Mode {
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Mode::Default => "default · approve each",
-            Mode::Plan => "plan · auto-read",
-            Mode::Auto => "auto · approve all",
-        }
-    }
-
     fn glyph(self) -> &'static str {
         match self {
             Mode::Default => "⏵",
             Mode::Plan => "✎",
             Mode::Auto => "⏵⏵",
+        }
+    }
+
+    /// Short one-word name for the status line ("auto mode on").
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Default => "default",
+            Mode::Plan => "plan",
+            Mode::Auto => "auto",
         }
     }
 
@@ -1581,54 +1582,66 @@ impl Model for App {
             s
         };
 
-        // Bottom status bar (two lines): cwd/branch + model/tokens, then mode + hints.
+        // Bottom status bar (Claude-style, two lines):
+        //   dir git:(branch) <model> (<window> context) ctx:N%   [+ live chips]
+        //   ⏵⏵ <mode> mode on (shift+tab to cycle) · …
+        let dim = |s: &str| Style::new().fg(Color::BrightBlack).render(s);
         let dir = self.cwd.rsplit('/').next().unwrap_or(&self.cwd);
-        let mut ctx = format!("  {dir}");
+        let mut line1 = format!("  {}", Style::new().fg(ACCENT).bold().render(dir));
         if let Some(b) = &self.branch {
-            ctx.push_str(&format!("  ⎇ {b}"));
+            line1.push_str(&format!(
+                " {}{}{}",
+                dim("git:("),
+                Style::new().fg(Color::Yellow).render(b),
+                dim(")")
+            ));
         }
-        if let Some(g) = &self.goal {
-            let short: String = g.chars().take(24).collect();
-            ctx.push_str(&format!("  🎯 {short}"));
-        }
-        if self.loop_remaining > 0 {
-            ctx.push_str(&format!("  ↻{}", self.loop_remaining));
-        }
-        // Live parallelism: running subagents + tools.
-        if self.active_agents > 0 {
-            ctx.push_str(&format!("  ⇉ {} agents", self.active_agents));
-        }
-        if self.active_tools > 0 {
-            ctx.push_str(&format!("  ⚙ {} running", self.active_tools));
-        }
-        if let Some(v) = &self.update_available {
-            ctx.push_str(&format!("  ⬆ {v}"));
-        }
-        let mut info = String::new();
         if let Some(m) = &self.model {
-            info.push_str(m); // provider/model
+            let name = m.rsplit('/').next().unwrap_or(m);
+            line1.push_str(&format!(
+                "  {}",
+                Style::new().fg(Color::BrightWhite).render(name)
+            ));
+            if self.context_limit > 0 {
+                let win = if self.context_limit >= 1_000_000 {
+                    format!("{}M", self.context_limit / 1_000_000)
+                } else {
+                    format!("{}k", self.context_limit / 1000)
+                };
+                line1.push_str(&format!(" {}", dim(&format!("({win} context)"))));
+            }
         }
         if self.context_limit > 0 {
             let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
-            info.push_str(&format!("  ·  ctx: {pct}%"));
+            line1.push_str(&format!(" {}", dim(&format!("ctx:{pct}%"))));
         } else if self.total_tokens > 0 {
-            info.push_str(&format!("  ·  {} tok", self.total_tokens));
+            line1.push_str(&format!(" {}", dim(&format!("{} tok", self.total_tokens))));
         }
-        info.push_str("  ");
-        let status1 = status_line(&ctx, &info, width);
+        // Live chips, only when active.
+        if let Some(g) = &self.goal {
+            let short: String = g.chars().take(24).collect();
+            line1.push_str(&format!("  🎯 {short}"));
+        }
+        if self.loop_remaining > 0 {
+            line1.push_str(&format!("  ↻{}", self.loop_remaining));
+        }
+        if self.active_agents > 0 {
+            line1.push_str(&format!("  ⇉ {} agents", self.active_agents));
+        }
+        if self.active_tools > 0 {
+            line1.push_str(&format!("  ⚙ {} running", self.active_tools));
+        }
+        if let Some(v) = &self.update_available {
+            line1.push_str(&format!("  ⬆ {v}"));
+        }
+        let status1 = pad_to(&line1, width);
         let mode_part = Style::new().fg(self.mode.color()).bold().render(&format!(
-            "  {} {}",
+            "  {} {} mode on",
             self.mode.glyph(),
-            self.mode.label()
+            self.mode.name()
         ));
-        let hints = Style::new()
-            .fg(Color::BrightBlack)
-            .render("Shift+Tab mode · /help · ↑↓ history · Esc · Ctrl+C quit  ");
-        let used = a3s_tui::style::visible_len(&mode_part) + a3s_tui::style::visible_len(&hints);
-        let status2 = format!(
-            "{mode_part}{}{hints}",
-            " ".repeat(width.saturating_sub(used))
-        );
+        let hints = dim(" (shift+tab to cycle) · /help · ↑↓ history · esc");
+        let status2 = pad_to(&format!("{mode_part}{hints}"), width);
 
         // Gap line between transcript and loading — or a floating "jump to
         // latest" hint when the user has scrolled up away from the bottom.
@@ -2421,7 +2434,13 @@ impl App {
     fn finalize_streaming(&mut self) {
         let rendered = self.streaming.view();
         if !rendered.trim().is_empty() {
-            self.messages.push(gutter(Color::Green, &rendered));
+            let block = gutter(Color::Green, &rendered);
+            // Safety net against duplicate output: skip if it's identical to the
+            // last block already shown (e.g. a re-finalize, or an agent that
+            // re-emits its preamble verbatim).
+            if self.messages.last() != Some(&block) {
+                self.messages.push(block);
+            }
         }
         self.streaming.clear();
         self.thinking.clear();

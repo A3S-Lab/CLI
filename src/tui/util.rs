@@ -2,15 +2,6 @@
 
 use super::*;
 
-/// A dim bottom status line with `left` and `right` justified to `width`.
-pub(crate) fn status_line(left: &str, right: &str, width: usize) -> String {
-    let used = a3s_tui::style::visible_len(left) + a3s_tui::style::visible_len(right);
-    let gap = width.saturating_sub(used);
-    Style::new()
-        .fg(Color::BrightBlack)
-        .render(&format!("{left}{}{right}", " ".repeat(gap)))
-}
-
 /// Pad a (possibly styled) string with spaces to `width` display columns.
 pub(crate) fn pad_to(s: &str, width: usize) -> String {
     let vis = a3s_tui::style::visible_len(s);
