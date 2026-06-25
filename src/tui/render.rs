@@ -33,16 +33,22 @@ pub(crate) fn render_tool_end(
     }
     let ok = exit_code == 0;
     let margin = " ".repeat(PAD);
-    // Header: "⏺ Bash(npm test)" / "⏺ Read(src/main.rs)" — Claude-Code style,
-    // the dot colored by outcome.
+    // Header: "• Ran npm test" / "• Read src/main.rs" — Codex style, a past-tense
+    // verb + the arg, the bullet colored by outcome.
     let dot = Style::new()
         .fg(if ok { Color::Green } else { Color::Red })
         .bold()
-        .render("⏺");
-    let header = format!(
-        "{margin}{dot} {}",
-        Style::new().bold().render(&tool_label(name, args))
-    );
+        .render("•");
+    let arg = args.and_then(arg_summary).unwrap_or_default();
+    let header = if arg.is_empty() {
+        format!("{margin}{dot} {}", Style::new().bold().render(tool_verb(name)))
+    } else {
+        format!(
+            "{margin}{dot} {} {}",
+            Style::new().bold().render(tool_verb(name)),
+            Style::new().fg(Color::BrightBlack).render(&arg)
+        )
+    };
 
     // For a successful file read on a known language, show the highlighted file
     // content under the action (keeps the nice read preview).
@@ -98,8 +104,25 @@ pub(crate) fn render_tool_end(
     out
 }
 
+/// Codex-style past-tense action verb for a completed tool call.
+pub(crate) fn tool_verb(name: &str) -> &str {
+    match name {
+        "bash" | "shell" | "run" | "exec" => "Ran",
+        "read" | "cat" => "Read",
+        "write" | "create" => "Wrote",
+        "edit" | "patch" | "apply_patch" => "Edited",
+        "grep" | "search" => "Searched",
+        "ls" | "glob" | "find" => "Listed",
+        "web_search" => "Searched web",
+        "web_fetch" => "Fetched",
+        "task" | "parallel_task" => "Explored",
+        other => other,
+    }
+}
+
 /// Claude-Code-style tool label: `Tool(arg)`, e.g. "Bash(npm test)",
-/// "Read(src/main.rs)", "Update(lib.rs)".
+/// "Read(src/main.rs)", "Update(lib.rs)". Used for the live-running indicator
+/// and the approval prompt.
 pub(crate) fn tool_label(name: &str, args: Option<&serde_json::Value>) -> String {
     let target = args.and_then(arg_summary).unwrap_or_default();
     let display = match name {

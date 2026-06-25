@@ -780,6 +780,10 @@ struct App {
     textarea: Textarea,
     spinner: Spinner,
     streaming: StreamingMarkdown,
+    /// Whether the current turn streamed any text deltas (vs. text only at End).
+    got_delta: bool,
+    /// Set while `/compact` is summarizing — drives the progress bar + blocks input.
+    compacting: Option<Instant>,
     /// Live reasoning ("thinking") text for the current turn, shown dimmed above
     /// the answer and cleared when the answer is finalized.
     thinking: String,
@@ -1303,6 +1307,7 @@ impl Model for App {
             }
 
             Msg::Compacted(summary) => {
+                self.compacting = None;
                 if summary.trim().is_empty() {
                     self.push_line(
                         &Style::new()
@@ -1507,7 +1512,18 @@ impl Model for App {
 
         // Activity line directly above the input: spinner while the agent works,
         // an inline approval prompt while awaiting, empty when idle.
-        let activity = match self.state {
+        let activity = if let Some(t0) = self.compacting {
+            // Time-estimated progress bar (compaction has no real % to report).
+            let secs = t0.elapsed().as_secs();
+            let pct = ((secs as f64 / 30.0) * 100.0).min(95.0) as usize;
+            let filled = pct * 24 / 100;
+            let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(24 - filled));
+            Style::new().fg(ACCENT).render(&format!(
+                "  ✦ Compacting context… ({}) {bar} {pct}%",
+                fmt_elapsed(t0.elapsed())
+            ))
+        } else {
+            match self.state {
             State::Streaming => {
                 // Pulsing sparkle + "Thinking…" with live elapsed + token count.
                 let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
@@ -1532,6 +1548,7 @@ impl Model for App {
             // The approval options panel (overlay_approval) is the UI now.
             State::Awaiting => String::new(),
             State::Idle => String::new(),
+            }
         };
 
         let prompt = Style::new().fg(icolor).bold().render(&format!("{sym} "));
@@ -1674,6 +1691,11 @@ impl App {
     fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
+            return None;
+        }
+        // No input while compacting — the summary is reseeding the session.
+        if self.compacting.is_some() {
+            self.textarea.clear();
             return None;
         }
         // Shell mode (`!`) runs a shell command directly (not through the agent).
@@ -1863,11 +1885,7 @@ impl App {
                     );
                     return None;
                 }
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("  ✦ compacting context…"),
-                );
+                self.compacting = Some(Instant::now()); // progress bar + input lock
                 let agent = self.agent.clone();
                 let workspace = self.cwd.clone();
                 return Some(cmd::cmd(move || async move {
@@ -2113,6 +2131,7 @@ impl App {
 
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
         self.streaming.clear();
+        self.got_delta = false; // track if this turn streamed any text deltas
         self.plan.clear(); // fresh plan per turn; planning events refill it
         self.running_task = Some(prompt.clone());
         self.state = State::Streaming;
@@ -2170,6 +2189,7 @@ impl App {
         self.rx.as_ref()?;
         match event {
             AgentEvent::TextDelta { text } => {
+                self.got_delta = true;
                 self.streaming.push(&text);
                 self.update_viewport_with_stream();
             }
@@ -2320,7 +2340,11 @@ impl App {
                         self.loop_remaining = 0;
                     }
                 }
-                if self.streaming.raw_content().trim().is_empty() && !text.is_empty() {
+                // Only fall back to End.text when the provider never streamed
+                // deltas this turn. Using the live buffer's emptiness here dups
+                // text: a mid-turn finalize (e.g. a tool call) empties the buffer,
+                // so End.text (the full message) would be appended a second time.
+                if !self.got_delta && !text.is_empty() {
                     self.streaming.push(&text);
                 }
                 self.finalize_streaming();
@@ -2458,10 +2482,14 @@ impl App {
         if !rendered.is_empty() {
             blocks.push(gutter(Color::Green, &rendered));
         }
-        // Currently-executing tool: "● action…" with a blinking dot.
+        // Currently-executing tool: "• Running <cmd>…" with a blinking bullet.
         if let Some(name) = &self.running_tool {
             let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
-            let action = tool_label(name, args.as_ref());
+            let verb = match name.as_str() {
+                "bash" | "shell" | "run" | "exec" => "Running",
+                _ => tool_verb(name),
+            };
+            let arg = args.as_ref().and_then(arg_summary).unwrap_or_default();
             let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
             let dot = Style::new()
                 .fg(if on {
@@ -2470,18 +2498,26 @@ impl App {
                     Color::BrightBlack
                 })
                 .bold()
-                .render("●");
-            blocks.push(format!("{}{} {}…", " ".repeat(PAD), dot, action));
+                .render("•");
+            let m = " ".repeat(PAD);
+            blocks.push(if arg.is_empty() {
+                format!("{m}{dot} {verb}…")
+            } else {
+                format!("{m}{dot} {verb} {arg}…")
+            });
         }
-        // Live stdout of the running tool — show the tail like a terminal.
+        // Live stdout of the running tool — tail prefixed with "│" like Codex.
         if !self.tool_output.trim().is_empty() {
+            let m = " ".repeat(PAD + 2);
+            let bar = Style::new().fg(Color::BrightBlack).render("│");
             let tail: Vec<&str> = self.tool_output.lines().rev().take(12).collect();
-            let tail = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
-            blocks.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&indent(&tail, PAD + 2)),
-            );
+            let body = tail
+                .into_iter()
+                .rev()
+                .map(|l| format!("{m}{bar} {}", Style::new().fg(Color::BrightBlack).render(l)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(body);
         }
         // Same "\n…\n" framing as rebuild_viewport so the transcript doesn't
         // jump a line when streaming starts/ends.
@@ -2863,6 +2899,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
         streaming: StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2)),
+        got_delta: false,
+        compacting: None,
         thinking: String::new(),
         state: State::Idle,
         messages: initial_messages,
