@@ -64,6 +64,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
+    (
+        "/mouse",
+        "toggle wheel-scroll (on) vs native text selection (off)",
+    ),
     ("/plugin", "enable/disable Claude skills & plugins"),
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
@@ -769,6 +773,9 @@ struct App {
     auto_reviewed: bool,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
+    /// Mouse capture on → wheel-scroll works but native text selection is off.
+    /// Off by default so select/copy works; toggled with `/mouse`.
+    mouse_scroll: bool,
     /// Clipboard images pasted (Ctrl+V), sent with the next message.
     pending_images: Vec<a3s_code_core::llm::Attachment>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
@@ -2042,6 +2049,18 @@ impl App {
                 self.theme_panel = Some(cur.min(THEMES.len() - 1));
                 return None;
             }
+            "/mouse" => {
+                self.textarea.clear();
+                self.mouse_scroll = !self.mouse_scroll;
+                a3s_tui::terminal::set_mouse_capture(self.mouse_scroll);
+                let msg = if self.mouse_scroll {
+                    "🖱 wheel-scroll on — text selection paused (run /mouse again to select/copy)"
+                } else {
+                    "🖱 wheel-scroll off — native text selection / copy enabled (PgUp/PgDn still scroll)"
+                };
+                self.push_line(&Style::new().fg(Color::Cyan).render(&format!("  {msg}")));
+                return None;
+            }
             "/reload" => {
                 self.textarea.clear();
                 // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
@@ -2940,6 +2959,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         last_activity: Instant::now(),
         auto_reviewed: false,
         shell_mode: false,
+        mouse_scroll: false,
         pending_images: Vec::new(),
         goal: None,
         loop_remaining: 0,
