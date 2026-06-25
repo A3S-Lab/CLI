@@ -3,6 +3,7 @@
 //! `a3s code` launches the interactive terminal UI (the coding agent); the
 //! rest are basic commands.
 
+mod codex;
 mod tui;
 
 fn usage() {

@@ -748,6 +748,8 @@ struct App {
     model_menu: Option<usize>,
     /// Active tab in the /model panel (0 = config; account tabs when signed in).
     model_tab: usize,
+    /// Custom LLM client to inject (Codex account); None uses config.acl creds.
+    llm_override: Option<Arc<dyn a3s_code_core::llm::LlmClient>>,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
@@ -2930,6 +2932,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         last_prompt_tokens: 0,
         model_menu: None,
         model_tab: 0,
+        llm_override: None,
         effort: 2, // high
         effort_panel: None,
         theme_panel: None,

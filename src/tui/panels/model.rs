@@ -110,11 +110,17 @@ impl App {
                 self.model_menu = None;
                 match provider {
                     None => {
+                        self.llm_override = None; // config.acl credentials
                         if let Some(model) = model {
                             self.switch_model(&model);
                         }
                     }
-                    Some(p) => self.account_model_note(p),
+                    Some(AuthProvider::Codex) => {
+                        if let Some(model) = model {
+                            self.sign_in_codex(&model);
+                        }
+                    }
+                    Some(p) => self.account_model_note(p), // Claude: still experimental
                 }
                 Some(None)
             }
@@ -126,8 +132,50 @@ impl App {
         }
     }
 
-    /// Account tabs are informational for now: a3s-code can't drive the Claude /
-    /// ChatGPT account APIs, so point the user at an API key in config.acl.
+    /// Sign in with the local Codex login and switch to one of its models by
+    /// injecting the custom Codex client (talks to the ChatGPT backend).
+    fn sign_in_codex(&mut self, model: &str) {
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(Color::Yellow)
+                    .render("  finish the current turn before switching models"),
+            );
+            return;
+        }
+        match crate::codex::CodexClient::from_codex_login(model, &self.session_id) {
+            Ok(client) => {
+                self.llm_override = Some(Arc::new(client));
+                self.model = Some(model.to_string()); // before rebuild
+                match self.rebuild_session(Some(model)) {
+                    Ok((s, _)) => {
+                        self.session = Arc::new(s);
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_GREEN)
+                                .render(&format!("  ⇄ Codex · {model}")),
+                        );
+                    }
+                    Err(e) => {
+                        self.llm_override = None;
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  failed to switch: {e}")),
+                        );
+                    }
+                }
+            }
+            Err(e) => self.push_line(
+                &Style::new()
+                    .fg(TN_RED)
+                    .render(&format!("  Codex sign-in failed: {e}")),
+            ),
+        }
+    }
+
+    /// Claude account tab is informational for now: a3s-code can't drive the
+    /// Anthropic account API, so point the user at an API key in config.acl.
     fn account_model_note(&mut self, provider: AuthProvider) {
         self.push_line(&Style::new().fg(Color::Yellow).render(&format!(
             "  {} login detected, but a3s can't use it yet — add an API key in \
@@ -175,6 +223,10 @@ impl App {
                 .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
                 .with_goal_tracking(true)
                 .with_max_tool_rounds(40);
+        }
+        // Signed in via the /model Codex tab → route through the account client.
+        if let Some(client) = &self.llm_override {
+            opts = opts.with_llm_client(client.clone());
         }
         opts
     }

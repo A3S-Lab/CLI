@@ -21,6 +21,11 @@ anyhow = "1"
 serde_json = "1"
 similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+# Codex account client (custom LlmClient over the ChatGPT backend).
+async-trait = "0.1"
+tokio-util = "0.7"
+base64 = "0.22"
+futures = "0.3"
 
 [profile.release]
 opt-level = "z"

@@ -9,10 +9,14 @@ dependencies = [
  "a3s-code-core",
  "a3s-tui",
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
  "image",
  "serde_json",
  "similar",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
