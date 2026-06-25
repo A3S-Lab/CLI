@@ -33,7 +33,12 @@ const ACCENT: Color = Color::Rgb(37, 99, 235);
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "switch provider / model"),
+    ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
+    ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
+    ("/plugin", "enable/disable Claude skills & plugins"),
+    ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
+    ("/update", "upgrade a3s to the latest release"),
     ("/btw", "ask a background side-question (/btw <prompt>)"),
     ("/top", "live process monitor (highlights coding agents)"),
     ("/ide", "file tree + code viewer for the workspace"),
@@ -52,68 +57,38 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/exit", "quit a3s code"),
 ];
 
-/// Open `path` in the user's editor without taking over the TUI terminal: a
-/// known GUI editor from $VISUAL/$EDITOR, else the OS default text-editor opener.
-fn open_in_editor(path: &str) -> bool {
-    // Detached spawn with the TUI's terminal hidden from the child, so a GUI
-    // launcher can't print to (and corrupt) the alt-screen.
-    let spawn = |bin: &str, pre: &[&str]| -> bool {
-        std::process::Command::new(bin)
-            .args(pre)
-            .arg(path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-    };
-    const GUI: &[&str] = &[
-        "code", "cursor", "zed", "subl", "codium", "atom", "mate", "gedit", "windsurf",
-    ];
-    // 1. An explicit GUI editor from $VISUAL/$EDITOR.
-    if let Ok(ed) = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")) {
-        let bin = ed.split_whitespace().next().unwrap_or("");
-        let base = bin.rsplit('/').next().unwrap_or(bin);
-        if GUI.contains(&base) && spawn(bin, &[]) {
-            return true;
-        }
-    }
-    // 2. Common GUI editor CLIs on PATH (VS Code first).
-    for ed in ["code", "cursor", "zed", "subl", "codium", "windsurf"] {
-        if spawn(ed, &[]) {
-            return true;
-        }
-    }
-    // 3. macOS: launch a known editor .app by name (works without a CLI on
-    //    PATH), then the file's default app, then TextEdit.
-    #[cfg(target_os = "macos")]
-    {
-        let installed = |app: &str| {
-            std::path::Path::new(&format!("/Applications/{app}.app")).exists()
-                || std::env::var("HOME").is_ok_and(|h| {
-                    std::path::Path::new(&format!("{h}/Applications/{app}.app")).exists()
-                })
-        };
-        for app in [
-            "Visual Studio Code",
-            "Cursor",
-            "Sublime Text",
-            "Zed",
-            "Windsurf",
-        ] {
-            if installed(app) && spawn("open", &["-a", app]) {
-                return true;
-            }
-        }
-        spawn("open", &[]) || spawn("open", &["-t"])
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        spawn("xdg-open", &[])
-    }
+/// Slash commands that mutate the session / conversation and so must NOT run
+/// mid-stream — hidden from the menu and rejected while a turn is in flight.
+const IDLE_ONLY: &[&str] = &[
+    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/update", "/init",
+];
+
+/// The latest published version from GitHub releases (stripped of the `v`), or
+/// `None` if offline / the lookup fails. Short timeout so startup never hangs.
+async fn check_latest_version() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        std::process::Command::new("curl")
+            .args([
+                "-fsSL",
+                "-m",
+                "4",
+                "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+            .and_then(|v| {
+                v.get("tag_name")?
+                    .as_str()
+                    .map(|s| s.trim_start_matches('v').to_string())
+            })
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
-/// Slash commands whose name starts with `input` (input begins with `/`).
 /// Workspace files for the `@` picker (git-tracked, gitignore-respected).
 fn workspace_files(dir: &str) -> Vec<String> {
     std::process::Command::new("git")
@@ -132,6 +107,7 @@ fn workspace_files(dir: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Slash commands whose name starts with `input` (input begins with `/`).
 fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
     SLASH_COMMANDS
         .iter()
@@ -484,7 +460,62 @@ fn keywords(lang: &str) -> &'static [&'static str] {
 
 /// Lightweight per-line syntax highlighting → ANSI. Handles comments, strings,
 /// numbers, keywords, types (CamelCase) and call sites. Single-line only.
+/// Syntax-highlight palette for the IDE editor + diffs (`/theme` cycles these).
+struct SyntaxTheme {
+    name: &'static str,
+    comment: Color,
+    string: Color,
+    number: Color,
+    keyword: Color,
+    typ: Color,
+    func: Color,
+}
+
+/// Built-in themes; index 0 (Atom One Dark) is the default.
+const THEMES: &[SyntaxTheme] = &[
+    SyntaxTheme {
+        name: "Atom One Dark",
+        comment: Color::Rgb(92, 99, 112),
+        string: Color::Rgb(152, 195, 121),
+        number: Color::Rgb(209, 154, 102),
+        keyword: Color::Rgb(198, 120, 221),
+        typ: Color::Rgb(229, 192, 123),
+        func: Color::Rgb(97, 175, 239),
+    },
+    SyntaxTheme {
+        name: "Dracula",
+        comment: Color::Rgb(98, 114, 164),
+        string: Color::Rgb(241, 250, 140),
+        number: Color::Rgb(189, 147, 249),
+        keyword: Color::Rgb(255, 121, 198),
+        typ: Color::Rgb(139, 233, 253),
+        func: Color::Rgb(80, 250, 123),
+    },
+    SyntaxTheme {
+        name: "Classic",
+        comment: Color::BrightBlack,
+        string: Color::Green,
+        number: Color::Cyan,
+        keyword: Color::Magenta,
+        typ: Color::Yellow,
+        func: Color::Blue,
+    },
+];
+
+static SYNTAX_THEME: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn current_theme() -> &'static SyntaxTheme {
+    let i = SYNTAX_THEME
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .min(THEMES.len() - 1);
+    &THEMES[i]
+}
+
 fn highlight_code(line: &str, lang: &str) -> String {
+    highlight_with(line, lang, current_theme())
+}
+
+fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String {
     if lang.is_empty() {
         return line.to_string();
     }
@@ -507,7 +538,7 @@ fn highlight_code(line: &str, lang: &str) -> String {
         };
         if is_comment {
             let rest: String = chars[i..].iter().collect();
-            out.push_str(&Style::new().fg(Color::BrightBlack).render(&rest));
+            out.push_str(&Style::new().fg(th.comment).render(&rest));
             break;
         }
         // String literal.
@@ -524,7 +555,7 @@ fn highlight_code(line: &str, lang: &str) -> String {
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            out.push_str(&Style::new().fg(Color::Green).render(&s));
+            out.push_str(&Style::new().fg(th.string).render(&s));
             continue;
         }
         // Number.
@@ -536,7 +567,7 @@ fn highlight_code(line: &str, lang: &str) -> String {
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            out.push_str(&Style::new().fg(Color::Cyan).render(&s));
+            out.push_str(&Style::new().fg(th.number).render(&s));
             continue;
         }
         // Identifier / keyword / type / call.
@@ -547,11 +578,11 @@ fn highlight_code(line: &str, lang: &str) -> String {
             }
             let word: String = chars[start..i].iter().collect();
             let styled = if kw.contains(&word.as_str()) {
-                Style::new().fg(Color::Magenta).render(&word)
+                Style::new().fg(th.keyword).render(&word)
             } else if chars.get(i) == Some(&'(') {
-                Style::new().fg(Color::Blue).render(&word)
+                Style::new().fg(th.func).render(&word)
             } else if word.chars().next().is_some_and(|c| c.is_uppercase()) {
-                Style::new().fg(Color::Yellow).render(&word)
+                Style::new().fg(th.typ).render(&word)
             } else {
                 word
             };
@@ -1257,6 +1288,8 @@ enum Msg {
     AutoReview(String),
     /// `/compact` produced this conversation summary; reseed a fresh session.
     Compacted(String),
+    /// Startup update check completed with the latest published version (if any).
+    UpdateCheck(Option<String>),
 }
 
 impl From<Event> for Msg {
@@ -1286,6 +1319,25 @@ fn banner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(280), Msg::BannerTick)
 }
 
+/// Compact token count: `50700` → `50.7k`.
+fn fmt_tokens(n: u64) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// A running (or just-finished) parallel subagent task, for the bottom tracker.
+struct SubAgent {
+    task_id: String,
+    agent: String,
+    description: String,
+    started: Instant,
+    tokens: u64,
+    done: bool,
+}
+
 struct App {
     session: Arc<AgentSession>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
@@ -1309,6 +1361,8 @@ struct App {
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
     effort_panel: Option<usize>,
+    /// `/theme` picker: temp theme index while open.
+    theme_panel: Option<usize>,
     /// /relay panel: resumable/relayable sessions, the active agent tab, and the
     /// selected index within that tab (when open).
     relay: Vec<RelaySession>,
@@ -1331,6 +1385,8 @@ struct App {
     /// Live parallelism for the status bar: running tools + running subagents.
     active_tools: usize,
     active_agents: usize,
+    /// Parallel subagent tasks shown in the bottom tracker panel.
+    subagents: Vec<SubAgent>,
     /// Project instructions (CLAUDE.md/AGENT.md), injected into the system prompt.
     instructions: Option<String>,
     /// Summary of earlier conversation after a manual `/compact` (reseed).
@@ -1410,6 +1466,16 @@ struct App {
     /// Workspace files (for the `@` file picker) + its selected index.
     files: Vec<String>,
     file_sel: usize,
+    /// Count of discoverable Claude skills (incl. plugin-bundled) for the banner.
+    skill_count: usize,
+    /// Loaded skills (name, description) for the slash menu + `/plugin`.
+    skills: Vec<(String, String)>,
+    /// Skill names the user disabled via `/plugins` (persisted, hidden from `/`).
+    disabled_skills: std::collections::HashSet<String>,
+    /// `/plugins` panel: selected row while open.
+    plugins_panel: Option<usize>,
+    /// Newer release found at startup (latest version), if any.
+    update_available: Option<String>,
     width: u16,
     height: u16,
     keymap: Keymap<Action>,
@@ -1419,14 +1485,19 @@ impl Model for App {
     type Msg = Msg;
 
     fn init(&mut self) -> Option<Cmd<Msg>> {
+        // Auto-check for a newer release on every launch (non-blocking).
+        let mut cmds = vec![cmd::cmd(|| async {
+            Msg::UpdateCheck(check_latest_version().await)
+        })];
         if self.messages.is_empty() {
             self.viewport.set_content(&self.banner());
-            return Some(banner_tick()); // start the mascot animation
+            cmds.push(banner_tick()); // start the mascot animation
+        } else {
+            // Resumed session — show the prior conversation, scrolled to the end.
+            self.rebuild_viewport();
+            self.viewport.update(ViewportMsg::Bottom);
         }
-        // Resumed session — show the prior conversation, scrolled to the end.
-        self.rebuild_viewport();
-        self.viewport.update(ViewportMsg::Bottom);
-        None
+        Some(cmd::batch(cmds))
     }
 
     fn update(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
@@ -1567,6 +1638,46 @@ impl Model for App {
                             self.effort_panel = None;
                             self.effort_anim = None;
                         }
+                        _ => {}
+                    }
+                    return None;
+                }
+                // /theme picker: ↑/↓ preview, Enter apply, Esc cancel.
+                if let Some(sel) = self.theme_panel {
+                    match key.code {
+                        KeyCode::Up => self.theme_panel = Some(sel.saturating_sub(1)),
+                        KeyCode::Down => self.theme_panel = Some((sel + 1).min(THEMES.len() - 1)),
+                        KeyCode::Enter => {
+                            SYNTAX_THEME.store(sel, std::sync::atomic::Ordering::Relaxed);
+                            self.theme_panel = None;
+                            self.rebuild_viewport();
+                            self.push_line(
+                                &Style::new()
+                                    .fg(Color::Green)
+                                    .render(&format!("  ◆ code theme: {}", THEMES[sel].name)),
+                            );
+                        }
+                        KeyCode::Esc => self.theme_panel = None,
+                        _ => {}
+                    }
+                    return None;
+                }
+                // /plugins panel: ↑/↓ select, Space enable/disable, Esc close.
+                if let Some(sel) = self.plugins_panel {
+                    let last = self.skills.len().saturating_sub(1);
+                    match key.code {
+                        KeyCode::Up => self.plugins_panel = Some(sel.saturating_sub(1)),
+                        KeyCode::Down => self.plugins_panel = Some((sel + 1).min(last)),
+                        KeyCode::Char(' ') => {
+                            if let Some((name, _)) = self.skills.get(sel.min(last)) {
+                                let name = name.clone();
+                                if !self.disabled_skills.remove(&name) {
+                                    self.disabled_skills.insert(name);
+                                }
+                                save_disabled_skills(&self.disabled_skills);
+                            }
+                        }
+                        KeyCode::Esc => self.plugins_panel = None,
                         _ => {}
                     }
                     return None;
@@ -1796,10 +1907,16 @@ impl Model for App {
 
             Msg::AutoReview(text) => {
                 if !text.trim().is_empty() {
-                    self.push_line(&gutter(
-                        Color::Cyan,
-                        &format!("⟳ inactivity review\n{}", text.trim()),
-                    ));
+                    // Dim + unobtrusive — it's a passive side note, not output.
+                    let dim = |s: &str| {
+                        format!(
+                            "  {}",
+                            Style::new().fg(Color::BrightBlack).italic().render(s)
+                        )
+                    };
+                    let mut lines = vec![dim("⟳ inactivity review")];
+                    lines.extend(text.trim().lines().map(dim));
+                    self.push_line(&lines.join("\n"));
                 }
             }
 
@@ -1840,6 +1957,20 @@ impl Model for App {
                             .fg(Color::Red)
                             .render(&format!("  compaction failed: {e}")),
                     ),
+                }
+            }
+
+            Msg::UpdateCheck(latest) => {
+                let newer = latest
+                    .as_deref()
+                    .is_some_and(|l| !crate::version_ge(env!("CARGO_PKG_VERSION"), l));
+                if newer {
+                    self.update_available = latest;
+                    // Refresh the start screen so the notice shows in the banner
+                    // without clobbering it with a transcript line.
+                    if self.messages.is_empty() {
+                        self.viewport.set_content(&self.banner());
+                    }
                 }
             }
 
@@ -2056,6 +2187,9 @@ impl Model for App {
         if self.active_tools > 0 {
             ctx.push_str(&format!("  ⚙ {} running", self.active_tools));
         }
+        if let Some(v) = &self.update_available {
+            ctx.push_str(&format!("  ⬆ {v}"));
+        }
         let mut info = String::new();
         if let Some(m) = &self.model {
             info.push_str(m); // provider/model
@@ -2097,14 +2231,17 @@ impl Model for App {
         };
         let tasks = self.task_lines();
         let task_block = tasks.join("\n");
-        // Plan/TODO panel pinned directly above the input box.
+        // Plan/TODO panel + parallel-subagent tracker pinned above the input.
         let plan = self.plan_lines();
         let plan_block = plan.join("\n");
+        let subs = self.subagent_lines();
+        let sub_block = subs.join("\n");
         let composed = Layout::vertical()
             .item(&viewport_view, Constraint::Fill)
             .item(&spacer, Constraint::Fixed(1))
             .item(&activity, Constraint::Fixed(1))
             .item(&plan_block, Constraint::Fixed(plan.len() as u16))
+            .item(&sub_block, Constraint::Fixed(subs.len() as u16))
             .item(&top_separator, Constraint::Fixed(1))
             .item(&input_view, Constraint::Fixed(1))
             .item(&separator, Constraint::Fixed(1))
@@ -2118,6 +2255,8 @@ impl Model for App {
         let composed = self.overlay_model_menu(composed);
         let composed = self.overlay_relay_menu(composed);
         let composed = self.overlay_effort(composed);
+        let composed = self.overlay_theme(composed);
+        let composed = self.overlay_plugins(composed);
         self.overlay_btw(composed)
     }
 
@@ -2157,6 +2296,27 @@ impl Model for App {
 impl App {
     /// True when the `/` command menu should be shown (idle, single-line input
     /// starting with `/` that matches at least one command).
+    /// Built-in commands + loaded skills (as `/<skill>`) matching `input`.
+    fn slash_candidates_all(&self, input: &str) -> Vec<(String, String)> {
+        // Hide session-mutating commands while a turn is streaming.
+        let idle = self.state == State::Idle;
+        let mut out: Vec<(String, String)> = slash_candidates(input)
+            .into_iter()
+            .filter(|(c, _)| idle || !IDLE_ONLY.contains(c))
+            .map(|(c, d)| (c.to_string(), d.to_string()))
+            .collect();
+        for (name, desc) in &self.skills {
+            if self.disabled_skills.contains(name) {
+                continue; // hidden via /plugins
+            }
+            let cmd = format!("/{name}");
+            if cmd.starts_with(input) {
+                out.push((cmd, format!("skill · {}", truncate(desc, 56))));
+            }
+        }
+        out
+    }
+
     fn slash_menu_open(&self) -> bool {
         let input = self.textarea.value();
         // Available while idle OR streaming (so /btw can fire mid-turn); not
@@ -2167,13 +2327,13 @@ impl App {
             // Close once args are being typed (e.g. "/btw <prompt>") so Enter
             // submits the whole line instead of just the command.
             && !input.contains(' ')
-            && !slash_candidates(&input).is_empty()
+            && !self.slash_candidates_all(&input).is_empty()
     }
 
     /// Keys while the slash menu is open: ↑/↓ select, Enter run, Tab complete,
     /// Esc dismiss. Returns `Some(handled)` to consume the key.
     fn handle_slash_key(&mut self, key: &KeyEvent) -> Option<Option<Cmd<Msg>>> {
-        let cands = slash_candidates(&self.textarea.value());
+        let cands = self.slash_candidates_all(&self.textarea.value());
         if cands.is_empty() {
             return None;
         }
@@ -2189,7 +2349,7 @@ impl App {
                 Some(None)
             }
             KeyCode::Enter => {
-                let cmd = cands[self.slash_sel].0.to_string();
+                let cmd = cands[self.slash_sel].0.clone();
                 self.slash_sel = 0;
                 self.textarea.clear();
                 // Run directly on this key event so the redraw is immediate (a
@@ -2197,6 +2357,11 @@ impl App {
                 if cmd == "/model" {
                     self.open_model_menu();
                     return Some(None);
+                }
+                // A skill (not a built-in command) → ask the agent to use it.
+                if !SLASH_COMMANDS.iter().any(|(c, _)| *c == cmd) {
+                    let name = cmd.trim_start_matches('/');
+                    return Some(self.on_submit(format!("Use your `{name}` skill.")));
                 }
                 Some(self.on_submit(cmd))
             }
@@ -2238,14 +2403,23 @@ impl App {
         if !self.slash_menu_open() {
             return composed;
         }
-        let cands = slash_candidates(&self.textarea.value());
-        let sel = self.slash_sel.min(cands.len() - 1);
+        let cands = self.slash_candidates_all(&self.textarea.value());
+        let total = cands.len();
+        let sel = self.slash_sel.min(total - 1);
         let width = self.width as usize;
-        let menu: Vec<String> = cands
-            .iter()
-            .enumerate()
-            .map(|(i, (cmd, desc))| {
-                let raw = pad_to(&format!("  {cmd:<9} {desc}"), width);
+        // Cap the menu height (skills make the list long) and scroll a window so
+        // the selection stays visible — Claude-Code style.
+        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 10);
+        let start = if sel < max_rows {
+            0
+        } else {
+            sel + 1 - max_rows
+        };
+        let end = (start + max_rows).min(total);
+        let mut menu: Vec<String> = (start..end)
+            .map(|i| {
+                let (cmd, desc) = &cands[i];
+                let raw = pad_to(&format!("  {cmd:<11} {desc}"), width);
                 if i == sel {
                     Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
                 } else {
@@ -2253,6 +2427,17 @@ impl App {
                 }
             })
             .collect();
+        if total > max_rows {
+            // Scroll position footer: ↑ if more above, ↓ if more below.
+            let up = if start > 0 { "↑" } else { " " };
+            let down = if end < total { "↓" } else { " " };
+            menu.push(pad_to(
+                &Style::new()
+                    .fg(Color::BrightBlack)
+                    .render(&format!("  {up}{down} {}/{total}", sel + 1)),
+                width,
+            ));
+        }
         self.overlay_list(composed, &menu)
     }
 
@@ -2274,12 +2459,17 @@ impl App {
             return Vec::new();
         };
         let q = q.to_lowercase();
-        self.files
+        // Sorted so same-directory files group together for the tree view; the
+        // overlay scrolls a window, so we can keep plenty for browsing.
+        let mut v: Vec<String> = self
+            .files
             .iter()
             .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
-            .take(10)
+            .take(400)
             .cloned()
-            .collect()
+            .collect();
+        v.sort();
+        v
     }
 
     fn file_menu_open(&self) -> bool {
@@ -2335,22 +2525,64 @@ impl App {
             return composed;
         }
         let cands = self.file_candidates();
-        let sel = self.file_sel.min(cands.len().saturating_sub(1));
+        let total = cands.len();
+        if total == 0 {
+            return composed;
+        }
+        let sel = self.file_sel.min(total - 1);
         let width = self.width as usize;
+        // Cap height + scroll a window (like the / menu); group by directory and
+        // indent the files so it reads as a tree, not a flat path list.
+        let max_rows = (self.height as usize).saturating_sub(9).clamp(3, 8);
+        let start = if sel < max_rows {
+            0
+        } else {
+            sel + 1 - max_rows
+        };
+        let end = (start + max_rows).min(total);
+
         let mut menu = vec![pad_to(
             &Style::new()
                 .fg(ACCENT)
                 .bold()
-                .render("  @ file · ↑/↓ · Enter/Tab insert · Esc"),
+                .render("  @ file · ↑/↓ · Enter insert · Esc"),
             width,
         )];
-        for (i, f) in cands.iter().enumerate() {
-            let raw = pad_to(&format!("  {f}"), width);
+        let mut last_dir: Option<String> = None;
+        for (i, f) in cands.iter().enumerate().take(end).skip(start) {
+            let (dir, base) = match f.rsplit_once('/') {
+                Some((d, b)) => (d.to_string(), b.to_string()),
+                None => (String::new(), f.clone()),
+            };
+            // Directory header (full path, cyan) whenever the group changes.
+            if last_dir.as_deref() != Some(dir.as_str()) {
+                let label = if dir.is_empty() {
+                    "./".to_string()
+                } else {
+                    format!("{dir}/")
+                };
+                menu.push(pad_to(
+                    &Style::new().fg(Color::Cyan).render(&format!("  {label}")),
+                    width,
+                ));
+                last_dir = Some(dir);
+            }
+            let raw = pad_to(&format!("    {base}"), width);
             menu.push(if i == sel {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
-                Style::new().fg(Color::BrightBlack).render(&raw)
+                Style::new().fg(Color::White).render(&raw)
             });
+        }
+        if total > max_rows {
+            let up = if start > 0 { "↑" } else { " " };
+            let down = if end < total { "↓" } else { " " };
+            menu.push(pad_to(
+                &Style::new()
+                    .fg(Color::BrightBlack)
+                    .render(&format!("  {up}{down} {}/{total}", sel + 1)),
+                width,
+            ));
         }
         self.overlay_list(composed, &menu)
     }
@@ -2542,6 +2774,113 @@ impl App {
     }
 
     /// The `/effort` slider panel (overlaid like the model picker).
+    /// `/plugins` panel: enable/disable Claude skills (checkbox list, scrolled).
+    fn overlay_plugins(&self, composed: String) -> String {
+        let Some(sel) = self.plugins_panel else {
+            return composed;
+        };
+        let total = self.skills.len();
+        if total == 0 {
+            return composed;
+        }
+        let sel = sel.min(total - 1);
+        let width = self.width as usize;
+        let on_count = total - self.disabled_skills.len().min(total);
+        let mut menu = vec![pad_to(
+            &Style::new().fg(ACCENT).bold().render(&format!(
+                "  Plugins & skills ({on_count}/{total} on) — ↑/↓ · Space toggle · Esc"
+            )),
+            width,
+        )];
+        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
+        let start = if sel < max_rows {
+            0
+        } else {
+            sel + 1 - max_rows
+        };
+        let end = (start + max_rows).min(total);
+        let descw = width.saturating_sub(28);
+        for i in start..end {
+            let (name, desc) = &self.skills[i];
+            let on = !self.disabled_skills.contains(name);
+            let marker = if i == sel { "▸" } else { " " };
+            let check = if on {
+                Style::new().fg(Color::Green).render("[✓]")
+            } else {
+                Style::new().fg(Color::BrightBlack).render("[ ]")
+            };
+            let nm_plain = format!("{:<16}", truncate(&format!("/{name}"), 16));
+            let nm = if on {
+                Style::new().fg(Color::Cyan).render(&nm_plain)
+            } else {
+                Style::new().fg(Color::BrightBlack).render(&nm_plain)
+            };
+            let raw = format!(
+                "  {marker} {check} {nm}  {}",
+                Style::new()
+                    .fg(Color::BrightBlack)
+                    .render(&truncate(desc, descw)),
+            );
+            menu.push(pad_to(&raw, width));
+        }
+        if total > max_rows {
+            let up = if start > 0 { "↑" } else { " " };
+            let down = if end < total { "↓" } else { " " };
+            menu.push(pad_to(
+                &Style::new()
+                    .fg(Color::BrightBlack)
+                    .render(&format!("  {up}{down} {}/{total}", sel + 1)),
+                width,
+            ));
+        }
+        self.overlay_list(composed, &menu)
+    }
+
+    /// `/theme` picker: a theme list + a live syntax-highlight preview.
+    fn overlay_theme(&self, composed: String) -> String {
+        let Some(sel) = self.theme_panel else {
+            return composed;
+        };
+        let width = self.width as usize;
+        let mut menu = vec![pad_to(
+            &Style::new()
+                .fg(ACCENT)
+                .bold()
+                .render("  Theme — ↑/↓ preview · Enter apply · Esc"),
+            width,
+        )];
+        for (i, th) in THEMES.iter().enumerate() {
+            let marker = if i == sel { "▸" } else { " " };
+            let raw = pad_to(&format!("  {marker} {}", th.name), width);
+            menu.push(if i == sel {
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+            } else {
+                Style::new().fg(Color::BrightBlack).render(&raw)
+            });
+        }
+        menu.push(pad_to(
+            &Style::new()
+                .fg(Color::BrightBlack)
+                .render("  ── preview ──"),
+            width,
+        ));
+        let th = &THEMES[sel];
+        let sample = [
+            "// syntax preview",
+            "fn compute(n: usize) -> String {",
+            "    let total = n * 42;",
+            "    format!(\"sum: {}\", total)",
+            "}",
+        ];
+        for line in sample {
+            menu.push(pad_to(
+                &format!("    {}", highlight_with(line, "rust", th)),
+                width,
+            ));
+        }
+        self.overlay_list(composed, &menu)
+    }
+
     fn overlay_effort(&self, composed: String) -> String {
         let Some(sel) = self.effort_panel else {
             return composed;
@@ -3752,7 +4091,8 @@ impl App {
     /// Resize the viewport so the pinned plan panel and the bottom task panel
     /// both fit without covering the transcript.
     fn relayout(&mut self) {
-        let n = (self.task_lines().len() + self.plan_lines().len()) as u16;
+        let n = (self.task_lines().len() + self.plan_lines().len() + self.subagent_lines().len())
+            as u16;
         self.viewport
             .resize(self.width, self.height.saturating_sub(7 + n));
     }
@@ -3801,6 +4141,47 @@ impl App {
             ));
         }
         lines
+    }
+
+    /// Bottom tracker for running parallel subagents (Claude-style): one row per
+    /// task with the agent type, description, elapsed time, and tokens.
+    fn subagent_lines(&self) -> Vec<String> {
+        if self.subagents.is_empty() {
+            return Vec::new();
+        }
+        let width = self.width as usize;
+        let mut out = vec![pad_to(
+            &Style::new().fg(Color::White).bold().render("  ⏺ main"),
+            width,
+        )];
+        for s in &self.subagents {
+            let secs = s.started.elapsed().as_secs();
+            let el = if secs >= 60 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{secs}s")
+            };
+            let right = if s.tokens > 0 {
+                format!("{el} · ↓ {} tokens", fmt_tokens(s.tokens))
+            } else {
+                el
+            };
+            let glyph = if s.done { '●' } else { '◯' };
+            let rlen = a3s_tui::style::visible_len(&right);
+            let maxleft = width.saturating_sub(rlen + 3).max(8);
+            let left = truncate(
+                &format!("  {glyph} {}  {}", s.agent, s.description),
+                maxleft,
+            );
+            let pad = width.saturating_sub(a3s_tui::style::visible_len(&left) + rlen + 1);
+            out.push(format!(
+                "{}{}{}",
+                Style::new().fg(Color::Magenta).render(&left),
+                " ".repeat(pad),
+                Style::new().fg(Color::BrightBlack).render(&right),
+            ));
+        }
+        out
     }
 
     /// `/btw` side-chat panel above the input: the question and its answer.
@@ -3886,6 +4267,17 @@ impl App {
                 };
                 Msg::ShellOutput(text)
             }));
+        }
+        // Block session-mutating commands while a turn is streaming.
+        if self.state != State::Idle {
+            let cmd0 = trimmed.split_whitespace().next().unwrap_or("");
+            if IDLE_ONLY.contains(&cmd0) {
+                self.textarea.clear();
+                self.push_line(&Style::new().fg(Color::Yellow).render(&format!(
+                    "  {cmd0} is unavailable while a turn is running — press Esc to stop first"
+                )));
+                return None;
+            }
         }
         // `/btw <prompt>` runs a background side-thread (separate ephemeral
         // session, the main conversation as context) without disturbing the
@@ -3987,6 +4379,24 @@ impl App {
                 self.rebuild_viewport();
                 return None;
             }
+            "/init" => {
+                // Agent-driven: analyze the repo and write AGENTS.md (auto-loaded
+                // by the core, like CLAUDE.md). Guarded idle by IDLE_ONLY above.
+                self.textarea.clear();
+                self.messages.push(user_bubble(
+                    "/init — generate AGENTS.md",
+                    self.width as usize,
+                ));
+                self.rebuild_viewport();
+                return self.start_stream(
+                    "Analyze this codebase and create (or update) an AGENTS.md file at the \
+                     project root. Include: a concise project overview, the exact build / test / \
+                     lint / run commands, the high-level architecture and key directories, and \
+                     the conventions an AI coding agent should follow. Base everything on what's \
+                     actually in the repo, and write the file with your file-writing tool."
+                        .to_string(),
+                );
+            }
             "/compact" => {
                 self.textarea.clear();
                 if self.state != State::Idle {
@@ -4055,17 +4465,21 @@ impl App {
             }
             "/config" => {
                 self.textarea.clear();
-                let line = match find_config() {
-                    Some(path) if open_in_editor(&path) => {
-                        format!("opened {path} in your editor")
-                    }
-                    Some(path) => {
-                        format!("config: {path} (couldn't launch an editor — open it manually)")
-                    }
-                    None => "no config found — create ~/.a3s/config.acl".to_string(),
-                };
-                self.messages.push(gutter(Color::BrightBlack, &line));
-                self.rebuild_viewport();
+                // Resolve the config; if there's none, generate a starter so the
+                // user always lands in the editor with something to edit.
+                let path = find_config().map(std::path::PathBuf::from).or_else(|| {
+                    let p = default_config_path()?;
+                    let _ = write_template_config(&p);
+                    Some(p)
+                });
+                match path {
+                    Some(p) => self.open_config_in_ide(&p),
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(Color::Yellow)
+                            .render("  could not locate a home directory for ~/.a3s/config.acl"),
+                    ),
+                }
                 return None;
             }
             "/model" => {
@@ -4096,6 +4510,67 @@ impl App {
                     focus_editor: false,
                 });
                 return None;
+            }
+            "/plugin" | "/plugins" => {
+                self.textarea.clear();
+                if self.skills.is_empty() {
+                    self.push_line(&Style::new().fg(Color::BrightBlack).render(
+                        "  no Claude skills/plugins found (~/.claude/skills, ~/.claude/plugins)",
+                    ));
+                } else {
+                    self.plugins_panel = Some(0);
+                }
+                return None;
+            }
+            "/theme" => {
+                self.textarea.clear();
+                let cur = SYNTAX_THEME.load(std::sync::atomic::Ordering::Relaxed);
+                self.theme_panel = Some(cur.min(THEMES.len() - 1));
+                return None;
+            }
+            "/reload" => {
+                self.textarea.clear();
+                // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
+                let dirs = claude_skill_dirs(&self.cwd);
+                self.skills = load_skills(&dirs);
+                self.skill_count = count_skill_files(&dirs);
+                self.push_line(&Style::new().fg(Color::Green).render(&format!(
+                    "  ↻ reloaded — {} skills available in the / menu",
+                    self.skills.len()
+                )));
+                return None;
+            }
+            "/update" => {
+                self.textarea.clear();
+                self.push_line(
+                    &Style::new()
+                        .fg(Color::BrightBlack)
+                        .render("  upgrading a3s…"),
+                );
+                let exe = std::env::current_exe().ok();
+                return Some(cmd::cmd(move || async move {
+                    let out = match &exe {
+                        Some(p) => tokio::process::Command::new(p).arg("update").output().await,
+                        None => {
+                            tokio::process::Command::new("a3s")
+                                .arg("update")
+                                .output()
+                                .await
+                        }
+                    };
+                    let text = match out {
+                        Ok(o) => {
+                            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                            s.push_str(&String::from_utf8_lossy(&o.stderr));
+                            s
+                        }
+                        Err(e) => format!("update failed: {e}"),
+                    };
+                    Msg::ShellOutput(format!(
+                        "{}\n(restart a3s code to use the new version)",
+                        text.trim_end()
+                    ))
+                }));
             }
             "/git" => {
                 self.textarea.clear();
@@ -4302,21 +4777,30 @@ impl App {
             } => {
                 self.finalize_streaming();
                 self.active_agents += 1;
-                let short = task_id.get(..6).unwrap_or(&task_id);
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::Magenta)
-                        .bold()
-                        .render(&format!("  ⇉ [{short}] {agent} · {description}")),
-                );
+                // Track it in the live bottom panel instead of a transcript line.
+                self.subagents.push(SubAgent {
+                    task_id,
+                    agent,
+                    description,
+                    started: Instant::now(),
+                    tokens: 0,
+                    done: false,
+                });
+                self.relayout();
             }
-            AgentEvent::SubagentProgress { status, .. } => {
-                if !status.trim().is_empty() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(Color::BrightBlack)
-                            .render(&format!("      · {}", status.trim())),
-                    );
+            AgentEvent::SubagentProgress {
+                task_id, metadata, ..
+            } => {
+                // Pull a token count from the progress metadata, if present.
+                let toks = metadata
+                    .get("tokens")
+                    .or_else(|| metadata.get("total_tokens"))
+                    .or_else(|| metadata.pointer("/usage/total_tokens"))
+                    .and_then(|v| v.as_u64());
+                if let Some(s) = self.subagents.iter_mut().find(|s| s.task_id == task_id) {
+                    if let Some(t) = toks {
+                        s.tokens = s.tokens.max(t);
+                    }
                 }
             }
             AgentEvent::SubagentEnd {
@@ -4327,7 +4811,9 @@ impl App {
                 ..
             } => {
                 self.active_agents = self.active_agents.saturating_sub(1);
-                let short = task_id.get(..6).unwrap_or(&task_id);
+                // Drop it from the live panel; record the result in the transcript.
+                self.subagents.retain(|s| s.task_id != task_id);
+                self.relayout();
                 let (mark, color) = if success {
                     ("✓", Color::Green)
                 } else {
@@ -4336,7 +4822,7 @@ impl App {
                 let snippet = output.lines().next().unwrap_or("").trim();
                 let snippet = truncate(snippet, self.width.saturating_sub(20) as usize);
                 self.push_line(&Style::new().fg(color).render(&format!(
-                    "  ⇉ {mark} [{short}] {agent}{}",
+                    "  ⇉ {mark} {agent}{}",
                     if snippet.is_empty() {
                         String::new()
                     } else {
@@ -4452,6 +4938,7 @@ impl App {
         self.running_task = None;
         self.active_tools = 0;
         self.active_agents = 0;
+        self.subagents.clear();
         self.relayout();
         self.stream_started = None;
         self.spinner.stop();
@@ -4462,6 +4949,37 @@ impl App {
     fn push_line(&mut self, line: &str) {
         self.messages.push(line.to_string());
         self.rebuild_viewport();
+    }
+
+    /// Open `path` directly in the built-in IDE editor (tree rooted at its
+    /// directory, file loaded, editor focused). Used by `/config` + first launch.
+    fn open_config_in_ide(&mut self, path: &std::path::Path) {
+        let dir = path.parent().unwrap_or(std::path::Path::new("."));
+        let lines: Vec<String> = std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .replace('\t', "    ")
+            .lines()
+            .map(String::from)
+            .collect();
+        self.ide = Some(Ide {
+            entries: ide_children(dir, 0),
+            sel: 0,
+            tree_scroll: 0,
+            file: Some(IdeFile {
+                path: path.to_path_buf(),
+                lines: if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines
+                },
+                scroll: 0,
+                row: 0,
+                col: 0,
+                dirty: false,
+                image: false,
+            }),
+            focus_editor: true,
+        });
     }
 
     /// Move through prompt history and load the entry into the input. Going
@@ -4576,8 +5094,13 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         let model = self.model.as_deref().unwrap_or("no model configured");
+        let skills = if self.skill_count > 0 {
+            format!("  ·  {} skills", self.skill_count)
+        } else {
+            String::new()
+        };
         let meta = Style::new().fg(Color::BrightBlack).render(&format!(
-            "{margin}a3s-code v{}  ·  {model}  ·  {}",
+            "{margin}a3s-code v{}  ·  {model}{skills}  ·  {}",
             env!("CARGO_PKG_VERSION"),
             self.cwd
         ));
@@ -4587,7 +5110,17 @@ impl App {
             .render(&format!(
             "{margin}Type a message · / for commands · Shift+Tab cycles mode · Ctrl+C twice to exit"
         ));
-        format!("\n{logo}\n\n{meta}\n{tips}\n")
+        let update = match &self.update_available {
+            Some(v) => format!(
+                "\n{margin}{}",
+                Style::new().fg(ACCENT).bold().render(&format!(
+                    "⬆ a3s {v} is available (you have {}) — type /update to upgrade",
+                    env!("CARGO_PKG_VERSION")
+                ))
+            ),
+            None => String::new(),
+        };
+        format!("\n{logo}\n\n{meta}\n{tips}{update}\n")
     }
 
     fn rebuild_viewport(&mut self) {
@@ -4707,33 +5240,47 @@ fn render_tool_end(
     if lines.is_empty() {
         return header;
     }
-    const SHOW: usize = 5;
+    // Head + tail window with a "… +N lines" marker in the middle so a long
+    // command (a big build, etc.) stays a fixed height instead of flooding.
+    const HEAD: usize = 3;
+    const TAIL: usize = 2;
     let body_color = if ok { Color::BrightBlack } else { Color::Red };
     let conn = Style::new().fg(Color::BrightBlack).render("⎿");
     let textw = width.saturating_sub(PAD + 7).max(20);
-    let mut out = header;
-    for (i, line) in lines.iter().take(SHOW).enumerate() {
+    let line_at = |i: usize, line: &str| -> String {
         let shown = truncate(line, textw);
         if i == 0 {
-            out.push_str(&format!(
+            format!(
                 "\n{margin}  {conn}  {}",
                 Style::new().fg(body_color).render(&shown)
-            ));
+            )
         } else {
-            out.push_str(&format!(
+            format!(
                 "\n{margin}     {}",
                 Style::new().fg(body_color).render(&shown)
-            ));
+            )
         }
-    }
-    if lines.len() > SHOW {
-        let more = lines.len() - SHOW;
+    };
+    let n = lines.len();
+    let mut out = header;
+    if n <= HEAD + TAIL + 1 {
+        for (i, line) in lines.iter().enumerate() {
+            out.push_str(&line_at(i, line));
+        }
+    } else {
+        for (i, line) in lines.iter().take(HEAD).enumerate() {
+            out.push_str(&line_at(i, line));
+        }
+        let hidden = n - HEAD - TAIL;
         out.push_str(&format!(
             "\n{margin}     {}",
             Style::new()
                 .fg(Color::BrightBlack)
-                .render(&format!("… +{more} lines"))
+                .render(&format!("… +{hidden} lines"))
         ));
+        for line in lines.iter().skip(n - TAIL) {
+            out.push_str(&line_at(1, line));
+        }
     }
     out
 }
@@ -4966,6 +5513,46 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// A starter `config.acl` (HCL-like ACL) with placeholders, generated on first
+/// launch so a new user has something to edit instead of an error.
+fn config_template() -> &'static str {
+    r#"# A3S coding-agent config (HCL-like ACL).
+# Fill in your provider apiKey/baseUrl + a model, set default_model, then save
+# with Ctrl+S. Docs: https://a3s-lab.github.io/a3s/
+
+default_model = "openai/my-model"
+
+providers "openai" {
+  apiKey  = "sk-REPLACE-ME"
+  baseUrl = "https://api.openai.com/v1/"   # or any OpenAI-compatible endpoint
+
+  models "my-model" {
+    name        = "My Model"
+    toolCall    = true
+    temperature = true
+    modalities  = { input = ["text"], output = ["text"] }
+    limit       = { context = 128000, output = 4096 }
+  }
+}
+"#
+}
+
+/// `~/.a3s/config.acl` — the default user-global config location.
+fn default_config_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/config.acl"))
+}
+
+/// Write the starter config to `path` (creating parent dirs). Never overwrites.
+fn write_template_config(path: &std::path::Path) -> std::io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, config_template())
+}
+
 /// Find the A3S config: `$A3S_CONFIG_FILE`, then `.a3s/config.acl` walking up
 /// from the current directory (project-local), then `~/.a3s/config.acl`
 /// (user-global) — so `a3s code` works from anywhere once a global config exists.
@@ -4998,6 +5585,107 @@ fn find_config() -> Option<String> {
 /// project (`<ws>/.claude/skills`), and plugin-bundled (`~/.claude/plugins/**/
 /// skills`) — so a3s can load Claude `SKILL.md` skills directly. a3s's skill
 /// loader already understands the `<name>/SKILL.md` layout and YAML frontmatter.
+/// Parse a SKILL.md's YAML frontmatter for `name` + `description`.
+fn parse_skill_meta(path: &std::path::Path) -> Option<(String, String)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let rest = content.trim_start().strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let (mut name, mut desc) = (None, None);
+    for line in rest[..end].lines() {
+        if let Some(v) = line.strip_prefix("name:") {
+            name = Some(v.trim().trim_matches(['"', '\'']).to_string());
+        } else if let Some(v) = line.strip_prefix("description:") {
+            desc = Some(v.trim().trim_matches(['"', '\'']).to_string());
+        }
+    }
+    let name = name?;
+    if name.is_empty() {
+        return None;
+    }
+    Some((name, desc.unwrap_or_default()))
+}
+
+/// `~/.a3s/disabled_skills` — names the user has turned off via `/plugins`.
+fn disabled_skills_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/disabled_skills"))
+}
+
+fn load_disabled_skills() -> std::collections::HashSet<String> {
+    disabled_skills_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn save_disabled_skills(set: &std::collections::HashSet<String>) {
+    if let Some(p) = disabled_skills_path() {
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut names: Vec<&String> = set.iter().collect();
+        names.sort();
+        let body = names
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let _ = std::fs::write(p, body);
+    }
+}
+
+/// Load skill (name, description) pairs from the skill dirs, for the slash menu.
+fn load_skills(dirs: &[std::path::PathBuf]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for d in dirs {
+        let Ok(rd) = std::fs::read_dir(d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            let md = if p.is_dir() {
+                p.join("SKILL.md")
+            } else if p.extension().and_then(|x| x.to_str()) == Some("md") {
+                p.clone()
+            } else {
+                continue;
+            };
+            if md.is_file() {
+                if let Some(meta) = parse_skill_meta(&md) {
+                    out.push(meta);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Count discoverable Claude skills (`<name>/SKILL.md` dirs + flat `*.md`)
+/// across the skill dirs — shown on the start screen so compatibility is visible.
+fn count_skill_files(dirs: &[std::path::PathBuf]) -> usize {
+    let mut n = 0;
+    for d in dirs {
+        if let Ok(rd) = std::fs::read_dir(d) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let is_skill_dir = p.is_dir() && p.join("SKILL.md").is_file();
+                let is_flat_md = p.extension().and_then(|x| x.to_str()) == Some("md");
+                if is_skill_dir || is_flat_md {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
 fn claude_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let project = std::path::Path::new(workspace).join(".claude/skills");
@@ -5010,7 +5698,9 @@ fn claude_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
         if personal.is_dir() {
             dirs.push(personal);
         }
-        collect_skills_dirs(&home.join(".claude/plugins"), 0, 4, &mut dirs);
+        // Depth 6 covers nested plugin layouts: plugins/cache/<plugin>/<plugin>/
+        // <version>/skills and marketplaces/<mkt>/external_plugins/<plugin>/skills.
+        collect_skills_dirs(&home.join(".claude/plugins"), 0, 6, &mut dirs);
     }
     dirs.sort();
     dirs.dedup();
@@ -5051,15 +5741,18 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let resuming = args.first().map(String::as_str) == Some("resume");
     let explicit_id = if resuming { args.get(1).cloned() } else { None };
     let mut session_id = explicit_id.clone().unwrap_or_else(new_session_id);
-    let config_path = find_config().ok_or_else(|| {
-        anyhow::anyhow!(
-            "no A3S config found.\n\nLooked for: $A3S_CONFIG_FILE, .a3s/config.acl in this \
-             directory or a parent, and ~/.a3s/config.acl.\n\nCreate one, e.g.:\n  \
-             mkdir -p ~/.a3s\n  $EDITOR ~/.a3s/config.acl\n\nMinimal example:\n  \
-             default_model = \"openai/gpt-4o\"\n  providers \"openai\" {{\n    apiKey = \
-             \"sk-...\"\n  }}\n\nOr point at an existing file: A3S_CONFIG_FILE=/path/config.acl a3s code"
-        )
-    })?;
+    // First launch: if there's no config, generate a starter template at
+    // ~/.a3s/config.acl and open it in the built-in IDE (see `created_config`).
+    let (config_path, created_config) = match find_config() {
+        Some(p) => (p, false),
+        None => {
+            let p = default_config_path()
+                .ok_or_else(|| anyhow::anyhow!("no HOME directory found for ~/.a3s/config.acl"))?;
+            write_template_config(&p)
+                .map_err(|e| anyhow::anyhow!("failed to write starter config {p:?}: {e}"))?;
+            (p.to_string_lossy().into_owned(), true)
+        }
+    };
     let agent = Arc::new(
         Agent::new(config_path.clone())
             .await
@@ -5242,7 +5935,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             "Scroll to bottom",
         );
 
-    let app = App {
+    let mut app = App {
         session,
         agent: agent.clone(),
         store: store.clone(),
@@ -5258,6 +5951,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         model_menu: None,
         effort: 2, // high
         effort_panel: None,
+        theme_panel: None,
         quit_armed: None,
         last_activity: Instant::now(),
         auto_reviewed: false,
@@ -5267,6 +5961,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         loop_remaining: 0,
         active_tools: 0,
         active_agents: 0,
+        subagents: Vec::new(),
         instructions,
         rainbow_until: None,
         rainbow_frame: 0,
@@ -5312,11 +6007,28 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         slash_sel: 0,
         files: workspace_files(&workspace),
         file_sel: 0,
+        skill_count: count_skill_files(&claude_dirs),
+        skills: load_skills(&claude_dirs),
+        disabled_skills: load_disabled_skills(),
+        plugins_panel: None,
+        update_available: None,
         cwd: workspace.clone(),
         width,
         height,
         keymap,
     };
+
+    // First launch: drop the user straight into the editor on the new config.
+    if created_config {
+        app.messages.push(gutter(
+            ACCENT,
+            "Welcome to a3s code! Generated a starter ~/.a3s/config.acl — fill in your \
+             provider apiKey/baseUrl + model, Ctrl+S to save, Esc to close, then restart \
+             `a3s code` to load it.",
+        ));
+        app.open_config_in_ide(std::path::Path::new(&config_path));
+        app.rebuild_viewport();
+    }
 
     ProgramBuilder::new(app)
         .with_alt_screen()
@@ -5471,5 +6183,31 @@ mod tests {
         let b = char_byte(&s, 1);
         s.insert(b, '中');
         assert_eq!(s, "a中b");
+    }
+
+    // ---- config + skills ----
+
+    #[test]
+    fn starter_config_template_parses() {
+        // First-launch generates this — it must be valid ACL with a usable model.
+        let p = std::env::temp_dir().join("a3s-template-test.acl");
+        std::fs::write(&p, config_template()).unwrap();
+        let cfg = a3s_code_core::config::CodeConfig::from_file(&p)
+            .expect("starter template must parse as valid ACL");
+        let models: Vec<_> = cfg.list_models().into_iter().collect();
+        assert!(!models.is_empty(), "template defines at least one model");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn counts_skill_dirs_and_flat_md() {
+        let base = std::env::temp_dir().join("a3s-skillcount-test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("myskill")).unwrap();
+        std::fs::write(base.join("myskill/SKILL.md"), "# skill").unwrap();
+        std::fs::write(base.join("flat.md"), "# flat skill").unwrap();
+        std::fs::write(base.join("notes.txt"), "ignored").unwrap();
+        assert_eq!(count_skill_files(std::slice::from_ref(&base)), 2);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
