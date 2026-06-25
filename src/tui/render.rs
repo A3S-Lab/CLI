@@ -75,8 +75,9 @@ pub(crate) fn render_tool_end(
         }
     }
 
-    // Otherwise the first few output lines under a "⎿" connector, with a
-    // "… +N lines" overflow marker (Claude-Code style).
+    // Show only the latest TAIL output lines under a "⎿" connector, with a
+    // "… +N earlier lines" marker when there's more (keeps a noisy build tight).
+    const TAIL: usize = 5;
     let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
     if lines.is_empty() {
         return header;
@@ -98,11 +99,22 @@ pub(crate) fn render_tool_end(
             )
         }
     };
-    // ponytail: full output, nothing dropped — the user wants all history in
-    // the scrollable transcript. Re-add a head/tail cap if a giant build floods.
     let mut out = header;
-    for (i, line) in lines.iter().enumerate() {
-        out.push_str(&line_at(i, line));
+    let start = lines.len().saturating_sub(TAIL);
+    if start > 0 {
+        out.push_str(&format!(
+            "\n{margin}  {conn}  {}",
+            Style::new()
+                .fg(Color::BrightBlack)
+                .render(&format!("… +{start} earlier lines"))
+        ));
+        for line in lines.iter().skip(start) {
+            out.push_str(&line_at(1, line));
+        }
+    } else {
+        for (i, line) in lines.iter().enumerate() {
+            out.push_str(&line_at(i, line));
+        }
     }
     out
 }

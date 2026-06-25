@@ -2168,6 +2168,7 @@ impl App {
         self.streaming.clear();
         self.got_delta = false; // track if this turn streamed any text deltas
         self.last_paint = None; // first delta of the turn paints immediately
+        self.viewport.set_auto_scroll(true); // sending a message jumps to latest
         self.plan.clear(); // fresh plan per turn; planning events refill it
         self.running_task = Some(prompt.clone());
         self.state = State::Streaming;
