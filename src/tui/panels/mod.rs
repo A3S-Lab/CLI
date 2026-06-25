@@ -9,6 +9,7 @@ mod files;
 mod git;
 mod help;
 mod ide;
+mod menu;
 mod plugins;
 mod relay;
 mod theme;
