@@ -10,6 +10,7 @@ mod git;
 mod help;
 mod ide;
 mod menu;
+mod model;
 mod plugins;
 mod relay;
 mod theme;
