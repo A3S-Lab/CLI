@@ -193,7 +193,11 @@ impl App {
             // Parallel fan-out available in every mode (not just ultracode).
             .with_max_parallel_tasks(8)
             .with_auto_delegation_enabled(true)
-            .with_auto_parallel_delegation(true);
+            .with_auto_parallel_delegation(true)
+            // Pin manual delegation on so `parallel_task`/`task` stay registered
+            // even if config.acl disables them — else ultracode's fan-out calls
+            // an unregistered tool ("Unknown tool: parallel_task").
+            .with_manual_delegation_enabled(true);
         // Keep project instructions (CLAUDE.md) + any /compact summary across
         // model/effort/compact rebuilds, injected into the system prompt.
         let extra = match (&self.instructions, &self.compact_summary) {

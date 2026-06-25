@@ -2829,7 +2829,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_file_memory(memory_dir())
                 .with_max_parallel_tasks(8)
                 .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true),
+                .with_auto_parallel_delegation(true)
+                .with_manual_delegation_enabled(true),
         ),
     ) {
         Ok(s) => s,
@@ -2847,7 +2848,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_file_memory(memory_dir())
                     .with_max_parallel_tasks(8)
                     .with_auto_delegation_enabled(true)
-                    .with_auto_parallel_delegation(true),
+                    .with_auto_parallel_delegation(true)
+                    .with_manual_delegation_enabled(true),
             )),
         )?,
     };
@@ -3039,6 +3041,43 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard: the parallel/ultracode SessionOptions register `task` +
+    /// `parallel_task` in the session tool surface (so fan-out has a tool to call).
+    #[tokio::test]
+    async fn parallel_opts_register_parallel_task() {
+        let dir = std::env::temp_dir().join(format!("a3s-ptask-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("config.acl");
+        std::fs::write(
+            &cfg,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n",
+        )
+        .unwrap();
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        // The FULL ultracode config (planning + goal + parallel fan-out).
+        let opts = SessionOptions::new()
+            .with_max_parallel_tasks(8)
+            .with_auto_delegation_enabled(true)
+            .with_auto_parallel_delegation(true)
+            .with_manual_delegation_enabled(true)
+            .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
+            .with_goal_tracking(true)
+            .with_max_tool_rounds(40);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        let names = session.tool_names();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names.contains(&"parallel_task".to_string()) && names.contains(&"task".to_string()),
+            "parallel_task/task registered under the parallel opts; got {names:?}"
+        );
+    }
 
     #[test]
     fn edit_metadata_renders_colored_diff() {
