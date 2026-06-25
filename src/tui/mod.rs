@@ -3022,10 +3022,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     ProgramBuilder::new(app)
         .with_alt_screen()
-        // Mouse capture so the wheel/trackpad scrolls the transcript (alt-screen
-        // has no native scrollback). Native text selection still works while
-        // holding Option (macOS/iTerm) or Shift (most terminals).
-        .with_mouse_support()
+        // No mouse capture: native click-drag selection / copy must work in every
+        // terminal (capturing the mouse breaks it). Scroll the transcript with
+        // PgUp/PgDn/Shift+End/Ctrl+End. (Re-enable behind a toggle if wheel-scroll
+        // is wanted — it would trade selection while active.)
         .with_fps(30)
         .run()
         .await?;
