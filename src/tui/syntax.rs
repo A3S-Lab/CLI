@@ -116,6 +116,15 @@ pub(crate) struct SyntaxTheme {
 /// Built-in themes; index 0 (Atom One Dark) is the default.
 pub(crate) const THEMES: &[SyntaxTheme] = &[
     SyntaxTheme {
+        name: "Tokyo Night",
+        comment: Color::Rgb(86, 95, 137),
+        string: Color::Rgb(158, 206, 106),
+        number: Color::Rgb(255, 158, 100),
+        keyword: Color::Rgb(187, 154, 247),
+        typ: Color::Rgb(42, 195, 222),
+        func: Color::Rgb(122, 162, 247),
+    },
+    SyntaxTheme {
         name: "Atom One Dark",
         comment: Color::Rgb(92, 99, 112),
         string: Color::Rgb(152, 195, 121),

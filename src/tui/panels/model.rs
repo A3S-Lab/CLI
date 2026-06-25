@@ -20,10 +20,10 @@ struct ModelTab {
     provider: Option<AuthProvider>, // None = config.acl
 }
 
-// Brand accents per source (a3s blue / Anthropic terracotta / OpenAI teal).
+// Per-source accents, tuned to the Tokyo Night palette (blue / orange / teal).
 const A3S_COLOR: Color = ACCENT;
-const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
-const CODEX_COLOR: Color = Color::Rgb(16, 163, 127);
+const CLAUDE_COLOR: Color = TN_ORANGE;
+const CODEX_COLOR: Color = Color::Rgb(115, 218, 202); // tokyo teal
 
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login

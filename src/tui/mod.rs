@@ -46,7 +46,14 @@ use update::*;
 use util::*;
 
 /// Theme accent — ShuAn OS blue. Single source of truth for the UI accent color.
-const ACCENT: Color = Color::Rgb(37, 99, 235);
+// Tokyo Night palette — muted, cohesive accents used across the whole UI.
+const ACCENT: Color = Color::Rgb(122, 162, 247); // soft blue (primary)
+const TN_GREEN: Color = Color::Rgb(158, 206, 106);
+const TN_YELLOW: Color = Color::Rgb(224, 175, 104);
+const TN_RED: Color = Color::Rgb(247, 118, 142);
+const TN_CYAN: Color = Color::Rgb(125, 207, 255);
+const TN_ORANGE: Color = Color::Rgb(255, 158, 100);
+const TN_FG: Color = Color::Rgb(192, 202, 245); // body text
 
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -577,9 +584,9 @@ impl Mode {
 
     fn color(self) -> Color {
         match self {
-            Mode::Default => Color::BrightWhite,
-            Mode::Plan => Color::Cyan,
-            Mode::Auto => Color::Green,
+            Mode::Default => TN_FG,
+            Mode::Plan => TN_CYAN,
+            Mode::Auto => TN_GREEN,
         }
     }
 
@@ -1592,16 +1599,13 @@ impl Model for App {
             line1.push_str(&format!(
                 " {}{}{}",
                 dim("git:("),
-                Style::new().fg(Color::Yellow).render(b),
+                Style::new().fg(TN_YELLOW).render(b),
                 dim(")")
             ));
         }
         if let Some(m) = &self.model {
             let name = m.rsplit('/').next().unwrap_or(m);
-            line1.push_str(&format!(
-                "  {}",
-                Style::new().fg(Color::BrightWhite).render(name)
-            ));
+            line1.push_str(&format!("  {}", Style::new().fg(TN_FG).render(name)));
             if self.context_limit > 0 {
                 let win = if self.context_limit >= 1_000_000 {
                     format!("{}M", self.context_limit / 1_000_000)

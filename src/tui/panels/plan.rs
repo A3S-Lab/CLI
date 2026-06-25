@@ -87,17 +87,16 @@ impl App {
         for (i, (_, text, glyph, color)) in self.plan.iter().take(8).enumerate() {
             // Map the status glyph to a checkbox; done tasks get struck through,
             // in-progress is orange (glyph + text).
-            let orange = Color::Rgb(255, 140, 0);
             let (boxc, bcolor, done, inprog) = match glyph {
-                '✔' => ('✔', Color::Green, true, false),
-                '▶' => ('◼', orange, false, true),
-                '✗' => ('✗', Color::Red, false, false),
+                '✔' => ('✔', TN_GREEN, true, false),
+                '▶' => ('◼', TN_ORANGE, false, true),
+                '✗' => ('✗', TN_RED, false, false),
                 _ => ('◻', Color::BrightBlack, false, false),
             };
             let text_style = if done {
                 Style::new().fg(*color).strikethrough()
             } else if inprog {
-                Style::new().fg(orange)
+                Style::new().fg(TN_ORANGE)
             } else {
                 Style::new().fg(*color)
             };
