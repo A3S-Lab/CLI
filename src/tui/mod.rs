@@ -1518,11 +1518,19 @@ impl Model for App {
             ribbon(0)
         } else {
             let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].0);
-            let left = bar.saturating_sub(elabel.chars().count() + 4);
+            // Context-window usage at the top-right of the input (Claude-style).
+            let ctxlabel = if self.context_limit > 0 {
+                let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
+                format!("{pct}% context used  ")
+            } else {
+                String::new()
+            };
+            let left = bar.saturating_sub(elabel.chars().count() + ctxlabel.chars().count() + 4);
             format!(
-                "{}{} {} {}",
+                "{}{} {}{} {}",
                 " ".repeat(PAD),
                 Style::new().fg(border).render(&"─".repeat(left)),
+                Style::new().fg(Color::BrightBlack).render(&ctxlabel),
                 Style::new().fg(ACCENT).bold().render(&elabel),
                 Style::new().fg(border).render("──"),
             )
