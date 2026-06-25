@@ -53,7 +53,6 @@ const ACCENT: Color = Color::Rgb(37, 99, 235);
 const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model", "switch provider / model"),
     ("/login", "sign in with a Claude or Codex account"),
-    ("/logout", "sign out (remove the saved account token)"),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
@@ -82,7 +81,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/update", "/init",
-    "/login", "/logout",
+    "/login",
 ];
 
 /// Workspace files for the `@` picker (git-tracked, gitignore-respected).
@@ -1956,20 +1955,6 @@ impl App {
                     phase: LoginPhase::Pick,
                     input: String::new(),
                 });
-                return None;
-            }
-            "/logout" => {
-                self.textarea.clear();
-                panels::login::clear_creds();
-                self.auth = None;
-                if let Ok((s, _)) = self.rebuild_session(None) {
-                    self.session = std::sync::Arc::new(s);
-                }
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("  ◆ signed out — using config.acl credentials"),
-                );
                 return None;
             }
             "/config" => {

@@ -58,6 +58,14 @@ impl AuthProvider {
     }
 }
 
+fn provider_at(sel: usize) -> AuthProvider {
+    if sel == 0 {
+        AuthProvider::Claude
+    } else {
+        AuthProvider::Codex
+    }
+}
+
 pub(crate) enum LoginPhase {
     Pick,
     Paste,
@@ -100,9 +108,28 @@ fn save_creds(provider: AuthProvider, token: &str) {
     }
 }
 
-pub(crate) fn clear_creds() {
-    if let Some(p) = creds_path() {
-        let _ = std::fs::remove_file(p);
+/// Reuse an already-signed-in token from the local Claude Code / Codex CLIs, so
+/// `/login` doesn't make the user paste anything when they're already logged in.
+pub(crate) fn detect_local(provider: AuthProvider) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let home = std::path::Path::new(&home);
+    let read = |rel: &str| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(home.join(rel)).ok()?).ok()
+    };
+    match provider {
+        AuthProvider::Codex => {
+            let v = read(".codex/auth.json")?;
+            v.pointer("/tokens/access_token")
+                .or_else(|| v.get("access_token"))
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        }
+        AuthProvider::Claude => {
+            let v = read(".claude/.credentials.json")?;
+            v.pointer("/claudeAiOauth/accessToken")
+                .and_then(|x| x.as_str())
+                .map(String::from)
+        }
     }
 }
 
@@ -136,7 +163,16 @@ impl App {
             LoginPhase::Pick => match key.code {
                 KeyCode::Up => login.sel = login.sel.saturating_sub(1),
                 KeyCode::Down => login.sel = (login.sel + 1).min(1),
-                KeyCode::Enter => login.phase = LoginPhase::Paste,
+                KeyCode::Enter => {
+                    let provider = provider_at(login.sel);
+                    // Reuse the local Claude Code / Codex login if present;
+                    // otherwise fall back to pasting a token.
+                    if let Some(token) = detect_local(provider) {
+                        self.finish_login(provider, token, "local login");
+                    } else if let Some(l) = self.login.as_mut() {
+                        l.phase = LoginPhase::Paste;
+                    }
+                }
                 KeyCode::Esc => self.login = None,
                 _ => {}
             },
@@ -147,36 +183,12 @@ impl App {
                 }
                 KeyCode::Esc => self.login = None,
                 KeyCode::Enter => {
-                    let provider = if login.sel == 0 {
-                        AuthProvider::Claude
-                    } else {
-                        AuthProvider::Codex
-                    };
+                    let provider = provider_at(login.sel);
                     let token = login.input.trim().to_string();
                     if token.is_empty() {
                         login.phase = LoginPhase::Error("no token entered".into());
                     } else {
-                        save_creds(provider, &token);
-                        self.auth = Some((provider, token));
-                        // Activate immediately by rebuilding the session.
-                        match self.rebuild_session(None) {
-                            Ok((s, _)) => {
-                                self.session = Arc::new(s);
-                                let who = if provider == AuthProvider::Codex {
-                                    "Codex"
-                                } else {
-                                    "Claude (experimental)"
-                                };
-                                if let Some(l) = self.login.as_mut() {
-                                    l.phase = LoginPhase::Done(format!("signed in · {who}"));
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(l) = self.login.as_mut() {
-                                    l.phase = LoginPhase::Error(e);
-                                }
-                            }
-                        }
+                        self.finish_login(provider, token, "pasted token");
                     }
                 }
                 _ => {}
@@ -184,6 +196,30 @@ impl App {
             LoginPhase::Done(_) | LoginPhase::Error(_) => self.login = None,
         }
         None
+    }
+
+    /// Persist the token, set it active, rebuild the session, and report.
+    fn finish_login(&mut self, provider: AuthProvider, token: String, via: &str) {
+        save_creds(provider, &token);
+        self.auth = Some((provider, token));
+        match self.rebuild_session(None) {
+            Ok((s, _)) => {
+                self.session = Arc::new(s);
+                let who = if provider == AuthProvider::Codex {
+                    "Codex"
+                } else {
+                    "Claude (experimental)"
+                };
+                if let Some(l) = self.login.as_mut() {
+                    l.phase = LoginPhase::Done(format!("signed in · {who} · {via}"));
+                }
+            }
+            Err(e) => {
+                if let Some(l) = self.login.as_mut() {
+                    l.phase = LoginPhase::Error(e);
+                }
+            }
+        }
     }
 
     /// Full-screen `/login` render (mirrors the other panels' full-height view).
@@ -196,14 +232,20 @@ impl App {
         ];
         match &login.phase {
             LoginPhase::Pick => {
-                let opts = [
-                    (
-                        "Claude account (subscription)",
-                        "experimental — not working yet",
-                    ),
-                    ("Codex / ChatGPT account", "supported"),
-                ];
-                for (i, (label, note)) in opts.iter().enumerate() {
+                for i in 0..2 {
+                    let provider = provider_at(i);
+                    let label = if i == 0 {
+                        "Claude account (subscription)"
+                    } else {
+                        "Codex / ChatGPT account"
+                    };
+                    let detected = detect_local(provider).is_some();
+                    let note = match (i, detected) {
+                        (0, true) => "✓ found local login · experimental",
+                        (0, false) => "paste a token · experimental",
+                        (_, true) => "✓ using your local Codex login",
+                        (_, false) => "paste a token",
+                    };
                     let marker = if i == login.sel { "❯" } else { " " };
                     let row = if i == login.sel {
                         Style::new()
@@ -215,9 +257,14 @@ impl App {
                             .fg(Color::White)
                             .render(&format!("  {marker} {label}"))
                     };
+                    let note_color = if detected {
+                        Color::Green
+                    } else {
+                        Color::BrightBlack
+                    };
                     lines.push(format!(
                         "{row}  {}",
-                        Style::new().fg(Color::BrightBlack).render(note)
+                        Style::new().fg(note_color).render(note)
                     ));
                 }
                 lines.push(String::new());
