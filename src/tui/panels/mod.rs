@@ -5,3 +5,4 @@
 //! exactly as if they were still inline in `tui/mod.rs`.
 
 mod git;
+mod ide;
