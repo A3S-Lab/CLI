@@ -2127,7 +2127,9 @@ impl Model for App {
         // an inline approval prompt while awaiting, empty when idle.
         let activity = match self.state {
             State::Streaming => {
-                let spin = Style::new().fg(ACCENT).render(&self.spinner.view());
+                // Pulsing sparkle + "Thinking…" with live elapsed + token count.
+                let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
+                let spark = Style::new().fg(ACCENT).render(&g.to_string());
                 let working = shimmer("Working…", self.blink_tick as usize);
                 let mut tail = String::new();
                 if let Some(t0) = self.stream_started {
@@ -2138,12 +2140,12 @@ impl Model for App {
                         + self.thinking.chars().count() / 4;
                     tail.push_str(&format!(" ({}", fmt_elapsed(t0.elapsed())));
                     if est > 0 {
-                        tail.push_str(&format!(" · ↑ ~{} tokens", humanize(est)));
+                        tail.push_str(&format!(" · ↓ {} tokens", humanize(est)));
                     }
                     tail.push(')');
                 }
                 let tail = Style::new().fg(ACCENT).render(&tail);
-                format!("  {spin} {working}{tail}")
+                format!("  {spark} {working}{tail}")
             }
             State::Awaiting => {
                 let label = self
@@ -2531,16 +2533,48 @@ impl App {
         }
         let sel = self.file_sel.min(total - 1);
         let width = self.width as usize;
-        // Cap height + scroll a window (like the / menu); group by directory and
-        // indent the files so it reads as a tree, not a flat path list.
-        let max_rows = (self.height as usize).saturating_sub(9).clamp(3, 8);
-        let start = if sel < max_rows {
+        // Build a real multi-level tree: emit each ancestor directory once,
+        // indented by depth, then the file under it. `disp` rows carry the
+        // candidate index for files (None for directory headers).
+        let mut disp: Vec<(String, Option<usize>)> = Vec::new();
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut sel_line = 0usize;
+        for (ci, cand) in cands.iter().enumerate() {
+            let parts: Vec<&str> = cand.split('/').collect();
+            for d in 0..parts.len().saturating_sub(1) {
+                let dir_path = parts[..=d].join("/");
+                if emitted.insert(dir_path) {
+                    let indent = "  ".repeat(d);
+                    disp.push((
+                        pad_to(
+                            &format!(
+                                "  {indent}{}",
+                                Style::new()
+                                    .fg(Color::Cyan)
+                                    .render(&format!("{}/", parts[d]))
+                            ),
+                            width,
+                        ),
+                        None,
+                    ));
+                }
+            }
+            let depth = parts.len().saturating_sub(1);
+            let base = parts.last().copied().unwrap_or(cand.as_str());
+            if ci == sel {
+                sel_line = disp.len();
+            }
+            disp.push((format!("  {}{base}", "  ".repeat(depth)), Some(ci)));
+        }
+
+        let max_rows = (self.height as usize).saturating_sub(9).clamp(4, 12);
+        let nlines = disp.len();
+        let start = if sel_line < max_rows {
             0
         } else {
-            sel + 1 - max_rows
+            sel_line + 1 - max_rows
         };
-        let end = (start + max_rows).min(total);
-
+        let end = (start + max_rows).min(nlines);
         let mut menu = vec![pad_to(
             &Style::new()
                 .fg(ACCENT)
@@ -2548,35 +2582,18 @@ impl App {
                 .render("  @ file · ↑/↓ · Enter insert · Esc"),
             width,
         )];
-        let mut last_dir: Option<String> = None;
-        for (i, f) in cands.iter().enumerate().take(end).skip(start) {
-            let (dir, base) = match f.rsplit_once('/') {
-                Some((d, b)) => (d.to_string(), b.to_string()),
-                None => (String::new(), f.clone()),
-            };
-            // Directory header (full path, cyan) whenever the group changes.
-            if last_dir.as_deref() != Some(dir.as_str()) {
-                let label = if dir.is_empty() {
-                    "./".to_string()
-                } else {
-                    format!("{dir}/")
-                };
-                menu.push(pad_to(
-                    &Style::new().fg(Color::Cyan).render(&format!("  {label}")),
-                    width,
-                ));
-                last_dir = Some(dir);
-            }
-            let raw = pad_to(&format!("    {base}"), width);
-            menu.push(if i == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+        for (line, ci) in disp.iter().take(end).skip(start) {
+            if *ci == Some(sel) {
+                menu.push(Style::new().fg(Color::BrightWhite).bg(ACCENT).render(line));
+            } else if ci.is_some() {
+                menu.push(pad_to(&Style::new().fg(Color::White).render(line), width));
             } else {
-                Style::new().fg(Color::White).render(&raw)
-            });
+                menu.push(line.clone()); // directory header (pre-styled + padded)
+            }
         }
-        if total > max_rows {
+        if nlines > max_rows {
             let up = if start > 0 { "↑" } else { " " };
-            let down = if end < total { "↓" } else { " " };
+            let down = if end < nlines { "↓" } else { " " };
             menu.push(pad_to(
                 &Style::new()
                     .fg(Color::BrightBlack)
@@ -4117,26 +4134,31 @@ impl App {
         }
     }
 
-    /// The pinned plan/TODO panel lines (header + each task), empty if no plan.
+    /// The pinned plan/TODO lines, hung under the thinking line with a `⎿`
+    /// connector and checkbox glyphs (◻ pending · ◼ in-progress · ☑ done).
     fn plan_lines(&self) -> Vec<String> {
         if self.plan.is_empty() {
             return Vec::new();
         }
         let width = self.width as usize;
-        let cap = width.saturating_sub(8);
-        let done = self.plan.iter().filter(|(_, _, g, _)| *g == '✔').count();
-        let mut lines = vec![pad_to(
-            &Style::new()
-                .fg(ACCENT)
-                .bold()
-                .render(&format!("  ▪ Plan · {done}/{}", self.plan.len())),
-            width,
-        )];
-        for (_, text, glyph, color) in self.plan.iter().take(8) {
+        let cap = width.saturating_sub(10);
+        let mut lines = Vec::new();
+        for (i, (_, text, glyph, color)) in self.plan.iter().take(8).enumerate() {
+            // Map the status glyph to a checkbox.
+            let (boxc, bcolor) = match glyph {
+                '✔' => ('✔', Color::Green),
+                '▶' => ('▸', Color::Yellow),
+                '✗' => ('✗', Color::Red),
+                _ => ('□', Color::BrightBlack),
+            };
+            // └ on the first row; align the rest under the checkbox.
+            let conn = if i == 0 { "└ " } else { "  " };
             lines.push(pad_to(
-                &Style::new()
-                    .fg(*color)
-                    .render(&format!("  {glyph} {}", truncate(text, cap))),
+                &format!(
+                    "  {conn}{} {}",
+                    Style::new().fg(bcolor).render(&boxc.to_string()),
+                    Style::new().fg(*color).render(&truncate(text, cap)),
+                ),
                 width,
             ));
         }
@@ -5491,8 +5513,8 @@ fn render_diff(path: &str, before: &str, after: &str, width: usize) -> String {
     }
     let mut out = format!(
         "  {} {} {}",
-        Style::new().fg(Color::BrightBlack).render("└"),
-        Style::new().fg(Color::Cyan).render(path),
+        Style::new().fg(Color::Green).bold().render("•"),
+        Style::new().render(&format!("Edited {path}")),
         Style::new()
             .fg(Color::BrightBlack)
             .render(&format!("(+{adds} -{dels})")),
@@ -5924,6 +5946,17 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             Action::ScrollDown,
             "Scroll down",
         )
+        // Mac-friendly half-page scroll (no fn key needed).
+        .bind(
+            KeyBinding::ctrl(KeyCode::Char('u')),
+            Action::ScrollUp,
+            "Scroll up",
+        )
+        .bind(
+            KeyBinding::ctrl(KeyCode::Char('d')),
+            Action::ScrollDown,
+            "Scroll down",
+        )
         .bind(
             KeyBinding::ctrl(KeyCode::Home),
             Action::ScrollTop,
@@ -6069,7 +6102,7 @@ mod tests {
             plain.contains("keep;"),
             "context lines are shown (unified diff)"
         );
-        assert!(plain.contains('└'), "tree-connector path header");
+        assert!(plain.contains("Edited src/x.rs"), "edit header with path");
     }
 
     /// Strip ANSI SGR sequences so tests can match the underlying text.
