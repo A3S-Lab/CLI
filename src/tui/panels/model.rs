@@ -1,7 +1,7 @@
 //! `/model` picker (with account tabs) + `/effort` rebuild logic + overlays.
 
 use super::super::*;
-use super::login::{detect_local, save_creds, AuthProvider};
+use super::login::{has_local_login, AuthProvider};
 
 // Account-backend model menus (the ChatGPT / Anthropic account backends don't
 // expose a list, so these are sensible defaults — pick what your plan supports).
@@ -35,7 +35,7 @@ impl App {
             models: self.models.clone(),
             provider: None,
         }];
-        if detect_local(AuthProvider::Claude).is_some() {
+        if has_local_login(AuthProvider::Claude) {
             tabs.push(ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
@@ -43,7 +43,7 @@ impl App {
                 provider: Some(AuthProvider::Claude),
             });
         }
-        if detect_local(AuthProvider::Codex).is_some() {
+        if has_local_login(AuthProvider::Codex) {
             tabs.push(ModelTab {
                 label: "Codex",
                 color: CODEX_COLOR,
@@ -65,10 +65,11 @@ impl App {
             );
             return;
         }
-        let active = self.auth.as_ref().map(|(p, _)| *p);
-        self.model_tab = tabs.iter().position(|t| t.provider == active).unwrap_or(0);
+        // The active model is always a config model (account tabs are
+        // informational), so open on the config tab at the current model.
+        self.model_tab = 0;
         let cur = self.model.as_deref();
-        let idx = tabs[self.model_tab]
+        let idx = tabs[0]
             .models
             .iter()
             .position(|m| Some(m.as_str()) == cur)
@@ -107,14 +108,13 @@ impl App {
                 let model = tabs[t].models.get(sel.min(last)).cloned();
                 let provider = tabs[t].provider;
                 self.model_menu = None;
-                if let Some(model) = model {
-                    match provider {
-                        None => {
-                            self.auth = None; // config.acl credentials
+                match provider {
+                    None => {
+                        if let Some(model) = model {
                             self.switch_model(&model);
                         }
-                        Some(p) => self.switch_account_model(p, &model),
                     }
+                    Some(p) => self.account_model_note(p),
                 }
                 Some(None)
             }
@@ -126,47 +126,14 @@ impl App {
         }
     }
 
-    /// Sign in with a detected local account and switch to one of its models.
-    fn switch_account_model(&mut self, provider: AuthProvider, model: &str) {
-        if self.state != State::Idle {
-            self.push_line(
-                &Style::new()
-                    .fg(Color::Yellow)
-                    .render("  finish the current turn before switching models"),
-            );
-            return;
-        }
-        let Some(token) = detect_local(provider) else {
-            self.push_line(
-                &Style::new()
-                    .fg(Color::Red)
-                    .render("  no local login found for that account"),
-            );
-            return;
-        };
-        save_creds(provider, &token); // remember the account choice across restarts
-        self.auth = Some((provider, token));
-        self.model = Some(model.to_string()); // before rebuild → auth_client uses it
-        match self.rebuild_session(Some(model)) {
-            Ok((s, _)) => {
-                self.session = Arc::new(s);
-                let who = if provider == AuthProvider::Codex {
-                    "Codex"
-                } else {
-                    "Claude (experimental)"
-                };
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::Green)
-                        .render(&format!("  ⇄ {who} · {model}")),
-                );
-            }
-            Err(e) => self.push_line(
-                &Style::new()
-                    .fg(Color::Red)
-                    .render(&format!("  failed to switch: {e}")),
-            ),
-        }
+    /// Account tabs are informational for now: a3s-code can't drive the Claude /
+    /// ChatGPT account APIs, so point the user at an API key in config.acl.
+    fn account_model_note(&mut self, provider: AuthProvider) {
+        self.push_line(&Style::new().fg(Color::Yellow).render(&format!(
+            "  {} login detected, but a3s can't use it yet — add an API key in \
+             config.acl and pick it from the a3s-code tab (/config to edit)",
+            provider.label()
+        )));
     }
 
     /// Switch the active model by resuming the session under it (history kept).
@@ -208,10 +175,6 @@ impl App {
                 .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
                 .with_goal_tracking(true)
                 .with_max_tool_rounds(40);
-        }
-        // Signed in via /login → route the model through the account token.
-        if let Some(client) = self.auth_client() {
-            opts = opts.with_llm_client(client);
         }
         opts
     }
@@ -354,11 +317,12 @@ impl App {
             }
             menu.push(pad_to(&bar, width));
         }
-        let active = self.auth.as_ref().map(|(p, _)| *p);
         let models = &tabs[t].models;
         let last = models.len().saturating_sub(1);
         for (i, m) in models.iter().enumerate().take(12) {
-            let cur = Some(m.as_str()) == self.model.as_deref() && tabs[t].provider == active;
+            // Only config-tab models can be the active model (account tabs are
+            // informational until a3s can drive those APIs).
+            let cur = Some(m.as_str()) == self.model.as_deref() && tabs[t].provider.is_none();
             let raw = pad_to(&format!("  {} {m}", if cur { "●" } else { " " }), width);
             menu.push(if i == sel.min(last) {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)

@@ -39,7 +39,6 @@ mod util;
 use config::*;
 use gitutil::*;
 use image::*;
-use panels::login::AuthProvider;
 use render::*;
 use skills::*;
 use syntax::*;
@@ -846,9 +845,6 @@ struct App {
     ide: Option<Ide>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
-    /// Active account credential (provider + token), injected as the LLM client.
-    /// Set by signing in through the `/model` account tabs.
-    auth: Option<(AuthProvider, String)>,
     /// `/help` overlay panel is showing.
     help_open: bool,
     /// Turns completed this session, for the status-bar task counter.
@@ -2967,9 +2963,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_kill: None,
         ide: None,
         git: None,
-        // Remembered account choice — prefer a fresh token from the vendor CLI.
-        auth: panels::login::load_creds()
-            .map(|(p, stored)| (p, panels::login::detect_local(p).unwrap_or(stored))),
         help_open: false,
         completed: 0,
         branch: git_branch(&workspace),
@@ -2998,13 +2991,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         ));
         app.open_config_in_ide(std::path::Path::new(&config_path));
         app.rebuild_viewport();
-    }
-
-    // A saved /login account → rebuild once so the initial session uses it.
-    if app.auth.is_some() {
-        if let Ok((s, _)) = app.rebuild_session(None) {
-            app.session = std::sync::Arc::new(s);
-        }
     }
 
     ProgramBuilder::new(app)
