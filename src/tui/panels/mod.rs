@@ -6,6 +6,7 @@
 
 mod effort;
 mod git;
+mod help;
 mod ide;
 mod plugins;
 mod relay;
