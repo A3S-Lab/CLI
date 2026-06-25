@@ -295,8 +295,8 @@ fn project_instructions(workspace: &str) -> Option<String> {
 const PAD: usize = 2;
 
 /// Model effort levels (label, thinking-token budget) — `/effort` slider. The
-/// last, `ultracode`, additionally plans a dynamic workflow and dispatches work
-/// to parallel subagents (a3s-code PTC).
+/// last, `ultracode`, additionally plans, then fans independent work out to
+/// parallel subagents via direct `parallel_task` calls.
 const EFFORT_LEVELS: &[(&str, usize)] = &[
     ("low", 1024),
     ("medium", 4096),
@@ -2197,20 +2197,9 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
-        // ultracode: drive the work through PTC — write + show a JS workflow
-        // program, then run it dispatching steps to parallel subagents.
-        let prompt = if self.effort == ULTRACODE {
-            format!(
-                "[ultracode] First, using the `program` tool, write a short JavaScript \
-                 workflow program that decomposes this task into independent steps and \
-                 dispatches them to parallel subagents (call parallel_task inside the \
-                 program). Show the program, then execute it. Prefer inline program \
-                 source; if you must write a script file, put it under the system temp \
-                 directory (never the project workspace) and delete it when done.\n\n{prompt}"
-            )
-        } else {
-            prompt
-        };
+        // ultracode steering lives in the system prompt (with_guidelines), not a
+        // per-turn prefix — see effort_session_opts. The old prefix drove every
+        // turn into the program/PTC runtime, which can't actually fan out.
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
