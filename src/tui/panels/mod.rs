@@ -5,6 +5,7 @@
 //! exactly as if they were still inline in `tui/mod.rs`.
 
 mod effort;
+mod files;
 mod git;
 mod help;
 mod ide;
