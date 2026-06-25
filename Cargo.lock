@@ -4,15 +4,19 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "a3s-code-core",
  "a3s-tui",
  "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
  "image",
  "serde_json",
  "similar",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -157,7 +161,7 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/TUI.git?rev=b448edc274171927cd174ea26ad17b4e70df4d59#b448edc274171927cd174ea26ad17b4e70df4d59"
+source = "git+https://github.com/A3S-Lab/TUI.git?rev=4a065307657a665b75eca7ace8dd803bf5239114#4a065307657a665b75eca7ace8dd803bf5239114"
 dependencies = [
  "comrak",
  "crossterm",
