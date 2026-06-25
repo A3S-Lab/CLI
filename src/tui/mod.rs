@@ -1576,7 +1576,20 @@ impl Model for App {
         } else {
             typed
         };
-        let input_view = format!("{}{}{}", " ".repeat(PAD), prompt, typed);
+        // First line carries the prompt; continuation lines (multi-line input)
+        // are indented to align under the prompt (PAD margin + "{sym} " = PAD+2).
+        let input_view = {
+            let cont = " ".repeat(PAD + 2);
+            let mut parts = typed.split('\n');
+            let first = parts.next().unwrap_or("");
+            let mut s = format!("{}{}{}", " ".repeat(PAD), prompt, first);
+            for line in parts {
+                s.push('\n');
+                s.push_str(&cont);
+                s.push_str(line);
+            }
+            s
+        };
 
         // Bottom status bar (two lines): cwd/branch + model/tokens, then mode + hints.
         let dir = self.cwd.rsplit('/').next().unwrap_or(&self.cwd);
@@ -1697,10 +1710,13 @@ impl Model for App {
         {
             return None;
         }
-        // input sits above: border, status×2, and the bottom task panel.
+        // Below the input: separator + 2 status lines + the bottom task panel.
+        // The input itself spans `input_height` rows; the cursor sits on its row.
+        let below = 3 + self.task_lines().len() as u16;
         let row = self
             .height
-            .saturating_sub(4 + self.task_lines().len() as u16);
+            .saturating_sub(below + self.input_height())
+            + self.textarea.cursor_row() as u16;
         let col = (PAD + 2) as u16 + self.textarea.cursor_display_col() as u16; // PAD + "❯ "
         Some((col, row))
     }
