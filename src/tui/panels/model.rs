@@ -15,28 +15,38 @@ const GPT_MODELS: &[&str] = &["gpt-5-codex", "gpt-5", "o4-mini"];
 /// A tab in the `/model` picker: config models, or a signed-in account's models.
 struct ModelTab {
     label: &'static str,
+    color: Color,
     models: Vec<String>,
     provider: Option<AuthProvider>, // None = config.acl
 }
 
+// Brand accents per source (a3s blue / Anthropic terracotta / OpenAI teal).
+const A3S_COLOR: Color = ACCENT;
+const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
+const CODEX_COLOR: Color = Color::Rgb(16, 163, 127);
+
 impl App {
-    /// Tabs: config always; Claude / GPT appear when that local login exists.
+    /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
+    /// is detected.
     fn model_tabs(&self) -> Vec<ModelTab> {
         let mut tabs = vec![ModelTab {
-            label: "Config",
+            label: "a3s-code",
+            color: A3S_COLOR,
             models: self.models.clone(),
             provider: None,
         }];
         if detect_local(AuthProvider::Claude).is_some() {
             tabs.push(ModelTab {
-                label: "Claude",
+                label: "Claude Code",
+                color: CLAUDE_COLOR,
                 models: CLAUDE_MODELS.iter().map(|s| s.to_string()).collect(),
                 provider: Some(AuthProvider::Claude),
             });
         }
         if detect_local(AuthProvider::Codex).is_some() {
             tabs.push(ModelTab {
-                label: "GPT",
+                label: "Codex",
+                color: CODEX_COLOR,
                 models: GPT_MODELS.iter().map(|s| s.to_string()).collect(),
                 provider: Some(AuthProvider::Codex),
             });
@@ -319,25 +329,26 @@ impl App {
         }
         let t = self.model_tab.min(tabs.len() - 1);
         let width = self.width as usize;
-        let hint = if tabs.len() > 1 {
-            "  Select model — ↑/↓ · ←/→ account · Enter · Esc"
-        } else {
-            "  Select model — ↑/↓ · Enter · Esc · /login not needed (use ←/→ once signed in)"
-        };
-        let mut menu = vec![pad_to(&Style::new().fg(ACCENT).bold().render(hint), width)];
-        // Tab bar (only worth showing when there's more than the config tab).
+        let mut menu = vec![pad_to(
+            &Style::new()
+                .fg(tabs[t].color)
+                .bold()
+                .render("  Select model — ↑/↓ · ←/→ account · Enter · Esc"),
+            width,
+        )];
+        // Tab strip (relay-style): each source in its brand colour, active boxed.
         if tabs.len() > 1 {
             let mut bar = String::from("  ");
             for (i, tab) in tabs.iter().enumerate() {
                 let chip = format!(" {} ", tab.label);
                 bar.push_str(&if i == t {
                     Style::new()
-                        .fg(Color::BrightWhite)
-                        .bg(ACCENT)
+                        .fg(Color::Black)
+                        .bg(tab.color)
                         .bold()
                         .render(&chip)
                 } else {
-                    Style::new().fg(Color::BrightBlack).render(&chip)
+                    Style::new().fg(tab.color).render(&chip)
                 });
                 bar.push(' ');
             }
