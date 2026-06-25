@@ -112,7 +112,7 @@ impl App {
         }
         let faster_smarter = format!("Faster{}Smarter", " ".repeat(track_w.saturating_sub(13)));
         let desc = if sel == ULTRACODE {
-            "ultracode: plans a dynamic workflow and runs tasks on parallel subagents (PTC)."
+            "ultracode: plans, then fans independent work out to parallel subagents."
         } else {
             "higher effort = more reasoning tokens (slower, deeper). Use sparingly."
         };

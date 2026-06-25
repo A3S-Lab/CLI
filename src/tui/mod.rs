@@ -64,6 +64,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
+    (
+        "/mouse",
+        "toggle wheel-scroll (on) vs native text selection (off)",
+    ),
     ("/plugin", "enable/disable Claude skills & plugins"),
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
@@ -295,8 +299,8 @@ fn project_instructions(workspace: &str) -> Option<String> {
 const PAD: usize = 2;
 
 /// Model effort levels (label, thinking-token budget) — `/effort` slider. The
-/// last, `ultracode`, additionally plans a dynamic workflow and dispatches work
-/// to parallel subagents (a3s-code PTC).
+/// last, `ultracode`, additionally plans, then fans independent work out to
+/// parallel subagents via direct `parallel_task` calls.
 const EFFORT_LEVELS: &[(&str, usize)] = &[
     ("low", 1024),
     ("medium", 4096),
@@ -769,6 +773,9 @@ struct App {
     auto_reviewed: bool,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
+    /// Mouse capture on → wheel-scroll works but native text selection is off.
+    /// Off by default so select/copy works; toggled with `/mouse`.
+    mouse_scroll: bool,
     /// Clipboard images pasted (Ctrl+V), sent with the next message.
     pending_images: Vec<a3s_code_core::llm::Attachment>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
@@ -1518,11 +1525,19 @@ impl Model for App {
             ribbon(0)
         } else {
             let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].0);
-            let left = bar.saturating_sub(elabel.chars().count() + 4);
+            // Context-window usage at the top-right of the input (Claude-style).
+            let ctxlabel = if self.context_limit > 0 {
+                let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
+                format!("{pct}% context used  ")
+            } else {
+                String::new()
+            };
+            let left = bar.saturating_sub(elabel.chars().count() + ctxlabel.chars().count() + 4);
             format!(
-                "{}{} {} {}",
+                "{}{} {}{} {}",
                 " ".repeat(PAD),
                 Style::new().fg(border).render(&"─".repeat(left)),
+                Style::new().fg(Color::BrightBlack).render(&ctxlabel),
                 Style::new().fg(ACCENT).bold().render(&elabel),
                 Style::new().fg(border).render("──"),
             )
@@ -2034,6 +2049,18 @@ impl App {
                 self.theme_panel = Some(cur.min(THEMES.len() - 1));
                 return None;
             }
+            "/mouse" => {
+                self.textarea.clear();
+                self.mouse_scroll = !self.mouse_scroll;
+                a3s_tui::terminal::set_mouse_capture(self.mouse_scroll);
+                let msg = if self.mouse_scroll {
+                    "🖱 wheel-scroll on — text selection paused (run /mouse again to select/copy)"
+                } else {
+                    "🖱 wheel-scroll off — native text selection / copy enabled (PgUp/PgDn still scroll)"
+                };
+                self.push_line(&Style::new().fg(Color::Cyan).render(&format!("  {msg}")));
+                return None;
+            }
             "/reload" => {
                 self.textarea.clear();
                 // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
@@ -2189,20 +2216,9 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
-        // ultracode: drive the work through PTC — write + show a JS workflow
-        // program, then run it dispatching steps to parallel subagents.
-        let prompt = if self.effort == ULTRACODE {
-            format!(
-                "[ultracode] First, using the `program` tool, write a short JavaScript \
-                 workflow program that decomposes this task into independent steps and \
-                 dispatches them to parallel subagents (call parallel_task inside the \
-                 program). Show the program, then execute it. Prefer inline program \
-                 source; if you must write a script file, put it under the system temp \
-                 directory (never the project workspace) and delete it when done.\n\n{prompt}"
-            )
-        } else {
-            prompt
-        };
+        // ultracode steering lives in the system prompt (with_guidelines), not a
+        // per-turn prefix — see effort_session_opts. The old prefix drove every
+        // turn into the program/PTC runtime, which can't actually fan out.
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
@@ -2829,7 +2845,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_file_memory(memory_dir())
                 .with_max_parallel_tasks(8)
                 .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true),
+                .with_auto_parallel_delegation(true)
+                .with_manual_delegation_enabled(true),
         ),
     ) {
         Ok(s) => s,
@@ -2847,7 +2864,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_file_memory(memory_dir())
                     .with_max_parallel_tasks(8)
                     .with_auto_delegation_enabled(true)
-                    .with_auto_parallel_delegation(true),
+                    .with_auto_parallel_delegation(true)
+                    .with_manual_delegation_enabled(true),
             )),
         )?,
     };
@@ -2941,6 +2959,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         last_activity: Instant::now(),
         auto_reviewed: false,
         shell_mode: false,
+        mouse_scroll: false,
         pending_images: Vec::new(),
         goal: None,
         loop_remaining: 0,
@@ -3023,10 +3042,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     ProgramBuilder::new(app)
         .with_alt_screen()
-        // Mouse capture so the wheel/trackpad scrolls the transcript (alt-screen
-        // has no native scrollback). Native text selection still works while
-        // holding Option (macOS/iTerm) or Shift (most terminals).
-        .with_mouse_support()
+        // No mouse capture: native click-drag selection / copy must work in every
+        // terminal (capturing the mouse breaks it). Scroll the transcript with
+        // PgUp/PgDn/Shift+End/Ctrl+End. (Re-enable behind a toggle if wheel-scroll
+        // is wanted — it would trade selection while active.)
         .with_fps(30)
         .run()
         .await?;
@@ -3039,6 +3058,43 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard: the parallel/ultracode SessionOptions register `task` +
+    /// `parallel_task` in the session tool surface (so fan-out has a tool to call).
+    #[tokio::test]
+    async fn parallel_opts_register_parallel_task() {
+        let dir = std::env::temp_dir().join(format!("a3s-ptask-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg = dir.join("config.acl");
+        std::fs::write(
+            &cfg,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n",
+        )
+        .unwrap();
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        // The FULL ultracode config (planning + goal + parallel fan-out).
+        let opts = SessionOptions::new()
+            .with_max_parallel_tasks(8)
+            .with_auto_delegation_enabled(true)
+            .with_auto_parallel_delegation(true)
+            .with_manual_delegation_enabled(true)
+            .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
+            .with_goal_tracking(true)
+            .with_max_tool_rounds(40);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        let names = session.tool_names();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names.contains(&"parallel_task".to_string()) && names.contains(&"task".to_string()),
+            "parallel_task/task registered under the parallel opts; got {names:?}"
+        );
+    }
 
     #[test]
     fn edit_metadata_renders_colored_diff() {

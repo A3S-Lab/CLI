@@ -16,6 +16,20 @@ const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = Color::Rgb(115, 218, 202); // tokyo teal
 
+/// Ultracode system-prompt steer: plan, then fan independent work out by
+/// calling `parallel_task` DIRECTLY — never wrapped in a `program` script.
+const ULTRACODE_GUIDELINES: &str = "\
+[ultracode] Operate in deep, parallel, exhaustive mode.\n\
+1. PLAN FIRST. Decompose the task into explicit, numbered steps. Mark which \
+steps are independent (can run concurrently) vs dependent (must be sequential).\n\
+2. FAN OUT DIRECTLY. For the independent steps, call the `parallel_task` tool \
+DIRECTLY at the top level, passing MULTIPLE subtasks in a single `parallel_task` \
+call so they run as concurrent subagents. Do not dispatch them one at a time.\n\
+3. NEVER wrap delegation in a script. Do NOT call `task`/`parallel_task` from \
+inside a `program` script — nested delegation cannot run in parallel there. Use \
+`program` only for bounded search/analysis, never for dispatching subagents.\n\
+4. Be exhaustive: pursue every independent thread to completion, then synthesize.";
+
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
     /// is detected.
@@ -176,9 +190,10 @@ impl App {
     }
 
     /// Switch the active model by resuming the session under it (history kept).
-    /// Base session options carrying the current effort. `ultracode` turns on
-    /// planning + parallel subagent delegation (a3s-code PTC), so a turn plans a
-    /// dynamic workflow and fans tasks out to multiple subagents.
+    /// Base session options carrying the current effort. `ultracode` adds a
+    /// system-prompt steer + goal tracking + a wider tool-round budget so a turn
+    /// plans, then fans independent work out to parallel subagents via direct
+    /// `parallel_task` calls.
     pub(crate) fn effort_session_opts(&self, thinking: bool) -> SessionOptions {
         let mut opts = SessionOptions::new()
             .with_session_store(self.store.clone())
@@ -193,7 +208,11 @@ impl App {
             // Parallel fan-out available in every mode (not just ultracode).
             .with_max_parallel_tasks(8)
             .with_auto_delegation_enabled(true)
-            .with_auto_parallel_delegation(true);
+            .with_auto_parallel_delegation(true)
+            // Pin manual delegation on so `parallel_task`/`task` stay registered
+            // even if config.acl disables them — else ultracode's fan-out calls
+            // an unregistered tool ("Unknown tool: parallel_task").
+            .with_manual_delegation_enabled(true);
         // Keep project instructions (CLAUDE.md) + any /compact summary across
         // model/effort/compact rebuilds, injected into the system prompt.
         let extra = match (&self.instructions, &self.compact_summary) {
@@ -202,18 +221,27 @@ impl App {
             (None, Some(s)) => Some(format!("# Earlier conversation (compacted)\n\n{s}")),
             (None, None) => None,
         };
-        if let Some(e) = extra {
-            opts = opts.with_prompt_slots(SystemPromptSlots::default().with_extra(e));
+        let ultra = self.effort == ULTRACODE;
+        if extra.is_some() || ultra {
+            let mut slots = SystemPromptSlots::default();
+            if let Some(e) = extra {
+                slots = slots.with_extra(e);
+            }
+            if ultra {
+                slots = slots.with_guidelines(ULTRACODE_GUIDELINES);
+            }
+            opts = opts.with_prompt_slots(slots);
         }
         // Extended thinking is Anthropic-only; only request it when asked.
         if thinking {
             opts = opts.with_thinking_budget(EFFORT_LEVELS[self.effort].1);
         }
-        if self.effort == ULTRACODE {
-            opts = opts
-                .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
-                .with_goal_tracking(true)
-                .with_max_tool_rounds(40);
+        if ultra {
+            // Deep, parallel work via DIRECT parallel_task calls (not planning
+            // mode, which is mutually exclusive with auto-parallel fan-out, and
+            // not the program/PTC runtime, which can't fan out). Steering is in
+            // the system prompt; here we just track the goal + widen the budget.
+            opts = opts.with_goal_tracking(true).with_max_tool_rounds(40);
         }
         // Signed in via the /model Codex tab → route through the account client.
         if let Some(client) = &self.llm_override {
