@@ -49,8 +49,10 @@ impl App {
     pub(crate) fn relayout(&mut self) {
         let n = (self.task_lines().len() + self.plan_lines().len() + self.subagent_lines().len())
             as u16;
-        self.viewport
-            .resize(self.width, self.height.saturating_sub(7 + n));
+        self.viewport.resize(
+            self.width,
+            self.height.saturating_sub(6 + self.input_height() + n),
+        );
     }
 
     /// Replace the pinned plan from a planning-mode task list.
@@ -83,20 +85,29 @@ impl App {
         let cap = width.saturating_sub(10);
         let mut lines = Vec::new();
         for (i, (_, text, glyph, color)) in self.plan.iter().take(8).enumerate() {
-            // Map the status glyph to a checkbox.
-            let (boxc, bcolor) = match glyph {
-                '✔' => ('✔', Color::Green),
-                '▶' => ('▸', Color::Yellow),
-                '✗' => ('✗', Color::Red),
-                _ => ('□', Color::BrightBlack),
+            // Map the status glyph to a checkbox; done tasks get struck through,
+            // in-progress is orange (glyph + text).
+            let orange = Color::Rgb(255, 140, 0);
+            let (boxc, bcolor, done, inprog) = match glyph {
+                '✔' => ('✔', Color::Green, true, false),
+                '▶' => ('◼', orange, false, true),
+                '✗' => ('✗', Color::Red, false, false),
+                _ => ('◻', Color::BrightBlack, false, false),
             };
-            // └ on the first row; align the rest under the checkbox.
-            let conn = if i == 0 { "└ " } else { "  " };
+            let text_style = if done {
+                Style::new().fg(*color).strikethrough()
+            } else if inprog {
+                Style::new().fg(orange)
+            } else {
+                Style::new().fg(*color)
+            };
+            // ⎿ on the first row; align the rest under the checkbox.
+            let conn = if i == 0 { "⎿  " } else { "   " };
             lines.push(pad_to(
                 &format!(
                     "  {conn}{} {}",
                     Style::new().fg(bcolor).render(&boxc.to_string()),
-                    Style::new().fg(*color).render(&truncate(text, cap)),
+                    text_style.render(&truncate(text, cap)),
                 ),
                 width,
             ));

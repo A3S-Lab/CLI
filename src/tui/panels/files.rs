@@ -1,4 +1,4 @@
-//! `@` file picker: query parsing, candidates, key handling, overlay.
+//! `@` file picker: an IDE-style collapsible tree (folders expand on demand).
 
 use super::super::*;
 
@@ -15,41 +15,70 @@ impl App {
         }
     }
 
-    /// Workspace files matching the current `@` query (substring match).
-    pub(crate) fn file_candidates(&self) -> Vec<String> {
-        let Some(q) = self.at_query() else {
-            return Vec::new();
-        };
-        let q = q.to_lowercase();
-        // Sorted so same-directory files group together for the tree view; the
-        // overlay scrolls a window, so we can keep plenty for browsing.
-        let mut v: Vec<String> = self
+    /// Visible tree nodes `(path, depth, is_dir)`: directories are collapsed
+    /// unless in `at_expanded`; a non-empty query auto-opens dirs holding a
+    /// match so it behaves like a filter. ponytail: rescans `files` per call —
+    /// capped at 2000 matches, switch to a cached tree if big repos lag.
+    pub(crate) fn at_nodes(&self) -> Vec<(String, usize, bool)> {
+        let q = self.at_query().unwrap_or_default().to_lowercase();
+        let matches: Vec<&String> = self
             .files
             .iter()
             .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
-            .take(400)
-            .cloned()
+            .take(2000)
             .collect();
-        v.sort();
-        v
+        let is_open = |dir: &str| -> bool {
+            self.at_expanded.contains(dir)
+                || (!q.is_empty()
+                    && matches
+                        .iter()
+                        .any(|f| f.starts_with(dir) && f.as_bytes().get(dir.len()) == Some(&b'/')))
+        };
+        let mut nodes: Vec<(String, usize, bool)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for f in &matches {
+            let parts: Vec<&str> = f.split('/').collect();
+            let mut visible = true;
+            for d in 0..parts.len() - 1 {
+                let dir = parts[..=d].join("/");
+                let parent_open = d == 0 || is_open(&parts[..d].join("/"));
+                if parent_open && seen.insert(dir.clone()) {
+                    nodes.push((dir.clone(), d, true));
+                }
+                if !is_open(&dir) {
+                    visible = false;
+                    break;
+                }
+            }
+            if visible {
+                nodes.push(((*f).clone(), parts.len() - 1, false));
+            }
+        }
+        nodes.sort_by(|a, b| a.0.cmp(&b.0)); // path order = tree order
+        nodes
+    }
+
+    fn dir_is_open(&self, dir: &str) -> bool {
+        self.at_expanded.contains(dir) || self.at_query().is_some_and(|q| !q.is_empty())
     }
 
     pub(crate) fn file_menu_open(&self) -> bool {
         self.state != State::Awaiting
             && !self.textarea.value().contains('\n')
             && self.at_query().is_some()
-            && !self.file_candidates().is_empty()
+            && !self.files.is_empty()
     }
 
-    /// Keys while the `@` file picker is open: ↑/↓ select, Enter/Tab insert,
-    /// Esc dismiss (drops the trailing `@query`).
+    /// Keys while the picker is open: ↑/↓ move, →/← expand/collapse a folder,
+    /// Enter toggles a folder or inserts a file, Esc dismisses.
     pub(crate) fn handle_file_key(&mut self, key: &KeyEvent) -> Option<Option<Cmd<Msg>>> {
-        let cands = self.file_candidates();
-        if cands.is_empty() {
+        let nodes = self.at_nodes();
+        if nodes.is_empty() {
             return None;
         }
-        let last = cands.len() - 1;
+        let last = nodes.len() - 1;
         self.file_sel = self.file_sel.min(last);
+        let (path, _, is_dir) = nodes[self.file_sel].clone();
         match key.code {
             KeyCode::Up => {
                 self.file_sel = self.file_sel.saturating_sub(1);
@@ -59,14 +88,25 @@ impl App {
                 self.file_sel = (self.file_sel + 1).min(last);
                 Some(None)
             }
+            KeyCode::Right if is_dir => {
+                self.at_expanded.insert(path);
+                Some(None)
+            }
+            KeyCode::Left if is_dir => {
+                self.at_expanded.remove(&path);
+                Some(None)
+            }
             KeyCode::Enter | KeyCode::Tab => {
-                let val = self.textarea.value();
-                if let Some(at) = val.rfind('@') {
-                    let picked = &cands[self.file_sel];
-                    self.textarea
-                        .set_value(&format!("{}@{picked} ", &val[..at]));
+                if is_dir {
+                    // Toggle the folder open/closed instead of inserting.
+                    if !self.at_expanded.remove(&path) {
+                        self.at_expanded.insert(path);
+                    }
+                } else if let Some(at) = self.textarea.value().rfind('@') {
+                    let val = self.textarea.value();
+                    self.textarea.set_value(&format!("{}@{path} ", &val[..at]));
+                    self.file_sel = 0;
                 }
-                self.file_sel = 0;
                 Some(None)
             }
             KeyCode::Esc => {
@@ -81,79 +121,53 @@ impl App {
         }
     }
 
-    /// Overlay the `@` file picker just above the input box.
+    /// Overlay the `@` file tree just above the input box.
     pub(crate) fn overlay_file_menu(&self, composed: String) -> String {
         if !self.file_menu_open() {
             return composed;
         }
-        let cands = self.file_candidates();
-        let total = cands.len();
+        let nodes = self.at_nodes();
+        let total = nodes.len();
         if total == 0 {
             return composed;
         }
         let sel = self.file_sel.min(total - 1);
         let width = self.width as usize;
-        // Build a real multi-level tree: emit each ancestor directory once,
-        // indented by depth, then the file under it. `disp` rows carry the
-        // candidate index for files (None for directory headers).
-        let mut disp: Vec<(String, Option<usize>)> = Vec::new();
-        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut sel_line = 0usize;
-        for (ci, cand) in cands.iter().enumerate() {
-            let parts: Vec<&str> = cand.split('/').collect();
-            for d in 0..parts.len().saturating_sub(1) {
-                let dir_path = parts[..=d].join("/");
-                if emitted.insert(dir_path) {
-                    let indent = "  ".repeat(d);
-                    disp.push((
-                        pad_to(
-                            &format!(
-                                "  {indent}{}",
-                                Style::new()
-                                    .fg(Color::Cyan)
-                                    .render(&format!("{}/", parts[d]))
-                            ),
-                            width,
-                        ),
-                        None,
-                    ));
-                }
-            }
-            let depth = parts.len().saturating_sub(1);
-            let base = parts.last().copied().unwrap_or(cand.as_str());
-            if ci == sel {
-                sel_line = disp.len();
-            }
-            disp.push((format!("  {}{base}", "  ".repeat(depth)), Some(ci)));
-        }
-
         let max_rows = (self.height as usize).saturating_sub(9).clamp(4, 12);
-        let nlines = disp.len();
-        let start = if sel_line < max_rows {
+        let start = if sel < max_rows {
             0
         } else {
-            sel_line + 1 - max_rows
+            sel + 1 - max_rows
         };
-        let end = (start + max_rows).min(nlines);
+        let end = (start + max_rows).min(total);
+
         let mut menu = vec![pad_to(
             &Style::new()
                 .fg(ACCENT)
                 .bold()
-                .render("  @ file · ↑/↓ · Enter insert · Esc"),
+                .render("  @ file · ↑/↓ · →/← folder · Enter · Esc"),
             width,
         )];
-        for (line, ci) in disp.iter().take(end).skip(start) {
-            if *ci == Some(sel) {
-                menu.push(Style::new().fg(Color::BrightWhite).bg(ACCENT).render(line));
-            } else if ci.is_some() {
-                menu.push(pad_to(&Style::new().fg(Color::White).render(line), width));
+        for (i, (path, depth, is_dir)) in nodes.iter().enumerate().take(end).skip(start) {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            let indent = "  ".repeat(*depth);
+            let raw = if *is_dir {
+                let arrow = if self.dir_is_open(path) { "▾" } else { "▸" };
+                pad_to(&format!("  {indent}{arrow} {name}/"), width)
             } else {
-                menu.push(line.clone()); // directory header (pre-styled + padded)
-            }
+                pad_to(&format!("  {indent}  {name}"), width)
+            };
+            menu.push(if i == sel {
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+            } else if *is_dir {
+                Style::new().fg(Color::Cyan).render(&raw)
+            } else {
+                Style::new().fg(Color::White).render(&raw)
+            });
         }
-        if nlines > max_rows {
+        if total > max_rows {
             let up = if start > 0 { "↑" } else { " " };
-            let down = if end < nlines { "↓" } else { " " };
+            let down = if end < total { "↓" } else { " " };
             menu.push(pad_to(
                 &Style::new()
                     .fg(Color::BrightBlack)

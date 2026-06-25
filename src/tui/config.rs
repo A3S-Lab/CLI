@@ -29,6 +29,13 @@ pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/config.acl"))
 }
 
+/// `~/.a3s/memory` — the agent's long-term memory store (created on demand).
+pub(crate) fn memory_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".a3s/memory"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/memory"))
+}
+
 /// Write the starter config to `path` (creating parent dirs). Never overwrites.
 pub(crate) fn write_template_config(path: &std::path::Path) -> std::io::Result<()> {
     if path.exists() {

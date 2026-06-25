@@ -72,10 +72,6 @@ pub(crate) fn render_tool_end(
     if lines.is_empty() {
         return header;
     }
-    // Head + tail window with a "… +N lines" marker in the middle so a long
-    // command (a big build, etc.) stays a fixed height instead of flooding.
-    const HEAD: usize = 3;
-    const TAIL: usize = 2;
     let body_color = if ok { Color::BrightBlack } else { Color::Red };
     let conn = Style::new().fg(Color::BrightBlack).render("⎿");
     let textw = width.saturating_sub(PAD + 7).max(20);
@@ -93,26 +89,11 @@ pub(crate) fn render_tool_end(
             )
         }
     };
-    let n = lines.len();
+    // ponytail: full output, nothing dropped — the user wants all history in
+    // the scrollable transcript. Re-add a head/tail cap if a giant build floods.
     let mut out = header;
-    if n <= HEAD + TAIL + 1 {
-        for (i, line) in lines.iter().enumerate() {
-            out.push_str(&line_at(i, line));
-        }
-    } else {
-        for (i, line) in lines.iter().take(HEAD).enumerate() {
-            out.push_str(&line_at(i, line));
-        }
-        let hidden = n - HEAD - TAIL;
-        out.push_str(&format!(
-            "\n{margin}     {}",
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&format!("… +{hidden} lines"))
-        ));
-        for line in lines.iter().skip(n - TAIL) {
-            out.push_str(&line_at(1, line));
-        }
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(&line_at(i, line));
     }
     out
 }

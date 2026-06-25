@@ -787,6 +787,8 @@ struct App {
     messages: Vec<String>,
     rx: Option<SharedRx>,
     pending_tool: Option<(String, String)>,
+    /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
+    approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
     /// Cursor into `history` while browsing; `None` means "fresh input".
@@ -844,6 +846,8 @@ struct App {
     /// Workspace files (for the `@` file picker) + its selected index.
     files: Vec<String>,
     file_sel: usize,
+    /// Expanded directories in the `@` picker tree (collapsed by default).
+    at_expanded: std::collections::HashSet<String>,
     /// Count of discoverable Claude skills (incl. plugin-bundled) for the banner.
     skill_count: usize,
     /// Loaded skills (name, description) for the slash menu + `/plugin`.
@@ -1525,16 +1529,8 @@ impl Model for App {
                 let tail = Style::new().fg(ACCENT).render(&tail);
                 format!("  {spark} {working}{tail}")
             }
-            State::Awaiting => {
-                let label = self
-                    .pending_tool
-                    .as_ref()
-                    .map(|(_, l)| l.as_str())
-                    .unwrap_or("this tool");
-                Style::new().fg(Color::Yellow).bold().render(&format!(
-                    "  ⏵ Allow {label}?   (y) yes · (a) always · (n) no · Esc"
-                ))
-            }
+            // The approval options panel (overlay_approval) is the UI now.
+            State::Awaiting => String::new(),
             State::Idle => String::new(),
         };
 
@@ -1623,7 +1619,7 @@ impl Model for App {
             .item(&plan_block, Constraint::Fixed(plan.len() as u16))
             .item(&sub_block, Constraint::Fixed(subs.len() as u16))
             .item(&top_separator, Constraint::Fixed(1))
-            .item(&input_view, Constraint::Fixed(1))
+            .item(&input_view, Constraint::Fixed(self.input_height()))
             .item(&separator, Constraint::Fixed(1))
             .item(&status1, Constraint::Fixed(1))
             .item(&status2, Constraint::Fixed(1))
@@ -1637,6 +1633,7 @@ impl Model for App {
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
+        let composed = self.overlay_approval(composed);
         self.overlay_btw(composed)
     }
 
@@ -1820,7 +1817,12 @@ impl App {
             "/exit" | "/quit" => return Some(cmd::quit()),
             "/clear" => {
                 self.messages.clear();
+                self.plan.clear();
+                self.subagents.clear();
+                self.queue.clear();
+                self.completed = 0;
                 self.textarea.clear();
+                self.relayout();
                 self.rebuild_viewport();
                 return None;
             }
@@ -2297,6 +2299,7 @@ impl App {
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.
                 self.state = State::Awaiting;
+                self.approval_sel = 0;
                 let label = tool_label(&tool_name, Some(&args));
                 self.pending_tool = Some((tool_id, label));
                 return None; // wait for the user; do not pump
@@ -2491,18 +2494,77 @@ impl App {
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
     }
 
+    /// Rows the input box needs — grows with embedded newlines (Shift+Enter),
+    /// capped so a huge paste can't eat the screen.
+    pub(crate) fn input_height(&self) -> u16 {
+        (self.textarea.value().split('\n').count() as u16).clamp(1, 8)
+    }
+
     /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
     /// a = allow + enable auto-approve for the rest of the session.
     fn handle_approval_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
         match key.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => Some(cmd::msg(Msg::ModalConfirm(0))),
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(Msg::ModalConfirm(1))),
-            KeyCode::Char('a' | 'A') => {
-                self.mode = Mode::Auto;
-                Some(cmd::msg(Msg::ModalConfirm(0)))
+            KeyCode::Up => {
+                self.approval_sel = self.approval_sel.saturating_sub(1);
+                None
             }
+            KeyCode::Down => {
+                self.approval_sel = (self.approval_sel + 1).min(2);
+                None
+            }
+            // Enter selects the highlighted option (0 yes · 1 always · 2 no).
+            KeyCode::Enter => Some(cmd::msg(self.apply_approval(self.approval_sel))),
+            KeyCode::Char('y' | 'Y') => Some(cmd::msg(self.apply_approval(0))),
+            KeyCode::Char('a' | 'A') => Some(cmd::msg(self.apply_approval(1))),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(self.apply_approval(2))),
             _ => None,
         }
+    }
+
+    fn apply_approval(&mut self, choice: usize) -> Msg {
+        match choice {
+            0 => Msg::ModalConfirm(0), // yes, once
+            1 => {
+                self.mode = Mode::Auto; // yes, and stop asking
+                Msg::ModalConfirm(0)
+            }
+            _ => Msg::ModalConfirm(1), // no
+        }
+    }
+
+    /// Tool-approval options panel (Claude-style numbered choices).
+    fn overlay_approval(&self, composed: String) -> String {
+        if self.state != State::Awaiting {
+            return composed;
+        }
+        let Some((_, label)) = &self.pending_tool else {
+            return composed;
+        };
+        let width = self.width as usize;
+        let opts = ["Yes", "Yes, and don't ask again", "No"];
+        let mut menu = vec![pad_to(
+            &Style::new()
+                .fg(Color::Yellow)
+                .bold()
+                .render(&format!("  ⏵ Allow {label}?")),
+            width,
+        )];
+        for (i, o) in opts.iter().enumerate() {
+            let marker = if i == self.approval_sel { "❯" } else { " " };
+            let raw = pad_to(&format!("  {marker} {}. {o}", i + 1), width);
+            menu.push(if i == self.approval_sel {
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
+            } else {
+                Style::new().fg(Color::White).render(&raw)
+            });
+        }
+        menu.push(pad_to(
+            &Style::new()
+                .fg(Color::BrightBlack)
+                .render("  Enter select · ↑/↓ · Esc"),
+            width,
+        ));
+        self.overlay_list(composed, &menu)
     }
 }
 
@@ -2668,7 +2730,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
                 .with_auto_compact(true)
-                .with_auto_compact_threshold(0.85),
+                .with_auto_compact_threshold(0.85)
+                .with_file_memory(memory_dir())
+                .with_max_parallel_tasks(8)
+                .with_auto_delegation_enabled(true)
+                .with_auto_parallel_delegation(true),
         ),
     ) {
         Ok(s) => s,
@@ -2682,7 +2748,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
                     .with_auto_compact(true)
-                    .with_auto_compact_threshold(0.85),
+                    .with_auto_compact_threshold(0.85)
+                    .with_file_memory(memory_dir())
+                    .with_max_parallel_tasks(8)
+                    .with_auto_delegation_enabled(true)
+                    .with_auto_parallel_delegation(true),
             )),
         )?,
     };
@@ -2798,6 +2868,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         messages: initial_messages,
         rx: None,
         pending_tool: None,
+        approval_sel: 0,
         history: Vec::new(),
         history_pos: None,
         model: default_model,
@@ -2824,6 +2895,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         branch: git_branch(&workspace),
         slash_sel: 0,
         files: workspace_files(&workspace),
+        at_expanded: std::collections::HashSet::new(),
         file_sel: 0,
         skill_count: count_skill_files(&claude_dirs),
         skills: load_skills(&claude_dirs),

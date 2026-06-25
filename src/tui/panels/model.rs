@@ -58,10 +58,16 @@ impl App {
             .with_session_store(self.store.clone())
             .with_session_id(self.session_id.as_str())
             .with_confirmation_policy(self.confirmation.clone())
+            .with_skill_dirs(claude_skill_dirs(&self.cwd))
             .with_auto_save(true)
             // Auto-compact the context when it nears the window (Claude-style).
             .with_auto_compact(true)
-            .with_auto_compact_threshold(0.85);
+            .with_auto_compact_threshold(0.85)
+            .with_file_memory(memory_dir())
+            // Parallel fan-out available in every mode (not just ultracode).
+            .with_max_parallel_tasks(8)
+            .with_auto_delegation_enabled(true)
+            .with_auto_parallel_delegation(true);
         // Keep project instructions (CLAUDE.md) + any /compact summary across
         // model/effort/compact rebuilds, injected into the system prompt.
         let extra = match (&self.instructions, &self.compact_summary) {
@@ -81,9 +87,6 @@ impl App {
             opts = opts
                 .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
                 .with_goal_tracking(true)
-                .with_max_parallel_tasks(8)
-                .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true)
                 .with_max_tool_rounds(40);
         }
         opts
