@@ -4,6 +4,7 @@
 //! module can see the ancestor `App`'s private fields, so these blocks compile
 //! exactly as if they were still inline in `tui/mod.rs`.
 
+mod btw;
 mod effort;
 mod files;
 mod git;
@@ -11,6 +12,7 @@ mod help;
 mod ide;
 mod menu;
 mod model;
+mod plan;
 mod plugins;
 mod relay;
 mod theme;
