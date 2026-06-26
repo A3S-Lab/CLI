@@ -672,111 +672,6 @@ static UPGRADE_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 /// The latest version tag, stashed by `/update` for the post-exit upgrade.
 static LATEST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// GitHub release target triple for this platform, or `None` if unsupported
-/// (e.g. Windows) — those fall back to a manual download.
-fn release_target() -> Option<&'static str> {
-    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
-        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
-        _ => return None,
-    })
-}
-
-/// True when `a3s` is installed + managed by Homebrew (so we upgrade through it).
-fn brew_manages_a3s() -> bool {
-    std::process::Command::new("brew")
-        .args(["list", "--versions", "a3s"])
-        .output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
-}
-
-/// Perform the in-place upgrade to `latest` after the TUI has exited (terminal
-/// restored, so child stdio shows real progress). Returns the binary to exec on
-/// success — Homebrew repoints its `a3s` symlink (exec by name); a standalone
-/// install swaps `current_exe` (exec that path) — or `None` on failure.
-fn perform_upgrade(latest: &str) -> Option<std::path::PathBuf> {
-    if brew_manages_a3s() {
-        // `brew upgrade` reads a cached formula — refresh the tap first.
-        if let Some(repo) = std::process::Command::new("brew")
-            .args(["--repo", "a3s-lab/tap"])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .filter(|s| !s.is_empty())
-        {
-            let _ = std::process::Command::new("git")
-                .args(["-C", &repo, "pull", "--quiet", "--ff-only"])
-                .status();
-        }
-        println!("\n⬇  upgrading a3s {latest} via Homebrew…\n");
-        let _ = std::process::Command::new("brew")
-            .args(["upgrade", "a3s"])
-            .status();
-        // Verify (brew upgrade exits 0 on a no-op), then exec by name so PATH
-        // resolves the freshly-repointed symlink.
-        let installed = std::process::Command::new("brew")
-            .args(["list", "--versions", "a3s"])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        return installed
-            .contains(latest)
-            .then(|| std::path::PathBuf::from("a3s"));
-    }
-    standalone_upgrade(latest)
-}
-
-/// Download the release tarball for this platform and swap it over the running
-/// binary (works for curl/manual installs). Returns the path to exec.
-fn standalone_upgrade(latest: &str) -> Option<std::path::PathBuf> {
-    let target = release_target()?;
-    let exe = std::env::current_exe().ok()?;
-    let url = format!(
-        "https://github.com/A3S-Lab/Cli/releases/download/v{latest}/a3s-v{latest}-{target}.tar.gz"
-    );
-    let tmp = std::env::temp_dir().join(format!("a3s-update-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&tmp);
-    let tarball = tmp.join("a3s.tar.gz");
-    println!("\n⬇  downloading a3s {latest}…\n");
-    let dl = std::process::Command::new("curl")
-        .args(["-fL", "--progress-bar", "-o"])
-        .arg(&tarball)
-        .arg(&url)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !dl {
-        return None;
-    }
-    let extracted = std::process::Command::new("tar")
-        .arg("xzf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&tmp)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let new_bin = tmp.join("a3s");
-    if !extracted || !new_bin.exists() {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&new_bin, std::fs::Permissions::from_mode(0o755));
-    }
-    // Rename works over a running binary on unix; fall back to copy across FS.
-    let swapped = std::fs::rename(&new_bin, &exe)
-        .or_else(|_| std::fs::copy(&new_bin, &exe).map(|_| ()))
-        .is_ok();
-    swapped.then_some(exe)
-}
-
 enum Msg {
     Term(Event),
     // Boxed: AgentEvent is large; keeps the Msg enum small.
@@ -1502,7 +1397,7 @@ impl Model for App {
             Msg::UpdateCheck(latest) => {
                 let newer = latest
                     .as_deref()
-                    .is_some_and(|l| !crate::version_ge(env!("CARGO_PKG_VERSION"), l));
+                    .is_some_and(|l| !crate::update::version_ge(env!("CARGO_PKG_VERSION"), l));
                 if newer {
                     self.update_available = latest;
                     // Refresh the start screen so the notice shows in the banner
@@ -1558,7 +1453,7 @@ impl Model for App {
                             .fg(Color::Yellow)
                             .render("  couldn't reach the release server — try again later"),
                     ),
-                    Some(l) if crate::version_ge(current, &l) => self.push_line(
+                    Some(l) if crate::update::version_ge(current, &l) => self.push_line(
                         &Style::new()
                             .fg(TN_GREEN)
                             .render(&format!("  ✓ already up to date (a3s {current})")),
@@ -1566,7 +1461,7 @@ impl Model for App {
                     Some(l) => {
                         // macOS/Linux self-update in place (Homebrew or a direct
                         // download); unsupported platforms get the download link.
-                        if release_target().is_some() {
+                        if crate::update::can_self_update() {
                             if let Ok(mut g) = LATEST.lock() {
                                 *g = Some(l.clone());
                             }
@@ -2258,23 +2153,12 @@ impl App {
                 self.relayout();
                 return Some(cmd::cmd(|| async {
                     // Quick version check only; the actual upgrade runs in the
-                    // shell after the TUI exits (run()), so brew's own progress
-                    // shows and the restart picks up the new binary.
-                    let latest = tokio::process::Command::new("curl")
-                        .args([
-                            "-fsSL",
-                            "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
-                        ])
-                        .output()
+                    // shell after the TUI exits (run()), so brew's/curl's own
+                    // progress shows and the restart picks up the new binary.
+                    let latest = tokio::task::spawn_blocking(crate::update::fetch_latest)
                         .await
                         .ok()
-                        .filter(|o| o.status.success())
-                        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
-                        .and_then(|v| {
-                            v["tag_name"]
-                                .as_str()
-                                .map(|s| s.trim_start_matches('v').to_string())
-                        });
+                        .flatten();
                     Msg::UpdatePlan(latest)
                 }));
             }
@@ -3308,7 +3192,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             .ok()
             .and_then(|g| g.clone())
             .unwrap_or_default();
-        match perform_upgrade(&latest) {
+        match crate::update::perform_upgrade(&latest) {
             Some(bin) => {
                 let restart_args = ["code", "resume", session_id.as_str()];
                 #[cfg(unix)]
