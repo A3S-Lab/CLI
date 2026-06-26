@@ -19,7 +19,7 @@ fn usage() {
 }
 
 /// `[0,2,6] >= [0,2,5]` — Vec<u32> compares lexicographically = semver order.
-fn version_ge(a: &str, b: &str) -> bool {
+pub(crate) fn version_ge(a: &str, b: &str) -> bool {
     let parse = |s: &str| {
         s.split('.')
             .filter_map(|x| x.parse::<u32>().ok())
