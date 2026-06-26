@@ -246,6 +246,8 @@ struct Ide {
     tree_scroll: usize,
     file: Option<IdeFile>,
     focus_editor: bool,
+    /// Transient save status shown in the footer (set on Ctrl+S).
+    flash: Option<String>,
 }
 
 /// Directory children for the tree, dirs first then files, noise skipped.
@@ -2029,6 +2031,7 @@ impl App {
                     tree_scroll: 0,
                     file: None,
                     focus_editor: false,
+                    flash: None,
                 });
                 return None;
             }
@@ -2036,7 +2039,7 @@ impl App {
                 self.textarea.clear();
                 if self.skills.is_empty() {
                     self.push_line(&Style::new().fg(Color::BrightBlack).render(
-                        "  no Claude skills/plugins found (~/.claude/skills, ~/.claude/plugins)",
+                        "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
                     ));
                 } else {
                     self.plugins_panel = Some(0);
@@ -2064,7 +2067,7 @@ impl App {
             "/reload" => {
                 self.textarea.clear();
                 // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
-                let dirs = claude_skill_dirs(&self.cwd);
+                let dirs = agent_skill_dirs(&self.cwd);
                 self.skills = load_skills(&dirs);
                 self.skill_count = count_skill_files(&dirs);
                 self.push_line(&Style::new().fg(Color::Green).render(&format!(
@@ -2517,6 +2520,7 @@ impl App {
                 image: false,
             }),
             focus_editor: true,
+            flash: None,
         });
     }
 
@@ -2628,6 +2632,10 @@ impl App {
             KeyCode::Char('y' | 'Y') => Some(cmd::msg(self.apply_approval(0))),
             KeyCode::Char('a' | 'A') => Some(cmd::msg(self.apply_approval(1))),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(self.apply_approval(2))),
+            // Digit keys pick the numbered option directly (1 Yes · 2 Always · 3 No).
+            KeyCode::Char(c @ '1'..='3') => {
+                Some(cmd::msg(self.apply_approval(c as usize - '1' as usize)))
+            }
             _ => None,
         }
     }
@@ -2672,7 +2680,7 @@ impl App {
         menu.push(pad_to(
             &Style::new()
                 .fg(Color::BrightBlack)
-                .render("  Enter select · ↑/↓ · Esc"),
+                .render("  Enter select · ↑/↓ · 1–3 · Esc"),
             width,
         ));
         self.overlay_list(composed, &menu)
@@ -2824,7 +2832,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .with_timeout(3_600_000, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
     // a3s's own (they share the markdown + YAML-frontmatter format).
-    let claude_dirs = claude_skill_dirs(&workspace);
+    let claude_dirs = agent_skill_dirs(&workspace);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);

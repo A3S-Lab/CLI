@@ -28,19 +28,34 @@ impl App {
             _ if ide.focus_editor && ide.file.is_some() => {
                 let body = h.saturating_sub(2);
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                // Ctrl+S saves to disk with explicit footer feedback (success or
+                // the OS error) — handled before the long-lived &mut file borrow.
+                if ctrl && matches!(key.code, KeyCode::Char('s' | 'S')) {
+                    let msg = {
+                        let f = ide.file.as_mut().unwrap();
+                        if f.image {
+                            "(read-only)".to_string()
+                        } else {
+                            let content = format!("{}\n", f.lines.join("\n"));
+                            match std::fs::write(&f.path, content) {
+                                Ok(()) => {
+                                    f.dirty = false;
+                                    "✔ saved".to_string()
+                                }
+                                Err(e) => format!("✗ save failed: {e}"),
+                            }
+                        }
+                    };
+                    ide.flash = Some(msg);
+                    return true;
+                }
+                ide.flash = None; // any edit/nav key dismisses the save flash
                 let f = ide.file.as_mut().unwrap();
                 if f.image {
                     return true; // image preview is read-only
                 }
                 let nlines = f.lines.len();
                 match key.code {
-                    // Ctrl+S saves to disk.
-                    KeyCode::Char('s') if ctrl => {
-                        let content = format!("{}\n", f.lines.join("\n"));
-                        if std::fs::write(&f.path, content).is_ok() {
-                            f.dirty = false;
-                        }
-                    }
                     KeyCode::Up => f.row = f.row.saturating_sub(1),
                     KeyCode::Down => f.row = (f.row + 1).min(nlines.saturating_sub(1)),
                     KeyCode::Left => {
@@ -235,7 +250,9 @@ impl App {
                 }
             })
             .unwrap_or_else(|| "(no file)".into());
-        let hint = if ide.focus_editor {
+        let hint = if let Some(flash) = ide.flash.as_deref() {
+            flash
+        } else if ide.focus_editor {
             "edit · Ctrl+S save · Esc back to tree"
         } else {
             "Tab edit · ↑↓ nav · Enter open · Esc close"

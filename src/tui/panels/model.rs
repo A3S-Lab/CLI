@@ -199,7 +199,7 @@ impl App {
             .with_session_store(self.store.clone())
             .with_session_id(self.session_id.as_str())
             .with_confirmation_policy(self.confirmation.clone())
-            .with_skill_dirs(claude_skill_dirs(&self.cwd))
+            .with_skill_dirs(agent_skill_dirs(&self.cwd))
             .with_auto_save(true)
             // Auto-compact the context when it nears the window (Claude-style).
             .with_auto_compact(true)
