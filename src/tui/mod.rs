@@ -2273,9 +2273,25 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
-        // ultracode steering lives in the system prompt (with_guidelines), not a
-        // per-turn prefix — see effort_session_opts. The old prefix drove every
-        // turn into the program/PTC runtime, which can't actually fan out.
+        // ultracode: raise the dynamic-workflow steering to TURN-level salience.
+        // The system-prompt guideline alone gets ignored by some models (they
+        // fan out via direct parallel_task, or answer inline); a per-turn nudge
+        // makes them author a `program` workflow script — which now fans out for
+        // real (PTC dispatches on the multi-threaded runtime since core 4.2.6,
+        // the reason the original prefix was safe to bring back). Verified with a
+        // real LLM: the model emits a correct run(ctx) script calling parallel_task.
+        let prompt = if self.effort == ULTRACODE {
+            format!(
+                "{prompt}\n\n[ultracode] Tackle this as a dynamic workflow. For the \
+                 independent parts, call the `program` tool with a JavaScript script \
+                 whose `async function run(ctx, inputs)` fans them out via \
+                 `ctx.tool(\"parallel_task\", {{ tasks: [...] }})`, keeps all task/\
+                 parallel_task delegation INSIDE the script, then aggregates and \
+                 returns. After it runs, synthesize the results."
+            )
+        } else {
+            prompt
+        };
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
@@ -2584,38 +2600,59 @@ impl App {
     /// a readable plan of the fanned-out subtasks. Stored for `/workflow` and
     /// announced with a collapsed one-line message in the transcript.
     fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
-        if name != "parallel_task" && name != "task" {
-            return;
-        }
-        let Some(tasks) = args
-            .and_then(|a| a.get("tasks"))
-            .and_then(|t| t.as_array())
-            .filter(|t| !t.is_empty())
-        else {
-            return;
+        let (doc, label) = match name {
+            // The generated workflow script itself (the dynamic workflow).
+            "program" => {
+                let Some(src) = args
+                    .and_then(|a| a.get("source"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                else {
+                    return;
+                };
+                (
+                    format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
+                    "dynamic workflow script · /workflow to view read-only".to_string(),
+                )
+            }
+            // A direct fan-out (no script wrapper).
+            "parallel_task" | "task" => {
+                let Some(tasks) = args
+                    .and_then(|a| a.get("tasks"))
+                    .and_then(|t| t.as_array())
+                    .filter(|t| !t.is_empty())
+                else {
+                    return;
+                };
+                let mut doc = format!(
+                    "# Dynamic workflow\n\nFanned out {} parallel subagent task(s):\n\n",
+                    tasks.len()
+                );
+                for (i, t) in tasks.iter().enumerate() {
+                    let desc = t
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("(task)");
+                    let prompt = t
+                        .get("prompt")
+                        .or_else(|| t.get("task"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    doc.push_str(&format!("## {}. {desc}\n\n{prompt}\n\n", i + 1));
+                }
+                (
+                    doc,
+                    format!(
+                        "dynamic workflow · {} parallel tasks · /workflow to view read-only",
+                        tasks.len()
+                    ),
+                )
+            }
+            _ => return,
         };
-        let mut doc = format!(
-            "# Dynamic workflow\n\nFanned out {} parallel subagent task(s):\n\n",
-            tasks.len()
-        );
-        for (i, t) in tasks.iter().enumerate() {
-            let desc = t
-                .get("description")
-                .and_then(|v| v.as_str())
-                .unwrap_or("(task)");
-            let prompt = t
-                .get("prompt")
-                .or_else(|| t.get("task"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            doc.push_str(&format!("## {}. {desc}\n\n{prompt}\n\n", i + 1));
-        }
         self.last_workflow = Some(doc);
         // Collapsed indicator; the full artifact opens read-only via /workflow.
-        self.push_line(&Style::new().fg(ACCENT).render(&format!(
-            "  ⊞ dynamic workflow · {} parallel tasks · /workflow to view read-only",
-            tasks.len()
-        )));
+        self.push_line(&Style::new().fg(ACCENT).render(&format!("  ⊞ {label}")));
     }
 
     /// Open read-only text content in the built-in IDE (used by `/workflow` to

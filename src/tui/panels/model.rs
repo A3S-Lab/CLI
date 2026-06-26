@@ -16,19 +16,32 @@ const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = Color::Rgb(115, 218, 202); // tokyo teal
 
-/// Ultracode system-prompt steer: plan, then fan independent work out by
-/// calling `parallel_task` DIRECTLY — never wrapped in a `program` script.
+/// Ultracode system-prompt steer: express the whole task as ONE generated
+/// `program` workflow script that fans out via `parallel_task` inside it — a
+/// hard rule (no top-level delegation) plus a copy-paste template, because a
+/// soft "prefer the script" steer let the model just call parallel_task directly
+/// (the PTC fans out child agents on the multi-threaded runtime since 4.2.6).
 const ULTRACODE_GUIDELINES: &str = "\
-[ultracode] Operate in deep, parallel, exhaustive mode.\n\
-1. PLAN FIRST. Decompose the task into explicit, numbered steps. Mark which \
-steps are independent (can run concurrently) vs dependent (must be sequential).\n\
-2. FAN OUT DIRECTLY. For the independent steps, call the `parallel_task` tool \
-DIRECTLY at the top level, passing MULTIPLE subtasks in a single `parallel_task` \
-call so they run as concurrent subagents. Do not dispatch them one at a time.\n\
-3. NEVER wrap delegation in a script. Do NOT call `task`/`parallel_task` from \
-inside a `program` script — nested delegation cannot run in parallel there. Use \
-`program` only for bounded search/analysis, never for dispatching subagents.\n\
-4. Be exhaustive: pursue every independent thread to completion, then synthesize.";
+[ultracode] Dynamic-workflow mode. Express ALL of your work as ONE generated, \
+executable workflow SCRIPT. Do NOT call `parallel_task` or `task` directly at \
+the top level — the script IS the workflow.\n\
+1. PLAN. Decompose the task into numbered steps; mark independent (concurrent) \
+vs dependent (sequential).\n\
+2. WRITE + RUN THE SCRIPT by calling the `program` tool with a JavaScript \
+`source` of this shape:\n\
+     async function run(ctx, inputs) {\n\
+       const results = await ctx.tool(\"parallel_task\", { tasks: [\n\
+         { description: \"step A\", prompt: \"...\" },\n\
+         { description: \"step B\", prompt: \"...\" }\n\
+       ] });\n\
+       return results;\n\
+     }\n\
+   Put EVERY task/parallel_task call INSIDE the script; add further ctx.tool(...) \
+calls for dependent steps and aggregate their outputs.\n\
+3. parallel_task inside the script fans out concurrent subagents on the \
+multi-threaded runtime. After it returns, synthesize the results into your \
+final answer.\n\
+4. Be exhaustive: pursue every thread to completion.";
 
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
@@ -237,10 +250,11 @@ impl App {
             opts = opts.with_thinking_budget(EFFORT_LEVELS[self.effort].1);
         }
         if ultra {
-            // Deep, parallel work via DIRECT parallel_task calls (not planning
-            // mode, which is mutually exclusive with auto-parallel fan-out, and
-            // not the program/PTC runtime, which can't fan out). Steering is in
-            // the system prompt; here we just track the goal + widen the budget.
+            // Dynamic-workflow mode: the model generates a `program` script that
+            // fans out via `parallel_task` (PTC dispatches on the multi-threaded
+            // runtime since 4.2.6). Not planning mode (mutually exclusive with
+            // auto-parallel fan-out). Steering is in the system prompt; here we
+            // just track the goal + widen the budget.
             opts = opts.with_goal_tracking(true).with_max_tool_rounds(40);
         }
         // Signed in via the /model Codex tab → route through the account client.

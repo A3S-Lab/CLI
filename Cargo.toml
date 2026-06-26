@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.5.7"
+version = "0.5.8"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "4.2.3"
+a3s-code-core = "4.2.7"
 a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "7ac056d949695e241afdb01819781bc9e775548b" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 anyhow = "1"
