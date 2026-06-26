@@ -665,9 +665,10 @@ enum Action {
     ScrollBottom,
 }
 
-/// Set by `/update` on a successful upgrade so `run` re-execs the freshly
-/// installed binary after the TUI exits (terminal is restored by then).
-static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set by `/update` when an upgrade is available: after the TUI exits (terminal
+/// restored), `run` runs the Homebrew upgrade in the shell (real progress) and
+/// re-execs the freshly-installed binary.
+static UPGRADE_ON_EXIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 enum Msg {
     Term(Event),
@@ -685,9 +686,8 @@ enum Msg {
     Interrupted,
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
-    /// `/update` finished: (succeeded, combined output). On success the app
-    /// restarts into the freshly-installed binary.
-    UpdateDone(bool, String),
+    /// `/update` version check finished: the latest version tag, if reachable.
+    UpdatePlan(Option<String>),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
     /// Refreshed process snapshot for the `/top` panel.
@@ -1441,22 +1441,40 @@ impl Model for App {
                 self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
             }
 
-            Msg::UpdateDone(ok, text) => {
+            Msg::UpdatePlan(latest) => {
                 self.updating = None;
-                let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
-                if !body.trim().is_empty() {
-                    self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
-                }
-                if ok {
-                    self.push_line(
+                self.relayout();
+                let current = env!("CARGO_PKG_VERSION");
+                match latest {
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(Color::Yellow)
+                            .render("  couldn't reach the release server — try again later"),
+                    ),
+                    Some(l) if crate::version_ge(current, &l) => self.push_line(
                         &Style::new()
                             .fg(TN_GREEN)
-                            .render("  ✓ updated — restarting a3s…"),
-                    );
-                    RESTART.store(true, std::sync::atomic::Ordering::Relaxed);
-                    return Some(cmd::quit());
+                            .render(&format!("  ✓ already up to date (a3s {current})")),
+                    ),
+                    Some(l) => {
+                        let exe = std::env::current_exe()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        let brew = exe.contains("/Cellar/")
+                            || exe.contains("/homebrew/")
+                            || exe.contains("/usr/local/");
+                        if brew {
+                            self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                                "  → a3s {l} available — closing to upgrade via Homebrew, then restarting…"
+                            )));
+                            UPGRADE_ON_EXIT.store(true, std::sync::atomic::Ordering::Relaxed);
+                            return Some(cmd::quit());
+                        }
+                        self.push_line(&Style::new().fg(Color::BrightBlack).render(&format!(
+                            "  → a3s {l} available — download: https://github.com/A3S-Lab/Cli/releases/latest"
+                        )));
+                    }
                 }
-                self.relayout();
             }
 
             Msg::SideNote(text) => {
@@ -1583,16 +1601,12 @@ impl Model for App {
 
         // Activity line directly above the input: spinner while the agent works,
         // an inline approval prompt while awaiting, empty when idle.
-        let activity = if let Some(t0) = self.updating {
-            // Time-estimated progress bar (Homebrew gives no % we can read here).
-            let secs = t0.elapsed().as_secs();
-            let pct = ((secs as f64 / 20.0) * 100.0).min(95.0) as usize;
-            let filled = pct * 24 / 100;
-            let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(24 - filled));
-            Style::new().fg(TN_GREEN).render(&format!(
-                "  ⬇ Upgrading a3s… ({}) {bar} {pct}%",
-                fmt_elapsed(t0.elapsed())
-            ))
+        let activity = if self.updating.is_some() {
+            // The upgrade itself runs in the shell after exit (real brew
+            // progress); in-TUI this is just the quick version check.
+            Style::new()
+                .fg(TN_GREEN)
+                .render("  ⬇ checking for updates…")
         } else if let Some(t0) = self.compacting {
             // Time-estimated progress bar (compaction has no real % to report).
             let secs = t0.elapsed().as_secs();
@@ -2134,27 +2148,28 @@ impl App {
             }
             "/update" => {
                 self.textarea.clear();
-                self.updating = Some(Instant::now()); // progress bar + input lock
+                self.updating = Some(Instant::now()); // "checking…" + input lock
                 self.relayout();
-                let exe = std::env::current_exe().ok();
-                return Some(cmd::cmd(move || async move {
-                    let out = match &exe {
-                        Some(p) => tokio::process::Command::new(p).arg("update").output().await,
-                        None => {
-                            tokio::process::Command::new("a3s")
-                                .arg("update")
-                                .output()
-                                .await
-                        }
-                    };
-                    match out {
-                        Ok(o) => {
-                            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                            s.push_str(&String::from_utf8_lossy(&o.stderr));
-                            Msg::UpdateDone(o.status.success(), s)
-                        }
-                        Err(e) => Msg::UpdateDone(false, format!("update failed: {e}")),
-                    }
+                return Some(cmd::cmd(|| async {
+                    // Quick version check only; the actual upgrade runs in the
+                    // shell after the TUI exits (run()), so brew's own progress
+                    // shows and the restart picks up the new binary.
+                    let latest = tokio::process::Command::new("curl")
+                        .args([
+                            "-fsSL",
+                            "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
+                        ])
+                        .output()
+                        .await
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+                        .and_then(|v| {
+                            v["tag_name"]
+                                .as_str()
+                                .map(|s| s.trim_start_matches('v').to_string())
+                        });
+                    Msg::UpdatePlan(latest)
                 }));
             }
             "/git" => {
@@ -3177,24 +3192,43 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .run()
         .await?;
 
-    // `/update` succeeded → re-launch the new binary into the same session. The
-    // TUI has restored the terminal (alt-screen off, raw mode off) by now.
-    if RESTART.load(std::sync::atomic::Ordering::Relaxed) {
-        if let Ok(exe) = std::env::current_exe() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                // exec replaces this process; only returns on failure.
-                let _ = std::process::Command::new(&exe)
-                    .args(["code", "resume", session_id.as_str()])
-                    .exec();
+    // `/update` found a newer version → upgrade via Homebrew in the (now
+    // restored) shell so brew's own download progress shows, then re-exec the
+    // freshly-installed binary. Use PATH `a3s` (brew repointed its symlink to
+    // the new version); current_exe() is the OLD version's path.
+    if UPGRADE_ON_EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+        // Refresh the tap so brew sees the new formula (upgrade alone won't).
+        if let Some(repo) = std::process::Command::new("brew")
+            .args(["--repo", "a3s-lab/tap"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = std::process::Command::new("git")
+                .args(["-C", &repo, "pull", "--quiet", "--ff-only"])
+                .status();
+        }
+        println!("\n⬇  upgrading a3s via Homebrew…\n");
+        let _ = std::process::Command::new("brew")
+            .args(["upgrade", "a3s"])
+            .status();
+        let restart_args = ["code", "resume", session_id.as_str()];
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // exec replaces this process; only returns on failure → fall back.
+            let _ = std::process::Command::new("a3s").args(restart_args).exec();
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe).args(restart_args).exec();
             }
-            #[cfg(not(unix))]
-            {
-                let _ = std::process::Command::new(&exe)
-                    .args(["code", "resume", session_id.as_str()])
-                    .status();
-            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = std::process::Command::new("a3s")
+                .args(restart_args)
+                .status();
         }
         return Ok(());
     }
