@@ -19,21 +19,35 @@ pub(crate) fn version_ge(a: &str, b: &str) -> bool {
 
 /// Latest release version tag from GitHub (no leading `v`), or `None` if the
 /// release server is unreachable. Blocking — call via `spawn_blocking` in async.
+///
+/// Uses the `releases/latest` REDIRECT on github.com (which 302s to
+/// `…/releases/tag/vX.Y.Z`), NOT the `api.github.com` REST endpoint — the API
+/// is rate-limited to 60 req/hr/IP unauthenticated, which strands users behind
+/// shared IPs / CI; the redirect has no such limit.
 pub(crate) fn fetch_latest() -> Option<String> {
     let out = Command::new("curl")
         .args([
             "-fsSL",
-            "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{url_effective}",
+            "https://github.com/A3S-Lab/Cli/releases/latest",
         ])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    v["tag_name"]
-        .as_str()
-        .map(|s| s.trim_start_matches('v').to_string())
+    version_from_release_url(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract `X.Y.Z` from a `…/releases/tag/vX.Y.Z` URL.
+fn version_from_release_url(url: &str) -> Option<String> {
+    url.trim()
+        .rsplit_once("/tag/v")
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// GitHub release target triple for this platform, or `None` if unsupported
@@ -169,6 +183,19 @@ mod tests {
         assert!(version_ge("0.5.5", "0.5.5"));
         assert!(!version_ge("0.5.4", "0.5.5"));
         assert!(version_ge("1.0.0", "0.9.9"));
+    }
+
+    #[test]
+    fn parse_version_from_redirect() {
+        let v = version_from_release_url("https://github.com/A3S-Lab/Cli/releases/tag/v0.5.6");
+        assert_eq!(v.as_deref(), Some("0.5.6"));
+        let v = version_from_release_url("https://github.com/A3S-Lab/Cli/releases/tag/v1.2.30\n");
+        assert_eq!(v.as_deref(), Some("1.2.30"));
+        // No redirect to a tag (e.g. the bare releases page) → None, not garbage.
+        assert_eq!(
+            version_from_release_url("https://github.com/A3S-Lab/Cli/releases"),
+            None
+        );
     }
 
     #[test]
