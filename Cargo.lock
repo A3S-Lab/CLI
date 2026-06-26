@@ -27,9 +27,9 @@ checksum = "35b83be97f61abdd33096446eae063f9d65d98e84c446560b59d3c744194287e"
 
 [[package]]
 name = "a3s-code-core"
-version = "4.2.1"
+version = "4.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5423a273d4f1805d2264c35f1fc569fb2713f35045e16a4ae847d2695606193"
+checksum = "e7950e9b5bcc4f123578dbf0ff6e503db57ef35dc709fcc213bdec1b9523e968"
 dependencies = [
  "a3s-acl",
  "a3s-common",
