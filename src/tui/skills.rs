@@ -105,21 +105,28 @@ pub(crate) fn count_skill_files(dirs: &[std::path::PathBuf]) -> usize {
     n
 }
 
-pub(crate) fn claude_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
+pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    let project = std::path::Path::new(workspace).join(".claude/skills");
-    if project.is_dir() {
-        dirs.push(project);
+    // Claude Code and Codex both keep skills under `<root>/skills` (same SKILL.md
+    // layout); load from either so a skill written for one works in the other.
+    for root in [".claude", ".codex"] {
+        let project = std::path::Path::new(workspace).join(root).join("skills");
+        if project.is_dir() {
+            dirs.push(project);
+        }
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = std::path::PathBuf::from(home);
-        let personal = home.join(".claude/skills");
-        if personal.is_dir() {
-            dirs.push(personal);
+        for root in [".claude", ".codex"] {
+            let personal = home.join(root).join("skills");
+            if personal.is_dir() {
+                dirs.push(personal);
+            }
         }
         // Depth 6 covers nested plugin layouts: plugins/cache/<plugin>/<plugin>/
         // <version>/skills and marketplaces/<mkt>/external_plugins/<plugin>/skills.
         collect_skills_dirs(&home.join(".claude/plugins"), 0, 6, &mut dirs);
+        collect_skills_dirs(&home.join(".codex/plugins"), 0, 6, &mut dirs);
     }
     dirs.sort();
     dirs.dedup();

@@ -4,6 +4,7 @@
 //! rest are basic commands.
 
 mod codex;
+mod top;
 mod tui;
 
 fn usage() {
@@ -11,6 +12,7 @@ fn usage() {
     println!("usage:");
     println!("  a3s code                  launch the interactive coding agent (TUI)");
     println!("  a3s code resume <id>      resume a saved session by id");
+    println!("  a3s top                   live monitor for agents, containers, and processes");
     println!("  a3s update                check for and install a newer version");
     println!("  a3s --version             show version");
     println!("  a3s --help                show this help");
@@ -80,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("update") => self_update().await,
+        Some("top") => top::run(args.collect()).await,
         // Pass any trailing args (e.g. `resume <id>`) through to the TUI.
         Some("code") => {
             let rest: Vec<String> = args.collect();

@@ -28,19 +28,35 @@ impl App {
             _ if ide.focus_editor && ide.file.is_some() => {
                 let body = h.saturating_sub(2);
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                // Ctrl+S saves to disk with explicit footer feedback (success or
+                // the OS error) — handled before the long-lived &mut file borrow.
+                if ctrl && matches!(key.code, KeyCode::Char('s' | 'S')) {
+                    let msg = {
+                        let f = ide.file.as_mut().unwrap();
+                        if f.image || f.readonly {
+                            "(read-only)".to_string()
+                        } else {
+                            let content = format!("{}\n", f.lines.join("\n"));
+                            match std::fs::write(&f.path, content) {
+                                Ok(()) => {
+                                    f.dirty = false;
+                                    "✔ saved".to_string()
+                                }
+                                Err(e) => format!("✗ save failed: {e}"),
+                            }
+                        }
+                    };
+                    ide.flash = Some(msg);
+                    return true;
+                }
+                ide.flash = None; // any edit/nav key dismisses the save flash
                 let f = ide.file.as_mut().unwrap();
                 if f.image {
                     return true; // image preview is read-only
                 }
+                let readonly = f.readonly; // view-only artifact: nav ok, edits blocked
                 let nlines = f.lines.len();
                 match key.code {
-                    // Ctrl+S saves to disk.
-                    KeyCode::Char('s') if ctrl => {
-                        let content = format!("{}\n", f.lines.join("\n"));
-                        if std::fs::write(&f.path, content).is_ok() {
-                            f.dirty = false;
-                        }
-                    }
                     KeyCode::Up => f.row = f.row.saturating_sub(1),
                     KeyCode::Down => f.row = (f.row + 1).min(nlines.saturating_sub(1)),
                     KeyCode::Left => {
@@ -64,19 +80,19 @@ impl App {
                     KeyCode::End => f.col = f.lines.get(f.row).map_or(0, |l| l.chars().count()),
                     KeyCode::PageUp => f.row = f.row.saturating_sub(body),
                     KeyCode::PageDown => f.row = (f.row + body).min(nlines.saturating_sub(1)),
-                    KeyCode::Char(c) => {
+                    KeyCode::Char(c) if !readonly => {
                         let b = char_byte(&f.lines[f.row], f.col);
                         f.lines[f.row].insert(b, c);
                         f.col += 1;
                         f.dirty = true;
                     }
-                    KeyCode::Tab => {
+                    KeyCode::Tab if !readonly => {
                         let b = char_byte(&f.lines[f.row], f.col);
                         f.lines[f.row].insert_str(b, "    ");
                         f.col += 4;
                         f.dirty = true;
                     }
-                    KeyCode::Enter => {
+                    KeyCode::Enter if !readonly => {
                         let b = char_byte(&f.lines[f.row], f.col);
                         let right = f.lines[f.row].split_off(b);
                         f.lines.insert(f.row + 1, right);
@@ -84,7 +100,7 @@ impl App {
                         f.col = 0;
                         f.dirty = true;
                     }
-                    KeyCode::Backspace => {
+                    KeyCode::Backspace if !readonly => {
                         if f.col > 0 {
                             let b0 = char_byte(&f.lines[f.row], f.col - 1);
                             let b1 = char_byte(&f.lines[f.row], f.col);
@@ -99,7 +115,7 @@ impl App {
                             f.dirty = true;
                         }
                     }
-                    KeyCode::Delete => {
+                    KeyCode::Delete if !readonly => {
                         let len = f.lines[f.row].chars().count();
                         if f.col < len {
                             let b0 = char_byte(&f.lines[f.row], f.col);
@@ -175,6 +191,7 @@ impl App {
                         col: 0,
                         dirty: false,
                         image: true,
+                        readonly: true,
                     });
                     ide.focus_editor = false; // read-only; keep tree focus
                 } else {
@@ -196,6 +213,7 @@ impl App {
                         col: 0,
                         dirty: false,
                         image: false,
+                        readonly: false,
                     });
                     ide.focus_editor = true;
                 }
@@ -235,7 +253,12 @@ impl App {
                 }
             })
             .unwrap_or_else(|| "(no file)".into());
-        let hint = if ide.focus_editor {
+        let readonly = ide.file.as_ref().is_some_and(|f| f.readonly);
+        let hint = if let Some(flash) = ide.flash.as_deref() {
+            flash
+        } else if readonly {
+            "read-only · ↑↓/PgUp/PgDn scroll · Esc back"
+        } else if ide.focus_editor {
             "edit · Ctrl+S save · Esc back to tree"
         } else {
             "Tab edit · ↑↓ nav · Enter open · Esc close"

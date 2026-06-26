@@ -68,6 +68,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/mouse",
         "toggle wheel-scroll (on) vs native text selection (off)",
     ),
+    (
+        "/workflow",
+        "view the latest ultracode dynamic workflow (read-only)",
+    ),
     ("/plugin", "enable/disable Claude skills & plugins"),
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
@@ -236,7 +240,8 @@ struct IdeFile {
     row: usize, // cursor line
     col: usize, // cursor column (char index)
     dirty: bool,
-    image: bool, // read-only image preview
+    image: bool,    // read-only image preview
+    readonly: bool, // view-only (e.g. a dynamic-workflow artifact) — edits blocked
 }
 
 /// State of the `/ide` panel: the file tree, selection, and the open file.
@@ -246,6 +251,8 @@ struct Ide {
     tree_scroll: usize,
     file: Option<IdeFile>,
     focus_editor: bool,
+    /// Transient save status shown in the footer (set on Ctrl+S).
+    flash: Option<String>,
 }
 
 /// Directory children for the tree, dirs first then files, noise skipped.
@@ -776,6 +783,9 @@ struct App {
     /// Mouse capture on → wheel-scroll works but native text selection is off.
     /// Off by default so select/copy works; toggled with `/mouse`.
     mouse_scroll: bool,
+    /// Latest dynamic-workflow artifact (ultracode parallel_task dispatch),
+    /// shown collapsed in the transcript and openable read-only via `/workflow`.
+    last_workflow: Option<String>,
     /// Clipboard images pasted (Ctrl+V), sent with the next message.
     pending_images: Vec<a3s_code_core::llm::Attachment>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
@@ -2029,6 +2039,7 @@ impl App {
                     tree_scroll: 0,
                     file: None,
                     focus_editor: false,
+                    flash: None,
                 });
                 return None;
             }
@@ -2036,7 +2047,7 @@ impl App {
                 self.textarea.clear();
                 if self.skills.is_empty() {
                     self.push_line(&Style::new().fg(Color::BrightBlack).render(
-                        "  no Claude skills/plugins found (~/.claude/skills, ~/.claude/plugins)",
+                        "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
                     ));
                 } else {
                     self.plugins_panel = Some(0);
@@ -2061,10 +2072,20 @@ impl App {
                 self.push_line(&Style::new().fg(Color::Cyan).render(&format!("  {msg}")));
                 return None;
             }
+            "/workflow" => {
+                self.textarea.clear();
+                match self.last_workflow.clone() {
+                    Some(doc) => self.open_readonly_in_ide("dynamic-workflow.md", &doc),
+                    None => self.push_line(&Style::new().fg(Color::BrightBlack).render(
+                        "  no dynamic workflow yet — run an ultracode task that fans out via parallel_task",
+                    )),
+                }
+                return None;
+            }
             "/reload" => {
                 self.textarea.clear();
                 // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
-                let dirs = claude_skill_dirs(&self.cwd);
+                let dirs = agent_skill_dirs(&self.cwd);
                 self.skills = load_skills(&dirs);
                 self.skill_count = count_skill_files(&dirs);
                 self.push_line(&Style::new().fg(Color::Green).render(&format!(
@@ -2290,6 +2311,7 @@ impl App {
                     args.as_ref(),
                     self.width as usize,
                 ));
+                self.capture_workflow(&name, args.as_ref());
                 self.tool_args.clear();
                 self.tool_output.clear();
             }
@@ -2515,8 +2537,76 @@ impl App {
                 col: 0,
                 dirty: false,
                 image: false,
+                readonly: false,
             }),
             focus_editor: true,
+            flash: None,
+        });
+    }
+
+    /// Capture a `parallel_task`/`task` dispatch as a dynamic-workflow artifact:
+    /// a readable plan of the fanned-out subtasks. Stored for `/workflow` and
+    /// announced with a collapsed one-line message in the transcript.
+    fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
+        if name != "parallel_task" && name != "task" {
+            return;
+        }
+        let Some(tasks) = args
+            .and_then(|a| a.get("tasks"))
+            .and_then(|t| t.as_array())
+            .filter(|t| !t.is_empty())
+        else {
+            return;
+        };
+        let mut doc = format!(
+            "# Dynamic workflow\n\nFanned out {} parallel subagent task(s):\n\n",
+            tasks.len()
+        );
+        for (i, t) in tasks.iter().enumerate() {
+            let desc = t
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(task)");
+            let prompt = t
+                .get("prompt")
+                .or_else(|| t.get("task"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            doc.push_str(&format!("## {}. {desc}\n\n{prompt}\n\n", i + 1));
+        }
+        self.last_workflow = Some(doc);
+        // Collapsed indicator; the full artifact opens read-only via /workflow.
+        self.push_line(&Style::new().fg(ACCENT).render(&format!(
+            "  ⊞ dynamic workflow · {} parallel tasks · /workflow to view read-only",
+            tasks.len()
+        )));
+    }
+
+    /// Open read-only text content in the built-in IDE (used by `/workflow` to
+    /// show the dynamic-workflow artifact). Editor-focused for scroll/nav, but
+    /// `readonly` blocks edits and Ctrl+S.
+    fn open_readonly_in_ide(&mut self, title: &str, content: &str) {
+        let lines: Vec<String> = content.lines().map(String::from).collect();
+        self.ide = Some(Ide {
+            entries: ide_children(std::path::Path::new(&self.cwd), 0),
+            sel: 0,
+            tree_scroll: 0,
+            file: Some(IdeFile {
+                path: std::path::PathBuf::from(title),
+                lines: if lines.is_empty() {
+                    vec![String::new()]
+                } else {
+                    lines
+                },
+                scroll: 0,
+                row: 0,
+                col: 0,
+                dirty: false,
+                image: false,
+                readonly: true,
+            }),
+            focus_editor: true,
+            flash: Some("read-only".to_string()),
         });
     }
 
@@ -2628,6 +2718,10 @@ impl App {
             KeyCode::Char('y' | 'Y') => Some(cmd::msg(self.apply_approval(0))),
             KeyCode::Char('a' | 'A') => Some(cmd::msg(self.apply_approval(1))),
             KeyCode::Char('n' | 'N') | KeyCode::Esc => Some(cmd::msg(self.apply_approval(2))),
+            // Digit keys pick the numbered option directly (1 Yes · 2 Always · 3 No).
+            KeyCode::Char(c @ '1'..='3') => {
+                Some(cmd::msg(self.apply_approval(c as usize - '1' as usize)))
+            }
             _ => None,
         }
     }
@@ -2672,7 +2766,7 @@ impl App {
         menu.push(pad_to(
             &Style::new()
                 .fg(Color::BrightBlack)
-                .render("  Enter select · ↑/↓ · Esc"),
+                .render("  Enter select · ↑/↓ · 1–3 · Esc"),
             width,
         ));
         self.overlay_list(composed, &menu)
@@ -2824,7 +2918,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .with_timeout(3_600_000, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
     // a3s's own (they share the markdown + YAML-frontmatter format).
-    let claude_dirs = claude_skill_dirs(&workspace);
+    let claude_dirs = agent_skill_dirs(&workspace);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -2960,6 +3054,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         auto_reviewed: false,
         shell_mode: false,
         mouse_scroll: false,
+        last_workflow: None,
         pending_images: Vec::new(),
         goal: None,
         loop_remaining: 0,
