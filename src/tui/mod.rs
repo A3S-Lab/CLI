@@ -665,6 +665,10 @@ enum Action {
     ScrollBottom,
 }
 
+/// Set by `/update` on a successful upgrade so `run` re-execs the freshly
+/// installed binary after the TUI exits (terminal is restored by then).
+static RESTART: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 enum Msg {
     Term(Event),
     // Boxed: AgentEvent is large; keeps the Msg enum small.
@@ -681,6 +685,9 @@ enum Msg {
     Interrupted,
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
+    /// `/update` finished: (succeeded, combined output). On success the app
+    /// restarts into the freshly-installed binary.
+    UpdateDone(bool, String),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
     /// Refreshed process snapshot for the `/top` panel.
@@ -816,6 +823,9 @@ struct App {
     got_delta: bool,
     /// Set while `/compact` is summarizing — drives the progress bar + blocks input.
     compacting: Option<Instant>,
+    /// Set while `/update` is upgrading — drives a progress bar + blocks input;
+    /// on success the app restarts into the new binary.
+    updating: Option<Instant>,
     /// Last time the streaming viewport was rebuilt — throttles the O(n) rebuild
     /// to ~30fps so a flood of deltas doesn't starve animation on the 1 loop.
     last_paint: Option<Instant>,
@@ -1431,6 +1441,24 @@ impl Model for App {
                 self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
             }
 
+            Msg::UpdateDone(ok, text) => {
+                self.updating = None;
+                let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
+                if !body.trim().is_empty() {
+                    self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
+                }
+                if ok {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GREEN)
+                            .render("  ✓ updated — restarting a3s…"),
+                    );
+                    RESTART.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Some(cmd::quit());
+                }
+                self.relayout();
+            }
+
             Msg::SideNote(text) => {
                 if let Some((q, _)) = self.btw.take() {
                     self.btw = Some((q, Some(text.trim().to_string())));
@@ -1555,7 +1583,17 @@ impl Model for App {
 
         // Activity line directly above the input: spinner while the agent works,
         // an inline approval prompt while awaiting, empty when idle.
-        let activity = if let Some(t0) = self.compacting {
+        let activity = if let Some(t0) = self.updating {
+            // Time-estimated progress bar (Homebrew gives no % we can read here).
+            let secs = t0.elapsed().as_secs();
+            let pct = ((secs as f64 / 20.0) * 100.0).min(95.0) as usize;
+            let filled = pct * 24 / 100;
+            let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(24 - filled));
+            Style::new().fg(TN_GREEN).render(&format!(
+                "  ⬇ Upgrading a3s… ({}) {bar} {pct}%",
+                fmt_elapsed(t0.elapsed())
+            ))
+        } else if let Some(t0) = self.compacting {
             // Time-estimated progress bar (compaction has no real % to report).
             let secs = t0.elapsed().as_secs();
             let pct = ((secs as f64 / 30.0) * 100.0).min(95.0) as usize;
@@ -1759,8 +1797,8 @@ impl App {
         if trimmed.is_empty() {
             return None;
         }
-        // No input while compacting — the summary is reseeding the session.
-        if self.compacting.is_some() {
+        // No input while compacting or upgrading.
+        if self.compacting.is_some() || self.updating.is_some() {
             self.textarea.clear();
             return None;
         }
@@ -2096,11 +2134,8 @@ impl App {
             }
             "/update" => {
                 self.textarea.clear();
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("  upgrading a3s…"),
-                );
+                self.updating = Some(Instant::now()); // progress bar + input lock
+                self.relayout();
                 let exe = std::env::current_exe().ok();
                 return Some(cmd::cmd(move || async move {
                     let out = match &exe {
@@ -2112,18 +2147,14 @@ impl App {
                                 .await
                         }
                     };
-                    let text = match out {
+                    match out {
                         Ok(o) => {
                             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
                             s.push_str(&String::from_utf8_lossy(&o.stderr));
-                            s
+                            Msg::UpdateDone(o.status.success(), s)
                         }
-                        Err(e) => format!("update failed: {e}"),
-                    };
-                    Msg::ShellOutput(format!(
-                        "{}\n(restart a3s code to use the new version)",
-                        text.trim_end()
-                    ))
+                        Err(e) => Msg::UpdateDone(false, format!("update failed: {e}")),
+                    }
                 }));
             }
             "/git" => {
@@ -3077,6 +3108,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         streaming: StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2)),
         got_delta: false,
         compacting: None,
+        updating: None,
         last_paint: None,
         thinking: String::new(),
         state: State::Idle,
@@ -3144,6 +3176,28 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .with_fps(30)
         .run()
         .await?;
+
+    // `/update` succeeded → re-launch the new binary into the same session. The
+    // TUI has restored the terminal (alt-screen off, raw mode off) by now.
+    if RESTART.load(std::sync::atomic::Ordering::Relaxed) {
+        if let Ok(exe) = std::env::current_exe() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // exec replaces this process; only returns on failure.
+                let _ = std::process::Command::new(&exe)
+                    .args(["code", "resume", session_id.as_str()])
+                    .exec();
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::process::Command::new(&exe)
+                    .args(["code", "resume", session_id.as_str()])
+                    .status();
+            }
+        }
+        return Ok(());
+    }
 
     // Session is auto-saved under this directory; show how to come back.
     println!("\n  session saved · resume it with:  a3s code resume {session_id}\n");

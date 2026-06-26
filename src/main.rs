@@ -59,15 +59,35 @@ async fn self_update() -> anyhow::Result<()> {
     let exe_s = exe.to_string_lossy();
     if exe_s.contains("/Cellar/") || exe_s.contains("/homebrew/") || exe_s.contains("/usr/local/") {
         println!("upgrading via Homebrew…");
-        let ok = std::process::Command::new("brew")
+        // `brew upgrade` reads the cached formula, so refresh the tap first —
+        // otherwise it sees the old version and no-ops with "already installed".
+        if let Some(repo) = std::process::Command::new("brew")
+            .args(["--repo", "a3s-lab/tap"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = std::process::Command::new("git")
+                .args(["-C", &repo, "pull", "--quiet", "--ff-only"])
+                .status();
+        }
+        let _ = std::process::Command::new("brew")
             .args(["upgrade", "a3s"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
+            .status();
+        // `brew upgrade` exits 0 even on a no-op, so confirm the new version is
+        // actually installed before claiming success.
+        let installed = std::process::Command::new("brew")
+            .args(["list", "--versions", "a3s"])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        if installed.contains(&latest) {
             println!("✓ updated to a3s {latest}");
         } else {
-            eprintln!("brew upgrade failed — run: brew update && brew upgrade a3s");
+            eprintln!("upgrade didn't take — run manually: brew update && brew upgrade a3s");
             std::process::exit(1);
         }
     } else {
