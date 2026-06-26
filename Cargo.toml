@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
