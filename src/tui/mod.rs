@@ -54,6 +54,7 @@ const TN_RED: Color = Color::Rgb(247, 118, 142);
 const TN_CYAN: Color = Color::Rgb(125, 207, 255);
 const TN_ORANGE: Color = Color::Rgb(255, 158, 100);
 const TN_FG: Color = Color::Rgb(192, 202, 245); // body text
+const TN_GRAY: Color = Color::Rgb(122, 132, 168); // completed / muted tasks
 
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -161,7 +162,7 @@ fn detect_agent(cmd: &str) -> Option<&'static str> {
 fn task_status_style(status: a3s_code_core::planning::TaskStatus) -> (char, Color) {
     use a3s_code_core::planning::TaskStatus;
     match status {
-        TaskStatus::Completed => ('✔', Color::Green),
+        TaskStatus::Completed => ('✔', TN_GRAY),
         TaskStatus::InProgress => ('▶', Color::Yellow),
         TaskStatus::Failed => ('✗', Color::Red),
         TaskStatus::Skipped | TaskStatus::Cancelled => ('⊘', Color::BrightBlack),
