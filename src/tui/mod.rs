@@ -945,6 +945,15 @@ impl Model for App {
                 self.rebuild_viewport();
             }
 
+            // Bracketed paste: drop the whole pasted block into the input as
+            // one edit (newlines become real line breaks) instead of N submitted
+            // lines / a3s-lane queue spam — Claude-Code-style paste DX.
+            Msg::Term(Event::Paste(text)) => {
+                self.last_activity = Instant::now();
+                self.textarea.insert_str(&text);
+                self.relayout();
+            }
+
             Msg::Term(Event::Key(key)) => {
                 self.last_activity = Instant::now();
                 self.auto_reviewed = false;

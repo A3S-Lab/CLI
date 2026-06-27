@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.5.9"
+version = "0.5.10"
 dependencies = [
  "a3s-code-core",
  "a3s-tui",
@@ -27,9 +27,9 @@ checksum = "35b83be97f61abdd33096446eae063f9d65d98e84c446560b59d3c744194287e"
 
 [[package]]
 name = "a3s-code-core"
-version = "4.2.7"
+version = "4.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "014451827f1bc5ec4e8174b1ea5e9617644ad7d088dfb942d83c74194e270700"
+checksum = "7154923a9eb1ca6e8425feb92d8c7ddb58ae1616d1f751cee2e9c7f54a9e6ec0"
 dependencies = [
  "a3s-acl",
  "a3s-common",
@@ -161,7 +161,7 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/TUI.git?rev=7ac056d949695e241afdb01819781bc9e775548b#7ac056d949695e241afdb01819781bc9e775548b"
+source = "git+https://github.com/A3S-Lab/TUI.git?rev=9db984689ed76ffae272f5410fdc274f93257eaa#9db984689ed76ffae272f5410fdc274f93257eaa"
 dependencies = [
  "comrak",
  "crossterm",
@@ -278,7 +278,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -289,7 +289,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1172,7 +1172,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1781,7 +1781,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tokio",
  "tower-service",
  "tracing",
@@ -2234,7 +2234,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2636,7 +2636,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.41",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2673,7 +2673,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.6.4",
+ "socket2 0.5.10",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -2992,7 +2992,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3005,7 +3005,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3390,7 +3390,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3581,7 +3581,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4298,7 +4298,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -4380,15 +4380,6 @@ name = "windows-sys"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
-dependencies = [
- "windows-targets 0.52.6",
-]
-
-[[package]]
-name = "windows-sys"
-version = "0.59.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
 dependencies = [
  "windows-targets 0.52.6",
 ]
