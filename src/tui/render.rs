@@ -224,7 +224,6 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
     use similar::{ChangeTag, TextDiff};
     const MAX_LINES: usize = 200;
 
-    let lang = lang_of(std::path::Path::new(path));
     let diff = TextDiff::from_lines(before, after);
     let (mut adds, mut dels) = (0usize, 0usize);
     for c in diff.iter_all_changes() {
@@ -264,40 +263,46 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
                 }
                 let raw = change.value();
                 let raw = raw.strip_suffix('\n').unwrap_or(raw);
-                let (no, marker, mcol, dim) = match change.tag() {
+                // Deleted lines get a red background, inserted lines a green one,
+                // so the change type reads at a glance. Context lines stay dim and
+                // unbackgrounded. (Plain high-contrast text, not syntax-highlight:
+                // syntax colors clash on a colored background.)
+                let (no, marker, line_bg, line_fg) = match change.tag() {
                     ChangeTag::Delete => (
                         change.old_index().map(|i| i + 1).unwrap_or(0),
                         '-',
-                        Color::Red,
-                        false,
+                        Some(Color::Rgb(82, 30, 34)),
+                        Color::Rgb(255, 215, 215),
                     ),
                     ChangeTag::Insert => (
                         change.new_index().map(|i| i + 1).unwrap_or(0),
                         '+',
-                        Color::Green,
-                        false,
+                        Some(Color::Rgb(26, 60, 36)),
+                        Color::Rgb(205, 255, 210),
                     ),
                     ChangeTag::Equal => (
                         change.old_index().map(|i| i + 1).unwrap_or(0),
                         ' ',
+                        None,
                         Color::BrightBlack,
-                        true,
                     ),
                 };
                 for (si, seg) in wrap_plain(raw, code_w).iter().enumerate() {
-                    let code = if dim {
-                        Style::new().fg(Color::BrightBlack).render(seg)
+                    let content = if si == 0 {
+                        format!("    {no:>width$} {marker} {seg}", width = nw)
                     } else {
-                        highlight_code(seg, lang)
+                        format!("{cont_pad}{seg}")
                     };
-                    if si == 0 {
-                        let gutter = Style::new()
-                            .fg(mcol)
-                            .render(&format!("    {no:>width$} {marker} ", width = nw));
-                        lines.push(format!("{gutter}{code}"));
-                    } else {
-                        lines.push(format!("{cont_pad}{code}"));
-                    }
+                    let line = match line_bg {
+                        // Changed line: fill the full row width with the bg color.
+                        Some(bg) => Style::new()
+                            .fg(line_fg)
+                            .bg(bg)
+                            .render(&pad_to(&content, width)),
+                        // Context line: dim foreground, no background.
+                        None => Style::new().fg(line_fg).render(&content),
+                    };
+                    lines.push(line);
                 }
             }
             if truncated {

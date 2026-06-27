@@ -3287,7 +3287,7 @@ mod tests {
             .with_manual_delegation_enabled(true)
             .with_planning_mode(a3s_code_core::PlanningMode::Enabled)
             .with_goal_tracking(true)
-            .with_max_tool_rounds(40);
+            .with_max_tool_rounds(200);
         let session = agent
             .session(dir.to_string_lossy().to_string(), Some(opts))
             .unwrap();

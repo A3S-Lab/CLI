@@ -225,7 +225,11 @@ impl App {
             // Pin manual delegation on so `parallel_task`/`task` stay registered
             // even if config.acl disables them — else ultracode's fan-out calls
             // an unregistered tool ("Unknown tool: parallel_task").
-            .with_manual_delegation_enabled(true);
+            .with_manual_delegation_enabled(true)
+            // Generous tool-round budget for every effort — Claude Code runs
+            // effectively unbounded; the old ~50 default cut real multi-step work
+            // (and many parallel subagents) short. ultracode widens it further.
+            .with_max_tool_rounds(200);
         // Keep project instructions (CLAUDE.md) + any /compact summary across
         // model/effort/compact rebuilds, injected into the system prompt.
         let extra = match (&self.instructions, &self.compact_summary) {
@@ -254,8 +258,8 @@ impl App {
             // fans out via `parallel_task` (PTC dispatches on the multi-threaded
             // runtime since 4.2.6). Not planning mode (mutually exclusive with
             // auto-parallel fan-out). Steering is in the system prompt; here we
-            // just track the goal + widen the budget.
-            opts = opts.with_goal_tracking(true).with_max_tool_rounds(40);
+            // just track the goal + widen the budget further (exhaustive mode).
+            opts = opts.with_goal_tracking(true).with_max_tool_rounds(500);
         }
         // Signed in via the /model Codex tab → route through the account client.
         if let Some(client) = &self.llm_override {
