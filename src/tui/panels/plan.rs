@@ -88,7 +88,7 @@ impl App {
             // Map the status glyph to a checkbox; done tasks get struck through,
             // in-progress is orange (glyph + text).
             let (boxc, bcolor, done, inprog) = match glyph {
-                '✔' => ('✔', TN_GREEN, true, false),
+                '✔' => ('✔', TN_GRAY, true, false),
                 '▶' => ('◼', TN_ORANGE, false, true),
                 '✗' => ('✗', TN_RED, false, false),
                 _ => ('◻', Color::BrightBlack, false, false),
