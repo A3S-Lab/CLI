@@ -2438,15 +2438,16 @@ impl App {
             } => {
                 if self.mode.auto_approves(&tool_name) {
                     // Silent: the mode indicator already shows auto-approve is on;
-                    // a line per tool is just noise.
+                    // a line per tool is just noise. Do NOT start another
+                    // spinner_tick here — the turn's tick loop is already running
+                    // (state stays Streaming through auto-approval). Stacking one
+                    // per auto-approved tool made the spinner advance several
+                    // frames per 80ms = the "时快时慢" speed-up.
                     let session = self.session.clone();
-                    return Some(cmd::batch(vec![
-                        cmd::cmd(move || async move {
-                            let _ = session.confirm_tool_use(&tool_id, true, None).await;
-                            Msg::Resume
-                        }),
-                        spinner_tick(),
-                    ]));
+                    return Some(cmd::cmd(move || async move {
+                        let _ = session.confirm_tool_use(&tool_id, true, None).await;
+                        Msg::Resume
+                    }));
                 }
                 // Claude-style: no "requests:" transcript line — the prompt on
                 // the activity line shows the tool; after approval the tool just
