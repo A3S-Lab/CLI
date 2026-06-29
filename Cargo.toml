@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.5.11"
+version = "0.5.12"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -14,10 +14,11 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "4.2.8"
-a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "9db984689ed76ffae272f5410fdc274f93257eaa" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+a3s-code-core = { git = "https://github.com/AI45Lab/Code.git", rev = "e1b65e8fd5dc3cf392d073173c37213669d0f782" }
+a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "be0ed1864a9a9f27ecf9999a98e731e51e7fa569" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -26,6 +27,9 @@ async-trait = "0.1"
 tokio-util = "0.7"
 base64 = "0.22"
 futures = "0.3"
+rand = "0.8"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
 
 [profile.release]
 opt-level = "z"

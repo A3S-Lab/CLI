@@ -34,21 +34,19 @@ impl App {
             let on = !self.disabled_skills.contains(name);
             let marker = if i == sel { "▸" } else { " " };
             let check = if on {
-                Style::new().fg(Color::Green).render("[✓]")
+                Style::new().fg(TN_GREEN).render("[✓]")
             } else {
-                Style::new().fg(Color::BrightBlack).render("[ ]")
+                Style::new().fg(TN_GRAY).render("[ ]")
             };
             let nm_plain = format!("{:<16}", truncate(&format!("/{name}"), 16));
             let nm = if on {
-                Style::new().fg(Color::Cyan).render(&nm_plain)
+                Style::new().fg(TN_CYAN).render(&nm_plain)
             } else {
-                Style::new().fg(Color::BrightBlack).render(&nm_plain)
+                Style::new().fg(TN_GRAY).render(&nm_plain)
             };
             let raw = format!(
                 "  {marker} {check} {nm}  {}",
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&truncate(desc, descw)),
+                Style::new().fg(TN_GRAY).render(&truncate(desc, descw)),
             );
             menu.push(pad_to(&raw, width));
         }
@@ -57,7 +55,7 @@ impl App {
             let down = if end < total { "↓" } else { " " };
             menu.push(pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("  {up}{down} {}/{total}", sel + 1)),
                 width,
             ));

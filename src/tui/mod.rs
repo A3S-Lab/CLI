@@ -9,11 +9,18 @@
 //! the update handler issues the next pump — feeding the async event stream into
 //! the synchronous TEA update loop one event at a time.
 
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, HashSet};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use a3s_code_core::config::OsConfig;
+use a3s_code_core::context::RecentWorkspaceFilesContextProvider;
 use a3s_code_core::hitl::TimeoutAction;
+use a3s_code_core::workspace::{
+    LocalWorkspaceManifest, LocalWorkspaceManifestSnapshot, ManifestWorkspaceBackend,
+    WorkspaceServices,
+};
 use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions, SystemPromptSlots};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
@@ -27,12 +34,14 @@ use a3s_tui::style::{Color, Style};
 use a3s_tui::{Event, KeyCode, KeyModifiers, Model, ProgramBuilder};
 use tokio::sync::{mpsc, Mutex};
 
+use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTableView};
+
 mod config;
 mod gitutil;
 mod image;
 mod panels;
 mod render;
-mod skills;
+pub(crate) mod skills;
 mod syntax;
 mod update;
 mod util;
@@ -45,7 +54,7 @@ use syntax::*;
 use update::*;
 use util::*;
 
-/// Theme accent — ShuAn OS blue. Single source of truth for the UI accent color.
+/// Theme accent — OS blue. Single source of truth for the UI accent color.
 // Tokyo Night palette — muted, cohesive accents used across the whole UI.
 const ACCENT: Color = Color::Rgb(122, 162, 247); // soft blue (primary)
 const TN_GREEN: Color = Color::Rgb(158, 206, 106);
@@ -53,8 +62,41 @@ const TN_YELLOW: Color = Color::Rgb(224, 175, 104);
 const TN_RED: Color = Color::Rgb(247, 118, 142);
 const TN_CYAN: Color = Color::Rgb(125, 207, 255);
 const TN_ORANGE: Color = Color::Rgb(255, 158, 100);
+const TN_PURPLE: Color = Color::Rgb(187, 154, 247); // magenta / purple accent
 const TN_FG: Color = Color::Rgb(192, 202, 245); // body text
 const TN_GRAY: Color = Color::Rgb(122, 132, 168); // completed / muted tasks
+
+/// Self-contained system-prompt directive injected ONLY when signed in to the OS
+/// platform. It disambiguates "OS" (the user means the signed-in 书安OS open
+/// platform, not this machine's operating system) AND inlines exactly how to call
+/// the progressive API, so the model can act immediately — without first
+/// discovering/loading the `a3s-os-capabilities` skill (that extra hop is why a
+/// passive catalog entry rarely triggered: the model fell back to `whoami`).
+/// `base_url` is the signed-in address so the endpoint is concrete.
+fn os_platform_guide(base_url: &str) -> String {
+    format!(
+        "[OS platform] You are signed in to the 书安OS open platform at {base_url} (via /login). \
+DEFAULT RULE: while signed in, \"OS\" in the user's questions ALWAYS means THIS 书安OS platform — \
+never this machine's operating system. So \"what's my OS account\", \"what modules does OS have\", \
+etc. are about the platform. Answer them via the platform's progressive API; do NOT answer from \
+this machine (whoami / hostname / paths / working directory describe the local box, not the \
+platform — they are the WRONG answer). The endpoint and auth token are ALREADY in your shell \
+environment (exported at login) — use them directly; do NOT read ~/.a3s/os-auth.json or any config \
+file on each call:\n\
+  curl -s -X POST \"$A3S_OS_BASE_URL/api/v1/kernel/capabilities\" \
+-H \"Authorization: Bearer $A3S_OS_TOKEN\" -H 'Content-Type: application/json' \
+-d '{{\"action\":\"list\"}}'\n\
+Body fields: `action` = list|search|describe|execute, plus `module` / `operation` / `params`. \
+Go broad→narrow: `list` (modules) → `describe`/`search` for the one operation → `execute`. \
+Pipe responses through `jq` to extract ONLY the fields you need (e.g. \
+`| jq -r '.data.modules[].name'`) so output stays a few lines; summarize the result for the user \
+in a few lines and do NOT paste the whole raw JSON back. \
+If a response contains a `viewUrl` (deep link to the console page for what was asked; extract \
+robustly e.g. `jq -r '.. | .viewUrl? // empty'`), ALWAYS show it to the user as a labeled \
+clickable link on its own line (e.g. `🔗 在控制台查看: <viewUrl>`). The `a3s-os-capabilities` \
+skill has full examples."
+    )
+}
 
 /// Built-in slash commands shown in the `/` menu.
 const SLASH_COMMANDS: &[(&str, &str)] = &[
@@ -73,6 +115,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/workflow",
         "view the latest ultracode dynamic workflow (read-only)",
     ),
+    ("/login", "sign in to the configured OS account"),
+    ("/logout", "sign out from the configured OS account"),
     ("/plugin", "enable/disable Claude skills & plugins"),
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
@@ -97,26 +141,9 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// Slash commands that mutate the session / conversation and so must NOT run
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
-    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/update", "/init",
+    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/reload", "/update",
+    "/init",
 ];
-
-/// Workspace files for the `@` picker (git-tracked, gitignore-respected).
-fn workspace_files(dir: &str) -> Vec<String> {
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 /// Slash commands whose name starts with `input` (input begins with `/`).
 fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
@@ -127,47 +154,168 @@ fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// One row of the `/top` process panel.
-struct ProcRow {
-    pid: String,
-    cpu: f32,
-    mem: f32,
-    cmd: String,
-    agent: Option<&'static str>,
-}
-
-/// Detect a coding-agent process from its command line.
-fn detect_agent(cmd: &str) -> Option<&'static str> {
-    let l = cmd.to_lowercase();
-    if l.contains("a3s-code")
-        || l.contains("a3s code")
-        || l.contains("/a3s ")
-        || l.ends_with("/a3s")
-    {
-        Some("a3s-code")
-    } else if l.contains("claude") {
-        Some("claude code")
-    } else if l.contains("codex") {
-        Some("codex")
-    } else if l.contains("cursor-agent") {
-        Some("cursor")
-    } else if l.contains("gemini") {
-        Some("gemini")
-    } else {
-        None
-    }
-}
-
 /// Glyph + colour for a plan task's status.
 fn task_status_style(status: a3s_code_core::planning::TaskStatus) -> (char, Color) {
     use a3s_code_core::planning::TaskStatus;
     match status {
         TaskStatus::Completed => ('✔', TN_GRAY),
-        TaskStatus::InProgress => ('▶', Color::Yellow),
-        TaskStatus::Failed => ('✗', Color::Red),
-        TaskStatus::Skipped | TaskStatus::Cancelled => ('⊘', Color::BrightBlack),
-        _ => ('□', Color::BrightBlack), // Pending
+        TaskStatus::InProgress => ('▶', TN_YELLOW),
+        TaskStatus::Failed => ('✗', TN_RED),
+        TaskStatus::Skipped | TaskStatus::Cancelled => ('⊘', TN_GRAY),
+        _ => ('□', TN_GRAY), // Pending
     }
+}
+
+/// A turn that delegated work (tools / subagents / planning) but stopped without
+/// a final user-facing answer should auto-synthesize one. This applies in EVERY
+/// mode, not just ultracode: parallel fan-out and planning run at all efforts, so
+/// the "did work, produced no answer" gap can happen anywhere (e.g. a high-effort
+/// plan that fans out to subagents which return artifacts-only). Fires at most
+/// once per turn (`synthesis_used`).
+fn needs_synthesis(
+    synthesis_inflight: bool,
+    synthesis_used: bool,
+    had_agent_activity: bool,
+    text_after_activity: bool,
+) -> bool {
+    !synthesis_inflight && !synthesis_used && had_agent_activity && !text_after_activity
+}
+
+/// Rough in-flight token estimate for text that's still streaming, before the
+/// provider's exact `usage` arrives on End. ASCII text averages ~4 chars/token,
+/// but CJK and other wide scripts are closer to ~1 token/char — so a flat
+/// `chars / 4` under-counts Chinese by 3-4× and makes the live counter lurch
+/// upward when it snaps to the real number. Count the two classes separately.
+fn estimate_tokens(s: &str) -> usize {
+    let (ascii, wide) = s.chars().fold((0usize, 0usize), |(a, w), c| {
+        if c.is_ascii() {
+            (a + 1, w)
+        } else {
+            (a, w + 1)
+        }
+    });
+    ascii / 4 + wide
+}
+
+/// Conservative context window assumed for models that declare no `limit.context`
+/// in config. Most modern models are >= this, so the ctx% indicator and
+/// auto-compaction keep working instead of silently disabling (a 0 window turns
+/// both off). Declared limits always override this.
+const DEFAULT_CONTEXT_LIMIT: u32 = 128_000;
+
+/// The fixed `max_context_tokens` the core uses for its auto-compaction trigger.
+/// The core compares each turn's prompt tokens against this constant and has no
+/// setter for the real model window, so we compensate by scaling the threshold.
+const CORE_MAX_CONTEXT_TOKENS: f32 = 200_000.0;
+
+/// Resolve a model's usable context window: the declared limit, or a sane
+/// default when it's missing/zero so context management never silently no-ops.
+fn resolve_ctx_limit(raw: Option<u32>) -> u32 {
+    match raw {
+        Some(c) if c > 0 => c,
+        _ => DEFAULT_CONTEXT_LIMIT,
+    }
+}
+
+/// Scale the core's auto-compact threshold so it fires at ~85% of `window` (the
+/// model's REAL context window) rather than 85% of the core's fixed 200k. For a
+/// 128k model: `0.85 * 128k / 200k = 0.544` → triggers at ~108.8k (= 85% of
+/// 128k). Windows above ~235k clamp to 1.0 (trigger at 200k): a touch early, but
+/// it never lets the window overflow.
+fn auto_compact_threshold_for(window: u32) -> f32 {
+    let window = if window > 0 {
+        window as f32
+    } else {
+        CORE_MAX_CONTEXT_TOKENS
+    };
+    (0.85 * window / CORE_MAX_CONTEXT_TOKENS).clamp(0.05, 1.0)
+}
+
+fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option<(String, String)> {
+    match name {
+        "program" => {
+            let src = args
+                .and_then(|a| a.get("source"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            Some((
+                format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
+                "dynamic workflow script · /workflow to view read-only".to_string(),
+            ))
+        }
+        "parallel_task" => {
+            let tasks = args
+                .and_then(|a| a.get("tasks"))
+                .and_then(|t| t.as_array())?
+                .iter()
+                .collect::<Vec<_>>();
+            workflow_doc_for_tasks(&tasks, true)
+        }
+        "task" => {
+            let args = args?;
+            if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
+                let tasks = tasks.iter().collect::<Vec<_>>();
+                workflow_doc_for_tasks(&tasks, tasks.len() > 1)
+            } else {
+                workflow_doc_for_tasks(&[args], false)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn workflow_doc_for_tasks(
+    tasks: &[&serde_json::Value],
+    parallel: bool,
+) -> Option<(String, String)> {
+    if tasks.is_empty() {
+        return None;
+    }
+
+    let mut doc = if parallel {
+        format!(
+            "# Dynamic workflow\n\nFanned out {} parallel subagent task(s):\n\n",
+            tasks.len()
+        )
+    } else {
+        "# Dynamic workflow\n\nDelegated subagent task(s):\n\n".to_string()
+    };
+
+    for (i, task) in tasks.iter().enumerate() {
+        let desc = task
+            .get("description")
+            .or_else(|| task.get("prompt"))
+            .or_else(|| task.get("task"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(task)");
+        let agent = task
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
+        let prompt = task
+            .get("prompt")
+            .or_else(|| task.get("task"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        doc.push_str(&format!(
+            "## {}. {desc}\n\nAgent: `{agent}`\n\n{prompt}\n\n",
+            i + 1
+        ));
+    }
+
+    let label = if parallel {
+        format!(
+            "dynamic workflow · {} parallel tasks · /workflow to view read-only",
+            tasks.len()
+        )
+    } else {
+        format!(
+            "dynamic workflow · {} delegated task{} · /workflow to view read-only",
+            tasks.len(),
+            if tasks.len() == 1 { "" } else { "s" }
+        )
+    };
+    Some((doc, label))
 }
 
 /// Brand/theme colour for a coding agent, used to tag its rows and tabs.
@@ -178,50 +326,15 @@ fn agent_color(agent: &str) -> Color {
         "codex" => Color::Rgb(16, 163, 127),       // OpenAI green
         "cursor" => Color::Rgb(180, 182, 200),
         "gemini" => Color::Rgb(124, 137, 245),
-        _ => Color::BrightBlack,
+        _ => TN_GRAY,
     }
 }
 
-/// Snapshot the process table via `ps`, sorted by CPU, agents first.
-async fn fetch_top() -> Vec<ProcRow> {
-    let out = tokio::process::Command::new("ps")
-        .args(["-axo", "pid=,pcpu=,pmem=,args="])
-        .output()
-        .await;
-    let Ok(out) = out else { return Vec::new() };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut rows: Vec<ProcRow> = text
-        .lines()
-        .filter_map(|line| {
-            // ps right-aligns columns with runs of spaces, so collapse them.
-            let mut it = line.split_whitespace();
-            let pid = it.next()?.to_string();
-            let cpu: f32 = it.next()?.parse().ok()?;
-            let mem: f32 = it.next()?.parse().ok()?;
-            let cmd = it.collect::<Vec<_>>().join(" ");
-            if cmd.is_empty() {
-                return None;
-            }
-            let agent = detect_agent(&cmd);
-            Some(ProcRow {
-                pid,
-                cpu,
-                mem,
-                cmd,
-                agent,
-            })
-        })
-        .collect();
-    // Agents first, then by CPU descending.
-    rows.sort_by(|a, b| {
-        b.agent.is_some().cmp(&a.agent.is_some()).then(
-            b.cpu
-                .partial_cmp(&a.cpu)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
-    });
-    rows.truncate(200);
-    rows
+/// Snapshot host processes for the `/top` panel via the shared `a3s top`
+/// collector, so the panel and `a3s top` agree on rows, agent detection, risk,
+/// CWD, and ordering (agents first, then CPU descending).
+async fn fetch_top() -> Vec<ProcessRow> {
+    collect_processes().await.unwrap_or_default()
 }
 
 /// One visible row of the `/ide` file tree (a flattened, expandable tree).
@@ -649,6 +762,8 @@ impl PartialOrd for Queued {
 /// pump command can own a clone; pumps run sequentially, so the mutex never
 /// actually contends.
 type SharedRx = Arc<Mutex<mpsc::Receiver<AgentEvent>>>;
+type SharedManifestRx =
+    Arc<Mutex<tokio::sync::broadcast::Receiver<LocalWorkspaceManifestSnapshot>>>;
 
 #[derive(PartialEq)]
 enum State {
@@ -681,6 +796,8 @@ enum Msg {
     StreamStarted(SharedRx),
     StreamEnded,
     StreamError(String),
+    WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
+    WorkspaceManifestStopped,
     SpinnerTick,
     /// Advance the welcome-mascot animation frame.
     BannerTick,
@@ -691,10 +808,14 @@ enum Msg {
     ShellOutput(String),
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
+    /// OS login completed.
+    OsLogin(Result<String, String>),
+    /// OS access token was refreshed (or refresh failed) in the background.
+    OsRefreshed(Result<crate::a3s_os::StoredOsSession, String>),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
     /// Refreshed process snapshot for the `/top` panel.
-    TopData(Vec<ProcRow>),
+    TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
     TopRefresh,
     /// Result of the async `/relay` session scan.
@@ -729,6 +850,21 @@ fn pump(rx: SharedRx) -> Cmd<Msg> {
     })
 }
 
+fn pump_manifest(rx: SharedManifestRx) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let mut guard = rx.lock().await;
+        loop {
+            match guard.recv().await {
+                Ok(snapshot) => return Msg::WorkspaceManifest(Box::new(snapshot)),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Msg::WorkspaceManifestStopped;
+                }
+            }
+        }
+    })
+}
+
 fn spinner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(80), Msg::SpinnerTick)
 }
@@ -738,14 +874,38 @@ fn banner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(280), Msg::BannerTick)
 }
 
+fn with_recent_workspace_context(
+    opts: SessionOptions,
+    manifest: &Arc<LocalWorkspaceManifest>,
+) -> SessionOptions {
+    opts.with_context_provider(Arc::new(RecentWorkspaceFilesContextProvider::new(
+        manifest.clone(),
+    )))
+}
+
+fn touch_workspace_file_path_for_manifest(
+    manifest: &LocalWorkspaceManifest,
+    workspace: &str,
+    path: &Path,
+) {
+    let root = Path::new(workspace);
+    if let Ok(relative) = path.strip_prefix(root) {
+        if let Some(path) = relative.to_str() {
+            manifest.touch_file(path);
+        }
+    }
+}
+
 /// A running (or just-finished) parallel subagent task, for the bottom tracker.
 struct SubAgent {
     task_id: String,
     agent: String,
     description: String,
     started: Instant,
+    ended: Option<Instant>,
     tokens: u64,
     done: bool,
+    success: Option<bool>,
 }
 
 struct App {
@@ -769,8 +929,16 @@ struct App {
     model_menu: Option<usize>,
     /// Active tab in the /model panel (0 = config; account tabs when signed in).
     model_tab: usize,
-    /// Custom LLM client to inject (Codex account); None uses config.acl creds.
+    /// Custom LLM client to inject for signed-in account tabs; None uses config.acl.
     llm_override: Option<Arc<dyn a3s_code_core::llm::LlmClient>>,
+    /// Optional OS endpoint from config.acl; enables /login and /logout.
+    os_config: Option<OsConfig>,
+    /// Restored OS login (from `~/.a3s/os-auth.json`, persisted across runs);
+    /// `None` = signed out. Loaded on startup, set by /login, cleared by /logout.
+    os_session: Option<crate::a3s_os::StoredOsSession>,
+    /// True while an OS access-token refresh is in flight (guards the BannerTick
+    /// trigger from spawning a second refresh before the first resolves).
+    os_refreshing: bool,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
@@ -807,10 +975,26 @@ struct App {
     active_agents: usize,
     /// Parallel subagent tasks shown in the bottom tracker panel.
     subagents: Vec<SubAgent>,
+    /// True once this turn used tools/planning/subagents that need a final
+    /// user-facing synthesis if the model stops without text afterwards.
+    turn_had_agent_activity: bool,
+    /// True once assistant text arrived after the latest tool/planning/subagent
+    /// activity in this turn.
+    turn_text_after_activity: bool,
+    /// Guard for the hidden ultracode continuation that turns raw workflow
+    /// results into a final answer.
+    ultracode_synthesis_inflight: bool,
+    /// At most one hidden synthesis continuation per user turn.
+    ultracode_synthesis_used: bool,
     /// Project instructions (CLAUDE.md/AGENT.md), injected into the system prompt.
     instructions: Option<String>,
     /// Summary of earlier conversation after a manual `/compact` (reseed).
     compact_summary: Option<String>,
+    /// Shared in-memory workspace file manifest, refreshed by a background watcher.
+    workspace_manifest: Arc<LocalWorkspaceManifest>,
+    workspace_manifest_rx: SharedManifestRx,
+    /// Manifest-backed workspace backend used by agent tools.
+    workspace_services: Arc<WorkspaceServices>,
     /// Brief rainbow-ribbon flourish on the input border when ultracode is picked.
     rainbow_until: Option<Instant>,
     rainbow_frame: usize,
@@ -847,8 +1031,8 @@ struct App {
     history_pos: Option<usize>,
     /// Model name reported by the provider (captured from the first turn).
     model: Option<String>,
-    /// Cumulative tokens used this session.
-    total_tokens: usize,
+    /// Cumulative OUTPUT (generated) tokens this session — what `↓` reports.
+    output_tokens: usize,
     /// Accumulated streamed JSON args of the in-progress tool call, so the
     /// result line can show what the tool actually did (command/path/pattern).
     tool_args: String,
@@ -876,11 +1060,14 @@ struct App {
     plan: Vec<(String, String, char, Color)>, // (id, content, glyph, colour)
     /// `/top` process panel: `Some(rows)` when open; `top_scroll` is the scroll
     /// offset and `top_sel` the highlighted (absolute) row index.
-    top: Option<Vec<ProcRow>>,
+    top: Option<Vec<ProcessRow>>,
     top_scroll: usize,
     top_sel: usize,
+    /// `/top` agent drill-down: `Some(pid)` focuses one coding agent's process
+    /// subtree (the agent root + its descendants). `None` shows all processes.
+    top_focus: Option<u32>,
     /// Pending force-kill confirmation in `/top`: (pid, command label).
-    top_kill: Option<(String, String)>,
+    top_kill: Option<(u32, String)>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
     /// `/git` full-screen panel (Some when open).
@@ -915,6 +1102,12 @@ struct App {
     keymap: Keymap<Action>,
 }
 
+impl App {
+    pub(crate) fn touch_workspace_file(&self, path: &str) {
+        self.workspace_manifest.touch_file(path);
+    }
+}
+
 impl Model for App {
     type Msg = Msg;
 
@@ -923,9 +1116,14 @@ impl Model for App {
         let mut cmds = vec![cmd::cmd(|| async {
             Msg::UpdateCheck(check_latest_version().await)
         })];
+        cmds.push(pump_manifest(self.workspace_manifest_rx.clone()));
+        // Heartbeat for EVERY session (fresh or resumed) — the BannerTick handler
+        // self-gates the mascot animation, but it's also the sole driver of the
+        // ultracode /effort confirm→apply and the idle auto-review. Resumed
+        // sessions used to start no heartbeat, so neither ever fired.
+        cmds.push(banner_tick());
         if self.messages.is_empty() {
             self.viewport.set_content(&self.banner());
-            cmds.push(banner_tick()); // start the mascot animation
         } else {
             // Resumed session — show the prior conversation, scrolled to the end.
             self.rebuild_viewport();
@@ -942,7 +1140,13 @@ impl Model for App {
                 self.relayout();
                 self.textarea
                     .set_width(width.saturating_sub((PAD + 2) as u16));
+                // Re-wrap the live answer at the new width instead of discarding it
+                // (the old reset lost any text streamed before the resize).
+                let raw = self.streaming.raw_content().to_string();
                 self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
+                if !raw.is_empty() {
+                    self.streaming.push(&raw);
+                }
                 self.rebuild_viewport();
             }
 
@@ -966,7 +1170,7 @@ impl Model for App {
                             self.quit_armed = Some(Instant::now());
                             self.push_line(
                                 &Style::new()
-                                    .fg(Color::Yellow)
+                                    .fg(TN_YELLOW)
                                     .render("  press Ctrl+C again to exit"),
                             );
                             return None;
@@ -1002,7 +1206,7 @@ impl Model for App {
                                 return Some(cmd::cmd(move || async move {
                                     let _ = tokio::process::Command::new("kill")
                                         .arg("-9")
-                                        .arg(&pid)
+                                        .arg(pid.to_string())
                                         .output()
                                         .await;
                                     Msg::TopData(fetch_top().await) // refresh after kill
@@ -1013,9 +1217,19 @@ impl Model for App {
                         }
                         return None;
                     }
-                    let last = self.top.as_ref().map_or(0, |r| r.len()).saturating_sub(1);
+                    let rows = self.top_rows();
+                    let last = rows.len().saturating_sub(1);
                     match key.code {
-                        KeyCode::Esc => self.top = None,
+                        // Esc backs out of an agent focus first, then closes.
+                        KeyCode::Esc => {
+                            if self.top_focus.is_some() {
+                                self.top_focus = None;
+                                self.top_sel = 0;
+                                self.top_scroll = 0;
+                            } else {
+                                self.top = None;
+                            }
+                        }
                         KeyCode::Up | KeyCode::Char('k') => {
                             self.top_sel = self.top_sel.saturating_sub(1)
                         }
@@ -1024,14 +1238,23 @@ impl Model for App {
                         }
                         KeyCode::PageUp => self.top_sel = self.top_sel.saturating_sub(10),
                         KeyCode::PageDown => self.top_sel = (self.top_sel + 10).min(last),
-                        // Enter asks to force-kill the highlighted process.
-                        KeyCode::Enter => {
-                            let info = self
-                                .top
-                                .as_ref()
-                                .and_then(|rs| rs.get(self.top_sel))
-                                .map(|r| (r.pid.clone(), r.cmd.clone()));
-                            self.top_kill = info;
+                        // Enter / → drills into the selected coding agent's
+                        // process subtree (its child processes).
+                        KeyCode::Enter | KeyCode::Right => {
+                            if self.top_focus.is_none() {
+                                if let Some(row) = rows.get(self.top_sel) {
+                                    if row.agent.is_some() {
+                                        self.top_focus = Some(row.pid);
+                                        self.top_sel = 0;
+                                        self.top_scroll = 0;
+                                    }
+                                }
+                            }
+                        }
+                        // Shift+K asks to force-kill the highlighted process.
+                        KeyCode::Char('K') => {
+                            self.top_kill =
+                                rows.get(self.top_sel).map(|r| (r.pid, r.command.clone()));
                         }
                         _ => {}
                     }
@@ -1052,11 +1275,10 @@ impl Model for App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
                 }
-                // /model picker takes keys while open.
+                // /model picker takes keys while open — consume EVERY key so
+                // nothing leaks to the hidden input box behind the overlay.
                 if self.model_menu.is_some() {
-                    if let Some(result) = self.handle_model_key(&key) {
-                        return result;
-                    }
+                    return self.handle_model_key(&key).unwrap_or(None);
                 }
                 // /effort slider takes keys while open.
                 if let Some(sel) = self.effort_panel {
@@ -1096,7 +1318,7 @@ impl Model for App {
                             self.rebuild_viewport();
                             self.push_line(
                                 &Style::new()
-                                    .fg(Color::Green)
+                                    .fg(TN_GREEN)
                                     .render(&format!("  ◆ code theme: {}", THEMES[sel].name)),
                             );
                         }
@@ -1126,10 +1348,9 @@ impl Model for App {
                     return None;
                 }
                 // /relay picker takes keys while open.
+                // /relay picker: consume EVERY key so none leaks to the input.
                 if self.relay_menu.is_some() {
-                    if let Some(result) = self.handle_relay_key(&key) {
-                        return result;
-                    }
+                    return self.handle_relay_key(&key).unwrap_or(None);
                 }
                 // Shift+End jumps to the latest output and resumes auto-follow.
                 if key.code == KeyCode::End && key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -1159,7 +1380,7 @@ impl Model for App {
                 }
                 // Esc interrupts the in-progress run (input stays usable otherwise).
                 if self.state == State::Streaming && key.code == KeyCode::Esc {
-                    self.push_line(&Style::new().fg(Color::Yellow).render("  ⎋ interrupting…"));
+                    self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupting…"));
                     let session = self.session.clone();
                     return Some(cmd::cmd(move || async move {
                         session.cancel().await;
@@ -1228,15 +1449,30 @@ impl Model for App {
             }
 
             Msg::StreamError(e) => {
-                self.push_line(&Style::new().fg(Color::Red).render(&format!("  error: {e}")));
+                self.push_line(&Style::new().fg(TN_RED).render(&format!("  error: {e}")));
+                self.loop_remaining = 0; // a failed turn stops the /loop
                 self.finish();
+                // Don't strand messages queued while this turn was starting.
+                return self.drain_queue();
+            }
+
+            Msg::WorkspaceManifest(snapshot) => {
+                self.files = snapshot.file_paths();
+                self.file_sel = self.file_sel.min(self.files.len().saturating_sub(1));
+                return Some(pump_manifest(self.workspace_manifest_rx.clone()));
+            }
+
+            Msg::WorkspaceManifestStopped => {
+                let snapshot = self.workspace_manifest.snapshot();
+                self.files = snapshot.file_paths();
+                self.file_sel = self.file_sel.min(self.files.len().saturating_sub(1));
             }
 
             Msg::Interrupted => {
                 // Esc force-aborted the turn: keep partial output, drop the
                 // stream (finish() clears rx so late events are ignored), idle.
                 self.finalize_streaming();
-                self.push_line(&Style::new().fg(Color::Yellow).render("  ⎋ interrupted"));
+                self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupted"));
                 self.loop_remaining = 0; // Esc also stops a /loop
                 self.finish();
                 return self.drain_queue();
@@ -1245,27 +1481,11 @@ impl Model for App {
             Msg::Agent(event) => return self.on_agent_event(*event),
 
             Msg::StreamEnded => {
+                // Channel closed without a normal End event (abnormal close).
                 if self.state == State::Streaming {
                     self.finalize_streaming();
-                    self.completed += 1;
                 }
-                self.finish();
-                // /loop: auto-continue until the agent says DONE, the cap is hit,
-                // or Esc. Queued user messages take priority.
-                if self.loop_remaining > 0 && self.queue.is_empty() {
-                    self.loop_remaining -= 1;
-                    let n = self.loop_remaining;
-                    self.push_line(
-                        &Style::new()
-                            .fg(Color::BrightBlack)
-                            .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
-                    );
-                    return Some(cmd::msg(Msg::Submit(
-                        "Continue. If the task is fully complete, reply DONE and stop.".to_string(),
-                    )));
-                }
-                // Run the next queued message (submitted while busy), if any.
-                return self.drain_queue();
+                return self.complete_turn();
             }
 
             Msg::SpinnerTick => {
@@ -1345,18 +1565,32 @@ impl Model for App {
                     });
                     return Some(cmd::batch(vec![banner_tick(), review]));
                 }
+                // Keep the OS access token fresh: refresh proactively before it
+                // expires so the agent's $A3S_OS_TOKEN never goes stale mid-session.
+                if !self.os_refreshing {
+                    if let Some(s) = &self.os_session {
+                        if crate::a3s_os::needs_refresh(s) {
+                            self.os_refreshing = true;
+                            let session = s.clone();
+                            let refresh = cmd::cmd(move || async move {
+                                Msg::OsRefreshed(
+                                    crate::a3s_os::refresh_session(&session)
+                                        .await
+                                        .map_err(|e| e.to_string()),
+                                )
+                            });
+                            return Some(cmd::batch(vec![banner_tick(), refresh]));
+                        }
+                    }
+                }
                 return Some(banner_tick());
             }
 
             Msg::AutoReview(text) => {
                 if !text.trim().is_empty() {
                     // Dim + unobtrusive — it's a passive side note, not output.
-                    let dim = |s: &str| {
-                        format!(
-                            "  {}",
-                            Style::new().fg(Color::BrightBlack).italic().render(s)
-                        )
-                    };
+                    let dim =
+                        |s: &str| format!("  {}", Style::new().fg(TN_GRAY).italic().render(s));
                     let mut lines = vec![dim("⟳ inactivity review")];
                     lines.extend(text.trim().lines().map(dim));
                     self.push_line(&lines.join("\n"));
@@ -1368,7 +1602,7 @@ impl Model for App {
                 if summary.trim().is_empty() {
                     self.push_line(
                         &Style::new()
-                            .fg(Color::Red)
+                            .fg(TN_RED)
                             .render("  compaction failed (empty summary)"),
                     );
                     return None;
@@ -1382,23 +1616,23 @@ impl Model for App {
                     Ok((s, _)) => {
                         self.session = Arc::new(s);
                         self.messages.clear();
-                        self.total_tokens = 0;
+                        self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
                         self.push_line(
                             &Style::new()
-                                .fg(Color::Green)
+                                .fg(TN_GREEN)
                                 .bold()
                                 .render("  ✦ context compacted — continuing from this summary:"),
                         );
                         self.push_line(&gutter(
-                            Color::Cyan,
+                            TN_CYAN,
                             self.compact_summary.as_deref().unwrap_or(""),
                         ));
                         self.rebuild_viewport();
                     }
                     Err(e) => self.push_line(
                         &Style::new()
-                            .fg(Color::Red)
+                            .fg(TN_RED)
                             .render(&format!("  compaction failed: {e}")),
                     ),
                 }
@@ -1427,7 +1661,7 @@ impl Model for App {
                     if !approved {
                         self.push_line(
                             &Style::new()
-                                .fg(Color::Red)
+                                .fg(TN_RED)
                                 .render(&format!("  ⎿ denied {label}")),
                         );
                     }
@@ -1450,7 +1684,7 @@ impl Model for App {
 
             Msg::ShellOutput(text) => {
                 let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
-                self.push_line(&gutter(Color::BrightBlack, body.trim_end()));
+                self.push_line(&gutter(TN_GRAY, body.trim_end()));
             }
 
             Msg::UpdatePlan(latest) => {
@@ -1460,7 +1694,7 @@ impl Model for App {
                 match latest {
                     None => self.push_line(
                         &Style::new()
-                            .fg(Color::Yellow)
+                            .fg(TN_YELLOW)
                             .render("  couldn't reach the release server — try again later"),
                     ),
                     Some(l) if crate::update::version_ge(current, &l) => self.push_line(
@@ -1481,9 +1715,50 @@ impl Model for App {
                             )));
                             return Some(cmd::quit());
                         }
-                        self.push_line(&Style::new().fg(Color::BrightBlack).render(&format!(
+                        self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
                             "  → a3s {l} available — download: https://github.com/A3S-Lab/Cli/releases/latest"
                         )));
+                    }
+                }
+            }
+
+            Msg::OsLogin(result) => match result {
+                Ok(label) => {
+                    // The browser flow already saved to disk; load it into memory
+                    // and rebuild so the login-gated skill activates this run.
+                    self.os_session = self
+                        .os_config
+                        .as_ref()
+                        .and_then(crate::a3s_os::current_session);
+                    if let Some(s) = &self.os_session {
+                        crate::a3s_os::export_os_env(s);
+                    }
+                    self.refresh_after_auth();
+                    self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                        "  ✓ signed in to OS as {label} · capabilities skill active"
+                    )));
+                }
+                Err(error) => self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  login failed: {error}")),
+                ),
+            },
+
+            Msg::OsRefreshed(result) => {
+                self.os_refreshing = false;
+                match result {
+                    Ok(session) => {
+                        // Re-export the fresh token so the agent's $A3S_OS_TOKEN
+                        // stays valid; no session rebuild needed (the skill reads
+                        // the env var at call time). Stay quiet — it's routine.
+                        crate::a3s_os::export_os_env(&session);
+                        self.os_session = Some(session);
+                    }
+                    Err(_) => {
+                        // Leave the existing session; the next BannerTick retries
+                        // while it's still within the refresh window, and /login
+                        // remains the fallback once it truly expires.
                     }
                 }
             }
@@ -1543,8 +1818,8 @@ impl Model for App {
         if let Some(ide) = &self.ide {
             return self.render_ide(ide);
         }
-        if let Some(rows) = &self.top {
-            return self.render_top_panel(rows);
+        if self.top.is_some() {
+            return self.render_top_panel();
         }
         let width = self.width as usize;
         let viewport_view = self.viewport.view();
@@ -1554,9 +1829,9 @@ impl Model for App {
         let (sym, icolor, border): (&str, Color, Color) = if self.shell_mode {
             ("!", Color::Rgb(255, 105, 180), Color::Rgb(255, 105, 180))
         } else if inp.starts_with("/btw") {
-            ("❯", Color::Yellow, Color::Yellow)
+            ("❯", TN_YELLOW, TN_YELLOW)
         } else {
-            ("❯", ACCENT, Color::BrightBlack)
+            ("❯", ACCENT, TN_GRAY)
         };
         // Brief rainbow ribbon on BOTH input borders right after picking
         // ultracode; otherwise plain bottom + effort-chip top.
@@ -1604,7 +1879,7 @@ impl Model for App {
                 "{}{} {}{} {}",
                 " ".repeat(PAD),
                 Style::new().fg(border).render(&"─".repeat(left)),
-                Style::new().fg(Color::BrightBlack).render(&ctxlabel),
+                Style::new().fg(TN_GRAY).render(&ctxlabel),
                 Style::new().fg(ACCENT).bold().render(&elabel),
                 Style::new().fg(border).render("──"),
             )
@@ -1637,11 +1912,12 @@ impl Model for App {
                     let working = shimmer("Working…", self.blink_tick as usize);
                     let mut tail = String::new();
                     if let Some(t0) = self.stream_started {
-                        // Live token estimate: finalized total + ~chars/4 for the
-                        // in-flight reasoning + answer (snaps to exact usage on End).
-                        let est = self.total_tokens
-                            + self.streaming.raw_content().chars().count() / 4
-                            + self.thinking.chars().count() / 4;
+                        // Live output estimate: finalized output tokens + a
+                        // CJK-aware estimate of the in-flight reasoning + answer
+                        // (snaps to exact completion usage on End).
+                        let est = self.output_tokens
+                            + estimate_tokens(self.streaming.raw_content())
+                            + estimate_tokens(&self.thinking);
                         tail.push_str(&format!(" ({}", fmt_elapsed(t0.elapsed())));
                         if est > 0 {
                             tail.push_str(&format!(" · ↓ {} tokens", humanize(est)));
@@ -1682,7 +1958,7 @@ impl Model for App {
         // Bottom status bar (Claude-style, two lines):
         //   dir git:(branch) <model> (<window> context) ctx:N%   [+ live chips]
         //   ⏵⏵ <mode> mode on (shift+tab to cycle) · …
-        let dim = |s: &str| Style::new().fg(Color::BrightBlack).render(s);
+        let dim = |s: &str| Style::new().fg(TN_GRAY).render(s);
         let dir = self.cwd.rsplit('/').next().unwrap_or(&self.cwd);
         let mut line1 = format!("  {}", Style::new().fg(ACCENT).bold().render(dir));
         if let Some(b) = &self.branch {
@@ -1707,9 +1983,20 @@ impl Model for App {
         }
         if self.context_limit > 0 {
             let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
-            line1.push_str(&format!(" {}", dim(&format!("ctx:{pct}%"))));
-        } else if self.total_tokens > 0 {
-            line1.push_str(&format!(" {}", dim(&format!("{} tok", self.total_tokens))));
+            // Color by fill so the approach to the ~85% auto-compact point is visible.
+            let c = if pct >= 85 {
+                TN_RED
+            } else if pct >= 70 {
+                TN_YELLOW
+            } else {
+                TN_GRAY
+            };
+            line1.push_str(&format!(
+                " {}",
+                Style::new().fg(c).render(&format!("ctx:{pct}%"))
+            ));
+        } else if self.output_tokens > 0 {
+            line1.push_str(&format!(" {}", dim(&format!("{} tok", self.output_tokens))));
         }
         // Live chips, only when active.
         if let Some(g) = &self.goal {
@@ -1752,9 +2039,11 @@ impl Model for App {
         };
         let tasks = self.task_lines();
         let task_block = tasks.join("\n");
-        // Plan/TODO panel + parallel-subagent tracker pinned above the input.
+        // Plan/TODO panel stays pinned above the input.
         let plan = self.plan_lines();
         let plan_block = plan.join("\n");
+        // Parallel-subagent tracker is pinned at the very bottom, below the
+        // status bar (not above the input) so it doesn't push the prompt around.
         let subs = self.subagent_lines();
         let sub_block = subs.join("\n");
         let composed = Layout::vertical()
@@ -1762,12 +2051,12 @@ impl Model for App {
             .item(&spacer, Constraint::Fixed(1))
             .item(&activity, Constraint::Fixed(1))
             .item(&plan_block, Constraint::Fixed(plan.len() as u16))
-            .item(&sub_block, Constraint::Fixed(subs.len() as u16))
             .item(&top_separator, Constraint::Fixed(1))
             .item(&input_view, Constraint::Fixed(self.input_height()))
             .item(&separator, Constraint::Fixed(1))
             .item(&status1, Constraint::Fixed(1))
             .item(&status2, Constraint::Fixed(1))
+            .item(&sub_block, Constraint::Fixed(subs.len() as u16))
             .item(&task_block, Constraint::Fixed(tasks.len() as u16))
             .render(self.height);
 
@@ -1806,9 +2095,9 @@ impl Model for App {
         {
             return None;
         }
-        // Below the input: separator + 2 status lines + the bottom task panel.
-        // The input itself spans `input_height` rows; the cursor sits on its row.
-        let below = 3 + self.task_lines().len() as u16;
+        // Below the input: separator + 2 status lines + the subagent panel +
+        // the task panel. The input spans `input_height` rows; cursor on its row.
+        let below = 3 + self.subagent_lines().len() as u16 + self.task_lines().len() as u16;
         let row = self.height.saturating_sub(below + self.input_height())
             + self.textarea.cursor_row() as u16;
         let col = (PAD + 2) as u16 + self.textarea.cursor_display_col() as u16; // PAD + "❯ "
@@ -1866,11 +2155,114 @@ impl App {
             let cmd0 = trimmed.split_whitespace().next().unwrap_or("");
             if IDLE_ONLY.contains(&cmd0) {
                 self.textarea.clear();
-                self.push_line(&Style::new().fg(Color::Yellow).render(&format!(
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
                     "  {cmd0} is unavailable while a turn is running — press Esc to stop first"
                 )));
                 return None;
             }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/login") {
+            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+                // e.g. "/login-token" is not the /login command.
+            } else {
+                self.textarea.clear();
+                let Some(os_config) = self.os_config.clone() else {
+                    self.push_line(&format!(
+                        "{}\n{}\n{}\n{}",
+                        Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /login needs an OS endpoint, but none is configured."),
+                        Style::new().fg(TN_GRAY).render(
+                            "  Add it to ~/.a3s/config.acl (or your project's .a3s/config.acl):"
+                        ),
+                        Style::new()
+                            .fg(TN_CYAN)
+                            .render("      os = \"https://your-os-host.example.com\""),
+                        Style::new()
+                            .fg(TN_GRAY)
+                            .render("  then restart a3s code and run /login again."),
+                    ));
+                    return None;
+                };
+                let token = rest.trim();
+                if !token.is_empty() {
+                    match crate::a3s_os::login_with_token(&os_config, token) {
+                        Ok(session) => {
+                            let label = session.display_label();
+                            crate::a3s_os::export_os_env(&session);
+                            self.os_session = Some(session);
+                            self.refresh_after_auth();
+                            self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                                "  ✓ signed in to OS as {label} · capabilities skill active"
+                            )));
+                        }
+                        Err(error) => self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  login failed: {error}")),
+                        ),
+                    }
+                    return None;
+                }
+
+                // Already signed in (restored from a previous run) → no need to
+                // re-authenticate; tell the user how to switch instead.
+                if let Some(s) = &self.os_session {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  already signed in to OS as {} · /logout to switch accounts",
+                        s.display_label()
+                    )));
+                    return None;
+                }
+
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GRAY)
+                        .render("  opening OS login in your browser…"),
+                );
+                return Some(cmd::cmd(move || async move {
+                    let result = crate::a3s_os::login_via_browser(os_config)
+                        .await
+                        .map(|session| session.display_label())
+                        .map_err(|error| error.to_string());
+                    Msg::OsLogin(result)
+                }));
+            }
+        }
+        if trimmed == "/logout" {
+            self.textarea.clear();
+            let Some(os_config) = self.os_config.clone() else {
+                self.push_line(&Style::new().fg(TN_YELLOW).render(
+                    "  configure `os = \"https://...\"` in .a3s/config.acl to enable /logout",
+                ));
+                return None;
+            };
+            match crate::a3s_os::logout(&os_config) {
+                Ok(true) => {
+                    self.os_session = None;
+                    crate::a3s_os::remove_capability_skill_dir();
+                    crate::a3s_os::clear_os_env();
+                    self.refresh_after_auth();
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GREEN)
+                            .render("  ✓ signed out from OS · capabilities skill removed"),
+                    );
+                }
+                Ok(false) => {
+                    self.os_session = None;
+                    crate::a3s_os::remove_capability_skill_dir();
+                    crate::a3s_os::clear_os_env();
+                    self.refresh_after_auth();
+                    self.push_line(&Style::new().fg(TN_GRAY).render("  no OS login was stored"));
+                }
+                Err(error) => self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  logout failed: {error}")),
+                ),
+            }
+            return None;
         }
         // `/btw <prompt>` runs a background side-thread (separate ephemeral
         // session, the main conversation as context) without disturbing the
@@ -1879,11 +2271,7 @@ impl App {
             let q = rest.trim().to_string();
             self.textarea.clear();
             if q.is_empty() {
-                self.push_line(
-                    &Style::new()
-                        .fg(Color::BrightBlack)
-                        .render("  usage: /btw <question>"),
-                );
+                self.push_line(&Style::new().fg(TN_GRAY).render("  usage: /btw <question>"));
                 return None;
             }
             self.btw = Some((q.clone(), None));
@@ -1926,24 +2314,24 @@ impl App {
             if g.is_empty() {
                 match &self.goal {
                     Some(cur) => self.push_line(&gutter(
-                        Color::Cyan,
+                        TN_CYAN,
                         &format!("🎯 goal: {cur}   (/goal clear to remove)"),
                     )),
                     None => self.push_line(
                         &Style::new()
-                            .fg(Color::BrightBlack)
+                            .fg(TN_GRAY)
                             .render("  usage: /goal <what you're working toward>"),
                     ),
                 }
             } else if g == "clear" {
                 self.goal = None;
-                self.push_line(&Style::new().fg(Color::BrightBlack).render("  goal cleared"));
+                self.push_line(&Style::new().fg(TN_GRAY).render("  goal cleared"));
                 return None;
             } else {
                 // Set the persistent goal AND start working toward it now (the
                 // goal is prepended to this and every later prompt).
                 self.goal = Some(g.to_string());
-                self.push_line(&gutter(Color::Cyan, &format!("🎯 goal set: {g}")));
+                self.push_line(&gutter(TN_CYAN, &format!("🎯 goal set: {g}")));
                 return Some(cmd::msg(Msg::Submit(g.to_string())));
             }
             return None;
@@ -1954,7 +2342,7 @@ impl App {
             self.textarea.clear();
             if task.is_empty() {
                 self.push_line(
-                    &Style::new().fg(Color::BrightBlack).render(
+                    &Style::new().fg(TN_GRAY).render(
                         "  usage: /loop <task>   (auto-continues up to 8 turns; Esc stops)",
                     ),
                 );
@@ -1973,6 +2361,23 @@ impl App {
                 self.queue.clear();
                 self.completed = 0;
                 self.textarea.clear();
+                // Actually reset the conversation, not just the screen: swap in a
+                // fresh session (new id, no history, no carried compact summary)
+                // and zero the token/ctx counters. /clear is idle-only (guarded
+                // above), so replacing the session is safe. Set the id first
+                // (rebuild_session keys off it) and revert it if the rebuild fails
+                // so id and session never desync.
+                let prev_id = std::mem::replace(&mut self.session_id, new_session_id());
+                let model = self.model.clone();
+                match self.rebuild_session(model.as_deref()) {
+                    Ok((s, _)) => {
+                        self.session = Arc::new(s);
+                        self.compact_summary = None;
+                        self.output_tokens = 0;
+                        self.last_prompt_tokens = 0;
+                    }
+                    Err(_) => self.session_id = prev_id,
+                }
                 self.relayout();
                 self.rebuild_viewport();
                 return None;
@@ -2000,35 +2405,45 @@ impl App {
                 if self.state != State::Idle {
                     self.push_line(
                         &Style::new()
-                            .fg(Color::Yellow)
+                            .fg(TN_YELLOW)
                             .render("  finish the current turn before compacting"),
                     );
                     return None;
                 }
                 let history = self.session.history();
                 if history.is_empty() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(Color::BrightBlack)
-                            .render("  nothing to compact yet"),
-                    );
+                    self.push_line(&Style::new().fg(TN_GRAY).render("  nothing to compact yet"));
                     return None;
                 }
                 self.compacting = Some(Instant::now()); // progress bar + input lock
                 let agent = self.agent.clone();
                 let workspace = self.cwd.clone();
+                // Re-compacting must subsume the PRIOR summary — it lives in the
+                // system prompt, not in `history`, so without this everything
+                // before the last /compact would be dropped from the new summary.
+                let prompt = match &self.compact_summary {
+                    Some(prev) => format!(
+                        "An earlier part of this conversation was already condensed into this \
+                         summary:\n\n{prev}\n\nProduce a SINGLE updated summary that fully \
+                         incorporates the summary above AND the conversation history below, so a \
+                         fresh session can continue seamlessly: the goal, key decisions, \
+                         files/commands touched, current state, and the immediate next steps. Be \
+                         thorough but compact."
+                    ),
+                    None => "Summarize this conversation so a fresh session can continue \
+                         seamlessly: the goal, key decisions, files/commands touched, current \
+                         state, and the immediate next steps. Be thorough but compact."
+                        .to_string(),
+                };
                 return Some(cmd::cmd(move || async move {
                     let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
                         .with_timeout(500, TimeoutAction::Reject);
-                    let prompt = "Summarize this conversation so a fresh session can continue \
-                         seamlessly: the goal, key decisions, files/commands touched, current \
-                         state, and the immediate next steps. Be thorough but compact.";
                     let mut summary = String::new();
                     if let Ok(sess) = agent.session(
                         workspace,
                         Some(SessionOptions::new().with_confirmation_policy(conf)),
                     ) {
-                        if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await {
+                        if let Ok((mut rx, _j)) = sess.stream(&prompt, Some(&history)).await {
                             while let Some(ev) = rx.recv().await {
                                 match ev {
                                     AgentEvent::TextDelta { text } => summary.push_str(&text),
@@ -2070,7 +2485,7 @@ impl App {
                     Some(p) => self.open_config_in_ide(&p),
                     None => self.push_line(
                         &Style::new()
-                            .fg(Color::Yellow)
+                            .fg(TN_YELLOW)
                             .render("  could not locate a home directory for ~/.a3s/config.acl"),
                     ),
                 }
@@ -2091,6 +2506,7 @@ impl App {
                 self.top = Some(Vec::new());
                 self.top_scroll = 0;
                 self.top_sel = 0;
+                self.top_focus = None;
                 return Some(cmd::cmd(|| async { Msg::TopData(fetch_top().await) }));
             }
             "/ide" => {
@@ -2109,7 +2525,7 @@ impl App {
             "/plugin" | "/plugins" => {
                 self.textarea.clear();
                 if self.skills.is_empty() {
-                    self.push_line(&Style::new().fg(Color::BrightBlack).render(
+                    self.push_line(&Style::new().fg(TN_GRAY).render(
                         "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
                     ));
                 } else {
@@ -2132,14 +2548,14 @@ impl App {
                 } else {
                     "🖱 wheel-scroll off — native text selection / copy enabled (PgUp/PgDn still scroll)"
                 };
-                self.push_line(&Style::new().fg(Color::Cyan).render(&format!("  {msg}")));
+                self.push_line(&Style::new().fg(TN_CYAN).render(&format!("  {msg}")));
                 return None;
             }
             "/workflow" => {
                 self.textarea.clear();
                 match self.last_workflow.clone() {
                     Some(doc) => self.open_readonly_in_ide("dynamic-workflow.md", &doc),
-                    None => self.push_line(&Style::new().fg(Color::BrightBlack).render(
+                    None => self.push_line(&Style::new().fg(TN_GRAY).render(
                         "  no dynamic workflow yet — run an ultracode task that fans out via parallel_task",
                     )),
                 }
@@ -2147,14 +2563,29 @@ impl App {
             }
             "/reload" => {
                 self.textarea.clear();
-                // Hot-reload: re-discover skill dirs + re-parse (new plugins show up).
+                // Hot-reload: re-discover skill dirs, refresh the UI catalog,
+                // and rebuild the session so the core skill registry and
+                // next Claude/system prompt see the same skills.
                 let dirs = agent_skill_dirs(&self.cwd);
                 self.skills = load_skills(&dirs);
                 self.skill_count = count_skill_files(&dirs);
-                self.push_line(&Style::new().fg(Color::Green).render(&format!(
-                    "  ↻ reloaded — {} skills available in the / menu",
-                    self.skills.len()
-                )));
+                let model = self.model.clone();
+                match self.rebuild_session(model.as_deref()) {
+                    Ok((session, _)) => {
+                        self.session = Arc::new(session);
+                        self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                            "  ↻ reloaded — {} skills available",
+                            self.skills.len()
+                        )));
+                    }
+                    Err(error) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  reload failed: {error}")),
+                        );
+                    }
+                }
                 return None;
             }
             "/update" => {
@@ -2225,7 +2656,7 @@ impl App {
                 seq: self.seq,
                 text: trimmed.to_string(),
             });
-            self.push_line(&Style::new().fg(Color::BrightBlack).render("    ⋯ queued"));
+            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
             None
         }
@@ -2239,7 +2670,7 @@ impl App {
         if !clipboard_image_to(&dest) {
             self.push_line(
                 &Style::new()
-                    .fg(Color::Yellow)
+                    .fg(TN_YELLOW)
                     .render("  no image in clipboard (Ctrl+V pastes a copied/screenshot image)"),
             );
             return;
@@ -2265,43 +2696,63 @@ impl App {
     }
 
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
+        self.start_stream_inner(prompt.clone(), prompt, true, true, false)
+    }
+
+    fn start_ultracode_synthesis(
+        &mut self,
+        prompt: String,
+        display_task: String,
+    ) -> Option<Cmd<Msg>> {
+        self.ultracode_synthesis_used = true;
+        self.push_line(&Style::new().fg(TN_GRAY).render("  ⇉ synthesizing results…"));
+        self.start_stream_inner(prompt, display_task, false, false, true)
+    }
+
+    fn start_stream_inner(
+        &mut self,
+        prompt: String,
+        display_task: String,
+        clear_turn_artifacts: bool,
+        include_attachments: bool,
+        synthesis: bool,
+    ) -> Option<Cmd<Msg>> {
         self.streaming.clear();
         self.got_delta = false; // track if this turn streamed any text deltas
+        self.turn_had_agent_activity = false;
+        self.turn_text_after_activity = false;
+        self.ultracode_synthesis_inflight = synthesis;
+        if !synthesis {
+            self.ultracode_synthesis_used = false;
+        }
         self.last_paint = None; // first delta of the turn paints immediately
         self.viewport.set_auto_scroll(true); // sending a message jumps to latest
-        self.plan.clear(); // fresh plan per turn; planning events refill it
-        self.running_task = Some(prompt.clone());
+        if clear_turn_artifacts {
+            self.plan.clear(); // fresh plan per user turn; planning events refill it
+            self.subagents.clear(); // keep completed agents visible until the next user turn
+        }
+        self.running_task = Some(display_task);
         self.state = State::Streaming;
         self.relayout();
         self.stream_started = Some(Instant::now());
         self.spinner.start();
         self.rebuild_viewport();
         let session = self.session.clone();
-        let atts = std::mem::take(&mut self.pending_images);
+        let atts = if include_attachments {
+            std::mem::take(&mut self.pending_images)
+        } else {
+            Vec::new()
+        };
         // Keep the agent aligned with the standing goal (display stays clean).
         let prompt = match &self.goal {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
-        // ultracode: raise the dynamic-workflow steering to TURN-level salience.
-        // The system-prompt guideline alone gets ignored by some models (they
-        // fan out via direct parallel_task, or answer inline); a per-turn nudge
-        // makes them author a `program` workflow script — which now fans out for
-        // real (PTC dispatches on the multi-threaded runtime since core 4.2.6,
-        // the reason the original prefix was safe to bring back). Verified with a
-        // real LLM: the model emits a correct run(ctx) script calling parallel_task.
-        let prompt = if self.effort == ULTRACODE {
-            format!(
-                "{prompt}\n\n[ultracode] Tackle this as a dynamic workflow. For the \
-                 independent parts, call the `program` tool with a JavaScript script \
-                 whose `async function run(ctx, inputs)` fans them out via \
-                 `ctx.tool(\"parallel_task\", {{ tasks: [...] }})`, keeps all task/\
-                 parallel_task delegation INSIDE the script, then aggregates and \
-                 returns. After it runs, synthesize the results."
-            )
-        } else {
-            prompt
-        };
+        // ultracode no longer rewrites the user turn. Whether a turn plans and
+        // fans out is decided by the core's message-gated planning
+        // (PlanningMode::Auto) plus the `parallel_task` tool description — not an
+        // unconditional per-turn imperative, which made even "hi" trigger a plan
+        // and workspace exploration.
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
@@ -2326,11 +2777,45 @@ impl App {
         self.start_stream(next.text)
     }
 
+    /// Shared turn-completion: count the turn, run any ultracode synthesis, go
+    /// idle, then either continue a `/loop` or drain the next queued message.
+    /// Called from BOTH the normal `AgentEvent::End` arm (the happy path, which
+    /// returns without re-pumping so `StreamEnded` never fires) and the
+    /// `StreamEnded` channel-closed arm — previously this lived only in
+    /// `StreamEnded`, so on success the queue never drained and `/loop` ran once.
+    fn complete_turn(&mut self) -> Option<Cmd<Msg>> {
+        if self.state == State::Streaming {
+            self.completed += 1;
+        }
+        let synthesis = self.prepare_ultracode_synthesis();
+        self.finish();
+        if let Some((prompt, display_task)) = synthesis {
+            return self.start_ultracode_synthesis(prompt, display_task);
+        }
+        // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
+        // Queued user messages take priority.
+        if self.loop_remaining > 0 && self.queue.is_empty() {
+            self.loop_remaining -= 1;
+            let n = self.loop_remaining;
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
+            );
+            return Some(cmd::msg(Msg::Submit(
+                "Continue. If the task is fully complete, reply DONE and stop.".to_string(),
+            )));
+        }
+        // Run the next queued message (submitted while busy), if any.
+        self.drain_queue()
+    }
+
     fn on_agent_event(&mut self, event: AgentEvent) -> Option<Cmd<Msg>> {
         // After an interrupt, rx is cleared — ignore any late buffered events.
         self.rx.as_ref()?;
         match event {
             AgentEvent::TextDelta { text } => {
+                self.mark_assistant_text(&text);
                 self.got_delta = true;
                 self.streaming.push(&text);
                 self.update_viewport_with_stream();
@@ -2342,6 +2827,7 @@ impl App {
             AgentEvent::ToolStart { name, .. } => {
                 // Finalize any assistant text; show the tool live with a blinking
                 // dot. The final "• action / └ result" lands on ToolEnd.
+                self.mark_agent_activity();
                 self.finalize_streaming();
                 self.tool_args.clear();
                 self.tool_output.clear();
@@ -2362,6 +2848,7 @@ impl App {
                 metadata,
                 ..
             } => {
+                self.mark_agent_activity();
                 self.running_tool = None;
                 self.active_tools = self.active_tools.saturating_sub(1);
                 let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
@@ -2385,6 +2872,7 @@ impl App {
                 description,
                 ..
             } => {
+                self.mark_agent_activity();
                 self.finalize_streaming();
                 self.active_agents += 1;
                 // Track it in the live bottom panel instead of a transcript line.
@@ -2393,23 +2881,29 @@ impl App {
                     agent,
                     description,
                     started: Instant::now(),
+                    ended: None,
                     tokens: 0,
                     done: false,
+                    success: None,
                 });
                 self.relayout();
             }
             AgentEvent::SubagentProgress {
                 task_id, metadata, ..
             } => {
-                // Pull a token count from the progress metadata, if present.
+                self.mark_agent_activity();
+                // Per-child OUTPUT tokens for the panel's `↓`. Each child turn-end
+                // reports that turn's completion_tokens once, so SUM them across
+                // turns (tool-event progress carries no usage, so it won't add).
+                // The old code took max(total_tokens), i.e. the largest single
+                // turn's prompt+completion ≈ the child's context size, not output.
                 let toks = metadata
-                    .get("tokens")
-                    .or_else(|| metadata.get("total_tokens"))
-                    .or_else(|| metadata.pointer("/usage/total_tokens"))
+                    .get("completion_tokens")
+                    .or_else(|| metadata.pointer("/usage/completion_tokens"))
                     .and_then(|v| v.as_u64());
                 if let Some(s) = self.subagents.iter_mut().find(|s| s.task_id == task_id) {
                     if let Some(t) = toks {
-                        s.tokens = s.tokens.max(t);
+                        s.tokens += t;
                     }
                 }
             }
@@ -2420,14 +2914,18 @@ impl App {
                 success,
                 ..
             } => {
+                self.mark_agent_activity();
                 self.active_agents = self.active_agents.saturating_sub(1);
-                // Drop it from the live panel; record the result in the transcript.
-                self.subagents.retain(|s| s.task_id != task_id);
+                if let Some(s) = self.subagents.iter_mut().find(|s| s.task_id == task_id) {
+                    s.done = true;
+                    s.success = Some(success);
+                    s.ended = Some(Instant::now());
+                }
                 self.relayout();
                 let (mark, color) = if success {
-                    ("✓", Color::Green)
+                    ("✓", TN_GREEN)
                 } else {
-                    ("✗", Color::Red)
+                    ("✗", TN_RED)
                 };
                 let snippet = output.lines().next().unwrap_or("").trim();
                 let snippet = truncate(snippet, self.width.saturating_sub(20) as usize);
@@ -2438,6 +2936,20 @@ impl App {
                     } else {
                         format!(" · {snippet}")
                     }
+                )));
+            }
+            AgentEvent::ContextCompacted {
+                before_messages,
+                after_messages,
+                percent_before,
+                ..
+            } => {
+                // The core auto-compacted mid-turn (pruned tool outputs + summarized
+                // old messages). The next turn's prompt reflects the smaller context,
+                // so ctx% self-corrects on the following End — just surface a note.
+                let pct = (percent_before * 100.0).round() as u32;
+                self.push_line(&Style::new().fg(TN_GRAY).italic().render(&format!(
+                    "  ✦ context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
                 )));
             }
             AgentEvent::ConfirmationRequired {
@@ -2489,10 +3001,20 @@ impl App {
                 // text: a mid-turn finalize (e.g. a tool call) empties the buffer,
                 // so End.text (the full message) would be appended a second time.
                 if !self.got_delta && !text.is_empty() {
+                    self.mark_assistant_text(&text);
                     self.streaming.push(&text);
                 }
                 self.finalize_streaming();
-                self.total_tokens += usage.total_tokens;
+                // `↓` counts OUTPUT (generated) tokens. Summing total_tokens per
+                // turn re-counts the whole context every turn (the prompt is
+                // re-sent each round) and balloons far past what was generated.
+                // completion_tokens is the output; fall back to total-prompt if a
+                // provider omits it.
+                self.output_tokens += if usage.completion_tokens > 0 {
+                    usage.completion_tokens
+                } else {
+                    usage.total_tokens.saturating_sub(usage.prompt_tokens)
+                };
                 // Latest prompt size = how full the context window is (for ctx%).
                 if usage.prompt_tokens > 0 {
                     self.last_prompt_tokens = usage.prompt_tokens;
@@ -2500,34 +3022,40 @@ impl App {
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
-                self.finish();
-                return None;
+                // Count the turn, idle, then continue /loop or drain the queue.
+                return self.complete_turn();
             }
             AgentEvent::Error { message } => {
                 self.push_line(
                     &Style::new()
-                        .fg(Color::Red)
+                        .fg(TN_RED)
                         .render(&format!("  error: {message}")),
                 );
+                self.loop_remaining = 0; // a failed turn stops the /loop
                 self.finish();
-                return None;
+                // Don't strand messages queued while this turn was running.
+                return self.drain_queue();
             }
             // Planning mode: capture the plan and live task-status updates for
             // the pinned TODO panel above the input.
             AgentEvent::PlanningEnd { plan, .. } => {
+                self.mark_agent_activity();
                 self.set_plan(&plan.steps);
             }
             AgentEvent::TaskUpdated { tasks, .. } => {
+                self.mark_agent_activity();
                 self.set_plan(&tasks);
             }
             // Per-step lifecycle also drives the panel, in case TaskUpdated is
             // sparse: a step turns ▶ on start and ✔/✗/⊘ on completion.
             AgentEvent::StepStart { step_id, .. } => {
-                self.set_task_status(&step_id, '▶', Color::Yellow);
+                self.mark_agent_activity();
+                self.set_task_status(&step_id, '▶', TN_YELLOW);
             }
             AgentEvent::StepEnd {
                 step_id, status, ..
             } => {
+                self.mark_agent_activity();
                 let (g, c) = task_status_style(status);
                 self.set_task_status(&step_id, g, c);
             }
@@ -2539,10 +3067,86 @@ impl App {
         self.rx.clone().map(pump)
     }
 
+    fn mark_agent_activity(&mut self) {
+        self.turn_had_agent_activity = true;
+        self.turn_text_after_activity = false;
+    }
+
+    fn mark_assistant_text(&mut self, text: &str) {
+        if !text.trim().is_empty() {
+            self.turn_text_after_activity = true;
+        }
+    }
+
+    fn prepare_ultracode_synthesis(&self) -> Option<(String, String)> {
+        if !needs_synthesis(
+            self.ultracode_synthesis_inflight,
+            self.ultracode_synthesis_used,
+            self.turn_had_agent_activity,
+            self.turn_text_after_activity,
+        ) {
+            return None;
+        }
+
+        let user_task = self
+            .running_task
+            .as_deref()
+            .filter(|task| !task.trim().is_empty())
+            .unwrap_or("the previous task");
+        let mut prompt = format!(
+            "[synthesis]\n\
+             The previous turn completed planning/tool/subagent work \
+             but stopped without a final user-facing answer.\n\n\
+             Original user task:\n{user_task}\n\n\
+             Write the final answer now in the user's language. Synthesize the \
+             completed work into a useful response. Do not call tools or start \
+             more subagents unless it is strictly necessary to avoid an incorrect \
+             answer. If a child run produced no text output, summarize the \
+             available plan/status instead of exposing raw task metadata.\n"
+        );
+
+        if !self.plan.is_empty() {
+            prompt.push_str("\nPlan/status:\n");
+            for (_, text, glyph, _) in &self.plan {
+                let status = match glyph {
+                    '✔' => "done",
+                    '▶' => "in progress",
+                    '✗' => "failed",
+                    _ => "pending",
+                };
+                prompt.push_str(&format!("- [{status}] {text}\n"));
+            }
+        }
+
+        if !self.subagents.is_empty() {
+            prompt.push_str("\nSubagents:\n");
+            for agent in &self.subagents {
+                let status = match agent.success {
+                    Some(true) => "done",
+                    Some(false) => "failed",
+                    None if agent.done => "done",
+                    None => "unknown",
+                };
+                prompt.push_str(&format!(
+                    "- [{status}] {}: {}\n",
+                    agent.agent, agent.description
+                ));
+            }
+        }
+
+        if let Some(workflow) = &self.last_workflow {
+            prompt.push_str("\nLatest workflow artifact excerpt:\n");
+            prompt.push_str(&truncate(workflow, 4000));
+            prompt.push('\n');
+        }
+
+        Some((prompt, user_task.to_string()))
+    }
+
     fn finalize_streaming(&mut self) {
         let rendered = self.streaming.view();
         if !rendered.trim().is_empty() {
-            let block = gutter(Color::Green, &rendered);
+            let block = gutter(TN_GREEN, &rendered);
             // Safety net against duplicate output: skip if this exact block
             // already appeared in the last few messages (a re-finalize, or an
             // agent that re-emits earlier text — e.g. its preamble after a tool).
@@ -2561,7 +3165,11 @@ impl App {
         self.running_task = None;
         self.active_tools = 0;
         self.active_agents = 0;
+        // Clear the parallel-subagent panel when the turn ends — it's a live
+        // progress tracker, so leaving completed agents pinned at the bottom once
+        // the work is done just clutters the idle screen.
         self.subagents.clear();
+        self.ultracode_synthesis_inflight = false;
         self.relayout();
         self.stream_started = None;
         self.spinner.stop();
@@ -2572,6 +3180,33 @@ impl App {
     fn push_line(&mut self, line: &str) {
         self.messages.push(line.to_string());
         self.rebuild_viewport();
+    }
+
+    /// Skill dirs for the session: the discovered Claude/Codex dirs plus the
+    /// login-gated built-in OS `a3s-os-capabilities` skill when signed in.
+    pub(crate) fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
+        let mut dirs = agent_skill_dirs(&self.cwd);
+        if self.os_session.is_some() {
+            if let Some(cfg) = &self.os_config {
+                if let Some(d) = crate::a3s_os::ensure_capability_skill_dir(cfg) {
+                    dirs.push(d);
+                }
+            }
+        }
+        dirs
+    }
+
+    /// After an OS login/logout, rebuild the session so the login-gated
+    /// skill loads/unloads immediately, and refresh the start-screen skill list.
+    fn refresh_after_auth(&mut self) {
+        if self.state == State::Idle {
+            if let Ok((s, _)) = self.rebuild_session(self.model.as_deref()) {
+                self.session = Arc::new(s);
+            }
+        }
+        let dirs = self.skill_dirs();
+        self.skill_count = count_skill_files(&dirs);
+        self.skills = load_skills(&dirs);
     }
 
     /// Open `path` directly in the built-in IDE editor (tree rooted at its
@@ -2611,55 +3246,8 @@ impl App {
     /// a readable plan of the fanned-out subtasks. Stored for `/workflow` and
     /// announced with a collapsed one-line message in the transcript.
     fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
-        let (doc, label) = match name {
-            // The generated workflow script itself (the dynamic workflow).
-            "program" => {
-                let Some(src) = args
-                    .and_then(|a| a.get("source"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                else {
-                    return;
-                };
-                (
-                    format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
-                    "dynamic workflow script · /workflow to view read-only".to_string(),
-                )
-            }
-            // A direct fan-out (no script wrapper).
-            "parallel_task" | "task" => {
-                let Some(tasks) = args
-                    .and_then(|a| a.get("tasks"))
-                    .and_then(|t| t.as_array())
-                    .filter(|t| !t.is_empty())
-                else {
-                    return;
-                };
-                let mut doc = format!(
-                    "# Dynamic workflow\n\nFanned out {} parallel subagent task(s):\n\n",
-                    tasks.len()
-                );
-                for (i, t) in tasks.iter().enumerate() {
-                    let desc = t
-                        .get("description")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("(task)");
-                    let prompt = t
-                        .get("prompt")
-                        .or_else(|| t.get("task"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    doc.push_str(&format!("## {}. {desc}\n\n{prompt}\n\n", i + 1));
-                }
-                (
-                    doc,
-                    format!(
-                        "dynamic workflow · {} parallel tasks · /workflow to view read-only",
-                        tasks.len()
-                    ),
-                )
-            }
-            _ => return,
+        let Some((doc, label)) = workflow_doc_for_tool(name, args) else {
+            return;
         };
         self.last_workflow = Some(doc);
         // Collapsed indicator; the full artifact opens read-only via /workflow.
@@ -2724,12 +3312,30 @@ impl App {
         self.last_paint = Some(Instant::now());
         let mut blocks: Vec<String> = self.messages.clone();
         if !self.thinking.trim().is_empty() {
-            let body = indent(&format!("💭 {}", self.thinking.trim()), PAD);
-            blocks.push(Style::new().fg(Color::BrightBlack).italic().render(&body));
+            // Lay out reasoning like every other message: pre-wrap to the content
+            // width and put the margin + "💭" OUTSIDE the dim style, one styled
+            // line at a time. The old `Style::render(&indent(…))` shoved the whole
+            // paragraph in as one line whose leading spaces sat *inside* the ANSI
+            // escape, so the viewport re-wrapped it to the screen edge (margins
+            // didn't line up) with uneven spacing. "💭 " is 3 display columns;
+            // continuation lines indent to match.
+            let dim = Style::new().fg(TN_GRAY).italic();
+            let margin = " ".repeat(PAD);
+            let avail = (self.width as usize).saturating_sub(PAD + 3).max(8);
+            let body = wrap_words(self.thinking.trim(), avail)
+                .iter()
+                .enumerate()
+                .map(|(i, line)| {
+                    let lead = if i == 0 { "💭 " } else { "   " };
+                    format!("{margin}{}", dim.render(&format!("{lead}{line}")))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(body);
         }
         let rendered = self.streaming.view();
         if !rendered.is_empty() {
-            blocks.push(gutter(Color::Green, &rendered));
+            blocks.push(gutter(TN_GREEN, &rendered));
         }
         // Currently-executing tool: "• Running <cmd>…" with a blinking bullet.
         if let Some(name) = &self.running_tool {
@@ -2741,11 +3347,7 @@ impl App {
             let arg = args.as_ref().and_then(arg_summary).unwrap_or_default();
             let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
             let dot = Style::new()
-                .fg(if on {
-                    Color::Yellow
-                } else {
-                    Color::BrightBlack
-                })
+                .fg(if on { TN_YELLOW } else { TN_GRAY })
                 .bold()
                 .render("•");
             let m = " ".repeat(PAD);
@@ -2758,12 +3360,12 @@ impl App {
         // Live stdout of the running tool — tail prefixed with "│" like Codex.
         if !self.tool_output.trim().is_empty() {
             let m = " ".repeat(PAD + 2);
-            let bar = Style::new().fg(Color::BrightBlack).render("│");
+            let bar = Style::new().fg(TN_GRAY).render("│");
             let tail: Vec<&str> = self.tool_output.lines().rev().take(12).collect();
             let body = tail
                 .into_iter()
                 .rev()
-                .map(|l| format!("{m}{bar} {}", Style::new().fg(Color::BrightBlack).render(l)))
+                .map(|l| format!("{m}{bar} {}", Style::new().fg(TN_GRAY).render(l)))
                 .collect::<Vec<_>>()
                 .join("\n");
             blocks.push(body);
@@ -2833,7 +3435,7 @@ impl App {
         let opts = ["Yes", "Yes, and don't ask again", "No"];
         let mut menu = vec![pad_to(
             &Style::new()
-                .fg(Color::Yellow)
+                .fg(TN_YELLOW)
                 .bold()
                 .render(&format!("  ⏵ Allow {label}?")),
             width,
@@ -2844,12 +3446,12 @@ impl App {
             menu.push(if i == self.approval_sel {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
-                Style::new().fg(Color::White).render(&raw)
+                Style::new().fg(TN_FG).render(&raw)
             });
         }
         menu.push(pad_to(
             &Style::new()
-                .fg(Color::BrightBlack)
+                .fg(TN_GRAY)
                 .render("  Enter select · ↑/↓ · 1–3 · Esc"),
             width,
         ));
@@ -2922,6 +3524,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let mut models: Vec<String> = Vec::new();
     let mut model_ctx: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let mut default_model: Option<String> = None;
+    let mut os_config: Option<OsConfig> = None;
     if let Ok(cfg) =
         a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(&config_path))
     {
@@ -2931,12 +3534,14 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             models.push(id);
         }
         default_model = cfg.default_model.clone();
+        os_config = cfg.os.clone();
     }
-    let context_limit = default_model
-        .as_ref()
-        .and_then(|m| model_ctx.get(m))
-        .copied()
-        .unwrap_or(0);
+    let context_limit = resolve_ctx_limit(
+        default_model
+            .as_ref()
+            .and_then(|m| model_ctx.get(m))
+            .copied(),
+    );
 
     // Persistent, resumable session: stored under <cwd>/.a3s/tui-sessions and
     // keyed by a fixed id, so relaunching in the same directory continues the
@@ -3002,20 +3607,56 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .with_timeout(3_600_000, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
     // a3s's own (they share the markdown + YAML-frontmatter format).
-    let claude_dirs = agent_skill_dirs(&workspace);
+    let mut claude_dirs = agent_skill_dirs(&workspace);
+    // Restore the persisted OS login *before* building the session, so its
+    // login-gated built-in `a3s-os-capabilities` skill is materialized and
+    // loaded from the first turn (only when signed in).
+    let os_session = os_config.as_ref().and_then(crate::a3s_os::current_session);
+    if let Some(s) = &os_session {
+        // Export endpoint + token so the agent's shell uses $A3S_OS_* directly
+        // instead of re-reading ~/.a3s/os-auth.json every call.
+        crate::a3s_os::export_os_env(s);
+        if let Some(dir) = os_config
+            .as_ref()
+            .and_then(crate::a3s_os::ensure_capability_skill_dir)
+        {
+            claude_dirs.push(dir);
+        }
+    }
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
-    let with_instr = |o: SessionOptions| match &instructions {
-        Some(i) => o.with_prompt_slots(SystemPromptSlots::default().with_extra(i.clone())),
-        None => o,
+    // When a persisted login is restored on launch, inject the OS-platform
+    // directive too (mirrors effort_session_opts) so the very first turn already
+    // routes OS questions through the progressive-API skill.
+    let os_address = os_session.as_ref().map(|s| s.address.clone());
+    let with_instr = |o: SessionOptions| {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(i) = &instructions {
+            parts.push(i.clone());
+        }
+        if let Some(addr) = &os_address {
+            parts.push(os_platform_guide(addr));
+        }
+        if parts.is_empty() {
+            o
+        } else {
+            o.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
+        }
     };
+    let manifest_backend = ManifestWorkspaceBackend::new(std::path::PathBuf::from(&workspace));
+    let workspace_manifest = manifest_backend.manifest();
+    let initial_manifest = workspace_manifest.snapshot();
+    let initial_files = initial_manifest.file_paths();
+    let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
+    let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
     let session = match agent.resume_session(
         session_id.as_str(),
-        with_instr(
+        with_instr(with_recent_workspace_context(
             SessionOptions::new()
                 .with_session_store(store.clone())
                 .with_confirmation_policy(confirmation.clone())
+                .with_workspace_backend(workspace_services.clone())
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
                 .with_auto_compact(true)
@@ -3025,16 +3666,18 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_auto_delegation_enabled(true)
                 .with_auto_parallel_delegation(true)
                 .with_manual_delegation_enabled(true),
-        ),
+            &workspace_manifest,
+        )),
     ) {
         Ok(s) => s,
         Err(_) => agent.session(
             workspace.clone(),
-            Some(with_instr(
+            Some(with_instr(with_recent_workspace_context(
                 SessionOptions::new()
                     .with_session_store(store.clone())
                     .with_session_id(session_id.as_str())
                     .with_confirmation_policy(confirmation.clone())
+                    .with_workspace_backend(workspace_services.clone())
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
                     .with_auto_compact(true)
@@ -3044,15 +3687,16 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_auto_delegation_enabled(true)
                     .with_auto_parallel_delegation(true)
                     .with_manual_delegation_enabled(true),
-            )),
+                &workspace_manifest,
+            ))),
         )?,
     };
 
     let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
 
     // Seed the transcript with any resumed conversation (user + assistant text).
-    let initial_messages: Vec<String> = session
-        .history()
+    let resumed = session.history();
+    let mut initial_messages: Vec<String> = resumed
         .iter()
         .filter_map(|m| {
             let text = m.text();
@@ -3065,12 +3709,33 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 "assistant" => {
                     let mut md = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
                     md.push(&text);
-                    Some(gutter(Color::Green, &md.view()))
+                    Some(gutter(TN_GREEN, &md.view()))
                 }
                 _ => None,
             }
         })
         .collect();
+    // Seed ↑/↓ input recall with the user's prior prompts so resuming a session
+    // keeps its command history (tool-result `user` messages carry no text block,
+    // so the non-empty filter excludes them).
+    let history_seed: Vec<String> = resumed
+        .iter()
+        .filter(|m| m.role == "user")
+        .map(|m| m.text().trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    // Quiet confirmation that the persisted login was restored (so the user
+    // isn't asked to /login again) and the login-gated skill is active.
+    if let Some(s) = &os_session {
+        initial_messages.insert(
+            0,
+            Style::new().fg(TN_GRAY).render(&format!(
+                "  ✓ signed in to OS as {} · capabilities skill active · /logout to sign out",
+                s.display_label()
+            )),
+        );
+    }
 
     let session = Arc::new(session);
 
@@ -3092,17 +3757,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             Action::ScrollDown,
             "Scroll down",
         )
-        // Mac-friendly half-page scroll (no fn key needed).
-        .bind(
-            KeyBinding::ctrl(KeyCode::Char('u')),
-            Action::ScrollUp,
-            "Scroll up",
-        )
-        .bind(
-            KeyBinding::ctrl(KeyCode::Char('d')),
-            Action::ScrollDown,
-            "Scroll down",
-        )
+        // NB: Ctrl+U / Ctrl+D are intentionally NOT bound to scroll — they shadow
+        // readline line-editing (Ctrl+U = kill-to-start) in the input. PageUp/Down
+        // and Ctrl+Home/End cover scrolling.
         .bind(
             KeyBinding::ctrl(KeyCode::Home),
             Action::ScrollTop,
@@ -3130,6 +3787,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         model_menu: None,
         model_tab: 0,
         llm_override: None,
+        os_config,
+        os_session,
+        os_refreshing: false,
         effort: 2, // high
         effort_panel: None,
         theme_panel: None,
@@ -3145,7 +3805,14 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         active_tools: 0,
         active_agents: 0,
         subagents: Vec::new(),
+        turn_had_agent_activity: false,
+        turn_text_after_activity: false,
+        ultracode_synthesis_inflight: false,
+        ultracode_synthesis_used: false,
         instructions,
+        workspace_manifest,
+        workspace_manifest_rx,
+        workspace_services,
         rainbow_until: None,
         rainbow_frame: 0,
         effort_anim: None,
@@ -3169,10 +3836,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         rx: None,
         pending_tool: None,
         approval_sel: 0,
-        history: Vec::new(),
+        history: history_seed,
         history_pos: None,
         model: default_model,
-        total_tokens: 0,
+        output_tokens: 0,
         tool_args: String::new(),
         tool_output: String::new(),
         stream_started: None,
@@ -3187,6 +3854,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top: None,
         top_scroll: 0,
         top_sel: 0,
+        top_focus: None,
         top_kill: None,
         ide: None,
         git: None,
@@ -3194,7 +3862,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         completed: 0,
         branch: git_branch(&workspace),
         slash_sel: 0,
-        files: workspace_files(&workspace),
+        files: initial_files,
         at_expanded: std::collections::HashSet::new(),
         file_sel: 0,
         skill_count: count_skill_files(&claude_dirs),
@@ -3272,6 +3940,124 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::llm::{
+        ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
+    };
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    #[derive(Clone, Default)]
+    struct CapturedLlmTurn {
+        system: Option<String>,
+        tools: Vec<String>,
+    }
+
+    struct CaptureLlmClient {
+        turns: Mutex<Vec<CapturedLlmTurn>>,
+        responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for CaptureLlmClient {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> {
+            self.record(system, tools);
+            Ok(self.next_response())
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+            _cancel_token: CancellationToken,
+        ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+            self.record(system, tools);
+            let response = self.next_response();
+            let (tx, rx) = mpsc::channel(2);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::Done(response)).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    impl CaptureLlmClient {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            Self {
+                turns: Mutex::new(Vec::new()),
+                responses: Mutex::new(responses.into()),
+            }
+        }
+
+        fn record(&self, system: Option<&str>, tools: &[ToolDefinition]) {
+            self.turns.lock().unwrap().push(CapturedLlmTurn {
+                system: system.map(str::to_string),
+                tools: tools.iter().map(|tool| tool.name.clone()).collect(),
+            });
+        }
+
+        fn next_response(&self) -> LlmResponse {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(done_response)
+        }
+
+        fn turns(&self) -> Vec<CapturedLlmTurn> {
+            self.turns.lock().unwrap().clone()
+        }
+    }
+
+    fn tool_call_response(name: &str, input: serde_json::Value) -> LlmResponse {
+        LlmResponse {
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: "toolu_test".into(),
+                    name: name.into(),
+                    input,
+                }],
+                reasoning_content: None,
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some("tool_use".into()),
+            meta: None,
+        }
+    }
+
+    fn done_response() -> LlmResponse {
+        LlmResponse {
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::Text {
+                    text: "DONE".into(),
+                }],
+                reasoning_content: None,
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some("stop".into()),
+            meta: None,
+        }
+    }
+
+    fn test_config(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n",
+        )
+        .unwrap();
+    }
 
     /// Guard: the parallel/ultracode SessionOptions register `task` +
     /// `parallel_task` in the session tool surface (so fan-out has a tool to call).
@@ -3280,13 +4066,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("a3s-ptask-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let cfg = dir.join("config.acl");
-        std::fs::write(
-            &cfg,
-            "default_model = \"openai/x\"\n\
-             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
-             models \"x\" { name = \"x\" }\n}\n",
-        )
-        .unwrap();
+        test_config(&cfg);
         let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
             .await
             .unwrap();
@@ -3308,6 +4088,269 @@ mod tests {
             names.contains(&"parallel_task".to_string()) && names.contains(&"task".to_string()),
             "parallel_task/task registered under the parallel opts; got {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_session_surface_passes_system_tools_and_skills_to_llm() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-claude-surface-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.acl");
+        test_config(&cfg);
+        std::fs::write(
+            dir.join("CLAUDE.md"),
+            "Project rule: claude-session-surface-marker",
+        )
+        .unwrap();
+        let skill_dir = dir.join(".claude/skills/inspect-surface");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: inspect-surface\n\
+             description: Inspect the Claude session surface\n\
+             kind: instruction\n\
+             allowed-tools:\n  - Read\n---\n\
+             Use this skill marker: inspect-surface-skill-marker\n",
+        )
+        .unwrap();
+
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let llm = Arc::new(CaptureLlmClient::new(vec![done_response()]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm.clone())
+            .with_prompt_slots(
+                SystemPromptSlots::default()
+                    .with_extra(project_instructions(dir.to_str().unwrap()).unwrap()),
+            )
+            .with_skill_dirs(agent_skill_dirs(dir.to_str().unwrap()))
+            .with_manual_delegation_enabled(true)
+            .with_auto_delegation_enabled(false)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let (mut rx, join) = session
+            .stream("Use available skills to inspect this project.", None)
+            .await
+            .unwrap();
+        while let Some(event) = rx.recv().await {
+            if matches!(event, a3s_code_core::AgentEvent::End { .. }) {
+                break;
+            }
+        }
+        join.await.unwrap();
+        let turns = llm.turns();
+        let captured = turns.first().unwrap();
+        let system = captured.system.as_deref().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            system.contains("You are A3S Code"),
+            "core system prompt should reach the LLM"
+        );
+        assert!(
+            system.contains("claude-session-surface-marker"),
+            "CLAUDE.md project instructions should reach the LLM"
+        );
+        assert!(
+            system.contains("# Skills"),
+            "skill catalog guidance should reach the LLM system prompt"
+        );
+        assert!(
+            captured.tools.iter().any(|name| name == "read")
+                && captured.tools.iter().any(|name| name == "Skill")
+                && captured.tools.iter().any(|name| name == "search_skills")
+                && captured.tools.iter().any(|name| name == "parallel_task"),
+            "a3s tools and skill tools should be model-visible; got {:?}",
+            captured.tools
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_can_invoke_skill_and_child_run_receives_skill_prompt() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-claude-skill-invoke-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.acl");
+        test_config(&cfg);
+        let skill_dir = dir.join(".claude/skills/inspect-surface");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: inspect-surface\n\
+             description: Inspect the Claude session surface\n\
+             kind: instruction\n\
+             allowed-tools:\n  - Read\n---\n\
+             Use this skill marker: inspect-surface-skill-marker\n",
+        )
+        .unwrap();
+
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let llm = Arc::new(CaptureLlmClient::new(vec![
+            tool_call_response(
+                "Skill",
+                serde_json::json!({
+                    "skill_name": "inspect-surface",
+                    "prompt": "Apply the inspect-surface skill."
+                }),
+            ),
+            done_response(),
+            done_response(),
+        ]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm.clone())
+            .with_skill_dirs(agent_skill_dirs(dir.to_str().unwrap()))
+            .with_manual_delegation_enabled(true)
+            .with_auto_delegation_enabled(false)
+            .with_permission_policy(
+                a3s_code_core::permissions::PermissionPolicy::new().allow("Skill(*)"),
+            )
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(5);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let result = session
+            .send("Use the inspect-surface skill.", None)
+            .await
+            .unwrap();
+        let turns = llm.turns();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(result.text.trim(), "DONE");
+        let system_snippets = turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                format!(
+                    "#{index}: {}",
+                    turn.system
+                        .as_deref()
+                        .unwrap_or("<none>")
+                        .chars()
+                        .take(220)
+                        .collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.system.as_deref().is_some_and(|system| {
+                    system.contains("You are executing the 'inspect-surface' skill")
+                        && system.contains("inspect-surface-skill-marker")
+                })),
+            "Skill tool should start a child LLM run with the skill prompt; turns: {}",
+            system_snippets
+        );
+    }
+
+    #[test]
+    fn workflow_doc_captures_single_task_dispatch() {
+        let args = serde_json::json!({
+            "agent": "plan",
+            "description": "Design the rendering architecture",
+            "prompt": "Plan a layered renderer."
+        });
+        let (doc, label) = workflow_doc_for_tool("task", Some(&args)).unwrap();
+
+        assert!(label.contains("delegated task"), "{label}");
+        assert!(doc.contains("Design the rendering architecture"));
+        assert!(doc.contains("Agent: `plan`"));
+        assert!(doc.contains("Plan a layered renderer."));
+    }
+
+    #[test]
+    fn synthesis_requires_activity_without_followup_text() {
+        // Fires when a turn had agent activity but produced no final text — in
+        // ANY mode (no effort gate), so a high-effort fan-out that ends silently
+        // still gets a synthesized answer.
+        assert!(needs_synthesis(false, false, true, false));
+        // No final answer needed if the turn already produced text after activity.
+        assert!(!needs_synthesis(false, false, true, true));
+        // At most once per turn.
+        assert!(!needs_synthesis(false, true, true, false));
+        // Nothing to synthesize if no work happened (e.g. a bare greeting).
+        assert!(!needs_synthesis(false, false, false, false));
+        // Never while a synthesis turn is itself in flight.
+        assert!(!needs_synthesis(true, false, true, false));
+    }
+
+    #[test]
+    fn estimate_tokens_counts_cjk_heavier_than_ascii() {
+        assert_eq!(estimate_tokens("abcd"), 1); // ASCII ~4 chars/token
+        assert_eq!(estimate_tokens("书安操作系统"), 6); // CJK ~1 token/char (chars/4 would say 1)
+        assert_eq!(estimate_tokens("hi 书安"), 2); // mixed: 3 ASCII -> 0, 2 wide -> 2
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn ctx_limit_falls_back_when_undeclared() {
+        assert_eq!(resolve_ctx_limit(Some(200_000)), 200_000); // declared wins
+        assert_eq!(resolve_ctx_limit(Some(0)), DEFAULT_CONTEXT_LIMIT); // zero -> default
+        assert_eq!(resolve_ctx_limit(None), DEFAULT_CONTEXT_LIMIT); // missing -> default
+    }
+
+    #[test]
+    fn auto_compact_threshold_scales_to_real_window() {
+        // 128k model: fire at 85% of 128k, i.e. 0.85*128/200 of the core's fixed 200k.
+        assert!((auto_compact_threshold_for(128_000) - 0.544).abs() < 0.001);
+        // 200k model == the core's own denominator: plain 0.85.
+        assert!((auto_compact_threshold_for(200_000) - 0.85).abs() < 0.001);
+        // Windows past ~235k clamp to 1.0 (trigger at the fixed 200k, never overflow).
+        assert_eq!(auto_compact_threshold_for(1_000_000), 1.0);
+        // Unknown window (0) falls back to the core default of 0.85.
+        assert!((auto_compact_threshold_for(0) - 0.85).abs() < 0.001);
+    }
+
+    #[test]
+    fn task_tool_empty_child_output_renders_useful_summary() {
+        let args = serde_json::json!({
+            "agent": "plan",
+            "description": "Plan subsystem boundaries",
+            "prompt": "Create the plan."
+        });
+        let meta = serde_json::json!({
+            "task_id": "task-abc123",
+            "session_id": "task-run-task-abc123",
+            "agent": "plan",
+            "success": true,
+            "output_bytes": 0,
+            "artifact_uri": "a3s://tasks/task-run-task-abc123/runs/task-abc123/output"
+        });
+        let output = "Task completed: task-abc123\n\
+                      Agent: plan\n\
+                      Session: task-run-task-abc123\n\
+                      Task ID: task-abc123\n\
+                      Artifact ID: task-output:task-abc123\n\
+                      Artifact URI: a3s://tasks/task-run-task-abc123/runs/task-abc123/output\n\
+                      Output:\n";
+        let out = render_tool_end("task", 0, output, Some(&meta), Some(&args), 100);
+        let plain = strip_ansi(&out);
+
+        assert!(plain.contains("Explored"));
+        assert!(plain.contains("Task completed · plan · task-abc123"));
+        assert!(plain.contains("no child text output"));
+        assert!(plain.contains("artifact: a3s://tasks/task-run-task-abc123"));
     }
 
     #[test]
@@ -3380,6 +4423,11 @@ mod tests {
             Some("TODO".to_string())
         );
         assert_eq!(arg_summary(&serde_json::json!({ "unknown": "x" })), None);
+    }
+
+    #[test]
+    fn reload_is_idle_only_because_it_rebuilds_the_session() {
+        assert!(IDLE_ONLY.contains(&"/reload"));
     }
 
     // ---- image preview (/ide + paste) ----

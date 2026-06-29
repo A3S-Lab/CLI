@@ -10,6 +10,7 @@ impl App {
         let mut out: Vec<(String, String)> = slash_candidates(input)
             .into_iter()
             .filter(|(c, _)| idle || !IDLE_ONLY.contains(c))
+            .filter(|(c, _)| self.os_config.is_some() || !matches!(*c, "/login" | "/logout"))
             .map(|(c, d)| (c.to_string(), d.to_string()))
             .collect();
         for (name, desc) in &self.skills {
@@ -130,7 +131,7 @@ impl App {
                 if i == sel {
                     Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
                 } else {
-                    Style::new().fg(Color::BrightBlack).render(&raw)
+                    Style::new().fg(TN_GRAY).render(&raw)
                 }
             })
             .collect();
@@ -140,7 +141,7 @@ impl App {
             let down = if end < total { "↓" } else { " " };
             menu.push(pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("  {up}{down} {}/{total}", sel + 1)),
                 width,
             ));

@@ -11,11 +11,8 @@ impl App {
         let row = |k: &str, d: &str| {
             format!(
                 "    {}  {}",
-                Style::new()
-                    .fg(Color::White)
-                    .bold()
-                    .render(&format!("{k:<16}")),
-                Style::new().fg(Color::BrightBlack).render(d)
+                Style::new().fg(TN_FG).bold().render(&format!("{k:<16}")),
+                Style::new().fg(TN_GRAY).render(d)
             )
         };
         let mut lines: Vec<String> = vec![
@@ -55,7 +52,7 @@ impl App {
             row("auto", "auto-approves tools"),
             String::new(),
             Style::new()
-                .fg(Color::BrightBlack)
+                .fg(TN_GRAY)
                 .render("  Resume a past session:  a3s code resume <id>  (printed on exit)"),
         ];
         for l in &mut lines {

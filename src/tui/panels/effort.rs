@@ -52,7 +52,7 @@ impl App {
                 String::new(),
                 center(
                     &Style::new()
-                        .fg(Color::BrightBlack)
+                        .fg(TN_GRAY)
                         .render("planning a dynamic workflow · dispatching parallel subagents"),
                     61,
                 ),
@@ -85,12 +85,12 @@ impl App {
         // Level names centred under their tick, each in its own colour
         // (faster→smarter gradient; ultracode is magenta).
         let level_colors = [
-            Color::Green,
-            Color::Cyan,
-            Color::Blue,
-            Color::Yellow,
+            TN_GREEN,
+            TN_CYAN,
+            ACCENT,
+            TN_YELLOW,
             Color::Rgb(255, 140, 0),
-            Color::Magenta,
+            TN_PURPLE,
         ];
         let mut labels = String::new();
         let mut vis = 0usize;
@@ -116,12 +116,12 @@ impl App {
         } else {
             "higher effort = more reasoning tokens (slower, deeper). Use sparingly."
         };
-        let dim = |s: &str| Style::new().fg(Color::BrightBlack).render(s);
+        let dim = |s: &str| Style::new().fg(TN_GRAY).render(s);
         let menu = vec![
             pad_to(&Style::new().fg(ACCENT).bold().render("  Effort"), width),
             pad_to(&format!("    {}", dim(&faster_smarter)), width),
             pad_to(
-                &format!("    {}", Style::new().fg(Color::White).render(&track)),
+                &format!("    {}", Style::new().fg(TN_FG).render(&track)),
                 width,
             ),
             pad_to(&format!("    {labels}"), width),

@@ -61,15 +61,12 @@ impl App {
         } else {
             String::new()
         };
-        let meta = Style::new().fg(Color::BrightBlack).render(&format!(
+        let meta = Style::new().fg(TN_GRAY).render(&format!(
             "{margin}a3s-code v{}  ·  {model}{skills}  ·  {}",
             env!("CARGO_PKG_VERSION"),
             self.cwd
         ));
-        let tips = Style::new()
-            .fg(Color::BrightBlack)
-            .italic()
-            .render(&format!(
+        let tips = Style::new().fg(TN_GRAY).italic().render(&format!(
             "{margin}Type a message · / for commands · Shift+Tab cycles mode · Ctrl+C twice to exit"
         ));
         let update = match &self.update_available {

@@ -104,6 +104,7 @@ impl App {
                     }
                 } else if let Some(at) = self.textarea.value().rfind('@') {
                     let val = self.textarea.value();
+                    self.touch_workspace_file(&path);
                     self.textarea.set_value(&format!("{}@{path} ", &val[..at]));
                     self.file_sel = 0;
                 }
@@ -160,9 +161,9 @@ impl App {
             menu.push(if i == sel {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else if *is_dir {
-                Style::new().fg(Color::Cyan).render(&raw)
+                Style::new().fg(TN_CYAN).render(&raw)
             } else {
-                Style::new().fg(Color::White).render(&raw)
+                Style::new().fg(TN_FG).render(&raw)
             });
         }
         if total > max_rows {
@@ -170,7 +171,7 @@ impl App {
             let down = if end < total { "↓" } else { " " };
             menu.push(pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("  {up}{down} {}/{total}", sel + 1)),
                 width,
             ));

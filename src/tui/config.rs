@@ -9,6 +9,9 @@ pub(crate) fn config_template() -> &'static str {
 
 default_model = "openai/my-model"
 
+# Optional OS endpoint. When set, a3s code enables /login and /logout.
+# os = "https://os.example.com"
+
 providers "openai" {
   apiKey  = "sk-REPLACE-ME"
   baseUrl = "https://api.openai.com/v1/"   # or any OpenAI-compatible endpoint

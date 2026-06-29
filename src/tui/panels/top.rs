@@ -1,48 +1,66 @@
-//! `/top` process monitor panel; coding-agent rows are highlighted.
+//! `/top` process monitor panel. Reuses `a3s top`'s shared process-table view
+//! so the panel and the standalone monitor agree on columns, colours, agent
+//! detection, and risk. Enter drills into a coding agent's process subtree.
 
 use super::super::*;
 
 impl App {
-    /// Full-screen `/top` process monitor; coding-agent rows are highlighted.
-    pub(crate) fn render_top_panel(&self, rows: &[ProcRow]) -> String {
+    /// Rows currently shown in `/top`: the focused agent's process subtree, or
+    /// all processes when not focused.
+    pub(crate) fn top_rows(&self) -> Vec<ProcessRow> {
+        let Some(all) = &self.top else {
+            return Vec::new();
+        };
+        match self.top_focus {
+            Some(root) => process_subtree(all, root),
+            None => all.clone(),
+        }
+    }
+
+    /// Full-screen `/top` monitor; coding-agent rows are highlighted and can be
+    /// drilled into. The body is rendered by the shared `a3s top` renderer.
+    pub(crate) fn render_top_panel(&self) -> String {
         let width = self.width as usize;
         let h = self.height as usize;
+        let rows = self.top_rows();
         let agents = rows.iter().filter(|r| r.agent.is_some()).count();
-        let title = Style::new().fg(ACCENT).bold().render(&format!(
-            "  /top — {} processes · {agents} coding agent(s) · Enter to kill",
-            rows.len()
-        ));
-        let mut out = vec![
-            pad_to(&title, width),
-            pad_to(
-                &Style::new().fg(Color::BrightBlack).render(
-                    "  PID      CPU%   MEM%   COMMAND                        Esc close · ↑/↓ select",
-                ),
-                width,
-            ),
-        ];
-        let body = h.saturating_sub(3);
-        let start = self
-            .top_scroll
-            .min(rows.len().saturating_sub(body.min(rows.len())));
-        for (i, r) in rows.iter().enumerate().skip(start).take(body) {
-            let cmd = truncate(&r.cmd, width.saturating_sub(44).max(10));
-            let tag = r.agent.map(|a| format!("   ◀ {a}")).unwrap_or_default();
-            let raw = pad_to(
-                &format!("  {:<7} {:>5.1}  {:>5.1}   {cmd}{tag}", r.pid, r.cpu, r.mem),
-                width,
-            );
-            // Agent rows wear their brand colour; the selected row inverts it.
-            let color = r.agent.map(agent_color).unwrap_or(Color::White);
-            let styled = if i == self.top_sel {
-                Style::new().fg(Color::Black).bg(color).bold().render(&raw)
-            } else if r.agent.is_some() {
-                Style::new().fg(color).bold().render(&raw)
-            } else {
-                Style::new().fg(Color::White).render(&raw)
-            };
-            out.push(styled);
-        }
+
+        let title = match self.top_focus {
+            Some(pid) => {
+                let label = self
+                    .top
+                    .as_ref()
+                    .and_then(|all| all.iter().find(|r| r.pid == pid))
+                    .and_then(|r| r.agent.map(|a| a.label()))
+                    .unwrap_or("agent");
+                Style::new().fg(ACCENT).bold().render(&format!(
+                    "  /top ▸ {label} (pid {pid}) — {} processes · Esc back · K kill",
+                    rows.len()
+                ))
+            }
+            None => Style::new().fg(ACCENT).bold().render(&format!(
+                "  /top — {} processes · {agents} agent(s) · Enter focus agent · K kill · Esc close",
+                rows.len()
+            )),
+        };
+
+        // Body via the shared renderer; the panel has no per-pid history, so the
+        // sparkline columns render blank (graceful degradation).
+        let hidden = HashSet::new();
+        let table = render_process_table(
+            &rows,
+            &ProcessTableView {
+                selected: self.top_sel,
+                scroll: self.top_scroll,
+                width: self.width,
+                height: h.saturating_sub(1).max(1),
+                hidden: &hidden,
+                history: None,
+            },
+        );
+
+        let mut out = vec![pad_to(&title, width)];
+        out.extend(table.lines().map(str::to_string));
         while out.len() < h {
             out.push(String::new());
         }
@@ -73,7 +91,7 @@ impl App {
                 if let Some(slot) = out.get_mut(row0 + k) {
                     let styled = Style::new()
                         .fg(Color::BrightWhite)
-                        .bg(Color::Red)
+                        .bg(TN_RED)
                         .bold()
                         .render(line);
                     *slot = format!("{}{styled}", " ".repeat(col0));
@@ -82,4 +100,27 @@ impl App {
         }
         out.join("\n")
     }
+}
+
+/// All processes in `root`'s subtree (root + transitive children by ppid),
+/// preserving the input order.
+// ponytail: O(n²) fixpoint over the process list; n is small (host processes).
+fn process_subtree(rows: &[ProcessRow], root: u32) -> Vec<ProcessRow> {
+    let mut included: HashSet<u32> = HashSet::from([root]);
+    loop {
+        let mut added = false;
+        for r in rows {
+            if !included.contains(&r.pid) && included.contains(&r.ppid) {
+                included.insert(r.pid);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    rows.iter()
+        .filter(|r| included.contains(&r.pid))
+        .cloned()
+        .collect()
 }
