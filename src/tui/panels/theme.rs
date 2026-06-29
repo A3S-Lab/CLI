@@ -22,13 +22,11 @@ impl App {
             menu.push(if i == sel {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
-                Style::new().fg(Color::BrightBlack).render(&raw)
+                Style::new().fg(TN_GRAY).render(&raw)
             });
         }
         menu.push(pad_to(
-            &Style::new()
-                .fg(Color::BrightBlack)
-                .render("  ── preview ──"),
+            &Style::new().fg(TN_GRAY).render("  ── preview ──"),
             width,
         ));
         let th = &THEMES[sel];

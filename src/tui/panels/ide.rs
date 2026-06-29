@@ -22,6 +22,8 @@ impl App {
         }
         let h = self.height as usize;
         let w = self.width as usize;
+        let workspace_manifest = self.workspace_manifest.clone();
+        let workspace = self.cwd.clone();
         let ide = self.ide.as_mut().unwrap();
         match key.code {
             // Editor focused: full text editing of the open file.
@@ -40,6 +42,11 @@ impl App {
                             match std::fs::write(&f.path, content) {
                                 Ok(()) => {
                                     f.dirty = false;
+                                    touch_workspace_file_path_for_manifest(
+                                        &workspace_manifest,
+                                        &workspace,
+                                        &f.path,
+                                    );
                                     "✔ saved".to_string()
                                 }
                                 Err(e) => format!("✗ save failed: {e}"),
@@ -183,6 +190,7 @@ impl App {
                     let lines =
                         render_image_file(&path, w.saturating_sub(tw + 4), h.saturating_sub(3))
                             .unwrap_or_else(|| vec!["<cannot decode image>".into()]);
+                    touch_workspace_file_path_for_manifest(&workspace_manifest, &workspace, &path);
                     ide.file = Some(IdeFile {
                         path,
                         lines,
@@ -201,6 +209,7 @@ impl App {
                         .lines()
                         .map(String::from)
                         .collect();
+                    touch_workspace_file_path_for_manifest(&workspace_manifest, &workspace, &path);
                     ide.file = Some(IdeFile {
                         path,
                         lines: if lines.is_empty() {
@@ -271,14 +280,9 @@ impl App {
                     .render(&format!("  IDE — {fname}    {hint}")),
                 width,
             ),
-            pad_to(
-                &Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-                width,
-            ),
+            pad_to(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
         ];
-        let sep = Style::new().fg(Color::BrightBlack).render(" │ ");
+        let sep = Style::new().fg(TN_GRAY).render(" │ ");
         for i in 0..body {
             let left = if let Some(e) = ide.entries.get(ide.tree_scroll + i) {
                 let icon = if e.is_dir {
@@ -299,7 +303,7 @@ impl App {
                 } else if e.is_dir {
                     Style::new().fg(ACCENT).render(&plain)
                 } else {
-                    Style::new().fg(Color::White).render(&plain)
+                    Style::new().fg(TN_FG).render(&plain)
                 }
             } else {
                 " ".repeat(tw)
@@ -312,9 +316,9 @@ impl App {
                     let lineno = f.scroll + i;
                     let num = Style::new()
                         .fg(if ide.focus_editor && lineno == f.row {
-                            Color::Yellow
+                            TN_YELLOW
                         } else {
-                            Color::BrightBlack
+                            TN_GRAY
                         })
                         .render(&format!("{:>4} ", lineno + 1));
                     // Truncate the plain line first, then syntax-highlight it.
@@ -324,9 +328,7 @@ impl App {
                     String::new()
                 }
             } else if i == 0 {
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render("  ← pick a file to view")
+                Style::new().fg(TN_GRAY).render("  ← pick a file to view")
             } else {
                 String::new()
             };

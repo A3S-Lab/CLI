@@ -36,7 +36,7 @@ pub(crate) fn render_tool_end(
     // Header: "• Ran npm test" / "• Read src/main.rs" — Codex style, a past-tense
     // verb + the arg, the bullet colored by outcome.
     let dot = Style::new()
-        .fg(if ok { Color::Green } else { Color::Red })
+        .fg(if ok { TN_GREEN } else { TN_RED })
         .bold()
         .render("•");
     let arg = args.and_then(arg_summary).unwrap_or_default();
@@ -49,7 +49,7 @@ pub(crate) fn render_tool_end(
         format!(
             "{margin}{dot} {} {}",
             Style::new().bold().render(tool_verb(name)),
-            Style::new().fg(Color::BrightBlack).render(&arg)
+            Style::new().fg(TN_GRAY).render(&arg)
         )
     };
 
@@ -75,6 +75,12 @@ pub(crate) fn render_tool_end(
         }
     }
 
+    if matches!(name, "task" | "parallel_task") {
+        if let Some(summary) = render_task_tool_summary(name, output, meta, ok, width) {
+            return format!("{header}{summary}");
+        }
+    }
+
     // Show only the latest TAIL output lines under a "⎿" connector, with a
     // "… +N earlier lines" marker when there's more (keeps a noisy build tight).
     const TAIL: usize = 5;
@@ -82,8 +88,8 @@ pub(crate) fn render_tool_end(
     if lines.is_empty() {
         return header;
     }
-    let body_color = if ok { Color::BrightBlack } else { Color::Red };
-    let conn = Style::new().fg(Color::BrightBlack).render("⎿");
+    let body_color = if ok { TN_GRAY } else { TN_RED };
+    let conn = Style::new().fg(TN_GRAY).render("⎿");
     let textw = width.saturating_sub(PAD + 7).max(20);
     let line_at = |i: usize, line: &str| -> String {
         let shown = truncate(line, textw);
@@ -105,7 +111,7 @@ pub(crate) fn render_tool_end(
         out.push_str(&format!(
             "\n{margin}  {conn}  {}",
             Style::new()
-                .fg(Color::BrightBlack)
+                .fg(TN_GRAY)
                 .render(&format!("… +{start} earlier lines"))
         ));
         for line in lines.iter().skip(start) {
@@ -117,6 +123,153 @@ pub(crate) fn render_tool_end(
         }
     }
     out
+}
+
+fn render_task_tool_summary(
+    name: &str,
+    output: &str,
+    meta: Option<&serde_json::Value>,
+    ok: bool,
+    width: usize,
+) -> Option<String> {
+    let meta = meta?;
+    match name {
+        "task" => render_single_task_summary(output, meta, ok, width),
+        "parallel_task" => render_parallel_task_summary(meta, ok, width),
+        _ => None,
+    }
+}
+
+fn render_single_task_summary(
+    output: &str,
+    meta: &serde_json::Value,
+    ok: bool,
+    width: usize,
+) -> Option<String> {
+    let agent = meta
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("agent");
+    let task_id = meta.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+    let success = meta.get("success").and_then(|v| v.as_bool()).unwrap_or(ok);
+    let status = if success { "completed" } else { "failed" };
+    let output_bytes = meta.get("output_bytes").and_then(|v| v.as_u64());
+    let artifact = meta.get("artifact_uri").and_then(|v| v.as_str());
+    let mut rows = vec![format!(
+        "Task {status} · {agent}{}",
+        task_id_suffix(task_id)
+    )];
+    if let Some(excerpt) = task_child_excerpt(output) {
+        rows.extend(excerpt.lines().map(str::to_string));
+    } else if output_bytes == Some(0) {
+        rows.push("no child text output; using plan/status for synthesis".to_string());
+    } else {
+        rows.push("child output stored in task artifact".to_string());
+    }
+    if let Some(uri) = artifact {
+        rows.push(format!("artifact: {}", truncate(uri, 96)));
+    }
+    Some(render_task_rows(&rows, success, width))
+}
+
+fn render_parallel_task_summary(
+    meta: &serde_json::Value,
+    ok: bool,
+    width: usize,
+) -> Option<String> {
+    let results = meta.get("results").and_then(|v| v.as_array())?;
+    if results.is_empty() {
+        return None;
+    }
+    let done = results
+        .iter()
+        .filter(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(ok))
+        .count();
+    let mut rows = vec![format!("{done}/{} agents done", results.len())];
+    for result in results.iter().take(4) {
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(ok);
+        let mark = if success { "✓" } else { "✗" };
+        let agent = result
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("agent");
+        let task_id = result.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+        let output_bytes = result.get("output_bytes").and_then(|v| v.as_u64());
+        let formatted = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let detail = if let Some(excerpt) = task_child_excerpt(formatted) {
+            truncate(&excerpt.replace('\n', " "), 120)
+        } else if output_bytes == Some(0) {
+            "no child text output".to_string()
+        } else {
+            "output stored in artifact".to_string()
+        };
+        rows.push(format!(
+            "{mark} {agent}{} · {detail}",
+            task_id_suffix(task_id)
+        ));
+    }
+    let more = results.len().saturating_sub(4);
+    if more > 0 {
+        rows.push(format!("+{more} more agent result(s)"));
+    }
+    Some(render_task_rows(&rows, ok, width))
+}
+
+fn render_task_rows(rows: &[String], ok: bool, width: usize) -> String {
+    let margin = " ".repeat(PAD);
+    let conn = Style::new().fg(TN_GRAY).render("⎿");
+    let body_color = if ok { TN_GRAY } else { TN_RED };
+    let textw = width.saturating_sub(PAD + 7).max(20);
+    let mut out = String::new();
+    for (i, row) in rows.iter().enumerate() {
+        let shown = truncate(row, textw);
+        if i == 0 {
+            out.push_str(&format!(
+                "\n{margin}  {conn}  {}",
+                Style::new().fg(body_color).render(&shown)
+            ));
+        } else {
+            out.push_str(&format!(
+                "\n{margin}     {}",
+                Style::new().fg(body_color).render(&shown)
+            ));
+        }
+    }
+    out
+}
+
+fn task_child_excerpt(formatted: &str) -> Option<String> {
+    let tail = formatted
+        .split_once("Output:\n")
+        .map(|(_, tail)| tail)
+        .or_else(|| {
+            formatted
+                .split_once("Output excerpt:")
+                .map(|(_, tail)| tail)
+        })?;
+    let lines = tail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn task_id_suffix(task_id: &str) -> String {
+    if task_id.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", truncate(task_id, 24))
+    }
 }
 
 /// Codex-style past-tense action verb for a completed tool call.
@@ -251,7 +404,7 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
         if gi > 0 {
             lines.push(
                 Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("    {} ⋮", " ".repeat(nw))),
             );
         }
@@ -284,7 +437,7 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
                         change.old_index().map(|i| i + 1).unwrap_or(0),
                         ' ',
                         None,
-                        Color::BrightBlack,
+                        TN_GRAY,
                     ),
                 };
                 for (si, seg) in wrap_plain(raw, code_w).iter().enumerate() {
@@ -314,18 +467,14 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
         }
     }
     if truncated {
-        lines.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render("    … (diff truncated)"),
-        );
+        lines.push(Style::new().fg(TN_GRAY).render("    … (diff truncated)"));
     }
     let mut out = format!(
         "  {} {} {}",
-        Style::new().fg(Color::Green).bold().render("•"),
+        Style::new().fg(TN_GREEN).bold().render("•"),
         Style::new().render(&format!("Edited {path}")),
         Style::new()
-            .fg(Color::BrightBlack)
+            .fg(TN_GRAY)
             .render(&format!("(+{adds} -{dels})")),
     );
     if !lines.is_empty() {

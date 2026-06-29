@@ -19,14 +19,14 @@ impl App {
         let cap = width.saturating_sub(8);
         let mut lines = vec![pad_to(
             &Style::new()
-                .fg(Color::BrightBlack)
+                .fg(TN_GRAY)
                 .render(&format!("  ─ tasks · ✓ {} done ────────", self.completed)),
             width,
         )];
         if let Some(t) = running {
             lines.push(pad_to(
                 &Style::new()
-                    .fg(Color::Yellow)
+                    .fg(TN_YELLOW)
                     .render(&format!("  ⏳ {}", truncate(t, cap))),
                 width,
             ));
@@ -36,7 +36,7 @@ impl App {
         for item in q.iter().take(6) {
             lines.push(pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("  ▱ {}", truncate(&item.text, cap))),
                 width,
             ));
@@ -91,7 +91,7 @@ impl App {
                 '✔' => ('✔', TN_GRAY, true, false),
                 '▶' => ('◼', TN_ORANGE, false, true),
                 '✗' => ('✗', TN_RED, false, false),
-                _ => ('◻', Color::BrightBlack, false, false),
+                _ => ('◻', TN_GRAY, false, false),
             };
             let text_style = if done {
                 Style::new().fg(*color).strikethrough()
@@ -114,44 +114,110 @@ impl App {
         lines
     }
 
-    /// Bottom tracker for running parallel subagents (Claude-style): one row per
-    /// task with the agent type, description, elapsed time, and tokens.
+    /// Bottom tracker for parallel subagents (Claude-style): a durable summary
+    /// row plus live rows for agents still running.
     pub(crate) fn subagent_lines(&self) -> Vec<String> {
         if self.subagents.is_empty() {
             return Vec::new();
         }
         let width = self.width as usize;
-        let mut out = vec![pad_to(
-            &Style::new().fg(Color::White).bold().render("  ⏺ main"),
-            width,
+        let now = Instant::now();
+        let total = self.subagents.len();
+        let done = self.subagents.iter().filter(|s| s.done).count();
+        let tokens = self.subagents.iter().map(|s| s.tokens).sum::<u64>();
+        let started = self
+            .subagents
+            .iter()
+            .map(|s| s.started)
+            .min()
+            .unwrap_or(now);
+        let ended = if done == total {
+            self.subagents
+                .iter()
+                .filter_map(|s| s.ended)
+                .max()
+                .unwrap_or(now)
+        } else {
+            now
+        };
+        let elapsed = ended.saturating_duration_since(started);
+        let status = if done == total {
+            format!("{done}/{total} agents done")
+        } else {
+            format!(
+                "{} running · {done}/{total} done",
+                total.saturating_sub(done)
+            )
+        };
+        let right = if tokens > 0 {
+            format!(
+                "{status} · {} · ↓ {} tokens",
+                fmt_elapsed(elapsed),
+                fmt_tokens(tokens)
+            )
+        } else {
+            format!("{status} · {}", fmt_elapsed(elapsed))
+        };
+        let task = self
+            .running_task
+            .as_deref()
+            .unwrap_or("parallel agents")
+            .trim();
+        let slug = workflow_slug(task);
+        let rlen = a3s_tui::style::visible_len(&right);
+        let maxleft = width.saturating_sub(rlen + 3).max(8);
+        let left = truncate(&format!("  ◯ {slug}  {task}"), maxleft);
+        let pad = width.saturating_sub(a3s_tui::style::visible_len(&left) + rlen + 1);
+        let mut out = vec![format!(
+            "{}{}{}",
+            Style::new().fg(ACCENT).bold().render(&left),
+            " ".repeat(pad),
+            Style::new().fg(TN_GRAY).render(&right),
         )];
-        for s in &self.subagents {
-            let secs = s.started.elapsed().as_secs();
-            let el = if secs >= 60 {
-                format!("{}m {}s", secs / 60, secs % 60)
-            } else {
-                format!("{secs}s")
-            };
+
+        for s in self.subagents.iter().filter(|s| !s.done).take(4) {
+            let el = fmt_elapsed(s.started.elapsed());
             let right = if s.tokens > 0 {
                 format!("{el} · ↓ {} tokens", fmt_tokens(s.tokens))
             } else {
                 el
             };
-            let glyph = if s.done { '●' } else { '◯' };
             let rlen = a3s_tui::style::visible_len(&right);
             let maxleft = width.saturating_sub(rlen + 3).max(8);
-            let left = truncate(
-                &format!("  {glyph} {}  {}", s.agent, s.description),
-                maxleft,
-            );
+            let left = truncate(&format!("     ◯ {}  {}", s.agent, s.description), maxleft);
             let pad = width.saturating_sub(a3s_tui::style::visible_len(&left) + rlen + 1);
             out.push(format!(
                 "{}{}{}",
-                Style::new().fg(Color::Magenta).render(&left),
+                Style::new().fg(TN_PURPLE).render(&left),
                 " ".repeat(pad),
-                Style::new().fg(Color::BrightBlack).render(&right),
+                Style::new().fg(TN_GRAY).render(&right),
             ));
         }
         out
+    }
+}
+
+fn workflow_slug(text: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in text.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+        if slug.len() >= 24 {
+            break;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "parallel-agents".to_string()
+    } else {
+        slug
     }
 }

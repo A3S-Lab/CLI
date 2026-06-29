@@ -191,9 +191,7 @@ impl App {
                     .bold()
                     .render(&format!(" {label} "))
             } else {
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&format!(" {label} "))
+                Style::new().fg(TN_GRAY).render(&format!(" {label} "))
             }
         };
         let logtab = if g.log.is_empty() {
@@ -208,16 +206,11 @@ impl App {
             Style::new()
                 .fg(ACCENT)
                 .render("⇄ Tab to switch · commits in Log"),
-            Style::new().fg(Color::BrightBlack).render(&g.note)
+            Style::new().fg(TN_GRAY).render(&g.note)
         );
         let mut out = vec![
             pad_to(&header, width),
-            pad_to(
-                &Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-                width,
-            ),
+            pad_to(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
         ];
         let body = h.saturating_sub(3);
 
@@ -228,10 +221,7 @@ impl App {
                 } else {
                     "  loading commits…"
                 };
-                out.push(pad_to(
-                    &Style::new().fg(Color::BrightBlack).render(msg),
-                    width,
-                ));
+                out.push(pad_to(&Style::new().fg(TN_GRAY).render(msg), width));
                 out.truncate(h);
                 while out.len() < h {
                     out.push(String::new());
@@ -241,7 +231,7 @@ impl App {
             // Two columns: the commit list (selectable) + the selected commit's
             // details (`git show`) on the right.
             let tw = (width / 3).clamp(20, 46);
-            let sep = Style::new().fg(Color::BrightBlack).render(" │ ");
+            let sep = Style::new().fg(TN_GRAY).render(" │ ");
             // keep the selected commit visible
             let start = g.log_sel.saturating_sub(body.saturating_sub(1));
             for i in 0..body {
@@ -250,12 +240,12 @@ impl App {
                     let (hash, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
                     let raw = pad_to(&truncate(&format!(" {hash}  {rest}"), tw), tw);
                     if ci == g.log_sel {
-                        Style::new().fg(Color::Black).bg(Color::Yellow).render(&raw)
+                        Style::new().fg(Color::Black).bg(TN_YELLOW).render(&raw)
                     } else {
                         format!(
                             "{}{}",
                             Style::new()
-                                .fg(Color::Yellow)
+                                .fg(TN_YELLOW)
                                 .render(&pad_to(&format!(" {hash} "), hash.len() + 2)),
                             truncate(rest, tw.saturating_sub(hash.len() + 3))
                         )
@@ -265,15 +255,15 @@ impl App {
                 };
                 let right = if let Some(line) = g.diff.get(g.diff_scroll + i) {
                     let st = if line.starts_with("@@") {
-                        Style::new().fg(Color::Cyan)
+                        Style::new().fg(TN_CYAN)
                     } else if line.starts_with("commit ") {
-                        Style::new().fg(Color::Yellow).bold()
+                        Style::new().fg(TN_YELLOW).bold()
                     } else if line.starts_with('+') {
-                        Style::new().fg(Color::Green)
+                        Style::new().fg(TN_GREEN)
                     } else if line.starts_with('-') {
-                        Style::new().fg(Color::Red)
+                        Style::new().fg(TN_RED)
                     } else if line.starts_with("diff ") || line.starts_with("index ") {
-                        Style::new().fg(Color::BrightBlack)
+                        Style::new().fg(TN_GRAY)
                     } else {
                         Style::new()
                     };
@@ -285,48 +275,48 @@ impl App {
             }
         } else {
             let tw = (width / 3).clamp(20, 46);
-            let sep = Style::new().fg(Color::BrightBlack).render(" │ ");
+            let sep = Style::new().fg(TN_GRAY).render(" │ ");
+            // Scroll the file list so the selection stays visible (mirrors the Log
+            // view); previously it rendered from index 0 and the highlight could
+            // scroll off the bottom and become unreachable.
+            let start = g.sel.saturating_sub(body.saturating_sub(1));
             for i in 0..body {
+                let fi = start + i;
                 // left: file list
-                let left = if let Some(f) = g.files.get(i) {
+                let left = if let Some(f) = g.files.get(fi) {
                     let mark = format!("{}{}", f.x, f.y);
                     let raw = pad_to(&truncate(&format!(" {mark}  {}", f.path), tw), tw);
                     let color = if f.untracked() {
-                        Color::Red
+                        TN_RED
                     } else if f.staged() {
-                        Color::Green
+                        TN_GREEN
                     } else {
-                        Color::Yellow
+                        TN_YELLOW
                     };
-                    if i == g.sel {
+                    if fi == g.sel {
                         Style::new().fg(Color::Black).bg(color).render(&raw)
                     } else {
                         Style::new().fg(color).render(&raw)
                     }
-                } else if i == 0 && g.files.is_empty() {
-                    pad_to(
-                        &Style::new()
-                            .fg(Color::BrightBlack)
-                            .render("  working tree clean"),
-                        tw,
-                    )
+                } else if fi == 0 && g.files.is_empty() {
+                    pad_to(&Style::new().fg(TN_GRAY).render("  working tree clean"), tw)
                 } else {
                     " ".repeat(tw)
                 };
                 // right: diff
                 let right = if let Some(line) = g.diff.get(g.diff_scroll + i) {
                     let st = if line.starts_with("@@") {
-                        Style::new().fg(Color::Cyan)
+                        Style::new().fg(TN_CYAN)
                     } else if line.starts_with('+') {
-                        Style::new().fg(Color::Green)
+                        Style::new().fg(TN_GREEN)
                     } else if line.starts_with('-') {
-                        Style::new().fg(Color::Red)
+                        Style::new().fg(TN_RED)
                     } else if line.starts_with("diff ")
                         || line.starts_with("index ")
                         || line.starts_with("--- ")
                         || line.starts_with("+++ ")
                     {
-                        Style::new().fg(Color::BrightBlack)
+                        Style::new().fg(TN_GRAY)
                     } else {
                         Style::new()
                     };
@@ -340,11 +330,11 @@ impl App {
 
         // Bottom row: commit input, or the key hints.
         let bottom = if let Some(msg) = &g.commit_input {
-            Style::new().fg(Color::Yellow).bold().render(&format!(
+            Style::new().fg(TN_YELLOW).bold().render(&format!(
                 "  commit message: {msg}_   (Enter commit · Esc cancel)"
             ))
         } else {
-            Style::new().fg(Color::BrightBlack).render(
+            Style::new().fg(TN_GRAY).render(
                 "  ↑↓ select · Space/s stage · u unstage · a stage-all · c commit · Tab log · r refresh · Esc",
             )
         };

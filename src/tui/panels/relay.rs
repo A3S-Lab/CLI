@@ -67,11 +67,15 @@ impl App {
             (s.native_id.clone(), s.seed.clone(), s.agent)
         };
         if let Some(id) = native_id {
-            let mut opts = SessionOptions::new()
-                .with_session_store(self.store.clone())
-                .with_session_id(id.as_str())
-                .with_confirmation_policy(self.confirmation.clone())
-                .with_auto_save(true);
+            let mut opts = with_recent_workspace_context(
+                SessionOptions::new()
+                    .with_session_store(self.store.clone())
+                    .with_session_id(id.as_str())
+                    .with_confirmation_policy(self.confirmation.clone())
+                    .with_workspace_backend(self.workspace_services.clone())
+                    .with_auto_save(true),
+                &self.workspace_manifest,
+            );
             // Resume under the CURRENT model, not whatever the saved session used
             // (e.g. a smoke-test's gpt-4o that this config doesn't have).
             if let Some(m) = self.model.clone().or_else(|| self.models.first().cloned()) {
@@ -93,20 +97,20 @@ impl App {
                             "assistant" => {
                                 let mut md = StreamingMarkdown::new(w);
                                 md.push(&text);
-                                self.messages.push(gutter(Color::Green, &md.view()));
+                                self.messages.push(gutter(TN_GREEN, &md.view()));
                             }
                             _ => {}
                         }
                     }
                     self.push_line(
                         &Style::new()
-                            .fg(Color::Green)
+                            .fg(TN_GREEN)
                             .render(&format!("  ⮌ resumed a3s-code session {id}")),
                     );
                 }
                 Err(e) => self.push_line(
                     &Style::new()
-                        .fg(Color::Red)
+                        .fg(TN_RED)
                         .render(&format!("  failed to resume: {e}")),
                 ),
             }
@@ -115,13 +119,13 @@ impl App {
             if self.state != State::Idle {
                 self.push_line(
                     &Style::new()
-                        .fg(Color::Yellow)
+                        .fg(TN_YELLOW)
                         .render("  finish the current turn before relaying"),
                 );
                 return None;
             }
             self.messages.push(gutter(
-                Color::Magenta,
+                TN_PURPLE,
                 &format!("⮌ relaying from {agent}: {}", truncate(&seed, 60)),
             ));
             self.start_stream(format!(
@@ -165,7 +169,7 @@ impl App {
             pad_to(&strip, width),
             pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render("  ←/→ agent · ↑/↓ session · Enter continue · Esc"),
                 width,
             ),
@@ -176,22 +180,41 @@ impl App {
         if idxs.is_empty() {
             menu.push(pad_to(
                 &Style::new()
-                    .fg(Color::BrightBlack)
+                    .fg(TN_GRAY)
                     .render(&format!("    (no {active} sessions for this directory)")),
                 width,
             ));
         }
-        for (row, &gi) in idxs.iter().enumerate().take(12) {
+        // Scroll a window around the selection so a session past row 12 stays
+        // visible and reachable (the list used to render a fixed first-12 only).
+        let total = idxs.len();
+        let sel = sel.min(total.saturating_sub(1));
+        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
+        let start = if sel < max_rows {
+            0
+        } else {
+            sel + 1 - max_rows
+        };
+        let end = (start + max_rows).min(total);
+        for (row, &gi) in idxs.iter().enumerate().take(end).skip(start) {
             let s = &self.relay[gi];
             let raw = pad_to(
                 &format!("  {}", truncate(&s.label, width.saturating_sub(4))),
                 width,
             );
-            menu.push(if row == sel.min(idxs.len().saturating_sub(1)) {
+            menu.push(if row == sel {
                 Style::new().fg(Color::Black).bg(color).render(&raw)
             } else {
                 Style::new().fg(color).render(&raw)
             });
+        }
+        if total > max_rows {
+            menu.push(pad_to(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render(&format!("  {}/{total}", sel + 1)),
+                width,
+            ));
         }
         self.overlay_list(composed, &menu)
     }

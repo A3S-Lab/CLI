@@ -24,24 +24,21 @@ impl App {
         };
         let mut lines = vec![pad_to(
             &Style::new()
-                .fg(Color::Yellow)
+                .fg(TN_YELLOW)
                 .bold()
                 .render("  ↘ by the way · Esc to close"),
             width,
         )];
         for l in wrap(&format!("Q: {q}")) {
             lines.push(pad_to(
-                &Style::new()
-                    .fg(Color::Yellow)
-                    .bold()
-                    .render(&format!("  {l}")),
+                &Style::new().fg(TN_YELLOW).bold().render(&format!("  {l}")),
                 width,
             ));
         }
         let ans = a.as_deref().unwrap_or("thinking…");
         for l in wrap(ans).into_iter().take(12) {
             lines.push(pad_to(
-                &Style::new().fg(Color::Yellow).render(&format!("  {l}")),
+                &Style::new().fg(TN_YELLOW).render(&format!("  {l}")),
                 width,
             ));
         }

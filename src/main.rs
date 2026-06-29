@@ -3,17 +3,26 @@
 //! `a3s code` launches the interactive terminal UI (the coding agent); the
 //! rest are basic commands.
 
+mod a3s_os;
+mod box_cmd;
+mod claude;
 mod codex;
+mod tools;
 mod top;
 mod tui;
 mod update;
+
+#[cfg(test)]
+static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn usage() {
     println!("a3s {} — A3S coding agent CLI\n", env!("CARGO_PKG_VERSION"));
     println!("usage:");
     println!("  a3s code                  launch the interactive coding agent (TUI)");
     println!("  a3s code resume <id>      resume a saved session by id");
-    println!("  a3s top                   live monitor for agents, containers, and processes");
+    println!("  a3s box <args...>         run a3s-box, installing it automatically if needed");
+    println!("  a3s list                  list installed a3s-* tools on PATH");
+    println!("  a3s top                   live monitor for boxes, agents, and diagnostics");
     println!("  a3s update                check for and install a newer version");
     println!("  a3s --version             show version");
     println!("  a3s --help                show this help");
@@ -54,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("update") => self_update().await,
+        Some("box") => box_cmd::run(args.collect()).await,
+        Some("list") => {
+            tools::print_tool_list();
+            Ok(())
+        }
         Some("top") => top::run(args.collect()).await,
         // Pass any trailing args (e.g. `resume <id>`) through to the TUI.
         Some("code") => {
@@ -81,9 +95,14 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn cargo_command() -> std::ffi::OsString {
+        std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+    }
+
     #[tokio::test]
     async fn test_help_command() {
-        let output = std::process::Command::new("cargo")
+        let _guard = cargo_run_guard();
+        let output = std::process::Command::new(cargo_command())
             .args(["run", "--", "--help"])
             .output()
             .expect("Failed to execute process");
@@ -95,7 +114,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_command() {
-        let output = std::process::Command::new("cargo")
+        let _guard = cargo_run_guard();
+        let output = std::process::Command::new(cargo_command())
             .args(["run", "--", "--version"])
             .output()
             .expect("Failed to execute process");
@@ -103,5 +123,11 @@ mod tests {
         assert!(output.status.success());
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    fn cargo_run_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
     }
 }
