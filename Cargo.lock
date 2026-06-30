@@ -172,11 +172,12 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/TUI.git?rev=be0ed1864a9a9f27ecf9999a98e731e51e7fa569#be0ed1864a9a9f27ecf9999a98e731e51e7fa569"
+source = "git+https://github.com/A3S-Lab/TUI.git?rev=091f6ba172bf47a9c38c57d96f19a53cbb74c6a3#091f6ba172bf47a9c38c57d96f19a53cbb74c6a3"
 dependencies = [
  "comrak",
  "crossterm",
  "futures-util",
+ "similar",
  "syntect",
  "taffy",
  "tokio",
