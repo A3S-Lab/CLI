@@ -85,6 +85,9 @@ jobs:
             license "MIT"
 
             on_macos do
+              # RemoteUI popup helper (own repo/formula): A3S-Lab/WebView. Pulled
+              # in automatically so the inline OS popup works out of the box.
+              depends_on "a3s-lab/tap/a3s-webview"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-apple-darwin.tar.gz"
                 sha256 "${mac_arm}"

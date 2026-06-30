@@ -44,15 +44,21 @@ impl App {
         lines
     }
 
-    /// Resize the viewport so the pinned plan panel and the bottom task panel
-    /// both fit without covering the transcript.
-    pub(crate) fn relayout(&mut self) {
+    /// Visible transcript rows = the viewport height, mirroring the layout chrome
+    /// (separators + status + input + pinned plan/task/subagent rows). Single
+    /// source of truth shared by `relayout` and mouse hit-testing.
+    pub(crate) fn viewport_rows(&self) -> usize {
         let n = (self.task_lines().len() + self.plan_lines().len() + self.subagent_lines().len())
             as u16;
-        self.viewport.resize(
-            self.width,
-            self.height.saturating_sub(6 + self.input_height() + n),
-        );
+        self.height.saturating_sub(6 + self.input_height() + n) as usize
+    }
+
+    /// Resize the viewport so the pinned plan panel and the bottom task panel
+    /// both fit without covering the transcript. Width reserves one column on the
+    /// right for the scrollbar (`append_scrollbar`), so content never clips it.
+    pub(crate) fn relayout(&mut self) {
+        self.viewport
+            .resize(self.width.saturating_sub(1), self.viewport_rows() as u16);
     }
 
     /// Replace the pinned plan from a planning-mode task list.

@@ -12,6 +12,7 @@ mod git;
 mod help;
 mod ide;
 pub(crate) mod login;
+mod memory;
 mod menu;
 mod model;
 mod plan;

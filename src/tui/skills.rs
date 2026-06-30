@@ -105,6 +105,50 @@ pub(crate) fn count_skill_files(dirs: &[std::path::PathBuf]) -> usize {
     n
 }
 
+/// Bundled built-in skills the cli always ships (not gated, not project-local).
+const OKF_SKILL: &str = include_str!("../../skills/okf.md");
+
+/// Materialize the always-available built-in cli skills (currently `okf`, the
+/// LLM-wiki knowledge compiler that emits an Open Knowledge Format bundle) under
+/// `~/.a3s/cli-skills/<name>/SKILL.md` and return that root so the session can add
+/// it to its skill dirs. Best-effort — returns `None` on any I/O error.
+pub(crate) fn ensure_builtin_skills_dir() -> Option<std::path::PathBuf> {
+    let root = std::path::PathBuf::from(std::env::var_os("HOME")?)
+        .join(".a3s")
+        .join("cli-skills");
+    ensure_builtin_skills_dir_at(&root).ok()?;
+    Some(root)
+}
+
+/// The built-in cli skills materialized under `~/.a3s/cli-skills/`. Any other
+/// directory there is a stale leftover from an earlier version (e.g. the old
+/// `kb-compile`, which was renamed to `okf`) and is pruned below.
+const BUILTIN_SKILLS: &[(&str, &str)] = &[("okf", OKF_SKILL)];
+
+fn ensure_builtin_skills_dir_at(root: &std::path::Path) -> std::io::Result<()> {
+    for (name, body) in BUILTIN_SKILLS {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("SKILL.md"), body)?;
+    }
+    // The cli-skills root is cli-owned (only built-ins materialize here), so prune
+    // any directory that isn't a current built-in — otherwise a renamed skill like
+    // the old `kb-compile` lingers and resurfaces as a duplicate `/` command.
+    if let Ok(rd) = std::fs::read_dir(root) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let is_builtin = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| BUILTIN_SKILLS.iter().any(|(name, _)| *name == n));
+            if p.is_dir() && !is_builtin {
+                let _ = std::fs::remove_dir_all(&p);
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     // Claude Code and Codex both keep skills under `<root>/skills` (same SKILL.md
@@ -158,5 +202,47 @@ fn collect_skills_dirs(
         } else if !name.starts_with('.') && name != "node_modules" {
             collect_skills_dirs(&p, depth + 1, max, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn okf_skill_materializes_and_parses() {
+        let dir = std::env::temp_dir().join(format!("a3s-okf-skill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Seed a stale leftover (the pre-rename `kb-compile`) — it must be pruned.
+        std::fs::create_dir_all(dir.join("kb-compile")).unwrap();
+        std::fs::write(dir.join("kb-compile/SKILL.md"), "stale").unwrap();
+        ensure_builtin_skills_dir_at(&dir).unwrap();
+        assert!(
+            !dir.join("kb-compile").exists(),
+            "stale kb-compile dir should be pruned so /kb-compile can't resurface"
+        );
+
+        // The cli loader discovers it by name → it shows in the `/` menu as `/okf`.
+        let skills = load_skills(std::slice::from_ref(&dir));
+        assert!(
+            skills.iter().any(|(n, _)| n == "okf"),
+            "okf skill not discovered: {skills:?}"
+        );
+        assert!(
+            !skills.iter().any(|(n, _)| n == "kb-compile"),
+            "stale kb-compile must not be discovered: {skills:?}"
+        );
+
+        // The stricter CORE loader (validates kind + fail-secure allowed-tools +
+        // 10KiB body cap) must accept it, else it would silently fail to load.
+        let md = std::fs::read_to_string(dir.join("okf/SKILL.md")).unwrap();
+        let skill = a3s_code_core::skills::Skill::parse(&md)
+            .expect("core skill loader must accept the bundled okf SKILL.md");
+        assert_eq!(skill.name, "okf");
+        assert!(
+            skill.allowed_tools.is_some(),
+            "allowed-tools must parse (fail-secure) so the skill is usable"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

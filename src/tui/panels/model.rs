@@ -9,6 +9,7 @@ struct ModelTab {
     color: Color,
     models: Vec<String>,
     provider: Option<AuthProvider>, // None = config.acl
+    os_gateway: bool,               // the 书安OS unified AI gateway tab
 }
 
 fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, usize) {
@@ -52,6 +53,7 @@ impl App {
             color: A3S_COLOR,
             models: self.models.clone(),
             provider: None,
+            os_gateway: false,
         }];
         if has_local_login(AuthProvider::Claude) {
             tabs.push(ModelTab {
@@ -59,6 +61,7 @@ impl App {
                 color: CLAUDE_COLOR,
                 models: claude_models(), // from ~/.claude.json
                 provider: Some(AuthProvider::Claude),
+                os_gateway: false,
             });
         }
         if has_local_login(AuthProvider::Codex) {
@@ -67,6 +70,23 @@ impl App {
                 color: CODEX_COLOR,
                 models: crate::codex::codex_models(), // from ~/.codex/models_cache.json
                 provider: Some(AuthProvider::Codex),
+                os_gateway: false,
+            });
+        }
+        // Signed in to 书安OS → offer its unified AI gateway (gateway-managed:
+        // we send the OS token + a model id; the gateway holds provider keys).
+        if self.os_session.is_some() {
+            let models = match &self.os_gateway_models {
+                Some(m) if !m.is_empty() => m.clone(),
+                Some(_) => vec!["(gateway unavailable)".to_string()],
+                None => vec!["(loading…)".to_string()],
+            };
+            tabs.push(ModelTab {
+                label: "OS网关",
+                color: TN_CYAN,
+                models,
+                provider: None,
+                os_gateway: true,
             });
         }
         tabs
@@ -118,7 +138,14 @@ impl App {
             KeyCode::Enter => {
                 let model = tabs[t].models.get(sel.min(last)).cloned();
                 let provider = tabs[t].provider;
+                let os_gateway = tabs[t].os_gateway;
                 self.model_menu = None;
+                if os_gateway {
+                    if let Some(model) = model {
+                        self.use_os_gateway(&model);
+                    }
+                    return Some(None);
+                }
                 match provider {
                     None => {
                         self.llm_override = None; // config.acl credentials
@@ -230,6 +257,58 @@ impl App {
                     .fg(TN_RED)
                     .render(&format!("  Codex sign-in failed: {e}")),
             ),
+        }
+    }
+
+    /// Route the agent's LLM through the 书安OS **unified AI gateway**: an
+    /// OpenAI-compatible client at `{OS origin}/v1/chat/completions`, authed with
+    /// the OS Bearer token (the gateway is "gateway-managed" — it holds the real
+    /// provider keys). `model` is a gateway model id from its `/v1/models`.
+    fn use_os_gateway(&mut self, model: &str) {
+        if model.starts_with('(') {
+            // a placeholder row ("(loading…)" / "(gateway unavailable)").
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  OS网关暂无可用模型（确认 OS 已配置统一 AI 网关后重试 /model）"),
+            );
+            return;
+        }
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  finish the current turn before switching models"),
+            );
+            return;
+        }
+        let Some(session) = self.os_session.clone() else {
+            return;
+        };
+        let origin = crate::a3s_os::os_origin(&session.address);
+        let client =
+            a3s_code_core::llm::OpenAiClient::new(session.access_token.clone(), model.to_string())
+                .with_base_url(origin)
+                .with_provider_name("OS网关");
+        self.llm_override = Some(Arc::new(client));
+        self.model = Some(model.to_string());
+        match self.rebuild_session(Some(model)) {
+            Ok((s, _)) => {
+                self.session = Arc::new(s);
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GREEN)
+                        .render(&format!("  ⇄ OS网关 · {model}")),
+                );
+            }
+            Err(e) => {
+                self.llm_override = None;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  failed to switch: {e}")),
+                );
+            }
         }
     }
 
@@ -499,12 +578,14 @@ mod tests {
                 color: A3S_COLOR,
                 models: vec!["openai/gpt-5".into()],
                 provider: None,
+                os_gateway: false,
             },
             ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
                 models: vec!["claude-sonnet-4".into()],
                 provider: Some(AuthProvider::Claude),
+                os_gateway: false,
             },
         ];
 

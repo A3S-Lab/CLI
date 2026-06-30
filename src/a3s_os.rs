@@ -144,18 +144,26 @@ pub(crate) fn logout(config: &OsConfig) -> Result<bool> {
 /// available to every command.
 pub(crate) const OS_ENV_BASE_URL: &str = "A3S_OS_BASE_URL";
 pub(crate) const OS_ENV_TOKEN: &str = "A3S_OS_TOKEN";
+pub(crate) const OS_ENV_REFRESH_TOKEN: &str = "A3S_OS_REFRESH_TOKEN";
 
-/// Export the signed-in platform endpoint + token to the process env so the
-/// agent's shell can use them directly. Called on login and on startup restore.
+/// Export the signed-in platform endpoint + tokens to the process env so the
+/// agent's shell — and the RemoteUI webview helper, which inherits this env —
+/// can use them directly. Called on login and on startup restore. The refresh
+/// token lets the webview's seeded session survive an edge-expired access token.
 pub(crate) fn export_os_env(session: &StoredOsSession) {
     std::env::set_var(OS_ENV_BASE_URL, &session.address);
     std::env::set_var(OS_ENV_TOKEN, &session.access_token);
+    match &session.refresh_token {
+        Some(rt) => std::env::set_var(OS_ENV_REFRESH_TOKEN, rt),
+        None => std::env::remove_var(OS_ENV_REFRESH_TOKEN),
+    }
 }
 
 /// Clear the exported platform env (called on /logout).
 pub(crate) fn clear_os_env() {
     std::env::remove_var(OS_ENV_BASE_URL);
     std::env::remove_var(OS_ENV_TOKEN);
+    std::env::remove_var(OS_ENV_REFRESH_TOKEN);
 }
 
 /// The stored session for the configured OS address, if the user logged in
@@ -459,6 +467,58 @@ async fn exchange_refresh_token(address: &str, refresh_token: &str) -> Result<OA
         .with_context(|| format!("parse OAuth2 refresh response from {token_url}"))
 }
 
+/// The OS origin (`scheme://host[:port]`). The unified AI gateway's
+/// OpenAI-compatible API is host-absolute (`/v1/chat/completions`), so we route
+/// to the origin, not the (possibly path-suffixed) configured platform address.
+pub(crate) fn os_origin(address: &str) -> String {
+    match address.find("://") {
+        Some(scheme_end) => {
+            let after = &address[scheme_end + 3..];
+            let end = after
+                .find('/')
+                .map_or(address.len(), |j| scheme_end + 3 + j);
+            address[..end].to_string()
+        }
+        None => address.trim_end_matches('/').to_string(),
+    }
+}
+
+/// List the 书安OS unified AI gateway's model ids via the OpenAI-compatible
+/// `GET {origin}/v1/models` (Bearer = the OS token). The gateway is
+/// "gateway-managed" (it holds the real provider keys; callers send only the OS
+/// token + a model id). Best-effort → empty `Vec` on any error, so the `/model`
+/// picker can show the gateway as unavailable rather than failing.
+pub(crate) async fn fetch_gateway_models(address: &str, token: &str) -> Vec<String> {
+    let url = format!("{}/v1/models", os_origin(address));
+    let Ok(client) = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build() else {
+        return Vec::new();
+    };
+    let Ok(resp) = client
+        .get(&url)
+        .bearer_auth(token)
+        .header("accept", "application/json")
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(json) = resp.json::<serde_json::Value>().await else {
+        return Vec::new();
+    };
+    // OpenAI shape: { "data": [ { "id": "..." }, ... ] }.
+    json.get("data")
+        .and_then(|d| d.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_authorization_url(
     address: &str,
     redirect_uri: &str,
@@ -660,6 +720,25 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn os_origin_strips_any_path_for_the_gateway() {
+        // The gateway endpoint is host-absolute (/v1/chat/completions), so the
+        // OpenAI base must be the bare origin regardless of the platform path.
+        assert_eq!(
+            os_origin("https://os.example.com"),
+            "https://os.example.com"
+        );
+        assert_eq!(
+            os_origin("https://os.example.com/"),
+            "https://os.example.com"
+        );
+        assert_eq!(
+            os_origin("https://os.example.com/api/v1"),
+            "https://os.example.com"
+        );
+        assert_eq!(os_origin("http://10.0.0.1:3888/x"), "http://10.0.0.1:3888");
+    }
 
     #[test]
     fn authorization_url_uses_oauth2_code_flow_with_pkce() {
