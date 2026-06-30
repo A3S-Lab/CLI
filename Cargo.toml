@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.5.12"
+version = "0.5.13"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -15,11 +15,12 @@ path = "src/main.rs"
 
 [dependencies]
 a3s-code-core = { git = "https://github.com/AI45Lab/Code.git", rev = "e1b65e8fd5dc3cf392d073173c37213669d0f782" }
-a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "be0ed1864a9a9f27ecf9999a98e731e51e7fa569" }
+a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "091f6ba172bf47a9c38c57d96f19a53cbb74c6a3" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
 similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 # Codex account client (custom LlmClient over the ChatGPT backend).

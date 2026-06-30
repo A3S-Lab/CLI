@@ -1,6 +1,9 @@
 //! `/git` panel: status/diff/log views, staging, and commit input.
 
 use super::super::*;
+use a3s_tui::components::{
+    GitPanel, GitPanelView as TuiGitPanelView, GitStatusFile as TuiGitStatusFile,
+};
 
 impl App {
     /// Spawn a diff fetch for the currently selected `/git` file.
@@ -180,169 +183,34 @@ impl App {
 
     /// Full-screen `/git` panel (gitui-style): status + diff / log + commit.
     pub(crate) fn render_git(&self, g: &Git) -> String {
-        let width = self.width as usize;
-        let h = self.height as usize;
-        let branch = self.branch.as_deref().unwrap_or("(detached)");
-        let tab = |label: &str, active: bool| {
-            if active {
-                Style::new()
-                    .fg(Color::Black)
-                    .bg(ACCENT)
-                    .bold()
-                    .render(&format!(" {label} "))
-            } else {
-                Style::new().fg(TN_GRAY).render(&format!(" {label} "))
-            }
+        let view = match g.view {
+            GitView::Status => TuiGitPanelView::Status,
+            GitView::Log => TuiGitPanelView::Log,
         };
-        let logtab = if g.log.is_empty() {
-            "Log".to_string()
-        } else {
-            format!("Log ({})", g.log.len())
-        };
-        let header = format!(
-            "  git · {branch}   {} {}  {}   {}",
-            tab("Status", g.view == GitView::Status),
-            tab(&logtab, g.view == GitView::Log),
-            Style::new()
-                .fg(ACCENT)
-                .render("⇄ Tab to switch · commits in Log"),
-            Style::new().fg(TN_GRAY).render(&g.note)
-        );
-        let mut out = vec![
-            pad_to(&header, width),
-            pad_to(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
-        ];
-        let body = h.saturating_sub(3);
+        let files = g
+            .files
+            .iter()
+            .map(|file| TuiGitStatusFile::new(file.x, file.y, file.path.clone()))
+            .collect::<Vec<_>>();
+        let mut panel = GitPanel::new(self.branch.as_deref().unwrap_or("(detached)"))
+            .files(files)
+            .selected_file(g.sel)
+            .log_entries(g.log.clone())
+            .selected_log(g.log_sel)
+            .active_view(view)
+            .diff_lines(g.diff.clone())
+            .diff_scroll(g.diff_scroll)
+            .note(g.note.as_str())
+            .accent_color(ACCENT)
+            .muted_color(TN_GRAY)
+            .status_colors(TN_GREEN, TN_YELLOW, TN_RED)
+            .diff_colors(TN_CYAN, TN_GREEN, TN_RED, TN_GRAY)
+            .fill_height(true);
 
-        if g.view == GitView::Log {
-            if g.log.is_empty() {
-                let msg = if g.note.is_empty() {
-                    "  no commits in this repository yet"
-                } else {
-                    "  loading commits…"
-                };
-                out.push(pad_to(&Style::new().fg(TN_GRAY).render(msg), width));
-                out.truncate(h);
-                while out.len() < h {
-                    out.push(String::new());
-                }
-                return out.join("\n");
-            }
-            // Two columns: the commit list (selectable) + the selected commit's
-            // details (`git show`) on the right.
-            let tw = (width / 3).clamp(20, 46);
-            let sep = Style::new().fg(TN_GRAY).render(" │ ");
-            // keep the selected commit visible
-            let start = g.log_sel.saturating_sub(body.saturating_sub(1));
-            for i in 0..body {
-                let ci = start + i;
-                let left = if let Some(line) = g.log.get(ci) {
-                    let (hash, rest) = line.split_once(' ').unwrap_or((line.as_str(), ""));
-                    let raw = pad_to(&truncate(&format!(" {hash}  {rest}"), tw), tw);
-                    if ci == g.log_sel {
-                        Style::new().fg(Color::Black).bg(TN_YELLOW).render(&raw)
-                    } else {
-                        format!(
-                            "{}{}",
-                            Style::new()
-                                .fg(TN_YELLOW)
-                                .render(&pad_to(&format!(" {hash} "), hash.len() + 2)),
-                            truncate(rest, tw.saturating_sub(hash.len() + 3))
-                        )
-                    }
-                } else {
-                    " ".repeat(tw)
-                };
-                let right = if let Some(line) = g.diff.get(g.diff_scroll + i) {
-                    let st = if line.starts_with("@@") {
-                        Style::new().fg(TN_CYAN)
-                    } else if line.starts_with("commit ") {
-                        Style::new().fg(TN_YELLOW).bold()
-                    } else if line.starts_with('+') {
-                        Style::new().fg(TN_GREEN)
-                    } else if line.starts_with('-') {
-                        Style::new().fg(TN_RED)
-                    } else if line.starts_with("diff ") || line.starts_with("index ") {
-                        Style::new().fg(TN_GRAY)
-                    } else {
-                        Style::new()
-                    };
-                    st.render(&truncate(line, width.saturating_sub(tw + 4)))
-                } else {
-                    String::new()
-                };
-                out.push(format!("{left}{sep}{right}"));
-            }
-        } else {
-            let tw = (width / 3).clamp(20, 46);
-            let sep = Style::new().fg(TN_GRAY).render(" │ ");
-            // Scroll the file list so the selection stays visible (mirrors the Log
-            // view); previously it rendered from index 0 and the highlight could
-            // scroll off the bottom and become unreachable.
-            let start = g.sel.saturating_sub(body.saturating_sub(1));
-            for i in 0..body {
-                let fi = start + i;
-                // left: file list
-                let left = if let Some(f) = g.files.get(fi) {
-                    let mark = format!("{}{}", f.x, f.y);
-                    let raw = pad_to(&truncate(&format!(" {mark}  {}", f.path), tw), tw);
-                    let color = if f.untracked() {
-                        TN_RED
-                    } else if f.staged() {
-                        TN_GREEN
-                    } else {
-                        TN_YELLOW
-                    };
-                    if fi == g.sel {
-                        Style::new().fg(Color::Black).bg(color).render(&raw)
-                    } else {
-                        Style::new().fg(color).render(&raw)
-                    }
-                } else if fi == 0 && g.files.is_empty() {
-                    pad_to(&Style::new().fg(TN_GRAY).render("  working tree clean"), tw)
-                } else {
-                    " ".repeat(tw)
-                };
-                // right: diff
-                let right = if let Some(line) = g.diff.get(g.diff_scroll + i) {
-                    let st = if line.starts_with("@@") {
-                        Style::new().fg(TN_CYAN)
-                    } else if line.starts_with('+') {
-                        Style::new().fg(TN_GREEN)
-                    } else if line.starts_with('-') {
-                        Style::new().fg(TN_RED)
-                    } else if line.starts_with("diff ")
-                        || line.starts_with("index ")
-                        || line.starts_with("--- ")
-                        || line.starts_with("+++ ")
-                    {
-                        Style::new().fg(TN_GRAY)
-                    } else {
-                        Style::new()
-                    };
-                    st.render(&truncate(line, width.saturating_sub(tw + 4)))
-                } else {
-                    String::new()
-                };
-                out.push(format!("{left}{sep}{right}"));
-            }
+        if let Some(input) = g.commit_input.as_deref() {
+            panel = panel.commit_input(input);
         }
 
-        // Bottom row: commit input, or the key hints.
-        let bottom = if let Some(msg) = &g.commit_input {
-            Style::new().fg(TN_YELLOW).bold().render(&format!(
-                "  commit message: {msg}_   (Enter commit · Esc cancel)"
-            ))
-        } else {
-            Style::new().fg(TN_GRAY).render(
-                "  ↑↓ select · Space/s stage · u unstage · a stage-all · c commit · Tab log · r refresh · Esc",
-            )
-        };
-        while out.len() + 1 < h {
-            out.push(String::new());
-        }
-        out.push(pad_to(&bottom, width));
-        out.truncate(h);
-        out.join("\n")
+        panel.view(self.width, self.height as usize)
     }
 }

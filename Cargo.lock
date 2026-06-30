@@ -4,13 +4,14 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "a3s-code-core",
  "a3s-tui",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "futures",
  "image",
  "rand 0.8.6",
@@ -171,11 +172,12 @@ dependencies = [
 [[package]]
 name = "a3s-tui"
 version = "0.1.4"
-source = "git+https://github.com/A3S-Lab/TUI.git?rev=be0ed1864a9a9f27ecf9999a98e731e51e7fa569#be0ed1864a9a9f27ecf9999a98e731e51e7fa569"
+source = "git+https://github.com/A3S-Lab/TUI.git?rev=091f6ba172bf47a9c38c57d96f19a53cbb74c6a3#091f6ba172bf47a9c38c57d96f19a53cbb74c6a3"
 dependencies = [
  "comrak",
  "crossterm",
  "futures-util",
+ "similar",
  "syntect",
  "taffy",
  "tokio",
@@ -4042,9 +4044,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.8.23"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+checksum = "185d8ab0dfbb35cf1399a6344d8484209c088f75f8f68230da55d48d95d43e3d"
 dependencies = [
  "serde",
  "serde_spanned",
@@ -4054,32 +4056,25 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "0.6.11"
+version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+checksum = "7cda73e2f1397b1262d6dfdcef8aafae14d1de7748d66822d3bfeeb6d03e5e4b"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "toml_edit"
-version = "0.22.27"
+version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+checksum = "396e4d48bbb2b7554c944bde63101b5ae446cff6ec4a24227428f15eb72ef338"
 dependencies = [
  "indexmap",
  "serde",
  "serde_spanned",
  "toml_datetime",
- "toml_write",
  "winnow",
 ]
-
-[[package]]
-name = "toml_write"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "tower"
@@ -4860,9 +4855,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "winnow"
-version = "0.7.15"
+version = "0.5.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
+checksum = "f593a95398737aeed53e489c785df13f3618e41dbcd6718c6addbf1395aa6876"
 dependencies = [
  "memchr",
 ]

@@ -61,8 +61,12 @@ impl App {
         } else {
             String::new()
         };
+        let os = match &self.os_session {
+            Some(s) => format!("  ·  OS: {}", s.display_label()),
+            None => String::new(),
+        };
         let meta = Style::new().fg(TN_GRAY).render(&format!(
-            "{margin}a3s-code v{}  ·  {model}{skills}  ·  {}",
+            "{margin}a3s-code v{}  ·  {model}{skills}{os}  ·  {}",
             env!("CARGO_PKG_VERSION"),
             self.cwd
         ));

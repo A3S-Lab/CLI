@@ -39,7 +39,9 @@ use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTab
 mod config;
 mod gitutil;
 mod image;
+mod memutil;
 mod panels;
+mod remote_ui;
 mod render;
 pub(crate) mod skills;
 mod syntax;
@@ -48,6 +50,7 @@ mod util;
 use config::*;
 use gitutil::*;
 use image::*;
+use memutil::*;
 use render::*;
 use skills::*;
 use syntax::*;
@@ -91,10 +94,10 @@ Go broad→narrow: `list` (modules) → `describe`/`search` for the one operatio
 Pipe responses through `jq` to extract ONLY the fields you need (e.g. \
 `| jq -r '.data.modules[].name'`) so output stays a few lines; summarize the result for the user \
 in a few lines and do NOT paste the whole raw JSON back. \
-If a response contains a `viewUrl` (deep link to the console page for what was asked; extract \
-robustly e.g. `jq -r '.. | .viewUrl? // empty'`), ALWAYS show it to the user as a labeled \
-clickable link on its own line (e.g. `🔗 在控制台查看: <viewUrl>`). The `a3s-os-capabilities` \
-skill has full examples."
+If a response contains a `view` object (a console page sized for a popup), keep `.view` in your \
+JSON output and END your reply with the link on its own line, exactly `🔗 打开渐进式UI` — the host \
+turns it into a one-click trigger that opens the authenticated 渐进式UI popup (the user's OS login \
+is injected, no re-login). Do not print the raw URL. The `a3s-os-capabilities` skill has full examples."
     )
 }
 
@@ -108,15 +111,16 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "edit .a3s/config.acl in your editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
     (
-        "/mouse",
-        "toggle wheel-scroll (on) vs native text selection (off)",
-    ),
-    (
         "/workflow",
         "view the latest ultracode dynamic workflow (read-only)",
     ),
+    (
+        "/output",
+        "view every tool call this session (name · args · result)",
+    ),
     ("/login", "sign in to the configured OS account"),
     ("/logout", "sign out from the configured OS account"),
+    ("/view", "open the last OS view in a native window"),
     ("/plugin", "enable/disable Claude skills & plugins"),
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
@@ -124,6 +128,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/top", "live process monitor (highlights coding agents)"),
     ("/ide", "file tree + code viewer for the workspace"),
     ("/git", "git status / diff / stage / commit (gitui-style)"),
+    (
+        "/memory",
+        "browse the agent's long-term memory (GitLens-style timeline)",
+    ),
     ("/effort", "adjust model effort (low … max)"),
     ("/compact", "summarize + compact the conversation context"),
     ("/goal", "set a north-star goal the agent keeps in mind"),
@@ -346,16 +354,279 @@ struct IdeEntry {
     expanded: bool,
 }
 
+/// Editor input mode — vim-aligned: Normal navigates/operates, Insert types.
+/// Freshly opened buffers start in Normal.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EditMode {
+    Normal,
+    Insert,
+}
+
 /// An open, editable file in the `/ide` panel.
 struct IdeFile {
     path: std::path::PathBuf,
     lines: Vec<String>, // text rows, or pre-rendered half-block rows if `image`
-    scroll: usize,
-    row: usize, // cursor line
-    col: usize, // cursor column (char index)
+    scroll: usize,      // top visible row (vertical scroll)
+    hscroll: usize,     // leftmost visible column (horizontal scroll; display columns)
+    row: usize,         // cursor line
+    col: usize,         // cursor column (char index)
     dirty: bool,
     image: bool,    // read-only image preview
     readonly: bool, // view-only (e.g. a dynamic-workflow artifact) — edits blocked
+    mode: EditMode, // vim Normal/Insert (see `ide_key`)
+    /// A pending operator/prefix awaiting its second keystroke (`d`, `c`, `g`, `y`).
+    pending: Option<char>,
+    /// Undo snapshots (lines + cursor) for `u`; bounded — configs are small.
+    undo: Vec<(Vec<String>, usize, usize)>,
+    clip: String,        // yank/delete register for p / P
+    clip_linewise: bool, // register holds whole lines (dd/yy) vs an inline span
+}
+
+impl IdeFile {
+    /// A freshly opened buffer: cursor at the top, Normal mode, empty undo.
+    fn new(path: std::path::PathBuf, lines: Vec<String>, image: bool, readonly: bool) -> Self {
+        IdeFile {
+            path,
+            lines: if lines.is_empty() {
+                vec![String::new()]
+            } else {
+                lines
+            },
+            scroll: 0,
+            hscroll: 0,
+            row: 0,
+            col: 0,
+            dirty: false,
+            image,
+            readonly,
+            mode: EditMode::Normal,
+            pending: None,
+            undo: Vec::new(),
+            clip: String::new(),
+            clip_linewise: false,
+        }
+    }
+}
+
+/// One completed tool call this session, retained for `/output`.
+struct ToolCallRecord {
+    name: String,
+    args: Option<serde_json::Value>,
+    output: String,
+    exit_code: i32,
+}
+
+/// Render the `/output` viewer body: one `#n · name · status` header per call,
+/// then its args and indented output. None when nothing has run.
+fn format_tool_log_records(records: &[ToolCallRecord]) -> Option<String> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for (i, rec) in records.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let status = if rec.exit_code == 0 {
+            "ok".to_string()
+        } else {
+            format!("exit {}", rec.exit_code)
+        };
+        out.push_str(&format!("#{} · {} · {}\n", i + 1, rec.name, status));
+        if let Some(args) = &rec.args {
+            out.push_str(&format!(
+                "  args: {}\n",
+                serde_json::to_string(args).unwrap_or_default()
+            ));
+        }
+        let trimmed = rec.output.trim_end();
+        if !trimmed.is_empty() {
+            out.push_str("  output:\n");
+            for line in trimmed.lines() {
+                out.push_str("    ");
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The directive sent to the agent for a `?` deep-research turn: decompose the
+/// question, search and read multiple sources, cross-check, and synthesize a
+/// cited report. The user's query is appended.
+fn deep_research_prompt(query: &str) -> String {
+    format!(
+        "Conduct deep research to answer the query below. Be thorough:\n\
+         1. Break it into the key sub-questions worth investigating.\n\
+         2. Use web search across those sub-questions, then read the most relevant \
+         sources in full with web_fetch — don't rely on result snippets alone.\n\
+         3. Cross-check claims across multiple independent sources; call out any \
+         disagreement, uncertainty, or recency caveats.\n\
+         4. Synthesize a comprehensive, well-structured answer with inline \
+         citations and a final \"Sources\" list of the URLs you used.\n\n\
+         Query: {query}"
+    )
+}
+
+/// The persistent `/goal` north-star for a `?` deep-research task. Kept short
+/// since it is prepended to every continuation turn of the long-horizon loop.
+fn deep_research_goal(query: &str) -> String {
+    format!("Deep research — deliver a comprehensive, well-cited report answering: {query}")
+}
+
+/// Append a one-column vertical scrollbar to the right of the viewport's visible
+/// rows. The viewport is sized to `inner_width` (= screen width − 1, see
+/// `relayout`) so the bar — a `│` track with an `█` thumb sized and positioned
+/// from the scroll state — never clips content. The gutter stays blank when
+/// nothing overflows the window.
+fn append_scrollbar(view: &str, inner_width: usize, total: usize, scroll_percent: u8) -> String {
+    let rows: Vec<&str> = view.split('\n').collect();
+    let h = rows.len();
+    let overflow = total > h && h > 0;
+    // Thumb length proportional to the visible fraction; positioned by percent.
+    let thumb_len = if overflow { (h * h / total).max(1) } else { 0 };
+    let thumb_start = if overflow {
+        (h - thumb_len) * scroll_percent as usize / 100
+    } else {
+        0
+    };
+    let track = Style::new().fg(TN_GRAY);
+    let thumb = Style::new().fg(ACCENT);
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let bar = if !overflow {
+                " ".to_string()
+            } else if i >= thumb_start && i < thumb_start + thumb_len {
+                thumb.render("█")
+            } else {
+                track.render("│")
+            };
+            format!("{}{}", pad_to(row, inner_width), bar)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The OSC 52 escape that asks the terminal to set the system clipboard to
+/// `text` (base64). Works over SSH on terminals that support OSC 52. Capped so a
+/// long reply can't blow past a terminal's OSC 52 size limit.
+fn osc52_copy(text: &str) -> String {
+    use base64::Engine;
+    let capped: String = text.chars().take(64_000).collect();
+    let b64 = base64::engine::general_purpose::STANDARD.encode(capped.as_bytes());
+    format!("\x1b]52;c;{b64}\x07")
+}
+
+/// Marker the agent puts inline in its reply to offer the RemoteUI popup. The
+/// host recognises a mouse click on any reply line containing it and opens the
+/// remembered view (`/view` does the same). The link lives in the message text —
+/// the host renders no button of its own.
+const VIEW_BUTTON_MARKER: &str = "打开渐进式UI";
+
+/// Put `text` on the system clipboard: OSC 52 (portable, survives SSH on
+/// supporting terminals) plus the native tool where we have one (macOS pbcopy).
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(osc52_copy(text).as_bytes());
+    let _ = out.flush();
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = std::process::Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Background of an active text selection in the transcript.
+const SELECTION_BG: Color = Color::Rgb(58, 64, 88);
+
+/// An in-progress mouse text-selection in the transcript viewport, in screen
+/// cells (visible row, column). `anchor` = drag start, `head` = current point.
+#[derive(Clone, Copy)]
+struct Selection {
+    anchor: (u16, u16),
+    head: (u16, u16),
+}
+
+impl Selection {
+    fn is_empty(&self) -> bool {
+        self.anchor == self.head
+    }
+    /// (top_row, top_col, bottom_row, bottom_col), as usize.
+    fn ordered(&self) -> (usize, usize, usize, usize) {
+        let (a, b) = if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        };
+        (a.0 as usize, a.1 as usize, b.0 as usize, b.1 as usize)
+    }
+}
+
+/// Substring of `s` spanning visible columns `[from, to)` (wide chars counted by
+/// display width). A char straddling the start is dropped; one straddling the
+/// end is kept.
+fn slice_cols(s: &str, from: usize, to: usize) -> String {
+    let mut col = 0usize;
+    let mut out = String::new();
+    for ch in s.chars() {
+        if col >= to {
+            break;
+        }
+        if col >= from {
+            out.push(ch);
+        }
+        col += a3s_tui::style::visible_len(&ch.to_string());
+    }
+    out
+}
+
+/// Plain text of a selection over the rendered viewport `view`: screen rows
+/// `r1..=r2`, columns `[c1, c2)` clipped on the first/last rows. Rows are
+/// ANSI-stripped and trailing padding trimmed.
+fn selection_to_text(view: &str, r1: usize, c1: usize, r2: usize, c2: usize) -> String {
+    let rows: Vec<&str> = view.split('\n').collect();
+    let mut out: Vec<String> = Vec::new();
+    for r in r1..=r2 {
+        let Some(row) = rows.get(r) else { break };
+        let plain = a3s_tui::style::strip_ansi(row);
+        let from = if r == r1 { c1 } else { 0 };
+        let to = if r == r2 { c2 } else { usize::MAX };
+        out.push(slice_cols(&plain, from, to).trim_end().to_string());
+    }
+    out.join("\n")
+}
+
+/// Re-render the viewport `view` with the selected span highlighted: selected
+/// rows render in plain text (no syntax colour, transiently) with the selected
+/// columns on `SELECTION_BG`; other rows keep their styling.
+fn highlight_selection(view: &str, r1: usize, c1: usize, r2: usize, c2: usize) -> String {
+    let bg = Style::new().bg(SELECTION_BG).fg(TN_FG);
+    view.split('\n')
+        .enumerate()
+        .map(|(i, row)| {
+            if i < r1 || i > r2 {
+                return row.to_string();
+            }
+            let plain = a3s_tui::style::strip_ansi(row);
+            let from = if i == r1 { c1 } else { 0 };
+            let to = if i == r2 { c2 } else { usize::MAX };
+            let before = slice_cols(&plain, 0, from);
+            let sel = slice_cols(&plain, from, to);
+            let after = slice_cols(&plain, to, usize::MAX);
+            format!("{before}{}{after}", bg.render(&sel))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// State of the `/ide` panel: the file tree, selection, and the open file.
@@ -812,6 +1083,8 @@ enum Msg {
     OsLogin(Result<String, String>),
     /// OS access token was refreshed (or refresh failed) in the background.
     OsRefreshed(Result<crate::a3s_os::StoredOsSession, String>),
+    /// 书安OS unified-gateway model ids fetched for the `/model` picker.
+    OsGatewayModels(Vec<String>),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
     /// Refreshed process snapshot for the `/top` panel.
@@ -824,6 +1097,8 @@ enum Msg {
     GitStatus(Vec<GitFile>, Vec<String>),
     /// `/git` diff for the selected file.
     GitDiff(Vec<String>),
+    /// `/memory` timeline loaded (the store index, newest first).
+    MemoryLoaded(Vec<MemEntry>),
     /// Inactivity auto-review summary text.
     AutoReview(String),
     /// `/compact` produced this conversation summary; reseed a fresh session.
@@ -939,6 +1214,14 @@ struct App {
     /// True while an OS access-token refresh is in flight (guards the BannerTick
     /// trigger from spawning a second refresh before the first resolves).
     os_refreshing: bool,
+    /// 书安OS unified-gateway models for the `/model` picker, lazily fetched on
+    /// first `/model` while signed in. `None` = not fetched yet; `Some([])` = the
+    /// gateway is unavailable/unconfigured.
+    os_gateway_models: Option<Vec<String>>,
+    /// Last 书安OS view seen in a tool result. RemoteUI is user-triggered: `/view`
+    /// or clicking the agent's inline "打开渐进式UI" link opens it in the native
+    /// a3s-webview window — it is never auto-opened.
+    last_view: Option<remote_ui::ViewSpec>,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
@@ -958,9 +1241,13 @@ struct App {
     auto_reviewed: bool,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
-    /// Mouse capture on → wheel-scroll works but native text selection is off.
-    /// Off by default so select/copy works; toggled with `/mouse`.
-    mouse_scroll: bool,
+    /// Deep-research mode: a leading `?` turns the input into a deep-research
+    /// query — sent to the agent with a multi-source research directive. Box
+    /// turns cyan.
+    research_mode: bool,
+    /// Active transcript text-selection (mouse drag → highlight → copy on
+    /// release); `None` when there's no selection.
+    selection: Option<Selection>,
     /// Latest dynamic-workflow artifact (ultracode parallel_task dispatch),
     /// shown collapsed in the transcript and openable read-only via `/workflow`.
     last_workflow: Option<String>,
@@ -1039,6 +1326,8 @@ struct App {
     /// Live stdout of the in-progress tool (e.g. a running command), shown
     /// dimmed under the action and cleared when the tool completes.
     tool_output: String,
+    /// Every completed tool call this session (name/args/output), shown by `/output`.
+    tool_log: Vec<ToolCallRecord>,
     /// When the current run started, for the live elapsed-time indicator.
     stream_started: Option<Instant>,
     /// Name of the tool currently executing (shown live with a blinking dot).
@@ -1072,6 +1361,8 @@ struct App {
     ide: Option<Ide>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
+    /// `/memory` full-screen timeline panel (Some when open).
+    memory: Option<MemPanel>,
     /// `/help` overlay panel is showing.
     help_open: bool,
     /// Turns completed this session, for the status-bar task counter.
@@ -1135,6 +1426,7 @@ impl Model for App {
     fn update(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
             Msg::Term(Event::Resize { width, height }) => {
+                self.selection = None; // screen-coord selection is stale after resize
                 self.width = width;
                 self.height = height;
                 self.relayout();
@@ -1162,7 +1454,8 @@ impl Model for App {
             Msg::Term(Event::Key(key)) => {
                 self.last_activity = Instant::now();
                 self.auto_reviewed = false;
-                // Ctrl+C: arm on the first press, exit on a second within 2s.
+                self.selection = None; // any keypress dismisses the copy highlight
+                                       // Ctrl+C: arm on the first press, exit on a second within 2s.
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     match self.quit_armed {
                         Some(t) if t.elapsed() < Duration::from_secs(2) => return Some(cmd::quit()),
@@ -1190,6 +1483,11 @@ impl Model for App {
                 // /git panel takes all keys while open.
                 if self.git.is_some() {
                     return self.git_key(&key);
+                }
+                // /memory panel takes all keys while open.
+                if self.memory.is_some() {
+                    self.memory_key(&key);
+                    return None;
                 }
                 // /ide panel takes all keys while open.
                 if self.ide.is_some() {
@@ -1371,10 +1669,11 @@ impl Model for App {
                     self.viewport.set_auto_scroll(self.viewport.at_bottom());
                     return None;
                 }
-                // Esc leaves shell mode first (discarding the partial command),
-                // taking priority over the streaming interrupt below.
-                if self.shell_mode && key.code == KeyCode::Esc {
+                // Esc leaves shell/research mode first (discarding the partial
+                // input), taking priority over the streaming interrupt below.
+                if (self.shell_mode || self.research_mode) && key.code == KeyCode::Esc {
                     self.shell_mode = false;
+                    self.research_mode = false;
                     self.textarea.clear();
                     return None;
                 }
@@ -1420,20 +1719,81 @@ impl Model for App {
                 if let Some(TextareaMsg::Submit(text)) = self.textarea.handle_key(&key) {
                     return Some(cmd::msg(Msg::Submit(text)));
                 }
-                // Shell mode: a leading `!` becomes the prompt (stripped from the
-                // text). It stays on until Esc or a submit (handled elsewhere).
+                // A leading `!` enters shell mode, a leading `?` enters
+                // deep-research mode (the prefix is stripped). Both stay on until
+                // Esc or a submit (handled elsewhere).
                 let val = self.textarea.value();
-                if !self.shell_mode && val.starts_with('!') {
-                    self.shell_mode = true;
-                    self.textarea.set_value(val.strip_prefix('!').unwrap_or(""));
+                if !self.shell_mode && !self.research_mode {
+                    if let Some(rest) = val.strip_prefix('!') {
+                        self.shell_mode = true;
+                        self.textarea.set_value(rest);
+                    } else if let Some(rest) = val.strip_prefix('?') {
+                        self.research_mode = true;
+                        self.textarea.set_value(rest);
+                    }
                 }
             }
 
             Msg::Term(Event::Mouse(m)) => {
-                use a3s_tui::event::MouseEventKind;
+                use a3s_tui::event::{MouseButton, MouseEventKind};
+                let vp_rows = self.viewport_rows();
+                // Content columns exclude the rightmost scrollbar column.
+                let max_col = (self.width as usize).saturating_sub(2) as u16;
                 match m.kind {
-                    MouseEventKind::ScrollUp => self.viewport.update(ViewportMsg::ScrollUp(3)),
-                    MouseEventKind::ScrollDown => self.viewport.update(ViewportMsg::ScrollDown(3)),
+                    MouseEventKind::ScrollUp => {
+                        self.selection = None;
+                        self.viewport.update(ViewportMsg::ScrollUp(3));
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.selection = None;
+                        self.viewport.update(ViewportMsg::ScrollDown(3));
+                    }
+                    // Drag to select transcript text. Capture stays on so the wheel
+                    // still scrolls; the app owns selection, so scroll + copy work
+                    // together (no mode toggle). Release copies to the clipboard.
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.selection = if (m.row as usize) < vp_rows {
+                            let p = (m.row, m.column.min(max_col));
+                            Some(Selection { anchor: p, head: p })
+                        } else {
+                            None
+                        };
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(s) = self.selection.as_mut() {
+                            let row = m.row.min(vp_rows.saturating_sub(1) as u16);
+                            s.head = (row, m.column.min(max_col));
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(s) = self.selection {
+                            if s.is_empty() {
+                                // A plain click: open the OS view if it landed on
+                                // the agent's inline "打开渐进式UI" link; else just clear.
+                                let view = self.viewport.view();
+                                let clicked = a3s_tui::style::strip_ansi(
+                                    view.split('\n')
+                                        .nth(s.anchor.0 as usize)
+                                        .unwrap_or_default(),
+                                );
+                                self.selection = None;
+                                if clicked.contains(VIEW_BUTTON_MARKER) {
+                                    if let Some(spec) = self.last_view.clone() {
+                                        self.open_remote_view(&spec);
+                                    }
+                                }
+                            } else {
+                                let (r1, c1, r2, c2) = s.ordered();
+                                let text = selection_to_text(&self.viewport.view(), r1, c1, r2, c2);
+                                if text.trim().is_empty() {
+                                    self.selection = None;
+                                } else {
+                                    // Keep the highlight visible as "copied" feedback.
+                                    copy_to_clipboard(&text);
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 // Pause auto-follow while scrolled up (so streaming output won't
@@ -1506,6 +1866,7 @@ impl Model for App {
                     && self.top.is_none()
                     && self.ide.is_none()
                     && self.git.is_none()
+                    && self.memory.is_none()
                     && !self.help_open
                 {
                     self.anim = self.anim.wrapping_add(1);
@@ -1763,6 +2124,13 @@ impl Model for App {
                 }
             }
 
+            Msg::OsGatewayModels(models) => {
+                // Cache the fetched gateway models, then open the /model picker
+                // (the "书安OS" tab now lists them — or shows it unavailable).
+                self.os_gateway_models = Some(models);
+                self.open_model_menu();
+            }
+
             Msg::SideNote(text) => {
                 if let Some((q, _)) = self.btw.take() {
                     self.btw = Some((q, Some(text.trim().to_string())));
@@ -1802,6 +2170,14 @@ impl Model for App {
                     g.diff_scroll = 0;
                 }
             }
+            Msg::MemoryLoaded(entries) => {
+                if let Some(m) = &mut self.memory {
+                    m.note = format!("{} entries", entries.len());
+                    m.entries = entries;
+                    m.sel = 0;
+                    m.refresh_detail();
+                }
+            }
 
             _ => {}
         }
@@ -1815,6 +2191,9 @@ impl Model for App {
         if let Some(g) = &self.git {
             return self.render_git(g);
         }
+        if let Some(m) = &self.memory {
+            return self.render_memory(m);
+        }
         if let Some(ide) = &self.ide {
             return self.render_ide(ide);
         }
@@ -1822,12 +2201,28 @@ impl Model for App {
             return self.render_top_panel();
         }
         let width = self.width as usize;
-        let viewport_view = self.viewport.view();
-        // Input mode hint: `!` = shell command (pink), `/btw` = side-channel
-        // (yellow), otherwise the normal prompt (accent blue).
+        let raw_view = self.viewport.view();
+        // Paint an active text-selection over the visible rows, then add the bar.
+        let shown = match &self.selection {
+            Some(s) if !s.is_empty() => {
+                let (r1, c1, r2, c2) = s.ordered();
+                highlight_selection(&raw_view, r1, c1, r2, c2)
+            }
+            _ => raw_view,
+        };
+        let viewport_view = append_scrollbar(
+            &shown,
+            width.saturating_sub(1),
+            self.viewport.total_lines(),
+            self.viewport.scroll_percent(),
+        );
+        // Input mode hint: `!` = shell command (pink), `?` = deep research (cyan),
+        // `/btw` = side-channel (yellow), otherwise the normal prompt (accent blue).
         let inp = self.textarea.value();
         let (sym, icolor, border): (&str, Color, Color) = if self.shell_mode {
             ("!", Color::Rgb(255, 105, 180), Color::Rgb(255, 105, 180))
+        } else if self.research_mode {
+            ("?", TN_CYAN, TN_CYAN)
         } else if inp.starts_with("/btw") {
             ("❯", TN_YELLOW, TN_YELLOW)
         } else {
@@ -1935,7 +2330,7 @@ impl Model for App {
 
         let prompt = Style::new().fg(icolor).bold().render(&format!("{sym} "));
         let typed = self.textarea.view();
-        let typed = if sym == "!" || inp.starts_with("/btw") {
+        let typed = if sym == "!" || sym == "?" || inp.starts_with("/btw") {
             Style::new().fg(icolor).render(&typed)
         } else {
             typed
@@ -2091,6 +2486,7 @@ impl Model for App {
         if self.state == State::Awaiting
             || self.top.is_some()
             || self.git.is_some()
+            || self.memory.is_some()
             || self.help_open
         {
             return None;
@@ -2149,6 +2545,48 @@ impl App {
                 };
                 Msg::ShellOutput(text)
             }));
+        }
+        // Deep-research mode (`?`) is a long-horizon task: it anchors the work
+        // with the `/goal` mechanism (a persistent north-star prepended to every
+        // turn) AND auto-continues via the `/loop` mechanism until the agent
+        // reports completion (or Esc). The first turn carries the full
+        // decompose → search + read → cross-check → synthesize directive.
+        if self.research_mode {
+            self.research_mode = false;
+            let query = trimmed.trim_start_matches('?').trim().to_string();
+            if query.is_empty() {
+                self.textarea.clear();
+                return None;
+            }
+            self.history.push(trimmed.to_string());
+            self.history_pos = None;
+            self.textarea.clear();
+            self.goal = Some(deep_research_goal(&query));
+            self.messages.push(gutter(
+                TN_CYAN,
+                &Style::new()
+                    .bold()
+                    .render(&format!("🔬 deep research: {query}")),
+            ));
+            self.push_line(&Style::new().fg(TN_GRAY).render(
+                "  🎯 goal set · ↻ auto-continues until done (Esc stops · /goal clear drops it)",
+            ));
+            let prompt = deep_research_prompt(&query);
+            let display = format!("🔬 {query}");
+            // Long-horizon budget: keep researching across turns toward the goal.
+            self.loop_remaining = 8;
+            if self.state == State::Idle {
+                return self.start_stream_inner(prompt, display, true, true, false);
+            }
+            self.seq += 1;
+            self.queue.push(Queued {
+                prio: 1,
+                seq: self.seq,
+                text: prompt,
+            });
+            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
+            self.relayout();
+            return None;
         }
         // Block session-mutating commands while a turn is streaming.
         if self.state != State::Idle {
@@ -2466,6 +2904,17 @@ impl App {
                 self.help_open = true;
                 return None;
             }
+            "/view" => {
+                self.textarea.clear();
+                if let Some(spec) = self.last_view.clone() {
+                    self.open_remote_view(&spec);
+                } else {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(
+                        "  no OS view yet — run an OS query that returns a viewUrl, then /view",
+                    ));
+                }
+                return None;
+            }
             "/auto" => {
                 self.mode = Mode::Auto;
                 self.textarea.clear();
@@ -2493,6 +2942,19 @@ impl App {
             }
             "/model" => {
                 self.textarea.clear();
+                // Signed in to 书安OS + gateway models not fetched yet → fetch them
+                // once (OpenAI-compatible /v1/models) so the picker can offer the
+                // unified gateway, then open. Otherwise open immediately.
+                if let Some(s) = self.os_session.clone() {
+                    if self.os_gateway_models.is_none() {
+                        let (addr, token) = (s.address.clone(), s.access_token.clone());
+                        return Some(cmd::cmd(move || async move {
+                            Msg::OsGatewayModels(
+                                crate::a3s_os::fetch_gateway_models(&addr, &token).await,
+                            )
+                        }));
+                    }
+                }
                 self.open_model_menu();
                 return None;
             }
@@ -2539,18 +3001,6 @@ impl App {
                 self.theme_panel = Some(cur.min(THEMES.len() - 1));
                 return None;
             }
-            "/mouse" => {
-                self.textarea.clear();
-                self.mouse_scroll = !self.mouse_scroll;
-                a3s_tui::terminal::set_mouse_capture(self.mouse_scroll);
-                let msg = if self.mouse_scroll {
-                    "🖱 wheel-scroll on — text selection paused (run /mouse again to select/copy)"
-                } else {
-                    "🖱 wheel-scroll off — native text selection / copy enabled (PgUp/PgDn still scroll)"
-                };
-                self.push_line(&Style::new().fg(TN_CYAN).render(&format!("  {msg}")));
-                return None;
-            }
             "/workflow" => {
                 self.textarea.clear();
                 match self.last_workflow.clone() {
@@ -2558,6 +3008,18 @@ impl App {
                     None => self.push_line(&Style::new().fg(TN_GRAY).render(
                         "  no dynamic workflow yet — run an ultracode task that fans out via parallel_task",
                     )),
+                }
+                return None;
+            }
+            "/output" => {
+                self.textarea.clear();
+                match self.format_tool_log() {
+                    Some(content) => self.open_readonly_in_ide("tool-calls.txt", &content),
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  no tool calls yet this session"),
+                    ),
                 }
                 return None;
             }
@@ -2620,6 +3082,26 @@ impl App {
                 return Some(cmd::cmd(move || async move {
                     let (files, log) = git_status_log(repo).await;
                     Msg::GitStatus(files, log)
+                }));
+            }
+            "/memory" => {
+                self.textarea.clear();
+                // Open immediately ("loading…"); parse the store index off the UI
+                // thread (it can be multi-MB) so the panel never janks on open.
+                let dir = memory_dir();
+                self.memory = Some(MemPanel {
+                    entries: Vec::new(),
+                    sel: 0,
+                    detail: memutil::MemDetail::default(),
+                    detail_scroll: 0,
+                    dir: dir.clone(),
+                    note: "loading…".into(),
+                });
+                return Some(cmd::cmd(move || async move {
+                    let entries = tokio::task::spawn_blocking(move || memutil::load_timeline(&dir))
+                        .await
+                        .unwrap_or_default();
+                    Msg::MemoryLoaded(entries)
                 }));
             }
             "/relay" => {
@@ -2861,6 +3343,31 @@ impl App {
                     self.width as usize,
                 ));
                 self.capture_workflow(&name, args.as_ref());
+                // RemoteUI: a 书安OS viewUrl in the tool output is openable. Remember
+                // it for `/view`, and if the API marked it embeddable (sized popup),
+                // open it now in the native a3s-webview window (auth via $A3S_OS_TOKEN).
+                if let Some(spec) = remote_ui::find_view_url(&output) {
+                    // RemoteUI is user-triggered — never auto-open. Remember the
+                    // view; the agent offers it via an inline "打开渐进式UI" link
+                    // (clicking that line, or `/view`, opens the popup).
+                    self.last_view = Some(spec);
+                }
+                // Retain the call for `/output`. Cap each output so a huge build
+                // log can't bloat the in-memory record.
+                // ponytail: 8 KB/call cap; the transcript already holds the full text
+                let logged = if output.len() > 8192 {
+                    let mut s: String = output.chars().take(8000).collect();
+                    s.push_str("\n… (output truncated — see transcript)");
+                    s
+                } else {
+                    output
+                };
+                self.tool_log.push(ToolCallRecord {
+                    name,
+                    args,
+                    output: logged,
+                    exit_code,
+                });
                 self.tool_args.clear();
                 self.tool_output.clear();
             }
@@ -3182,10 +3689,26 @@ impl App {
         self.rebuild_viewport();
     }
 
+    /// Open a 书安OS viewUrl in the native `a3s-webview` window. Silent on success
+    /// (the window appearing is feedback enough); only a missing helper binary
+    /// leaves a transcript hint.
+    fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
+        if remote_ui::open_window(spec).is_err() {
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  🔗 {} (install a3s-webview for an in-app window)",
+                spec.url
+            )));
+        }
+    }
+
     /// Skill dirs for the session: the discovered Claude/Codex dirs plus the
     /// login-gated built-in OS `a3s-os-capabilities` skill when signed in.
     pub(crate) fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         let mut dirs = agent_skill_dirs(&self.cwd);
+        // Always-available built-in skills (the `okf` LLM-wiki / knowledge compiler).
+        if let Some(d) = ensure_builtin_skills_dir() {
+            dirs.push(d);
+        }
         if self.os_session.is_some() {
             if let Some(cfg) = &self.os_config {
                 if let Some(d) = crate::a3s_os::ensure_capability_skill_dir(cfg) {
@@ -3223,20 +3746,7 @@ impl App {
             entries: ide_children(dir, 0),
             sel: 0,
             tree_scroll: 0,
-            file: Some(IdeFile {
-                path: path.to_path_buf(),
-                lines: if lines.is_empty() {
-                    vec![String::new()]
-                } else {
-                    lines
-                },
-                scroll: 0,
-                row: 0,
-                col: 0,
-                dirty: false,
-                image: false,
-                readonly: false,
-            }),
+            file: Some(IdeFile::new(path.to_path_buf(), lines, false, false)),
             focus_editor: true,
             flash: None,
         });
@@ -3263,23 +3773,22 @@ impl App {
             entries: ide_children(std::path::Path::new(&self.cwd), 0),
             sel: 0,
             tree_scroll: 0,
-            file: Some(IdeFile {
-                path: std::path::PathBuf::from(title),
-                lines: if lines.is_empty() {
-                    vec![String::new()]
-                } else {
-                    lines
-                },
-                scroll: 0,
-                row: 0,
-                col: 0,
-                dirty: false,
-                image: false,
-                readonly: true,
-            }),
+            file: Some(IdeFile::new(
+                std::path::PathBuf::from(title),
+                lines,
+                false,
+                true,
+            )),
             focus_editor: true,
             flash: Some("read-only".to_string()),
         });
+    }
+
+    /// Format every retained tool call for the `/output` viewer: a header line
+    /// per call (index · name · status) followed by its args and output. Returns
+    /// None when nothing has run yet.
+    fn format_tool_log(&self) -> Option<String> {
+        format_tool_log_records(&self.tool_log)
     }
 
     /// Move through prompt history and load the entry into the input. Going
@@ -3377,6 +3886,7 @@ impl App {
     }
 
     fn rebuild_viewport(&mut self) {
+        self.selection = None; // content changed → screen-coord selection is stale
         let full = self.messages.join("\n\n");
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
     }
@@ -3725,16 +4235,20 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .filter(|t| !t.is_empty())
         .collect();
 
-    // Quiet confirmation that the persisted login was restored (so the user
-    // isn't asked to /login again) and the login-gated skill is active.
+    // Quiet confirmation that the persisted login was restored. Only when
+    // RESUMING an existing conversation — on a fresh start, leaving the transcript
+    // empty lets the welcome banner show (it notes the signed-in account itself);
+    // inserting this line here is what was suppressing the banner after OS login.
     if let Some(s) = &os_session {
-        initial_messages.insert(
-            0,
-            Style::new().fg(TN_GRAY).render(&format!(
-                "  ✓ signed in to OS as {} · capabilities skill active · /logout to sign out",
-                s.display_label()
-            )),
-        );
+        if !initial_messages.is_empty() {
+            initial_messages.insert(
+                0,
+                Style::new().fg(TN_GRAY).render(&format!(
+                    "  ✓ signed in to OS as {} · capabilities skill active · /logout to sign out",
+                    s.display_label()
+                )),
+            );
+        }
     }
 
     let session = Arc::new(session);
@@ -3790,6 +4304,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         os_config,
         os_session,
         os_refreshing: false,
+        os_gateway_models: None,
+        last_view: None,
         effort: 2, // high
         effort_panel: None,
         theme_panel: None,
@@ -3797,7 +4313,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         last_activity: Instant::now(),
         auto_reviewed: false,
         shell_mode: false,
-        mouse_scroll: false,
+        research_mode: false,
+        selection: None,
         last_workflow: None,
         pending_images: Vec::new(),
         goal: None,
@@ -3818,7 +4335,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         effort_anim: None,
         compact_summary: None,
         btw: None,
-        viewport: Viewport::new(width, height.saturating_sub(7)),
+        viewport: Viewport::new(width.saturating_sub(1), height.saturating_sub(7)),
         textarea: Textarea::new()
             .with_height(1)
             .with_auto_grow(8) // box grows with Shift+Enter newlines (no scroll)
@@ -3842,6 +4359,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         output_tokens: 0,
         tool_args: String::new(),
         tool_output: String::new(),
+        tool_log: Vec::new(),
         stream_started: None,
         running_tool: None,
         blink_tick: 0,
@@ -3858,6 +4376,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_kill: None,
         ide: None,
         git: None,
+        memory: None,
         help_open: false,
         completed: 0,
         branch: git_branch(&workspace),
@@ -3890,10 +4409,13 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     ProgramBuilder::new(app)
         .with_alt_screen()
-        // No mouse capture: native click-drag selection / copy must work in every
-        // terminal (capturing the mouse breaks it). Scroll the transcript with
-        // PgUp/PgDn/Shift+End/Ctrl+End. (Re-enable behind a toggle if wheel-scroll
-        // is wanted — it would trade selection while active.)
+        // Capture the mouse so the wheel scrolls the transcript (alt-screen has no
+        // terminal scrollback, so capture is the only way to get wheel events).
+        // Copy is preserved: most terminals still do native selection on
+        // Shift+drag (Fn/⌥ on macOS Terminal) even with capture on, plus `/copy`
+        // yanks the last reply via OSC52, and `/mouse` drops capture entirely for
+        // pure native selection.
+        .with_mouse_support()
         .with_fps(30)
         .run()
         .await?;
@@ -4087,6 +4609,145 @@ mod tests {
         assert!(
             names.contains(&"parallel_task".to_string()) && names.contains(&"task".to_string()),
             "parallel_task/task registered under the parallel opts; got {names:?}"
+        );
+    }
+
+    // ── `/output` formatting ───────────────────────────────────────────────
+    #[test]
+    fn format_tool_log_empty_is_none() {
+        assert!(format_tool_log_records(&[]).is_none());
+    }
+
+    #[test]
+    fn format_tool_log_renders_header_args_and_output() {
+        let recs = vec![
+            ToolCallRecord {
+                name: "read".into(),
+                args: Some(serde_json::json!({"file_path": "/x"})),
+                output: "hello\n".into(),
+                exit_code: 0,
+            },
+            ToolCallRecord {
+                name: "bash".into(),
+                args: None,
+                output: String::new(),
+                exit_code: 2,
+            },
+        ];
+        let out = format_tool_log_records(&recs).unwrap();
+        assert!(out.contains("#1 · read · ok"), "{out}");
+        assert!(out.contains("args: {\"file_path\":\"/x\"}"), "{out}");
+        assert!(
+            out.contains("    hello"),
+            "output should be indented: {out}"
+        );
+        assert!(out.contains("#2 · bash · exit 2"), "{out}");
+    }
+
+    // ── `?` deep-research mode ─────────────────────────────────────────────
+    #[test]
+    fn deep_research_prompt_directs_research_and_keeps_query() {
+        let p = deep_research_prompt("rust async runtimes");
+        assert!(p.contains("rust async runtimes"), "{p}");
+        let lo = p.to_lowercase();
+        assert!(lo.contains("deep research"), "{p}");
+        assert!(lo.contains("web search") && lo.contains("web_fetch"), "{p}");
+        assert!(lo.contains("source"), "should ask to cite sources: {p}");
+    }
+
+    #[test]
+    fn deep_research_goal_is_a_research_north_star_with_query() {
+        let g = deep_research_goal("rust async runtimes");
+        assert!(g.contains("rust async runtimes"), "{g}");
+        assert!(g.to_lowercase().contains("research"), "{g}");
+    }
+
+    // ── scroll + copy ──────────────────────────────────────────────────────
+    #[test]
+    fn scrollbar_blank_when_content_fits() {
+        let out = append_scrollbar("a\nb\nc", 5, 3, 100);
+        assert_eq!(out.lines().count(), 3);
+        for line in out.lines() {
+            assert!(line.ends_with(' '), "no-overflow gutter blank: {line:?}");
+            assert!(!line.contains('█') && !line.contains('│'));
+        }
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_position() {
+        let view = "r0\nr1\nr2\nr3"; // 4 visible rows, far more total
+        let top = append_scrollbar(view, 4, 40, 0);
+        assert!(top.lines().next().unwrap().contains('█'), "thumb at top");
+        let bottom = append_scrollbar(view, 4, 40, 100);
+        assert!(
+            bottom.lines().last().unwrap().contains('█'),
+            "thumb at bottom"
+        );
+        // every row carries the bar (thumb or track) once content overflows
+        assert!(top.lines().all(|l| l.contains('█') || l.contains('│')));
+    }
+
+    #[test]
+    fn osc52_wraps_base64_in_envelope() {
+        let s = osc52_copy("hi");
+        assert!(s.starts_with("\u{1b}]52;c;") && s.ends_with('\u{7}'));
+        assert!(s.contains("aGk=")); // base64("hi")
+    }
+
+    #[test]
+    fn slice_cols_handles_ascii_and_wide() {
+        assert_eq!(slice_cols("hello", 1, 4), "ell");
+        assert_eq!(slice_cols("hello", 0, 100), "hello");
+        // CJK glyphs are width-2: "你好" spans columns 0..4.
+        assert_eq!(slice_cols("你好", 0, 2), "你");
+        assert_eq!(slice_cols("你好", 2, 4), "好");
+    }
+
+    #[test]
+    fn selection_to_text_extracts_span_across_rows() {
+        let view = "  hello world\n  second line\n  third";
+        // row0 col2..end, through row1 col0..8 — trailing padding trimmed.
+        let t = selection_to_text(view, 0, 2, 1, 8);
+        assert_eq!(t, "hello world\n  second");
+    }
+
+    #[test]
+    fn highlight_selection_touches_only_selected_rows() {
+        let view = "row zero\nrow one\nrow two";
+        let out = highlight_selection(view, 1, 0, 1, 7);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines[0], "row zero"); // untouched
+        assert_eq!(lines[2], "row two"); // untouched
+        assert!(lines[1].contains("row one")); // selected text preserved
+        assert!(lines[1].contains('\u{1b}')); // wrapped in a style escape
+    }
+
+    /// `?` deep research is only meaningful if the agent actually has the web
+    /// tools to call — guard that they're registered in the session surface.
+    #[tokio::test]
+    async fn web_tools_registered_for_q_research_mode() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-research-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.acl");
+        test_config(&cfg);
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), None)
+            .unwrap();
+        let names = session.tool_names();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            names.contains(&"web_search".to_string()) && names.contains(&"web_fetch".to_string()),
+            "the `?` deep-research mode relies on web_search + web_fetch; got {names:?}"
         );
     }
 
