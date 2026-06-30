@@ -46,7 +46,7 @@ pub(crate) fn load_timeline(dir: &Path) -> Vec<MemEntry> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    v.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    v.sort_by_key(|e| std::cmp::Reverse(e.timestamp));
     v
 }
 
