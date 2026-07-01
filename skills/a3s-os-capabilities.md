@@ -96,8 +96,8 @@ signed-in user may access.
      do **not** narrow it away with `jq`; emit the full response or keep it in
      your projection (e.g. `... | jq '{ data, view }'`). Never fabricate or drop
      a returned `view`.
-  2. **End your reply with the link on its own line, exactly:** `🔗 打开渐进式UI`
-     — the host turns any reply line containing `打开渐进式UI` into a one-click
+  2. **End your reply with the link on its own line, exactly:** `🔗 查看视图`
+     — the host turns any reply line containing `查看视图` into a one-click
      trigger that opens the view in the authenticated **渐进式UI** popup (the
      user's current OS login is injected — no re-login). RemoteUI is
      **user-triggered**: the popup is NOT opened automatically; the user clicks

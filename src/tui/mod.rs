@@ -95,7 +95,7 @@ Pipe responses through `jq` to extract ONLY the fields you need (e.g. \
 `| jq -r '.data.modules[].name'`) so output stays a few lines; summarize the result for the user \
 in a few lines and do NOT paste the whole raw JSON back. \
 If a response contains a `view` object (a console page sized for a popup), keep `.view` in your \
-JSON output and END your reply with the link on its own line, exactly `🔗 打开渐进式UI` — the host \
+JSON output and END your reply with the link on its own line, exactly `🔗 查看视图` — the host \
 turns it into a one-click trigger that opens the authenticated 渐进式UI popup (the user's OS login \
 is injected, no re-login). Do not print the raw URL. The `a3s-os-capabilities` skill has full examples."
     )
@@ -523,7 +523,7 @@ fn osc52_copy(text: &str) -> String {
 /// host recognises a mouse click on any reply line containing it and opens the
 /// remembered view (`/view` does the same). The link lives in the message text —
 /// the host renders no button of its own.
-const VIEW_BUTTON_MARKER: &str = "打开渐进式UI";
+const VIEW_BUTTON_MARKER: &str = "查看视图";
 
 /// Put `text` on the system clipboard: OSC 52 (portable, survives SSH on
 /// supporting terminals) plus the native tool where we have one (macOS pbcopy).
@@ -1219,7 +1219,7 @@ struct App {
     /// gateway is unavailable/unconfigured.
     os_gateway_models: Option<Vec<String>>,
     /// Last 书安OS view seen in a tool result. RemoteUI is user-triggered: `/view`
-    /// or clicking the agent's inline "打开渐进式UI" link opens it in the native
+    /// or clicking the agent's inline "查看视图" link opens it in the native
     /// a3s-webview window — it is never auto-opened.
     last_view: Option<remote_ui::ViewSpec>,
     /// Current model effort (index into EFFORT_LEVELS).
@@ -1769,7 +1769,7 @@ impl Model for App {
                         if let Some(s) = self.selection {
                             if s.is_empty() {
                                 // A plain click: open the OS view if it landed on
-                                // the agent's inline "打开渐进式UI" link; else just clear.
+                                // the agent's inline "查看视图" link; else just clear.
                                 let view = self.viewport.view();
                                 let clicked = a3s_tui::style::strip_ansi(
                                     view.split('\n')
@@ -3348,7 +3348,7 @@ impl App {
                 // open it now in the native a3s-webview window (auth via $A3S_OS_TOKEN).
                 if let Some(spec) = remote_ui::find_view_url(&output) {
                     // RemoteUI is user-triggered — never auto-open. Remember the
-                    // view; the agent offers it via an inline "打开渐进式UI" link
+                    // view; the agent offers it via an inline "查看视图" link
                     // (clicking that line, or `/view`, opens the popup).
                     self.last_view = Some(spec);
                 }
