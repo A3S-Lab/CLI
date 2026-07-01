@@ -125,6 +125,16 @@ The KB **is** the `/ide` panel, re-seeded at the vault root, with a markdown rea
 
 ### Command plumbing
 
+> **Shipped (v0.5.15):** `/kb` was implemented as an **ingestion** command, not the
+> browse panel proposed below. `/kb <text | file | folder>` deterministically adds
+> raw material to `.a3s/kb/sources/` (typed text → an OKF note with frontmatter;
+> a file → copied verbatim; a folder → its text files copied, structure preserved,
+> binaries/oversized skipped; provenance logged in `sources/SOURCES.md`). It runs
+> off the UI thread (`kbutil::add_to_kb`) and never mangles originals. **Browsing**
+> the vault is done through the existing `/ide` tree (`.a3s/kb/` shows there with no
+> new wiring); **compiling** sources into concept pages is `/okf`. The read-mode
+> browse panel below remains a future proposal.
+
 - Add one entry to `SLASH_COMMANDS` (`crates/cli/src/tui/mod.rs:103`):
   `("/kb", "browse/edit the project knowledge base")`.
 - Add a `"/kb" =>` arm to the `match trimmed` dispatch (`mod.rs:2730`), mirroring the ~12-line `/ide` arm at `mod.rs:2898`. It calls a new `open_kb_in_ide(root)` helper cloned from `open_config_in_ide` (`mod.rs:3641`) / `open_readonly_in_ide` (`mod.rs:3674`), seeding `entries` from `.a3s/kb/` (created if absent) instead of `self.cwd`.

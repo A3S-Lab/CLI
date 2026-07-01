@@ -39,6 +39,7 @@ use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTab
 mod config;
 mod gitutil;
 mod image;
+mod kbutil;
 mod memutil;
 mod panels;
 mod remote_ui;
@@ -134,6 +135,10 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/memory",
         "browse the agent's long-term memory (GitLens-style timeline)",
+    ),
+    (
+        "/kb",
+        "add text / a file / a folder to the knowledge base (.a3s/kb)",
     ),
     ("/effort", "adjust model effort (low … max)"),
     ("/compact", "summarize + compact the conversation context"),
@@ -1102,6 +1107,8 @@ enum Msg {
     GitDiff(Vec<String>),
     /// `/memory` timeline loaded (the store index, newest first).
     MemoryLoaded(Vec<MemEntry>),
+    /// `/kb` ingest finished; carries the one-line summary to show.
+    KbAdded(String),
     /// Inactivity auto-review summary text.
     AutoReview(String),
     /// `/compact` produced this conversation summary; reseed a fresh session.
@@ -2181,6 +2188,14 @@ impl Model for App {
                     m.refresh_detail();
                 }
             }
+            Msg::KbAdded(summary) => {
+                let color = if summary.starts_with('✗') {
+                    TN_RED
+                } else {
+                    TN_GRAY
+                };
+                self.push_line(&Style::new().fg(color).render(&format!("  {summary}")));
+            }
 
             _ => {}
         }
@@ -2704,6 +2719,24 @@ impl App {
                 ),
             }
             return None;
+        }
+        // `/kb <text | file | folder>` ingests raw material into the project
+        // knowledge base (.a3s/kb/sources/). Deterministic file I/O off the UI
+        // thread; `/okf` later compiles the sources into OKF concept pages.
+        if let Some(rest) = trimmed.strip_prefix("/kb") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                let arg = rest.trim().to_string();
+                self.textarea.clear();
+                let cwd = self.cwd.clone();
+                let now = chrono::Utc::now().to_rfc3339();
+                return Some(cmd::cmd(move || async move {
+                    let summary =
+                        tokio::task::spawn_blocking(move || kbutil::add_to_kb(&cwd, &arg, &now))
+                            .await
+                            .unwrap_or_else(|e| format!("✗ /kb failed: {e}"));
+                    Msg::KbAdded(summary)
+                }));
+            }
         }
         // `/btw <prompt>` runs a background side-thread (separate ephemeral
         // session, the main conversation as context) without disturbing the

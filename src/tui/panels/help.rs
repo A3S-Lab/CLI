@@ -27,6 +27,10 @@ impl App {
                 "/memory",
                 "browse long-term memory (GitLens-style timeline)",
             ),
+            row(
+                "/kb <text|file|folder>",
+                "add to the knowledge base (.a3s/kb)",
+            ),
             row("/top", "live process monitor (Enter to force-kill)"),
             row(
                 "/relay",
