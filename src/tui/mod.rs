@@ -92,16 +92,19 @@ file on each call:\n\
 -d '{{\"action\":\"list\"}}'\n\
 Body fields: `action` = list|search|describe|execute, plus `module` / `operation` / `params`. \
 Go broad→narrow: `list` (modules) → `describe`/`search` for the one operation → `execute`. \
-Pipe responses through `jq` to extract ONLY the fields you need (e.g. \
-`| jq -r '.data.modules[].name'`) so output stays a few lines; summarize the result for the user \
-in a few lines and do NOT paste the whole raw JSON back. \
-Every response envelope has a `requestId` and `timestamp`; after your summary, ALWAYS output them on \
-their own line, exactly `↳ requestId <requestId> · <timestamp>`, so the call is traceable (keep \
-`.requestId`/`.timestamp` in any jq projection). \
-If a response contains a `view` object (a console page sized for a popup), keep `.view` in your \
-JSON output and END your reply with the link on its own line, exactly `🔗 查看视图` — the host \
-turns it into a one-click trigger that opens the authenticated 渐进式UI popup (the user's OS login \
-is injected, no re-login). Do not print the raw URL. The `a3s-os-capabilities` skill has full examples."
+For `list`/`search`/`describe`, pipe through `jq` to extract only the fields you need so output \
+stays a few lines (e.g. `| jq -r '.data.modules[].name'`). \
+For `execute`, ALWAYS add `\"shaped\":true` to the request body — that is what makes the response \
+carry the `.view` popup deep-link — and do NOT jq-narrow an execute response: pipe it whole (it is \
+already compact), so `.view` survives. If you strip `.view` (or omit `\"shaped\":true`), the user \
+loses the 查看视图 link. \
+Summarize the result for the user in a few lines; do NOT paste the whole raw JSON back. \
+After your summary, ALWAYS output the trace on its own line, exactly \
+`↳ requestId <requestId> · <timestamp>`. \
+You do NOT print the view link yourself: whenever the execute output carries a `.view`, the host \
+automatically shows a one-click `🔗 查看视图` line that opens the authenticated 渐进式UI popup \
+(the user's OS login is injected, no re-login). Never print the raw URL. The \
+`a3s-os-capabilities` skill has full examples."
     )
 }
 
@@ -1265,6 +1268,9 @@ struct App {
     pending_images: Vec<a3s_code_core::llm::Attachment>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
     goal: Option<String>,
+    /// When the current `/goal` was set — drives the "Pursuing goal (1h 32m)"
+    /// elapsed timer in the status bar. `None` whenever `goal` is `None`.
+    goal_since: Option<Instant>,
     /// Remaining auto-continue turns for `/loop` (0 = off).
     loop_remaining: usize,
     /// Live parallelism for the status bar: running tools + running subagents.
@@ -2412,9 +2418,15 @@ impl Model for App {
             line1.push_str(&format!(" {}", dim(&format!("{} tok", self.output_tokens))));
         }
         // Live chips, only when active.
-        if let Some(g) = &self.goal {
-            let short: String = g.chars().take(24).collect();
-            line1.push_str(&format!("  🎯 {short}"));
+        if self.goal.is_some() {
+            let elapsed = self
+                .goal_since
+                .map(|t| format!(" ({})", fmt_elapsed(t.elapsed())))
+                .unwrap_or_default();
+            line1.push_str(&format!(
+                "  {}",
+                Style::new().fg(TN_CYAN).render(&format!("🎯 Pursuing goal{elapsed}"))
+            ));
         }
         if self.loop_remaining > 0 {
             line1.push_str(&format!("  ↻{}", self.loop_remaining));
@@ -2580,6 +2592,7 @@ impl App {
             self.history_pos = None;
             self.textarea.clear();
             self.goal = Some(deep_research_goal(&query));
+            self.goal_since = Some(Instant::now());
             self.messages.push(gutter(
                 TN_CYAN,
                 &Style::new()
@@ -2799,12 +2812,14 @@ impl App {
                 }
             } else if g == "clear" {
                 self.goal = None;
+                self.goal_since = None;
                 self.push_line(&Style::new().fg(TN_GRAY).render("  goal cleared"));
                 return None;
             } else {
                 // Set the persistent goal AND start working toward it now (the
                 // goal is prepended to this and every later prompt).
                 self.goal = Some(g.to_string());
+                self.goal_since = Some(Instant::now());
                 self.push_line(&gutter(TN_CYAN, &format!("🎯 goal set: {g}")));
                 return Some(cmd::msg(Msg::Submit(g.to_string())));
             }
@@ -3382,11 +3397,26 @@ impl App {
                 // RemoteUI: a 书安OS viewUrl in the tool output is openable. Remember
                 // it for `/view`, and if the API marked it embeddable (sized popup),
                 // open it now in the native a3s-webview window (auth via $A3S_OS_TOKEN).
-                if let Some(spec) = remote_ui::find_view_url(&output) {
+                // The progressive API returns a RELATIVE view url; complete it
+                // against the signed-in OS origin (the TUI is "the edge").
+                let os_origin = self
+                    .os_session
+                    .as_ref()
+                    .map(|s| crate::a3s_os::os_origin(&s.address));
+                if let Some(spec) = remote_ui::find_view_url(&output, os_origin.as_deref()) {
                     // RemoteUI is user-triggered — never auto-open. Remember the
-                    // view; the agent offers it via an inline "查看视图" link
-                    // (clicking that line, or `/view`, opens the popup).
+                    // view for `/view`, and surface a clickable "查看视图" line
+                    // ourselves (deterministic) rather than trusting the model to
+                    // print the marker — weaker models often forget it or jq the
+                    // `.view` object away. Only emit for a NEW view (no dupes).
+                    let is_new = self.last_view.as_ref() != Some(&spec);
                     self.last_view = Some(spec);
+                    if is_new {
+                        self.push_line(&gutter(
+                            TN_CYAN,
+                            &format!("🔗 {VIEW_BUTTON_MARKER}  (click or /view to open)"),
+                        ));
+                    }
                 }
                 // Retain the call for `/output`. Cap each output so a huge build
                 // log can't bloat the in-memory record.
@@ -3730,8 +3760,10 @@ impl App {
     /// leaves a transcript hint.
     fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
         if remote_ui::open_window(spec).is_err() {
+            // No helper binary (not shipped on Linux/Windows, or not installed):
+            // print the url so the user can open it in a browser themselves.
             self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                "  🔗 {} (install a3s-webview for an in-app window)",
+                "  🔗 open in your browser: {} (install a3s-webview for an in-app window, macOS)",
                 spec.url
             )));
         }
@@ -4354,6 +4386,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         last_workflow: None,
         pending_images: Vec::new(),
         goal: None,
+        goal_since: None,
         loop_remaining: 0,
         active_tools: 0,
         active_agents: 0,

@@ -63,7 +63,7 @@ signed-in user may access.
 | `list` | — | every module you can access (name, description, path, operationCount) |
 | `search` | `query` | matching operations across modules |
 | `describe` | `module` (+ optional `operation`) | the module's sub-modules + its operations; or, with `operation`, just that ONE operation's full input/output schema |
-| `execute` | `module`, `operation`, `params` | the operation result (`data`), plus an optional `view` object (a console deep link + suggested popup size) and `ui` agent-ui directive |
+| `execute` | `module`, `operation`, `params` (+ `"shaped": true` to get the view) | the operation result (`data`); with `"shaped": true`, also an optional `view` object (a console deep link + suggested popup size) and `ui` agent-ui directive |
 
 ## Rules
 
@@ -74,13 +74,14 @@ signed-in user may access.
   `search`/`describe <module> <operation>` for the ONE operation you'll run →
   `execute`. Show the user only the operation(s) that answer them, not every
   interface.
-- **Keep output tight — extract, don't dump.** Pipe every response through `jq`
-  to pull only the fields you need (e.g. `... | jq -r '.data.modules[].name'` for
-  a module list, `... | jq '.data | keys'` to peek a shape) so the result is a few
-  relevant lines, not a raw JSON blob. In your reply to the user, summarize in a
-  few lines — do NOT paste the whole response back. (The TUI already collapses
-  long tool output to ~5 lines, but a targeted `jq` result is what keeps both the
-  tool line and your answer short.)
+- **Keep output tight — extract, don't dump.** For `list`/`search`/`describe`,
+  pipe through `jq` to pull only the fields you need (e.g.
+  `... | jq -r '.data.modules[].name'` for a module list, `... | jq '.data | keys'`
+  to peek a shape) so the result is a few relevant lines, not a raw JSON blob.
+  **Exception — `execute`:** send `"shaped": true` and pipe the response WHOLE (do
+  not narrow it); it is already compact and its `.view` field is what gives the
+  user the 查看视图 popup — narrowing it away loses the link. In your reply,
+  summarize in a few lines either way — do NOT paste the whole response back.
 - Never guess `module`, `operation`, field names, or enums. `list` / `search` /
   `describe` first, then build `params` from the returned schema. `describe` with
   an `operation` gives that op's exact schema — the rung right before `execute`.
@@ -93,25 +94,23 @@ signed-in user may access.
   and a `timestamp`. After summarizing the result, output them on their own line so
   the call is traceable, exactly: `↳ requestId <requestId> · <timestamp>`. Keep
   `.requestId` and `.timestamp` in any `jq` projection (don't narrow them away).
-- **Offer the `view` as an inline link — never auto-open.** Some `execute`
-  responses include a `view` object — `{ "url": "…?embed=1", "width": N, "height":
-  N }` — a focused console page sized for a popup. Two things must happen:
-  1. **Keep `.view` in your command's JSON stdout** so the host can capture it —
-     do **not** narrow it away with `jq`; emit the full response or keep it in
-     your projection (e.g. `... | jq '{ data, view, requestId, timestamp }'`).
-     Never fabricate or drop a returned `view`.
-  2. **End your reply with the link on its own line, exactly:** `🔗 查看视图`
-     — the host turns any reply line containing `查看视图` into a one-click
-     trigger that opens the view in the authenticated **渐进式UI** popup (the
-     user's current OS login is injected — no re-login). RemoteUI is
-     **user-triggered**: the popup is NOT opened automatically; the user clicks
-     that link (or runs `/view`). Do **not** print the raw URL yourself — the link
-     line is the affordance.
+- **Let the host surface the `view` link — you don't print it.** An `execute`
+  response includes a `view` object — `{ "url": "…?embed=1", "width": N, "height":
+  N }` — a focused console page sized for a popup, **only when you send
+  `"shaped": true` in the execute request body.** Two things must happen:
+  1. **Send `"shaped": true`** on every `execute` call, and **do NOT `jq`-narrow
+     the execute response** — pipe it whole (it is already compact). Without the
+     flag, or if you strip `.view`, no view is produced and the user gets no link.
+  2. **Do NOT print any `查看视图` line yourself.** The host inspects the execute
+     output and, whenever a `.view` is present, automatically renders a one-click
+     `🔗 查看视图` line that opens the **渐进式UI** popup (the user's current OS
+     login is injected — no re-login). It is **user-triggered**: the popup is NOT
+     opened automatically; the user clicks that line (or runs `/view`). Never
+     print the raw URL. Printing the link yourself only duplicates the host's.
 
-  So a typical reply ends with two lines:
+  So a typical reply ends with just the trace line:
   ```
   ↳ requestId 52178323-b614-42e4-af60-4b0b91ad8355 · 2026-07-01T01:21:07.905Z
-  🔗 查看视图
   ```
 - The `ui` field (`protocol: "agent-ui"`) is a host-rendered remote component —
   note that it exists if present, but don't try to render it yourself.
@@ -147,17 +146,18 @@ post '{"action":"list"}'                                              # 1. what 
 post '{"action":"search","query":"ocr"}'                             # 2. find operations
 post '{"action":"describe","module":"kernel","operation":"runOcr"}'  # 3. exact schema
 
-# execute: keep `.view` in the projection so the host can offer the 渐进式UI link
-post '{"action":"execute","module":"assets","operation":"listAssets"}' | jq '{data, view}'
+# execute: send "shaped":true and DON'T narrow — the whole (compact) response
+# carries `.view`, which the host turns into the 查看视图 popup link.
+post '{"action":"execute","module":"assets","operation":"listAssets","shaped":true}'
 ```
 
 ```json
 // 4a. list the system's configured LLM/OCR capabilities (masked projection)
-{ "action": "execute", "module": "kernel", "operation": "listAiCaps" }
+{ "action": "execute", "module": "kernel", "operation": "listAiCaps", "shaped": true }
 ```
 
 ```json
 // 4b. run OCR through the platform's configured backend (you never see its URL/key)
-{ "action": "execute", "module": "kernel", "operation": "runOcr",
+{ "action": "execute", "module": "kernel", "operation": "runOcr", "shaped": true,
   "params": { "url": "https://…/spec.pdf", "mimeType": "application/pdf", "modelType": "document", "outputFormat": "markdown" } }
 ```

@@ -132,10 +132,12 @@ pub(crate) fn new_session_id() -> String {
     format!("{:016x}-{:x}", nanos, std::process::id())
 }
 
-/// "1m 05s" / "42s".
+/// "1h 32m" / "1m 05s" / "42s".
 pub(crate) fn fmt_elapsed(d: Duration) -> String {
     let s = d.as_secs();
-    if s >= 60 {
+    if s >= 3600 {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    } else if s >= 60 {
         format!("{}m {:02}s", s / 60, s % 60)
     } else {
         format!("{s}s")

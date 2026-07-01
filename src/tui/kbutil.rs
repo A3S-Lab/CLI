@@ -42,15 +42,17 @@ pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
             format!("✔ added file to KB · {}", show(cwd, &dest))
         })
     } else if path.is_dir() {
-        ingest_dir(&path, &sources).map(|(added, skipped)| {
+        ingest_dir(&path, &sources).map(|(added, skipped, capped)| {
             log_source(&sources, now, "folder", arg, &sources.join(dir_name(&path)));
-            let skip = if skipped > 0 {
-                format!(" ({skipped} skipped)")
-            } else {
-                String::new()
-            };
+            let mut note = String::new();
+            if skipped > 0 {
+                note.push_str(&format!(" ({skipped} skipped)"));
+            }
+            if capped {
+                note.push_str(&format!(" (capped at {MAX_DIR_FILES} — folder truncated)"));
+            }
             format!(
-                "✔ added {added} file(s) from {arg} to KB{skip} · .a3s/kb/sources/{}/",
+                "✔ added {added} file(s) from {arg} to KB{note} · .a3s/kb/sources/{}/",
                 dir_name(&path)
             )
         })
@@ -91,12 +93,14 @@ fn ingest_file(file: &Path, sources: &Path) -> std::io::Result<PathBuf> {
 
 /// Copy a folder's text files into `sources/<dirname>/…`, preserving structure.
 /// Skips hidden entries + `target`/`node_modules`, binaries, and oversized files.
-fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize)> {
+fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize, bool)> {
     let root_dest = sources.join(dir_name(dir));
     let (mut added, mut skipped) = (0usize, 0usize);
+    let mut capped = false;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
         if added >= MAX_DIR_FILES {
+            capped = true;
             break;
         }
         let rd = match std::fs::read_dir(&d) {
@@ -117,6 +121,7 @@ fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize)> {
                 continue;
             }
             if added >= MAX_DIR_FILES {
+                capped = true;
                 break;
             }
             if !is_text_file(&p).unwrap_or(false) {
@@ -135,7 +140,7 @@ fn ingest_dir(dir: &Path, sources: &Path) -> std::io::Result<(usize, usize)> {
             }
         }
     }
-    Ok((added, skipped))
+    Ok((added, skipped, capped))
 }
 
 /// A file is "text" if it's under the size cap and its first 8 KiB have no NUL.
@@ -301,6 +306,20 @@ mod tests {
         let base = kb_dir(cwds).join("sources/docs");
         assert!(base.join("a.md").exists() && base.join("sub/b.md").exists());
         assert!(!base.join("bin.dat").exists()); // binary excluded
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn folder_cap_is_surfaced_not_silent() {
+        let cwd = tmp();
+        let cwds = cwd.to_str().unwrap();
+        let dir = cwd.join("big");
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..(MAX_DIR_FILES + 5) {
+            std::fs::write(dir.join(format!("f{i}.md")), "x").unwrap();
+        }
+        let out = add_to_kb(cwds, dir.to_str().unwrap(), "2026-07-01T00:00:00Z");
+        assert!(out.contains("capped at"), "{out}"); // truncation must be visible
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

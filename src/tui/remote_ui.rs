@@ -23,27 +23,52 @@ pub(crate) struct ViewSpec {
 /// object `{ url, width, height }`; falls back to a legacy top-level `viewUrl`
 /// (+ optional `viewSize` / `embeddable`). The capabilities API nests it under
 /// `data` too, so we walk recursively and take the first match.
-pub(crate) fn find_view_url(output: &str) -> Option<ViewSpec> {
-    let value: serde_json::Value = serde_json::from_str(output).ok()?;
-    find_in(&value)
+///
+/// The progressive API returns a RELATIVE `url` (`/admin/…?embed=1`) by the OS's
+/// "store relative, complete at the edge" convention — the TUI IS the edge, so we
+/// absolutize it against `origin` (the signed-in OS origin). Without this every
+/// capabilities view is silently dropped, since the webview needs an absolute URL.
+pub(crate) fn find_view_url(output: &str, origin: Option<&str>) -> Option<ViewSpec> {
+    // Tool stdout is usually one JSON doc, but a bash block may emit several
+    // (e.g. a `list` then an `execute`). Scan every parseable JSON value and take
+    // the LAST that carries a view — the freshest result the user just ran. This
+    // also tolerates concatenated docs that a single `from_str` would reject.
+    serde_json::Deserializer::from_str(output)
+        .into_iter::<serde_json::Value>()
+        .flatten()
+        .filter_map(|v| find_in(&v, origin))
+        .last()
 }
 
-fn find_in(value: &serde_json::Value) -> Option<ViewSpec> {
+/// Accept an absolute `http(s)://` url as-is, or complete a root-relative
+/// `/path` against `origin`. Anything else (relative with no origin, `mailto:`,
+/// …) yields `None` so we never hand the webview a URL it can't open.
+fn absolutize(url: &str, origin: Option<&str>) -> Option<String> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        Some(url.to_string())
+    } else if url.starts_with('/') {
+        origin.map(|o| format!("{}{}", o.trim_end_matches('/'), url))
+    } else {
+        None
+    }
+}
+
+fn find_in(value: &serde_json::Value, origin: Option<&str>) -> Option<ViewSpec> {
     match value {
         serde_json::Value::Object(obj) => {
             // Current 书安OS shape: a `view` object `{ url, width, height }` — a
             // focused, chrome-less embed widget at a suggested size.
-            if let Some(spec) = obj.get("view").and_then(parse_view_object) {
+            if let Some(spec) = obj.get("view").and_then(|v| parse_view_object(v, origin)) {
                 return Some(spec);
             }
             // Back-compat: a bare top-level `viewUrl` (+ optional `viewSize` /
             // `embeddable`), the shape the API returned before the `view` object.
-            if let Some(spec) = parse_legacy_view_url(obj) {
+            if let Some(spec) = parse_legacy_view_url(obj, origin) {
                 return Some(spec);
             }
-            obj.values().find_map(find_in)
+            obj.values().find_map(|v| find_in(v, origin))
         }
-        serde_json::Value::Array(arr) => arr.iter().find_map(find_in),
+        serde_json::Value::Array(arr) => arr.iter().find_map(|v| find_in(v, origin)),
         _ => None,
     }
 }
@@ -57,14 +82,11 @@ fn px(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u32
 
 /// Parse the current `view` object `{ url, width, height }`. The API only emits
 /// it for sized popups, so a parsed `view` is always embeddable.
-fn parse_view_object(v: &serde_json::Value) -> Option<ViewSpec> {
+fn parse_view_object(v: &serde_json::Value, origin: Option<&str>) -> Option<ViewSpec> {
     let obj = v.as_object()?;
-    let url = obj
-        .get("url")
-        .and_then(|u| u.as_str())
-        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))?;
+    let url = obj.get("url").and_then(|u| u.as_str())?;
     Some(ViewSpec {
-        url: url.to_string(),
+        url: absolutize(url, origin)?,
         width: px(obj, "width"),
         height: px(obj, "height"),
         embeddable: true,
@@ -73,11 +95,12 @@ fn parse_view_object(v: &serde_json::Value) -> Option<ViewSpec> {
 
 /// Back-compat: the older top-level `viewUrl` string with an optional `viewSize`
 /// `{width,height}` sibling and `embeddable` flag.
-fn parse_legacy_view_url(obj: &serde_json::Map<String, serde_json::Value>) -> Option<ViewSpec> {
-    let url = obj
-        .get("viewUrl")
-        .and_then(|u| u.as_str())
-        .filter(|u| u.starts_with("http://") || u.starts_with("https://"))?;
+fn parse_legacy_view_url(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    origin: Option<&str>,
+) -> Option<ViewSpec> {
+    let url = obj.get("viewUrl").and_then(|u| u.as_str())?;
+    let url = absolutize(url, origin)?;
     let size = obj.get("viewSize").and_then(|s| s.as_object());
     let width = size.and_then(|s| px(s, "width"));
     let height = size.and_then(|s| px(s, "height"));
@@ -87,7 +110,7 @@ fn parse_legacy_view_url(obj: &serde_json::Map<String, serde_json::Value>) -> Op
         .unwrap_or(false)
         || width.is_some();
     Some(ViewSpec {
-        url: url.to_string(),
+        url,
         width,
         height,
         embeddable,
@@ -144,7 +167,7 @@ mod tests {
     #[test]
     fn finds_top_level_view_url() {
         let out = r#"{"success":true,"viewUrl":"https://os.x/p","data":{"items":[]}}"#;
-        let s = find_view_url(out).unwrap();
+        let s = find_view_url(out, None).unwrap();
         assert_eq!(s.url, "https://os.x/p");
         assert!(!s.embeddable); // no size / flag
     }
@@ -153,7 +176,7 @@ mod tests {
     fn finds_nested_view_url_with_size_marks_embeddable() {
         let out =
             r#"{"data":{"viewUrl":"https://os.x/embed","viewSize":{"width":720,"height":520}}}"#;
-        let s = find_view_url(out).unwrap();
+        let s = find_view_url(out, None).unwrap();
         assert_eq!((s.width, s.height), (Some(720), Some(520)));
         assert!(s.embeddable); // size present ⇒ embeddable
     }
@@ -161,13 +184,13 @@ mod tests {
     #[test]
     fn embeddable_flag_without_size() {
         let out = r#"{"viewUrl":"https://os.x/p","embeddable":true}"#;
-        assert!(find_view_url(out).unwrap().embeddable);
+        assert!(find_view_url(out, None).unwrap().embeddable);
     }
 
     #[test]
     fn finds_view_object_marks_embeddable() {
         let out = r#"{"success":true,"view":{"url":"https://os.x/p?embed=1","width":720,"height":520},"modules":[]}"#;
-        let s = find_view_url(out).unwrap();
+        let s = find_view_url(out, None).unwrap();
         assert_eq!(s.url, "https://os.x/p?embed=1");
         assert_eq!((s.width, s.height), (Some(720), Some(520)));
         assert!(s.embeddable); // a `view` object is always a sized popup
@@ -176,21 +199,50 @@ mod tests {
     #[test]
     fn finds_nested_view_object() {
         let out = r#"{"data":{"view":{"url":"https://os.x/embed","width":400,"height":300}}}"#;
-        assert_eq!(find_view_url(out).unwrap().width, Some(400));
+        assert_eq!(find_view_url(out, None).unwrap().width, Some(400));
     }
 
     #[test]
     fn view_object_takes_precedence_over_legacy_url() {
         let out = r#"{"viewUrl":"https://old/x","view":{"url":"https://new/y","width":300,"height":200}}"#;
-        assert_eq!(find_view_url(out).unwrap().url, "https://new/y");
+        assert_eq!(find_view_url(out, None).unwrap().url, "https://new/y");
+    }
+
+    #[test]
+    fn relative_view_url_is_absolutized_against_origin() {
+        // The 书安OS progressive API returns a RELATIVE url; the TUI (the edge)
+        // completes it. This is the common real-world shape.
+        let out = r#"{"success":true,"view":{"url":"/admin/kernel/assets?embed=1","width":1440,"height":900}}"#;
+        let s = find_view_url(out, Some("https://os.example.com/")).unwrap();
+        assert_eq!(s.url, "https://os.example.com/admin/kernel/assets?embed=1"); // trailing / trimmed
+        assert!(s.embeddable);
+    }
+
+    #[test]
+    fn last_view_wins_across_concatenated_json_docs() {
+        // A bash block that ran `list` then `execute` emits two JSON docs; the
+        // freshest (execute, with the view) must win.
+        let out = r#"{"success":true,"modules":[]}
+{"success":true,"view":{"url":"/admin/assets/a1?embed=1","width":1024,"height":768}}"#;
+        let s = find_view_url(out, Some("https://os.x")).unwrap();
+        assert_eq!(s.url, "https://os.x/admin/assets/a1?embed=1");
+    }
+
+    #[test]
+    fn relative_view_url_without_origin_is_dropped() {
+        // No signed-in origin ⇒ we can't complete it; better none than a broken url.
+        let out = r#"{"view":{"url":"/admin/kernel/assets?embed=1","width":10,"height":10}}"#;
+        assert!(find_view_url(out, None).is_none());
     }
 
     #[test]
     fn ignores_non_http_and_absent() {
-        assert!(find_view_url(r#"{"viewUrl":"file:///x"}"#).is_none());
-        assert!(find_view_url(r#"{"view":{"url":"file:///x","width":10,"height":10}}"#).is_none());
-        assert!(find_view_url(r#"{"data":{"items":[1,2]}}"#).is_none());
-        assert!(find_view_url("not json").is_none());
+        assert!(find_view_url(r#"{"viewUrl":"file:///x"}"#, None).is_none());
+        assert!(
+            find_view_url(r#"{"view":{"url":"file:///x","width":10,"height":10}}"#, None).is_none()
+        );
+        assert!(find_view_url(r#"{"data":{"items":[1,2]}}"#, None).is_none());
+        assert!(find_view_url("not json", None).is_none());
     }
 
     #[test]
@@ -227,9 +279,9 @@ mod tests {
     #[test]
     fn progressive_api_view_flows_to_webview_args() {
         let resp = r#"{"success":true,
-            "view":{"url":"https://os.example.com/admin/kernel/assets?embed=1","width":900,"height":680},
+            "view":{"url":"/admin/kernel/assets?embed=1","width":900,"height":680},
             "data":{"items":[]}}"#;
-        let spec = find_view_url(resp).expect("view object should parse");
+        let spec = find_view_url(resp, Some("https://os.example.com")).expect("view object should parse");
         assert!(spec.embeddable); // a `view` is always a sized popup → auto-opens
         let args = webview_args(&spec);
         assert_eq!(args[0], "--url");

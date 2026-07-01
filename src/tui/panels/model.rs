@@ -233,6 +233,7 @@ impl App {
             Ok(client) => {
                 self.llm_override = Some(Arc::new(client));
                 self.model = Some(model.to_string()); // before rebuild
+                self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
                 match self.rebuild_session(Some(model)) {
                     Ok((s, _)) => {
                         self.session = Arc::new(s);
@@ -292,6 +293,7 @@ impl App {
                 .with_provider_name("OS网关");
         self.llm_override = Some(Arc::new(client));
         self.model = Some(model.to_string());
+        self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
                 self.session = Arc::new(s);
