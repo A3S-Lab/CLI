@@ -41,6 +41,7 @@ mod gitutil;
 mod image;
 mod kbutil;
 mod memutil;
+mod os_im;
 mod panels;
 mod remote_ui;
 mod render;
@@ -134,6 +135,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/btw", "ask a background side-question (/btw <prompt>)"),
     ("/top", "live process monitor (highlights coding agents)"),
     ("/ide", "file tree + code viewer for the workspace"),
+    ("/im", "OS chat — DMs & groups (standalone; needs /login)"),
     ("/git", "git status / diff / stage / commit (gitui-style)"),
     (
         "/memory",
@@ -651,6 +653,38 @@ struct Ide {
     flash: Option<String>,
 }
 
+/// Whether the chat page's left pane + input act on conversations (`Chat`) or on
+/// the contact directory search (`Search`). Tab toggles.
+#[derive(Clone, Copy, PartialEq)]
+enum ChatMode {
+    Chat,
+    Search,
+}
+
+/// `/im` chat page — a STANDALONE OS instant-messaging surface (left pane:
+/// conversations, or a searchable contact directory | right pane: messages;
+/// bottom: composer / search box). Talks to the OS IM REST API directly and is
+/// deliberately kept OUT of the agent loop: chat content is never fed to the
+/// coding agent as context. Live-ish via polling while the page is open.
+struct ChatPanel {
+    convs: Vec<os_im::ImConversation>,
+    /// Selected conversation (index into `convs`).
+    sel: usize,
+    /// The conversation whose messages are currently loaded.
+    active: Option<String>,
+    messages: Vec<os_im::ImMessage>,
+    /// My own user id, to right-align + label my messages.
+    me: Option<String>,
+    error: Option<String>,
+    loading: bool,
+    /// Chat vs. contact-search mode (Tab toggles).
+    mode: ChatMode,
+    /// Contact-search results (populated in `Search` mode).
+    contacts: Vec<os_im::Contact>,
+    /// Selected contact (index into `contacts`).
+    contact_sel: usize,
+}
+
 /// Directory children for the tree, dirs first then files, noise skipped.
 fn ide_children(dir: &std::path::Path, depth: usize) -> Vec<IdeEntry> {
     let mut v: Vec<IdeEntry> = std::fs::read_dir(dir)
@@ -701,19 +735,73 @@ fn project_instructions(workspace: &str) -> Option<String> {
 /// Left margin for the whole UI (inner padding).
 const PAD: usize = 2;
 
-/// Model effort levels (label, thinking-token budget) — `/effort` slider. The
-/// last, `ultracode`, additionally plans, then fans independent work out to
-/// parallel subagents via direct `parallel_task` calls.
-const EFFORT_LEVELS: &[(&str, usize)] = &[
-    ("low", 1024),
-    ("medium", 4096),
-    ("high", 8192),
-    ("xhigh", 16384),
-    ("max", 32768),
-    ("ultracode", 32768),
+/// One `/effort` level. Effort scales reasoning depth on THREE axes so it is
+/// meaningful on every model, not just Anthropic:
+/// - `thinking_budget`: Anthropic extended-thinking tokens (ignored elsewhere);
+/// - `max_tool_rounds`: how much multi-step work a single turn may do;
+/// - `guideline`: a system-prompt depth steer (the lever that works on GPT/GLM/
+///   OS models, which have no thinking budget) — `None` = the model's balanced
+///   default.
+///
+/// `ultracode` additionally plans, then fans independent work out to parallel
+/// subagents via `parallel_task`.
+struct EffortProfile {
+    label: &'static str,
+    thinking_budget: usize,
+    max_tool_rounds: usize,
+    /// Auto-continuation turns: how many times the loop re-prompts to keep going
+    /// when the model stops before the task is done. Higher effort persists longer.
+    max_continuation_turns: u32,
+    guideline: Option<&'static str>,
+}
+
+const EFFORT_LEVELS: &[EffortProfile] = &[
+    EffortProfile { label: "low", thinking_budget: 1024, max_tool_rounds: 120, max_continuation_turns: 2, guideline: Some(EFFORT_LOW) },
+    EffortProfile { label: "medium", thinking_budget: 4096, max_tool_rounds: 200, max_continuation_turns: 3, guideline: None },
+    EffortProfile { label: "high", thinking_budget: 8192, max_tool_rounds: 300, max_continuation_turns: 4, guideline: Some(EFFORT_HIGH) },
+    EffortProfile { label: "xhigh", thinking_budget: 16384, max_tool_rounds: 400, max_continuation_turns: 6, guideline: Some(EFFORT_XHIGH) },
+    EffortProfile { label: "max", thinking_budget: 32768, max_tool_rounds: 500, max_continuation_turns: 8, guideline: Some(EFFORT_MAX) },
+    EffortProfile { label: "ultracode", thinking_budget: 32768, max_tool_rounds: 600, max_continuation_turns: 8, guideline: Some(ULTRACODE_GUIDELINES) },
 ];
 /// Index of the `ultracode` level (special: planning + parallel subagents).
 const ULTRACODE: usize = 5;
+
+// Model-agnostic depth steers injected into the system prompt per effort level.
+// They scale reasoning + verification rigor; `medium` has none (the baseline).
+// Never tell the model to skip SAFETY checks — low trims optional rigor only.
+const EFFORT_LOW: &str = "\
+[effort: low] Favor speed and minimalism. Answer directly, make the smallest \
+change that works (reading enough surrounding code to change it safely), and \
+keep verification proportionate: still run the narrowest build/test/type-check \
+that covers what you touched — just don't add checks or scope the task didn't \
+warrant. Don't gold-plate.";
+const EFFORT_HIGH: &str = "\
+[effort: high] Favor depth. Reason through the approach before acting. After \
+changes, verify the narrow path you touched (build / test / type-check) and \
+check the obvious edge cases, then re-read your own diff for correctness before \
+finishing.";
+const EFFORT_XHIGH: &str = "\
+[effort: xhigh] Work rigorously. Before committing to an approach, weigh at \
+least one alternative. Verify thoroughly — run the relevant tests/build, probe \
+edge cases and failure modes, and confirm the change actually does what was \
+asked. Do a self-review pass for correctness and simplicity before concluding.";
+const EFFORT_MAX: &str = "\
+[effort: max] Maximum rigor; prefer correctness and completeness over speed. \
+Decompose the problem, compare alternatives, and implement the strongest \
+solution. Verify exhaustively: tests, build, edge cases, and boundary / \
+adversarial inputs. Finish with a self-critique pass that actively hunts for \
+what you may have missed or gotten wrong, and fix it before concluding.";
+/// Ultracode system-prompt steer: keep the model focused on decomposition and
+/// synthesis while the core planning runtime turns independent plan waves into
+/// visible `parallel_task` subagents.
+const ULTRACODE_GUIDELINES: &str = "\
+[ultracode] Dynamic-workflow mode is available — you decide whether a turn needs \
+it. Match the effort to the task: answer trivial or conversational input (a \
+greeting, a single question, a one-step edit) directly, with no plan and no \
+fan-out. When a task genuinely splits into independent branches, decompose it, \
+run those branches as parallel background subagents via `parallel_task` (keep \
+each child prompt bounded and evidence-oriented), then synthesize their results \
+before continuing dependent work.";
 
 /// A resumable/relayable session from this or another coding agent.
 struct RelaySession {
@@ -1095,13 +1183,29 @@ enum Msg {
     /// OS access token was refreshed (or refresh failed) in the background.
     OsRefreshed(Result<crate::a3s_os::StoredOsSession, String>),
     /// 书安OS unified-gateway model ids fetched for the `/model` picker.
-    OsGatewayModels(Vec<String>),
+    OsGatewayModels(Result<Vec<crate::a3s_os::GatewayModel>, String>),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
     /// Refreshed process snapshot for the `/top` panel.
     TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
     TopRefresh,
+    /// `/im` conversation list loaded (or an error).
+    ImConvs(Result<Vec<os_im::ImConversation>, String>),
+    /// `/im` message history for a conversation loaded.
+    ImHistory(String, Result<Vec<os_im::ImMessage>, String>),
+    /// `/im` send result (the persisted message, or an error).
+    ImSent(Result<Box<os_im::ImMessage>, String>),
+    /// `/im <userId>` opened/created a DM (select + load it).
+    ImDmOpened(Result<Box<os_im::ImConversation>, String>),
+    /// `/im` contact-search results (org co-members matching the query).
+    ImContacts(Result<Vec<os_im::Contact>, String>),
+    /// `/im` resolved the signed-in user's own id (for own-message alignment).
+    ImMe(String),
+    /// Tick to re-poll the open `/im` page (list + active history).
+    ImPoll,
+    /// No-op — lets fire-and-forget async work satisfy the `Cmd -> Msg` contract.
+    Noop,
     /// Result of the async `/relay` session scan.
     RelayData(Vec<RelaySession>),
     /// `/git` status + recent log snapshot.
@@ -1227,10 +1331,13 @@ struct App {
     /// True while an OS access-token refresh is in flight (guards the BannerTick
     /// trigger from spawning a second refresh before the first resolves).
     os_refreshing: bool,
-    /// 书安OS unified-gateway models for the `/model` picker, lazily fetched on
+    /// OS unified-gateway models for the `/model` picker, lazily fetched on
     /// first `/model` while signed in. `None` = not fetched yet; `Some([])` = the
     /// gateway is unavailable/unconfigured.
     os_gateway_models: Option<Vec<String>>,
+    /// The precise reason the last gateway-models fetch failed (e.g. `/v1` not
+    /// proxied → HTML, auth error, unreachable), shown in the `/model` picker.
+    os_gateway_error: Option<String>,
     /// Last 书安OS view seen in a tool result. RemoteUI is user-triggered: `/view`
     /// or clicking the agent's inline "查看视图" link opens it in the native
     /// a3s-webview window — it is never auto-opened.
@@ -1375,6 +1482,8 @@ struct App {
     top_kill: Option<(u32, String)>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
+    /// `/im` standalone chat page (Some when open). Independent of the agent loop.
+    chat: Option<ChatPanel>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
     /// `/memory` full-screen timeline panel (Some when open).
@@ -1509,6 +1618,10 @@ impl Model for App {
                 if self.ide.is_some() {
                     self.ide_key(&key);
                     return None;
+                }
+                // /im chat page takes all keys while open (nav + composer).
+                if self.chat.is_some() {
+                    return self.handle_chat_key(&key);
                 }
                 // /top panel takes keys while open.
                 if self.top.is_some() {
@@ -2140,10 +2253,27 @@ impl Model for App {
                 }
             }
 
-            Msg::OsGatewayModels(models) => {
-                // Cache the fetched gateway models, then open the /model picker
-                // (the "书安OS" tab now lists them — or shows it unavailable).
-                self.os_gateway_models = Some(models);
+            Msg::OsGatewayModels(result) => {
+                match result {
+                    // Record each model's real context window (when the gateway
+                    // reports one) so switching to it sizes auto-compact + the
+                    // status bar correctly, then cache the ids.
+                    Ok(models) => {
+                        for m in &models {
+                            if let Some(ctx) = m.context {
+                                self.model_ctx.insert(m.id.clone(), ctx);
+                            }
+                        }
+                        self.os_gateway_models = Some(models.into_iter().map(|m| m.id).collect());
+                        self.os_gateway_error = None;
+                    }
+                    // Keep the precise reason so the picker + switch attempt can
+                    // explain WHY the gateway is unavailable.
+                    Err(e) => {
+                        self.os_gateway_models = Some(Vec::new());
+                        self.os_gateway_error = Some(e);
+                    }
+                }
                 self.open_model_menu();
             }
 
@@ -2164,6 +2294,53 @@ impl Model for App {
                     return Some(cmd::cmd(|| async { Msg::TopData(fetch_top().await) }));
                 }
             }
+            Msg::ImConvs(result) => return self.on_im_convs(result),
+            Msg::ImHistory(id, result) => return self.on_im_history(id, result),
+            Msg::ImSent(result) => {
+                if let Some(chat) = &mut self.chat {
+                    match result {
+                        Ok(msg) => {
+                            chat.error = None;
+                            if chat.active.as_deref() == Some(msg.conversation_id.as_str()) {
+                                chat.messages.push(*msg);
+                            }
+                        }
+                        Err(e) => chat.error = Some(e),
+                    }
+                }
+            }
+            Msg::ImPoll => {
+                if self.chat.is_some() {
+                    // IM is login-gated: if the session went away (logout / failed
+                    // refresh), close the page instead of polling unauthenticated.
+                    if self.os_session.is_none() {
+                        self.chat = None;
+                        return None;
+                    }
+                    return Some(self.chat_refresh());
+                }
+            }
+            Msg::ImDmOpened(result) => return self.on_im_dm_opened(result),
+            Msg::ImMe(id) => {
+                if let Some(chat) = &mut self.chat {
+                    if !id.is_empty() {
+                        chat.me = Some(id);
+                    }
+                }
+            }
+            Msg::ImContacts(result) => {
+                if let Some(chat) = &mut self.chat {
+                    match result {
+                        Ok(contacts) => {
+                            chat.contacts = contacts;
+                            chat.contact_sel = 0;
+                            chat.error = None;
+                        }
+                        Err(e) => chat.error = Some(e),
+                    }
+                }
+            }
+            Msg::Noop => {}
             Msg::RelayData(sessions) => {
                 if self.relay_menu.is_some() {
                     self.relay = sessions;
@@ -2220,6 +2397,9 @@ impl Model for App {
         }
         if let Some(ide) = &self.ide {
             return self.render_ide(ide);
+        }
+        if let Some(chat) = &self.chat {
+            return self.render_chat(chat);
         }
         if self.top.is_some() {
             return self.render_top_panel();
@@ -2285,7 +2465,7 @@ impl Model for App {
         let top_separator = if rainbow {
             ribbon(0)
         } else {
-            let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].0);
+            let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].label);
             // Context-window usage at the top-right of the input (Claude-style).
             let ctxlabel = if self.context_limit > 0 {
                 let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
@@ -2709,6 +2889,7 @@ impl App {
             match crate::a3s_os::logout(&os_config) {
                 Ok(true) => {
                     self.os_session = None;
+                    self.chat = None; // IM requires an OS login — close it on sign-out.
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     self.refresh_after_auth();
@@ -2720,6 +2901,7 @@ impl App {
                 }
                 Ok(false) => {
                     self.os_session = None;
+                    self.chat = None; // IM requires an OS login — close it on sign-out.
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     self.refresh_after_auth();
@@ -2749,6 +2931,16 @@ impl App {
                             .unwrap_or_else(|e| format!("✗ /kb failed: {e}"));
                     Msg::KbAdded(summary)
                 }));
+            }
+        }
+        // `/im [userId]` opens the standalone OS chat page; an optional user
+        // id opens/creates that DM directly. Kept OUT of the agent loop.
+        if let Some(rest) = trimmed.strip_prefix("/im") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                self.textarea.clear();
+                let arg = rest.trim().to_string();
+                let dm_with = (!arg.is_empty()).then_some(arg);
+                return self.open_chat(dm_with);
             }
         }
         // `/btw <prompt>` runs a background side-thread (separate ephemeral
@@ -2993,11 +3185,14 @@ impl App {
             }
             "/model" => {
                 self.textarea.clear();
-                // Signed in to 书安OS + gateway models not fetched yet → fetch them
-                // once (OpenAI-compatible /v1/models) so the picker can offer the
-                // unified gateway, then open. Otherwise open immediately.
+                // Signed in to OS + gateway models not fetched (or a previous fetch
+                // failed → empty) → (re)fetch the OpenAI-compatible /v1/models so the
+                // picker can offer the unified gateway, then open. A transient
+                // gateway error thus recovers on the next /model instead of sticking
+                // until restart. Otherwise open immediately.
                 if let Some(s) = self.os_session.clone() {
-                    if self.os_gateway_models.is_none() {
+                    let need_fetch = self.os_gateway_models.as_ref().is_none_or(|m| m.is_empty());
+                    if need_fetch {
                         let (addr, token) = (s.address.clone(), s.access_token.clone());
                         return Some(cmd::cmd(move || async move {
                             Msg::OsGatewayModels(
@@ -4373,6 +4568,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         os_session,
         os_refreshing: false,
         os_gateway_models: None,
+        os_gateway_error: None,
         last_view: None,
         effort: 2, // high
         effort_panel: None,
@@ -4444,6 +4640,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_focus: None,
         top_kill: None,
         ide: None,
+        chat: None,
         git: None,
         memory: None,
         help_open: false,
@@ -4474,6 +4671,17 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         ));
         app.open_config_in_ide(std::path::Path::new(&config_path));
         app.rebuild_viewport();
+    }
+
+    // Apply the current effort (default `high`) to the launch session so the
+    // FIRST turn already runs at the chosen depth. The session built above is
+    // effort-naive — the scaled tool-round budget and the depth guideline live
+    // only in effort_session_opts (reached via rebuild_session, as every
+    // /effort switch does). Best-effort: keep the launch session if it can't
+    // rebuild. (Resumes the same id, so transcript history is preserved.)
+    let launch_model = app.model.clone();
+    if let Ok((s, _)) = app.rebuild_session(launch_model.as_deref()) {
+        app.session = Arc::new(s);
     }
 
     ProgramBuilder::new(app)
@@ -4531,6 +4739,32 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effort_ladder_is_monotonic_and_well_formed() {
+        // ULTRACODE indexes the last level, which is the ultracode profile.
+        assert_eq!(ULTRACODE, EFFORT_LEVELS.len() - 1);
+        assert_eq!(EFFORT_LEVELS[ULTRACODE].label, "ultracode");
+        // Depth rises with effort: thinking budget and tool-round budget both
+        // non-decreasing across low → max (so higher effort is never shallower).
+        for w in EFFORT_LEVELS[..=ULTRACODE].windows(2) {
+            assert!(w[1].thinking_budget >= w[0].thinking_budget, "thinking budget regressed");
+            assert!(w[1].max_tool_rounds >= w[0].max_tool_rounds, "tool-round budget regressed");
+            assert!(
+                w[1].max_continuation_turns >= w[0].max_continuation_turns,
+                "continuation budget regressed"
+            );
+        }
+        // medium is the unsteered baseline; every other level carries a guideline
+        // so effort is meaningful even on models with no thinking budget.
+        assert!(EFFORT_LEVELS[1].guideline.is_none(), "medium should be the baseline");
+        for (i, p) in EFFORT_LEVELS.iter().enumerate() {
+            if i != 1 {
+                assert!(p.guideline.is_some(), "level {} has no depth steer", p.label);
+            }
+        }
+    }
+
     use a3s_code_core::llm::{
         ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
     };

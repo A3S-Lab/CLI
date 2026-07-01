@@ -9,7 +9,7 @@ struct ModelTab {
     color: Color,
     models: Vec<String>,
     provider: Option<AuthProvider>, // None = config.acl
-    os_gateway: bool,               // the 书安OS unified AI gateway tab
+    os_gateway: bool,               // the OS unified AI gateway tab
 }
 
 fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, usize) {
@@ -31,18 +31,6 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
 const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = Color::Rgb(115, 218, 202); // tokyo teal
-
-/// Ultracode system-prompt steer: keep the model focused on decomposition and
-/// synthesis while the core planning runtime turns independent plan waves into
-/// visible `parallel_task` subagents.
-const ULTRACODE_GUIDELINES: &str = "\
-[ultracode] Dynamic-workflow mode is available — you decide whether a turn needs \
-it. Match the effort to the task: answer trivial or conversational input (a \
-greeting, a single question, a one-step edit) directly, with no plan and no \
-fan-out. When a task genuinely splits into independent branches, decompose it, \
-run those branches as parallel background subagents via `parallel_task` (keep \
-each child prompt bounded and evidence-oriented), then synthesize their results \
-before continuing dependent work.";
 
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
@@ -73,16 +61,21 @@ impl App {
                 os_gateway: false,
             });
         }
-        // Signed in to 书安OS → offer its unified AI gateway (gateway-managed:
+        // Signed in to OS → offer its unified AI gateway (gateway-managed:
         // we send the OS token + a model id; the gateway holds provider keys).
         if self.os_session.is_some() {
             let models = match &self.os_gateway_models {
                 Some(m) if !m.is_empty() => m.clone(),
-                Some(_) => vec!["(gateway unavailable)".to_string()],
+                // Empty: distinguish a fetch failure from a genuinely empty gateway.
+                Some(_) => vec![if self.os_gateway_error.is_some() {
+                    "(gateway unreachable)".to_string()
+                } else {
+                    "(no models configured)".to_string()
+                }],
                 None => vec!["(loading…)".to_string()],
             };
             tabs.push(ModelTab {
-                label: "OS网关",
+                label: "OS Gateway",
                 color: TN_CYAN,
                 models,
                 provider: None,
@@ -261,17 +254,21 @@ impl App {
         }
     }
 
-    /// Route the agent's LLM through the 书安OS **unified AI gateway**: an
+    /// Route the agent's LLM through the OS **unified AI gateway**: an
     /// OpenAI-compatible client at `{OS origin}/v1/chat/completions`, authed with
     /// the OS Bearer token (the gateway is "gateway-managed" — it holds the real
     /// provider keys). `model` is a gateway model id from its `/v1/models`.
     fn use_os_gateway(&mut self, model: &str) {
         if model.starts_with('(') {
-            // a placeholder row ("(loading…)" / "(gateway unavailable)").
+            // A placeholder row. Surface the precise reason if the fetch failed,
+            // else it's genuinely unconfigured.
+            let reason = self.os_gateway_error.clone().unwrap_or_else(|| {
+                "no models configured — set up the unified AI gateway on OS, then retry /model".to_string()
+            });
             self.push_line(
                 &Style::new()
                     .fg(TN_YELLOW)
-                    .render("  OS网关暂无可用模型（确认 OS 已配置统一 AI 网关后重试 /model）"),
+                    .render(&format!("  OS gateway unavailable: {reason}")),
             );
             return;
         }
@@ -287,10 +284,13 @@ impl App {
             return;
         };
         let origin = crate::a3s_os::os_origin(&session.address);
+        // Route through the OS backend's authenticated LLM proxy (validates the
+        // OS token, forwards to the internal gateway) rather than a bare `/v1`.
         let client =
             a3s_code_core::llm::OpenAiClient::new(session.access_token.clone(), model.to_string())
                 .with_base_url(origin)
-                .with_provider_name("OS网关");
+                .with_chat_completions_path("/api/v1/llm/chat/completions")
+                .with_provider_name("OS Gateway");
         self.llm_override = Some(Arc::new(client));
         self.model = Some(model.to_string());
         self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
@@ -300,7 +300,7 @@ impl App {
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
-                        .render(&format!("  ⇄ OS网关 · {model}")),
+                        .render(&format!("  ⇄ OS Gateway · {model}")),
                 );
             }
             Err(e) => {
@@ -342,10 +342,13 @@ impl App {
                 // even if config.acl disables them — else ultracode's fan-out calls
                 // an unregistered tool ("Unknown tool: parallel_task").
                 .with_manual_delegation_enabled(true)
-                // Generous tool-round budget for every effort — Claude Code runs
-                // effectively unbounded; the old ~50 default cut real multi-step work
-                // (and many parallel subagents) short. ultracode widens it further.
-                .with_max_tool_rounds(200),
+                // Tool-round budget scales with effort (low 120 … max 500,
+                // ultracode 600) — the old flat ~50 default cut real multi-step
+                // work (and parallel subagents) short.
+                .with_max_tool_rounds(EFFORT_LEVELS[self.effort].max_tool_rounds)
+                // Auto-continuation also scales: higher effort re-prompts more
+                // times to finish before giving up (low 2 … max/ultra 8).
+                .with_max_continuation_turns(EFFORT_LEVELS[self.effort].max_continuation_turns),
             &self.workspace_manifest,
         );
         // Keep project instructions (CLAUDE.md) + any /compact summary across
@@ -364,19 +367,22 @@ impl App {
         }
         let extra = (!extra_parts.is_empty()).then(|| extra_parts.join("\n\n"));
         let ultra = self.effort == ULTRACODE;
-        if extra.is_some() || ultra {
+        // The per-level depth steer (low → max, and ultracode's own) — the lever
+        // that scales effort on models with no thinking budget (GPT/GLM/OS).
+        let guideline = EFFORT_LEVELS[self.effort].guideline;
+        if extra.is_some() || guideline.is_some() {
             let mut slots = SystemPromptSlots::default();
             if let Some(e) = extra {
                 slots = slots.with_extra(e);
             }
-            if ultra {
-                slots = slots.with_guidelines(ULTRACODE_GUIDELINES);
+            if let Some(g) = guideline {
+                slots = slots.with_guidelines(g);
             }
             opts = opts.with_prompt_slots(slots);
         }
         // Extended thinking is Anthropic-only; only request it when asked.
         if thinking {
-            opts = opts.with_thinking_budget(EFFORT_LEVELS[self.effort].1);
+            opts = opts.with_thinking_budget(EFFORT_LEVELS[self.effort].thinking_budget);
         }
         if ultra {
             // Dynamic-workflow mode: planning is message-gated (Auto), so a turn
@@ -385,10 +391,10 @@ impl App {
             // plan every turn, which is what made ultracode explore on a greeting.
             // The core runtime still upgrades independent plan waves into
             // `parallel_task` subagents when auto-parallel delegation is enabled.
+            // (Guideline + tool-round budget come from the ultracode profile.)
             opts = opts
                 .with_planning_mode(a3s_code_core::PlanningMode::Auto)
-                .with_goal_tracking(true)
-                .with_max_tool_rounds(500);
+                .with_goal_tracking(true);
         }
         // Signed in via a /model account tab → route through that account client.
         if let Some(client) = &self.llm_override {
@@ -480,15 +486,24 @@ impl App {
                         "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on)",
                     ));
                 } else if dropped {
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ◇ effort: {} (this model uses its default depth)",
-                        EFFORT_LEVELS[self.effort].0
+                    // No extended-thinking budget on this model. Above/below the
+                    // medium baseline a depth guideline still applies (effort is
+                    // not a no-op); at medium only the tool-round budget differs.
+                    let note = if EFFORT_LEVELS[self.effort].guideline.is_some() {
+                        "depth via reasoning guidance; no extended-thinking on this model"
+                    } else {
+                        "balanced baseline; no extended-thinking on this model"
+                    };
+                    self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                        "  ◇ effort: {} ({note})",
+                        EFFORT_LEVELS[self.effort].label
                     )));
                 } else {
                     self.push_line(
-                        &Style::new()
-                            .fg(TN_GREEN)
-                            .render(&format!("  ◇ effort: {}", EFFORT_LEVELS[self.effort].0)),
+                        &Style::new().fg(TN_GREEN).render(&format!(
+                            "  ◇ effort: {}",
+                            EFFORT_LEVELS[self.effort].label
+                        )),
                     );
                 }
             }

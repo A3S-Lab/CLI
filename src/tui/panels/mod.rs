@@ -6,6 +6,7 @@
 
 mod banner;
 mod btw;
+mod chat;
 mod effort;
 mod files;
 mod git;

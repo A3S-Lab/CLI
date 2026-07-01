@@ -94,7 +94,8 @@ impl App {
         ];
         let mut labels = String::new();
         let mut vis = 0usize;
-        for (i, (name, _)) in EFFORT_LEVELS.iter().enumerate() {
+        for (i, profile) in EFFORT_LEVELS.iter().enumerate() {
+            let name = profile.label;
             let nw = name.chars().count();
             let start = posf(i).saturating_sub(nw / 2);
             while vis < start {
@@ -114,7 +115,7 @@ impl App {
         let desc = if sel == ULTRACODE {
             "ultracode: plans, then fans independent work out to parallel subagents."
         } else {
-            "higher effort = more reasoning tokens (slower, deeper). Use sparingly."
+            "higher effort = deeper reasoning + stricter verification + longer tool budget (slower)."
         };
         let dim = |s: &str| Style::new().fg(TN_GRAY).render(s);
         let menu = vec![
@@ -129,7 +130,7 @@ impl App {
                 &Style::new()
                     .fg(ACCENT)
                     .bold()
-                    .render(&format!("    ▸ {}", EFFORT_LEVELS[sel].0)),
+                    .render(&format!("    ▸ {}", EFFORT_LEVELS[sel].label)),
                 width,
             ),
             pad_to(&format!("    {}", dim(desc)), width),

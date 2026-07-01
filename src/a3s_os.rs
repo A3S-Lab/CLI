@@ -239,30 +239,30 @@ enum LoginOutcome {
     InvalidState,
 }
 
-/// The Chinese, OS-branded page shown in the browser once the OAuth redirect
-/// lands back on the local callback. Returns `(http_status, html_body)`.
+/// The OS-branded page shown in the browser once the OAuth redirect lands back
+/// on the local callback. Returns `(http_status, html_body)`.
 fn login_callback_page(outcome: LoginOutcome) -> (&'static str, String) {
     let (status, heading, detail) = match outcome {
         LoginOutcome::Success => (
             "200 OK",
-            "OS 授权登录成功",
-            "您已成功登录，可以关闭此页面，返回 a3s code 继续操作。",
+            "OS sign-in successful",
+            "You are signed in. You can close this page and return to a3s code.",
         ),
         LoginOutcome::NotApproved => (
             "400 Bad Request",
-            "OS 授权未通过",
-            "登录授权未被批准，可以关闭此页面，返回 a3s code。",
+            "OS sign-in not approved",
+            "The authorization was not approved. You can close this page and return to a3s code.",
         ),
         LoginOutcome::InvalidState => (
             "400 Bad Request",
-            "登录状态无效",
-            "登录状态校验失败，请返回 a3s code 重新执行 /login。",
+            "Invalid sign-in state",
+            "Sign-in state validation failed. Return to a3s code and run /login again.",
         ),
     };
     let body = format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
          <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-         <title>OS 登录</title></head>\
+         <title>OS sign-in</title></head>\
          <body style=\"margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;\
          font-family:system-ui,-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\
          background:#0f172a;color:#e2e8f0\">\
@@ -483,40 +483,97 @@ pub(crate) fn os_origin(address: &str) -> String {
     }
 }
 
-/// List the 书安OS unified AI gateway's model ids via the OpenAI-compatible
+/// One model advertised by the OS unified AI gateway, plus its real context
+/// window when the gateway reports it (so the CLI can size auto-compact + the
+/// status bar correctly instead of assuming a default).
+#[derive(Clone, Debug)]
+pub(crate) struct GatewayModel {
+    pub id: String,
+    pub context: Option<u32>,
+}
+
+/// List the OS unified AI gateway's models via the OpenAI-compatible
 /// `GET {origin}/v1/models` (Bearer = the OS token). The gateway is
 /// "gateway-managed" (it holds the real provider keys; callers send only the OS
-/// token + a model id). Best-effort → empty `Vec` on any error, so the `/model`
-/// picker can show the gateway as unavailable rather than failing.
-pub(crate) async fn fetch_gateway_models(address: &str, token: &str) -> Vec<String> {
-    let url = format!("{}/v1/models", os_origin(address));
-    let Ok(client) = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build() else {
-        return Vec::new();
-    };
-    let Ok(resp) = client
+/// token + a model id).
+///
+/// Returns a precise `Err` on failure so the `/model` picker can say WHY the
+/// gateway is unavailable — in particular it distinguishes an HTML/SPA response
+/// (the OS origin doesn't proxy `/v1/*` to the gateway) from a genuine empty
+/// list, an auth error, or an unreachable host. `Ok(vec![])` means the gateway
+/// really has no models configured.
+pub(crate) async fn fetch_gateway_models(
+    address: &str,
+    token: &str,
+) -> Result<Vec<GatewayModel>, String> {
+    // Go through the OS backend's authenticated proxy (`/api/v1/llm/*`), which
+    // validates the OS token then forwards to the internal gateway. `/api` is
+    // reverse-proxied, unlike a bare `/v1`.
+    let url = format!("{}/api/v1/llm/models", os_origin(address));
+    let client = reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
         .get(&url)
         .bearer_auth(token)
         .header("accept", "application/json")
         .send()
         .await
-    else {
-        return Vec::new();
-    };
-    if !resp.status().is_success() {
-        return Vec::new();
+        .map_err(|e| format!("request to {url} failed: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("{url} returned HTTP {}", status.as_u16()));
     }
-    let Ok(json) = resp.json::<serde_json::Value>().await else {
-        return Vec::new();
-    };
-    // OpenAI shape: { "data": [ { "id": "..." }, ... ] }.
-    json.get("data")
+    // OpenAI shape: { "data": [ { "id": "...", <optional context field> }, ... ] }.
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| {
+        if text.trim_start().starts_with('<') {
+            format!(
+                "{url} returned HTML, not JSON — the OS build may predate the LLM gateway proxy (/api/v1/llm)"
+            )
+        } else {
+            format!("{url} returned a non-JSON response")
+        }
+    })?;
+    let data = json
+        .get("data")
         .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(String::from))
-                .collect()
+        .ok_or_else(|| format!("{url} response had no `data` array"))?;
+    Ok(data
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id").and_then(|i| i.as_str())?.to_string();
+            Some(GatewayModel {
+                id,
+                context: parse_gateway_context(m),
+            })
         })
-        .unwrap_or_default()
+        .collect())
+}
+
+/// Opportunistically read a model's context window from the several field names
+/// OpenAI-compatible gateways use (LiteLLM / one-api / vLLM differ). Absent →
+/// `None`, and the caller keeps its default. Never fails.
+fn parse_gateway_context(m: &serde_json::Value) -> Option<u32> {
+    const KEYS: &[&str] = &[
+        "context_length",
+        "max_context_length",
+        "max_model_len",
+        "context_window",
+        "max_input_tokens",
+    ];
+    for key in KEYS {
+        if let Some(n) = m.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0) {
+            return Some(n as u32);
+        }
+    }
+    // LiteLLM nests it under `model_info`.
+    m.get("model_info")
+        .and_then(|mi| mi.get("max_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .map(|n| n as u32)
 }
 
 fn build_authorization_url(
@@ -722,6 +779,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parses_gateway_context_from_common_fields() {
+        let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
+        // OpenAI-compatible variants seen across gateways.
+        assert_eq!(parse_gateway_context(&j(r#"{"context_length":200000}"#)), Some(200000));
+        assert_eq!(parse_gateway_context(&j(r#"{"max_model_len":32768}"#)), Some(32768));
+        assert_eq!(parse_gateway_context(&j(r#"{"context_window":128000}"#)), Some(128000));
+        // LiteLLM nests it.
+        assert_eq!(parse_gateway_context(&j(r#"{"model_info":{"max_input_tokens":1000000}}"#)), Some(1_000_000));
+        // Absent or zero → None so the caller keeps its default.
+        assert_eq!(parse_gateway_context(&j(r#"{"id":"m"}"#)), None);
+        assert_eq!(parse_gateway_context(&j(r#"{"context_length":0}"#)), None);
+    }
+
+    #[test]
     fn os_origin_strips_any_path_for_the_gateway() {
         // The gateway endpoint is host-absolute (/v1/chat/completions), so the
         // OpenAI base must be the bare origin regardless of the platform path.
@@ -899,7 +970,7 @@ mod tests {
         };
         ensure_capability_skill_dir_at(&dir, &config).unwrap();
 
-        // The cli skill loader discovers it by name (this is "生效").
+        // The cli skill loader discovers it by name (this is "in effect").
         let skills = crate::tui::skills::load_skills(std::slice::from_ref(&dir));
         assert!(
             skills.iter().any(|(n, _)| n == "a3s-os-capabilities"),
@@ -911,7 +982,7 @@ mod tests {
         assert!(md.contains("https://os.example.test"));
         assert!(!md.contains("{{BASE_URL}}"));
 
-        // Definitive "生效": the *core* skill loader (stricter than the cli's
+        // Definitive "in effect": the *core* skill loader (stricter than the cli's
         // menu parser — validates kind + fail-secure allowed-tools + 10KiB body)
         // accepts it. If this parsed to None the skill would silently not load.
         let skill = a3s_code_core::skills::Skill::parse(&md)
@@ -935,15 +1006,15 @@ mod tests {
             let (_, body) = login_callback_page(outcome);
             assert!(body.contains("OS"), "missing OS branding: {outcome:?}");
             assert!(
-                body.contains("登录") || body.contains("授权"),
-                "page should be Chinese: {outcome:?}"
+                body.contains("sign-in") || body.contains("sign in"),
+                "page should describe the sign-in outcome: {outcome:?}"
             );
             assert!(body.starts_with("<!doctype html>"), "not an HTML page");
             assert!(body.contains("charset=\"utf-8\""), "missing utf-8 charset");
         }
         let (status, body) = login_callback_page(LoginOutcome::Success);
         assert_eq!(status, "200 OK");
-        assert!(body.contains("授权登录成功"));
+        assert!(body.contains("sign-in successful"));
         assert_eq!(
             login_callback_page(LoginOutcome::InvalidState).0,
             "400 Bad Request"
