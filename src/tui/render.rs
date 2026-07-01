@@ -40,6 +40,13 @@ pub(crate) fn render_tool_end(
         .bold()
         .render("•");
     let arg = args.and_then(arg_summary).unwrap_or_default();
+    // Bash commands get Codex-style token coloring (program vs flags vs args);
+    // everything else keeps the muted single-color summary.
+    let arg_styled = if matches!(name, "bash" | "shell" | "run" | "exec") {
+        highlight_shell(&arg)
+    } else {
+        Style::new().fg(TN_GRAY).render(&arg)
+    };
     let header = if arg.is_empty() {
         format!(
             "{margin}{dot} {}",
@@ -49,7 +56,7 @@ pub(crate) fn render_tool_end(
         format!(
             "{margin}{dot} {} {}",
             Style::new().bold().render(tool_verb(name)),
-            Style::new().fg(TN_GRAY).render(&arg)
+            arg_styled
         )
     };
 
@@ -291,6 +298,27 @@ pub(crate) fn tool_verb(name: &str) -> &str {
 /// Claude-Code-style tool label: `Tool(arg)`, e.g. "Bash(npm test)",
 /// "Read(src/main.rs)", "Update(lib.rs)". Used for the live-running indicator
 /// and the approval prompt.
+/// Codex-style coloring for a shell command in a tool header: the program name
+/// stands out (bold cyan), flags are distinct (yellow), and positional args are
+/// muted (gray) so the line is scannable at a glance.
+pub(crate) fn highlight_shell(cmd: &str) -> String {
+    let mut out = String::new();
+    for (i, tok) in cmd.split_whitespace().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let styled = if i == 0 {
+            Style::new().fg(TN_CYAN).bold().render(tok)
+        } else if tok.starts_with('-') {
+            Style::new().fg(TN_YELLOW).render(tok)
+        } else {
+            Style::new().fg(TN_GRAY).render(tok)
+        };
+        out.push_str(&styled);
+    }
+    out
+}
+
 pub(crate) fn tool_label(name: &str, args: Option<&serde_json::Value>) -> String {
     let target = args.and_then(arg_summary).unwrap_or_default();
     let display = match name {
@@ -482,4 +510,19 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
         out.push_str(&lines.join("\n"));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_shell_colors_tokens_and_preserves_text() {
+        let s = highlight_shell("curl -s -X POST http://x");
+        // Styling was applied (escape sequences present)...
+        assert!(s.contains('\u{1b}'));
+        // ...but the visible text is unchanged (single-spaced tokens).
+        assert_eq!(a3s_tui::style::strip_ansi(&s), "curl -s -X POST http://x");
+        assert_eq!(highlight_shell(""), "");
+    }
 }

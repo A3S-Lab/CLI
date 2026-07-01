@@ -89,20 +89,30 @@ signed-in user may access.
 - Prefer read/`GET`-style operations for discovery; write operations (create /
   update / delete) run with the user's real platform permissions — confirm intent
   before mutating platform state.
+- **Always report the call trace.** Every response envelope carries a `requestId`
+  and a `timestamp`. After summarizing the result, output them on their own line so
+  the call is traceable, exactly: `↳ requestId <requestId> · <timestamp>`. Keep
+  `.requestId` and `.timestamp` in any `jq` projection (don't narrow them away).
 - **Offer the `view` as an inline link — never auto-open.** Some `execute`
   responses include a `view` object — `{ "url": "…?embed=1", "width": N, "height":
   N }` — a focused console page sized for a popup. Two things must happen:
   1. **Keep `.view` in your command's JSON stdout** so the host can capture it —
      do **not** narrow it away with `jq`; emit the full response or keep it in
-     your projection (e.g. `... | jq '{ data, view }'`). Never fabricate or drop
-     a returned `view`.
-  2. **End your reply with the link on its own line, exactly:** `🔗 打开渐进式UI`
-     — the host turns any reply line containing `打开渐进式UI` into a one-click
+     your projection (e.g. `... | jq '{ data, view, requestId, timestamp }'`).
+     Never fabricate or drop a returned `view`.
+  2. **End your reply with the link on its own line, exactly:** `🔗 查看视图`
+     — the host turns any reply line containing `查看视图` into a one-click
      trigger that opens the view in the authenticated **渐进式UI** popup (the
      user's current OS login is injected — no re-login). RemoteUI is
      **user-triggered**: the popup is NOT opened automatically; the user clicks
      that link (or runs `/view`). Do **not** print the raw URL yourself — the link
      line is the affordance.
+
+  So a typical reply ends with two lines:
+  ```
+  ↳ requestId 52178323-b614-42e4-af60-4b0b91ad8355 · 2026-07-01T01:21:07.905Z
+  🔗 查看视图
+  ```
 - The `ui` field (`protocol: "agent-ui"`) is a host-rendered remote component —
   note that it exists if present, but don't try to render it yourself.
 
