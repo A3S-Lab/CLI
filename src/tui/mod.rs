@@ -154,6 +154,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/relay", "continue an unfinished task from another agent"),
     ("/help", "show commands and shortcuts"),
+    ("/fork", "branch a new session from this point (original kept)"),
     ("/clear", "reset the conversation"),
     ("/auto", "switch to auto-approve mode"),
     ("/exit", "quit a3s code"),
@@ -163,7 +164,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/reload", "/update",
-    "/init",
+    "/init", "/fork",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).
@@ -1206,6 +1207,9 @@ enum Msg {
     ImPoll,
     /// No-op — lets fire-and-forget async work satisfy the `Cmd -> Msg` contract.
     Noop,
+    /// `/fork` copied the session under a new id (Ok) — swap the active session to
+    /// it — or failed (Err with a reason).
+    Forked(Result<String, String>),
     /// Result of the async `/relay` session scan.
     RelayData(Vec<RelaySession>),
     /// `/git` status + recent log snapshot.
@@ -2341,6 +2345,33 @@ impl Model for App {
                 }
             }
             Msg::Noop => {}
+            Msg::Forked(result) => match result {
+                Ok(new_id) => {
+                    // Swap the active session to the fork (which carries the copied
+                    // history). Set the id first — rebuild_session keys off it — and
+                    // revert on failure so id and session never desync. The
+                    // transcript stays on screen: the fork continues from here.
+                    let prev = std::mem::replace(&mut self.session_id, new_id);
+                    let model = self.model.clone();
+                    match self.rebuild_session(model.as_deref()) {
+                        Ok((s, _)) => {
+                            self.session = Arc::new(s);
+                            let short: String = self.session_id.chars().take(8).collect();
+                            self.push_line(&gutter(
+                                TN_CYAN,
+                                &format!("⑂ forked into a new session ({short}) — the original is kept"),
+                            ));
+                        }
+                        Err(e) => {
+                            self.session_id = prev;
+                            self.push_line(
+                                &Style::new().fg(TN_RED).render(&format!("  fork failed: {e}")),
+                            );
+                        }
+                    }
+                }
+                Err(e) => self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}"))),
+            },
             Msg::RelayData(sessions) => {
                 if self.relay_menu.is_some() {
                     self.relay = sessions;
@@ -3035,6 +3066,32 @@ impl App {
         // Slash commands run inline in any state.
         match trimmed {
             "/exit" | "/quit" => return Some(cmd::quit()),
+            "/fork" => {
+                // Branch a new session from the current one: copy the persisted
+                // SessionData under a fresh id, then swap the active session to it
+                // (Msg::Forked). The original id keeps its state, so it stays
+                // resumable — the two diverge from here. Idle-only (guarded above),
+                // so the last turn is already flushed to the store.
+                self.textarea.clear();
+                let store = self.store.clone();
+                let src = self.session_id.clone();
+                let dst = new_session_id();
+                return Some(cmd::cmd(move || async move {
+                    match store.load(&src).await {
+                        Ok(Some(mut data)) => {
+                            data.id = dst.clone();
+                            match store.save(&data).await {
+                                Ok(()) => Msg::Forked(Ok(dst)),
+                                Err(e) => Msg::Forked(Err(format!("could not save the fork: {e}"))),
+                            }
+                        }
+                        Ok(None) => {
+                            Msg::Forked(Err("nothing to fork yet — start a conversation first".into()))
+                        }
+                        Err(e) => Msg::Forked(Err(format!("could not read the session: {e}"))),
+                    }
+                }));
+            }
             "/clear" => {
                 self.messages.clear();
                 self.plan.clear();
@@ -5394,6 +5451,14 @@ mod tests {
     #[test]
     fn reload_is_idle_only_because_it_rebuilds_the_session() {
         assert!(IDLE_ONLY.contains(&"/reload"));
+    }
+
+    #[test]
+    fn fork_is_idle_only_and_listed() {
+        // /fork swaps the active session, so it must not run mid-stream…
+        assert!(IDLE_ONLY.contains(&"/fork"));
+        // …and it's offered in the slash menu.
+        assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/fork"));
     }
 
     // ---- image preview (/ide + paste) ----
