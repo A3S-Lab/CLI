@@ -94,6 +94,9 @@ Go broad→narrow: `list` (modules) → `describe`/`search` for the one operatio
 Pipe responses through `jq` to extract ONLY the fields you need (e.g. \
 `| jq -r '.data.modules[].name'`) so output stays a few lines; summarize the result for the user \
 in a few lines and do NOT paste the whole raw JSON back. \
+Every response envelope has a `requestId` and `timestamp`; after your summary, ALWAYS output them on \
+their own line, exactly `↳ requestId <requestId> · <timestamp>`, so the call is traceable (keep \
+`.requestId`/`.timestamp` in any jq projection). \
 If a response contains a `view` object (a console page sized for a popup), keep `.view` in your \
 JSON output and END your reply with the link on its own line, exactly `🔗 查看视图` — the host \
 turns it into a one-click trigger that opens the authenticated 渐进式UI popup (the user's OS login \
@@ -5069,8 +5072,10 @@ mod tests {
     fn tool_end_shows_primary_arg_summary() {
         let args = serde_json::json!({ "command": "npm test", "timeout": 60 });
         let out = render_tool_end("bash", 0, "ok\n", None, Some(&args), 80);
-        assert!(out.contains("Ran"), "action verb for bash");
-        assert!(out.contains("npm test"), "shows the command argument");
+        // Bash args are token-colored (program/flags/args), so check visible text.
+        let plain = a3s_tui::style::strip_ansi(&out);
+        assert!(plain.contains("Ran"), "action verb for bash");
+        assert!(plain.contains("npm test"), "shows the command argument");
     }
 
     #[test]
