@@ -12,6 +12,12 @@ default_model = "openai/my-model"
 # Optional OS endpoint. When set, a3s code enables /login and /logout.
 # os = "https://os.example.com"
 
+# Optional: where `&` code-review clones are stored (default ~/.a3s/repos).
+# repo_dir = "~/.a3s/repos"
+
+# Optional: where /flow workflow DAG JSONs are stored (default ~/.a3s/flows).
+# flow_dir = "~/.a3s/flows"
+
 providers "openai" {
   apiKey  = "sk-REPLACE-ME"
   baseUrl = "https://api.openai.com/v1/"   # or any OpenAI-compatible endpoint
@@ -37,6 +43,81 @@ pub(crate) fn memory_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(|h| std::path::Path::new(&h).join(".a3s/memory"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/memory"))
+}
+
+/// Where `&` code-review clones land: `$A3S_REPO_DIR`, else a top-level
+/// `repo_dir = "…"` in config.acl, else `~/.a3s/repos`. Read at submit
+/// time so a `/config` edit takes effect without a restart.
+pub(crate) fn repo_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("A3S_REPO_DIR") {
+        if !d.is_empty() {
+            return std::path::PathBuf::from(d);
+        }
+    }
+    if let Some(path) = find_config() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(d) = top_level_str(&text, "repo_dir") {
+                return expand_home(&d);
+            }
+        }
+    }
+    std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".a3s/repos"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/repos"))
+}
+
+/// Where `/flow` DAG JSONs are stored: `$A3S_FLOW_DIR`, else a top-level
+/// `flow_dir = "…"` in config.acl, else `~/.a3s/flows`. Read at use time so a
+/// `/config` edit takes effect without a restart (same contract as repo_dir).
+pub(crate) fn flow_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("A3S_FLOW_DIR") {
+        if !d.is_empty() {
+            return std::path::PathBuf::from(d);
+        }
+    }
+    if let Some(path) = find_config() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(d) = top_level_str(&text, "flow_dir") {
+                return expand_home(&d);
+            }
+        }
+    }
+    std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".a3s/flows"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/flows"))
+}
+
+/// Extract a top-level `key = "value"` scalar from HCL-ish text. Only lines at
+/// brace depth 0 count, so a same-named key inside a `providers { … }` block
+/// can't shadow it. The core's CodeConfig ignores unknown keys, so the option
+/// lives in the same config.acl without breaking its typed parse.
+fn top_level_str(text: &str, key: &str) -> Option<String> {
+    let mut depth = 0i64;
+    for line in text.lines() {
+        let t = line.trim();
+        if depth == 0 && !t.starts_with('#') {
+            if let Some(rest) = t.strip_prefix(key) {
+                if let Some(v) = rest.trim_start().strip_prefix('=') {
+                    let v = v.trim().trim_matches('"');
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+        depth += t.matches('{').count() as i64 - t.matches('}').count() as i64;
+    }
+    None
+}
+
+/// Expand a leading `~/` to `$HOME` (config values are user-typed paths).
+fn expand_home(p: &str) -> std::path::PathBuf {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(h) = std::env::var_os("HOME") {
+            return std::path::Path::new(&h).join(rest);
+        }
+    }
+    std::path::PathBuf::from(p)
 }
 
 /// Write the starter config to `path` (creating parent dirs). Never overwrites.
@@ -76,4 +157,34 @@ pub(crate) fn find_config() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn top_level_str_reads_only_depth_zero_keys() {
+        let text = r#"
+# repo_dir = "/commented/out"
+providers "x" {
+  repo_dir = "/inside/a/block"
+}
+repo_dir = "~/clones"
+"#;
+        assert_eq!(top_level_str(text, "repo_dir").as_deref(), Some("~/clones"));
+        assert_eq!(top_level_str(text, "missing"), None);
+        // A longer identifier sharing the prefix does not match.
+        assert_eq!(top_level_str("repo_dirx = \"/y\"", "repo_dir"), None);
+    }
+
+    #[test]
+    fn expand_home_resolves_tilde() {
+        let home = std::env::var("HOME").expect("HOME set in tests");
+        assert_eq!(
+            expand_home("~/clones"),
+            std::path::Path::new(&home).join("clones")
+        );
+        assert_eq!(expand_home("/abs/path"), std::path::Path::new("/abs/path"));
+    }
 }

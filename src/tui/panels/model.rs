@@ -183,10 +183,13 @@ impl App {
             Ok(client) => {
                 self.llm_override = Some(Arc::new(client));
                 self.model = Some(model.clone());
+                // Before rebuild: effort_session_opts scales the auto-compact
+                // threshold from context_limit, so it must reflect the NEW model.
+                let prev_ctx = self.context_limit;
+                self.context_limit = resolve_ctx_limit(self.model_ctx.get(&model).copied());
                 match self.rebuild_session(Some(&model)) {
                     Ok((session, _)) => {
                         self.session = Arc::new(session);
-                        self.context_limit = resolve_ctx_limit(self.model_ctx.get(&model).copied());
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -195,6 +198,7 @@ impl App {
                     }
                     Err(error) => {
                         self.llm_override = None;
+                        self.context_limit = prev_ctx;
                         self.push_line(
                             &Style::new()
                                 .fg(TN_RED)
@@ -226,6 +230,7 @@ impl App {
             Ok(client) => {
                 self.llm_override = Some(Arc::new(client));
                 self.model = Some(model.to_string()); // before rebuild
+                let prev_ctx = self.context_limit;
                 self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
                 match self.rebuild_session(Some(model)) {
                     Ok((s, _)) => {
@@ -238,6 +243,7 @@ impl App {
                     }
                     Err(e) => {
                         self.llm_override = None;
+                        self.context_limit = prev_ctx;
                         self.push_line(
                             &Style::new()
                                 .fg(TN_RED)
@@ -263,7 +269,8 @@ impl App {
             // A placeholder row. Surface the precise reason if the fetch failed,
             // else it's genuinely unconfigured.
             let reason = self.os_gateway_error.clone().unwrap_or_else(|| {
-                "no models configured — set up the unified AI gateway on OS, then retry /model".to_string()
+                "no models configured — set up the unified AI gateway on OS, then retry /model"
+                    .to_string()
             });
             self.push_line(
                 &Style::new()
@@ -293,6 +300,7 @@ impl App {
                 .with_provider_name("OS Gateway");
         self.llm_override = Some(Arc::new(client));
         self.model = Some(model.to_string());
+        let prev_ctx = self.context_limit;
         self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
@@ -305,6 +313,7 @@ impl App {
             }
             Err(e) => {
                 self.llm_override = None;
+                self.context_limit = prev_ctx;
                 self.push_line(
                     &Style::new()
                         .fg(TN_RED)
@@ -444,22 +453,28 @@ impl App {
             );
             return;
         }
+        // Before rebuild: effort_session_opts scales the auto-compact threshold
+        // from context_limit, so it must reflect the NEW model's window.
+        let prev_ctx = self.context_limit;
+        self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
                 self.session = Arc::new(s);
                 self.model = Some(model.to_string());
-                self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
                         .render(&format!("  ⇄ switched to {model}")),
                 );
             }
-            Err(e) => self.push_line(
-                &Style::new()
-                    .fg(TN_RED)
-                    .render(&format!("  failed to switch model: {e}")),
-            ),
+            Err(e) => {
+                self.context_limit = prev_ctx;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  failed to switch model: {e}")),
+                );
+            }
         }
     }
 
@@ -500,10 +515,9 @@ impl App {
                     )));
                 } else {
                     self.push_line(
-                        &Style::new().fg(TN_GREEN).render(&format!(
-                            "  ◇ effort: {}",
-                            EFFORT_LEVELS[self.effort].label
-                        )),
+                        &Style::new()
+                            .fg(TN_GREEN)
+                            .render(&format!("  ◇ effort: {}", EFFORT_LEVELS[self.effort].label)),
                     );
                 }
             }

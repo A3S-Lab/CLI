@@ -1,4 +1,4 @@
-//! RemoteUI: surface the `view` (a sized embed widget) that 书安OS's progressive
+//! RemoteUI: surface the `view` (a sized embed widget) that OS's progressive
 //! API returns for a task.
 //!
 //! A `view` is a partial, chrome-less console page meant for a *sized popup*
@@ -56,7 +56,7 @@ fn absolutize(url: &str, origin: Option<&str>) -> Option<String> {
 fn find_in(value: &serde_json::Value, origin: Option<&str>) -> Option<ViewSpec> {
     match value {
         serde_json::Value::Object(obj) => {
-            // Current 书安OS shape: a `view` object `{ url, width, height }` — a
+            // Current OS shape: a `view` object `{ url, width, height }` — a
             // focused, chrome-less embed widget at a suggested size.
             if let Some(spec) = obj.get("view").and_then(|v| parse_view_object(v, origin)) {
                 return Some(spec);
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn relative_view_url_is_absolutized_against_origin() {
-        // The 书安OS progressive API returns a RELATIVE url; the TUI (the edge)
+        // The OS progressive API returns a RELATIVE url; the TUI (the edge)
         // completes it. This is the common real-world shape.
         let out = r#"{"success":true,"view":{"url":"/admin/kernel/assets?embed=1","width":1440,"height":900}}"#;
         let s = find_view_url(out, Some("https://os.example.com/")).unwrap();
@@ -238,9 +238,11 @@ mod tests {
     #[test]
     fn ignores_non_http_and_absent() {
         assert!(find_view_url(r#"{"viewUrl":"file:///x"}"#, None).is_none());
-        assert!(
-            find_view_url(r#"{"view":{"url":"file:///x","width":10,"height":10}}"#, None).is_none()
-        );
+        assert!(find_view_url(
+            r#"{"view":{"url":"file:///x","width":10,"height":10}}"#,
+            None
+        )
+        .is_none());
         assert!(find_view_url(r#"{"data":{"items":[1,2]}}"#, None).is_none());
         assert!(find_view_url("not json", None).is_none());
     }
@@ -281,7 +283,8 @@ mod tests {
         let resp = r#"{"success":true,
             "view":{"url":"/admin/kernel/assets?embed=1","width":900,"height":680},
             "data":{"items":[]}}"#;
-        let spec = find_view_url(resp, Some("https://os.example.com")).expect("view object should parse");
+        let spec =
+            find_view_url(resp, Some("https://os.example.com")).expect("view object should parse");
         assert!(spec.embeddable); // a `view` is always a sized popup → auto-opens
         let args = webview_args(&spec);
         assert_eq!(args[0], "--url");

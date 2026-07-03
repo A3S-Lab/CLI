@@ -72,7 +72,7 @@ const TN_FG: Color = Color::Rgb(192, 202, 245); // body text
 const TN_GRAY: Color = Color::Rgb(122, 132, 168); // completed / muted tasks
 
 /// Self-contained system-prompt directive injected ONLY when signed in to the OS
-/// platform. It disambiguates "OS" (the user means the signed-in 书安OS open
+/// platform. It disambiguates "OS" (the user means the signed-in OS open
 /// platform, not this machine's operating system) AND inlines exactly how to call
 /// the progressive API, so the model can act immediately — without first
 /// discovering/loading the `a3s-os-capabilities` skill (that extra hop is why a
@@ -80,8 +80,8 @@ const TN_GRAY: Color = Color::Rgb(122, 132, 168); // completed / muted tasks
 /// `base_url` is the signed-in address so the endpoint is concrete.
 fn os_platform_guide(base_url: &str) -> String {
     format!(
-        "[OS platform] You are signed in to the 书安OS open platform at {base_url} (via /login). \
-DEFAULT RULE: while signed in, \"OS\" in the user's questions ALWAYS means THIS 书安OS platform — \
+        "[OS platform] You are signed in to the OS open platform at {base_url} (via /login). \
+DEFAULT RULE: while signed in, \"OS\" in the user's questions ALWAYS means THIS OS platform — \
 never this machine's operating system. So \"what's my OS account\", \"what modules does OS have\", \
 etc. are about the platform. Answer them via the platform's progressive API; do NOT answer from \
 this machine (whoami / hostname / paths / working directory describe the local box, not the \
@@ -116,11 +116,31 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "switch model (←/→ for Claude/GPT accounts if signed in)",
     ),
     ("/init", "analyze the project and generate AGENTS.md"),
-    ("/config", "edit .a3s/config.acl in your editor"),
+    ("/config", "edit config.acl in the built-in editor"),
     ("/theme", "cycle the code-highlight theme (Atom One Dark …)"),
     (
         "/workflow",
         "view the latest ultracode dynamic workflow (read-only)",
+    ),
+    (
+        "/review",
+        "reopen the review checklist · or pick a local repos project to review",
+    ),
+    (
+        "/deploy",
+        "pick a repos project → Agentic CI/CD → OS gateway (needs /login)",
+    ),
+    (
+        "/run",
+        "pick a repos project → dev-mode debug run on A3S Runtime → access URL (needs /login)",
+    ),
+    (
+        "/flow",
+        "pick a flow DAG → OS workflow designer (edit + debug run, needs /login) · /flow <text> drafts one",
+    ),
+    (
+        "/evolve",
+        "pick a repo → set a goal → multi-round auto-improving dev (needs /login)",
     ),
     (
         "/output",
@@ -134,7 +154,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/update", "upgrade a3s to the latest release"),
     ("/btw", "ask a background side-question (/btw <prompt>)"),
     ("/top", "live process monitor (highlights coding agents)"),
-    ("/ide", "file tree + code viewer for the workspace"),
+    ("/ide", "superfile-style file browser + editor"),
     ("/im", "OS chat — DMs & groups (standalone; needs /login)"),
     ("/git", "git status / diff / stage / commit (gitui-style)"),
     (
@@ -143,7 +163,11 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/kb",
-        "add text / a file / a folder to the knowledge base (.a3s/kb)",
+        "browse/manage the knowledge base · /kb <text|file|folder> adds",
+    ),
+    (
+        "/ctx",
+        "search past sessions (ctx) · /ctx <n> attach · /ctx save <n> keep as memory",
     ),
     ("/effort", "adjust model effort (low … max)"),
     ("/compact", "summarize + compact the conversation context"),
@@ -152,9 +176,16 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/loop",
         "run a task, auto-continuing until done (Esc stops)",
     ),
+    (
+        "/sleep",
+        "consolidate today's work into memory (experience · preferences · knowledge)",
+    ),
     ("/relay", "continue an unfinished task from another agent"),
     ("/help", "show commands and shortcuts"),
-    ("/fork", "branch a new session from this point (original kept)"),
+    (
+        "/fork",
+        "branch a new session from this point (original kept)",
+    ),
     ("/clear", "reset the conversation"),
     ("/auto", "switch to auto-approve mode"),
     ("/exit", "quit a3s code"),
@@ -164,7 +195,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/reload", "/update",
-    "/init", "/fork",
+    "/init", "/fork", "/review", "/sleep", "/flow",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).
@@ -243,14 +274,32 @@ fn resolve_ctx_limit(raw: Option<u32>) -> u32 {
 /// model's REAL context window) rather than 85% of the core's fixed 200k. For a
 /// 128k model: `0.85 * 128k / 200k = 0.544` → triggers at ~108.8k (= 85% of
 /// 128k). Windows above ~235k clamp to 1.0 (trigger at 200k): a touch early, but
-/// it never lets the window overflow.
+/// it never lets the window overflow. The floor only guards degenerate values —
+/// a real floor (like the old 0.05) would push tiny windows' trigger PAST the
+/// window itself (0.05 → 10k tokens > an 8k window: compaction could never
+/// precede overflow).
 fn auto_compact_threshold_for(window: u32) -> f32 {
     let window = if window > 0 {
         window as f32
     } else {
         CORE_MAX_CONTEXT_TOKENS
     };
-    (0.85 * window / CORE_MAX_CONTEXT_TOKENS).clamp(0.05, 1.0)
+    (0.85 * window / CORE_MAX_CONTEXT_TOKENS).clamp(0.01, 1.0)
+}
+
+/// Context-fill warning latch: maps `pct` to its tier (0/70/85) and says
+/// whether crossing INTO a higher tier than `warned` should warn now. The
+/// returned tier becomes the new latch, so dropping back (compaction, /clear,
+/// model switch) re-arms the warning. Pure for unit-testing.
+fn ctx_warn_tier(pct: usize, warned: u8) -> (u8, Option<u8>) {
+    let tier: u8 = if pct >= 85 {
+        85
+    } else if pct >= 70 {
+        70
+    } else {
+        0
+    };
+    (tier, (tier > warned).then_some(tier))
 }
 
 fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option<(String, String)> {
@@ -644,6 +693,8 @@ fn highlight_selection(view: &str, r1: usize, c1: usize, r2: usize, c2: usize) -
 }
 
 /// State of the `/ide` panel: the file tree, selection, and the open file.
+/// Also backs `/config` (rooted at the config dir) and the `/kb` browser
+/// (rooted at the vault, with delete enabled) — all superfile-styled.
 struct Ide {
     entries: Vec<IdeEntry>,
     sel: usize,
@@ -652,6 +703,34 @@ struct Ide {
     focus_editor: bool,
     /// Transient save status shown in the footer (set on Ctrl+S).
     flash: Option<String>,
+    /// Left-panel title ("workspace" / "config" / "knowledge base").
+    title: String,
+    /// Superfile-style hover preview of the tree-selected file, keyed by path
+    /// so it reloads only when the selection actually moves.
+    preview: Option<(std::path::PathBuf, Vec<String>)>,
+    /// `/kb` browser: the vault root. Enables `x` delete, hard-bounded to
+    /// paths inside this root. `None` for /ide and /config.
+    kb_root: Option<std::path::PathBuf>,
+    /// A path armed for deletion — the next `x` on the same selection deletes.
+    armed_delete: Option<std::path::PathBuf>,
+}
+
+impl Ide {
+    /// A fresh panel over `entries` (no file open, tree focused).
+    fn browse(entries: Vec<IdeEntry>, title: &str) -> Self {
+        Ide {
+            entries,
+            sel: 0,
+            tree_scroll: 0,
+            file: None,
+            focus_editor: false,
+            flash: None,
+            title: title.to_string(),
+            preview: None,
+            kb_root: None,
+            armed_delete: None,
+        }
+    }
 }
 
 /// Whether the chat page's left pane + input act on conversations (`Chat`) or on
@@ -757,12 +836,48 @@ struct EffortProfile {
 }
 
 const EFFORT_LEVELS: &[EffortProfile] = &[
-    EffortProfile { label: "low", thinking_budget: 1024, max_tool_rounds: 120, max_continuation_turns: 2, guideline: Some(EFFORT_LOW) },
-    EffortProfile { label: "medium", thinking_budget: 4096, max_tool_rounds: 200, max_continuation_turns: 3, guideline: None },
-    EffortProfile { label: "high", thinking_budget: 8192, max_tool_rounds: 300, max_continuation_turns: 4, guideline: Some(EFFORT_HIGH) },
-    EffortProfile { label: "xhigh", thinking_budget: 16384, max_tool_rounds: 400, max_continuation_turns: 6, guideline: Some(EFFORT_XHIGH) },
-    EffortProfile { label: "max", thinking_budget: 32768, max_tool_rounds: 500, max_continuation_turns: 8, guideline: Some(EFFORT_MAX) },
-    EffortProfile { label: "ultracode", thinking_budget: 32768, max_tool_rounds: 600, max_continuation_turns: 8, guideline: Some(ULTRACODE_GUIDELINES) },
+    EffortProfile {
+        label: "low",
+        thinking_budget: 1024,
+        max_tool_rounds: 120,
+        max_continuation_turns: 2,
+        guideline: Some(EFFORT_LOW),
+    },
+    EffortProfile {
+        label: "medium",
+        thinking_budget: 4096,
+        max_tool_rounds: 200,
+        max_continuation_turns: 3,
+        guideline: None,
+    },
+    EffortProfile {
+        label: "high",
+        thinking_budget: 8192,
+        max_tool_rounds: 300,
+        max_continuation_turns: 4,
+        guideline: Some(EFFORT_HIGH),
+    },
+    EffortProfile {
+        label: "xhigh",
+        thinking_budget: 16384,
+        max_tool_rounds: 400,
+        max_continuation_turns: 6,
+        guideline: Some(EFFORT_XHIGH),
+    },
+    EffortProfile {
+        label: "max",
+        thinking_budget: 32768,
+        max_tool_rounds: 500,
+        max_continuation_turns: 8,
+        guideline: Some(EFFORT_MAX),
+    },
+    EffortProfile {
+        label: "ultracode",
+        thinking_budget: 32768,
+        max_tool_rounds: 600,
+        max_continuation_turns: 8,
+        guideline: Some(ULTRACODE_GUIDELINES),
+    },
 ];
 /// Index of the `ultracode` level (special: planning + parallel subagents).
 const ULTRACODE: usize = 5;
@@ -1181,9 +1296,11 @@ enum Msg {
     UpdatePlan(Option<String>),
     /// OS login completed.
     OsLogin(Result<String, String>),
+    /// Post-login SSH-key sync finished (registers the local pubkey with OS).
+    SshKeySynced(crate::a3s_os::SshKeyOutcome),
     /// OS access token was refreshed (or refresh failed) in the background.
     OsRefreshed(Result<crate::a3s_os::StoredOsSession, String>),
-    /// 书安OS unified-gateway model ids fetched for the `/model` picker.
+    /// OS unified-gateway model ids fetched for the `/model` picker.
     OsGatewayModels(Result<Vec<crate::a3s_os::GatewayModel>, String>),
     /// Answer from a `/btw` background side-thread.
     SideNote(String),
@@ -1220,6 +1337,18 @@ enum Msg {
     MemoryLoaded(Vec<MemEntry>),
     /// `/kb` ingest finished; carries the one-line summary to show.
     KbAdded(String),
+    /// `/ctx <query>` finished: raw `ctx search --json` stdout (or the error).
+    CtxResults(Result<String, String>),
+    /// `/ctx <n>` finished: (hit title, transcript window) to stage as context.
+    CtxWindow(Result<(String, String), String>),
+    /// `/ctx save <n>` finished: Ok(hit title) once written to the memory store.
+    CtxSaved(Result<String, String>),
+    /// `/sleep` finished persisting its consolidated memories (count on Ok).
+    SleepSaved(Result<usize, String>),
+    /// `/flow` pushed a DAG into its OS asset: (flow name, designer url).
+    FlowOpened(Result<(String, String), String>),
+    /// `/memory` → ctx back-jump finished: (ctx event id, transcript window).
+    CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text.
     AutoReview(String),
     /// `/compact` produced this conversation summary; reseed a fresh session.
@@ -1321,6 +1450,9 @@ struct App {
     context_limit: u32,
     /// Prompt tokens of the last turn = current context fill.
     last_prompt_tokens: usize,
+    /// Highest context-fill tier already warned about (0 / 70 / 85), so each
+    /// warning prints once per fill-up and re-arms when usage drops back.
+    ctx_warned_tier: u8,
     /// Selected index in the /model panel; `Some` means the panel is open.
     model_menu: Option<usize>,
     /// Active tab in the /model panel (0 = config; account tabs when signed in).
@@ -1342,7 +1474,7 @@ struct App {
     /// The precise reason the last gateway-models fetch failed (e.g. `/v1` not
     /// proxied → HTML, auth error, unreachable), shown in the `/model` picker.
     os_gateway_error: Option<String>,
-    /// Last 书安OS view seen in a tool result. RemoteUI is user-triggered: `/view`
+    /// Last OS view seen in a tool result. RemoteUI is user-triggered: `/view`
     /// or clicking the agent's inline "查看视图" link opens it in the native
     /// a3s-webview window — it is never auto-opened.
     last_view: Option<remote_ui::ViewSpec>,
@@ -1369,6 +1501,48 @@ struct App {
     /// query — sent to the agent with a multi-source research directive. Box
     /// turns cyan.
     research_mode: bool,
+    /// Code-review mode: a leading `&` turns the input into a git repo URL to
+    /// clone + deep-review, strictly read-only. Box turns purple. The turn's
+    /// ```a3s-review report opens the issue checklist (`review` below).
+    review_mode: bool,
+    /// True from a `&` submit until its report is parsed (or the run is
+    /// interrupted/fails). Gates capture_review so a turn that merely QUOTES
+    /// an a3s-review block can't open a phantom checklist.
+    review_pending: bool,
+    /// True from a `/sleep` submit until its report is parsed (or the run is
+    /// interrupted/fails). Gates capture_sleep the same way.
+    sleep_pending: bool,
+    /// Last parsed `&` review report (issues + checkbox state). Survives the
+    /// panel closing so `/review` can reopen it.
+    review: Option<panels::review::ReviewState>,
+    /// `/deploy` project picker (login-gated); open when `Some`.
+    repo_picker: Option<panels::repos::RepoPanel>,
+    /// `/flow` DAG picker (login-gated); open when `Some`.
+    flow: Option<panels::flow::FlowPanel>,
+    /// `/evolve` repo picker (login-gated); open when `Some`.
+    evolve: Option<panels::evolve::EvolvePanel>,
+    /// True after `/evolve` picks a repo: the next submit is the improvement
+    /// direction (sets the standing goal + starts the dev loop).
+    evolve_mode: bool,
+    /// The repo an evolve session targets `(dir, name)`, set on picker select.
+    evolve_target: Option<(std::path::PathBuf, String)>,
+    /// Whether the review issue-checklist overlay is showing.
+    review_open: bool,
+    /// `ctx` CLI detected at startup (past-session history search).
+    ctx_ready: bool,
+    /// Last `/ctx` search hits, addressable as `/ctx <n>`.
+    ctx_hits: Vec<panels::ctx::CtxHit>,
+    /// A transcript window staged by `/ctx <n>`, attached (one-shot) to the
+    /// next outgoing message.
+    pending_ctx: Option<String>,
+    /// True for the single `Msg::Submit` the `/loop` mechanism emits to
+    /// auto-continue — so on_submit doesn't attach a staged `/ctx` window to
+    /// this machine turn.
+    loop_continuation: bool,
+    /// ALL assistant text of the current turn (across mid-turn tool-call
+    /// finalizes, which clear the live streaming buffer). capture_review scans
+    /// this when a provider leaves `End.text` empty.
+    turn_text: String,
     /// Active transcript text-selection (mouse drag → highlight → copy on
     /// release); `None` when there's no selection.
     selection: Option<Selection>,
@@ -1465,6 +1639,9 @@ struct App {
     anim: u8,
     /// Run mode (Shift+Tab cycles default → plan → auto).
     mode: Mode,
+    /// The mode to restore once an autonomous directive run finishes —
+    /// `Some` while such a run auto-switched to `Mode::Auto`.
+    autonomy_restore: Option<Mode>,
     /// User messages submitted while the agent is busy, run when it frees up.
     queue: BinaryHeap<Queued>,
     /// Monotonic counter for FIFO ordering within a queue priority.
@@ -1561,6 +1738,21 @@ impl Model for App {
                 self.relayout();
                 self.textarea
                     .set_width(width.saturating_sub((PAD + 2) as u16));
+                // An open /ide image buffer is rasterized at open-time width —
+                // re-render it for the new panel size or its rows overflow the
+                // frame (styled rows can't be re-truncated).
+                if let Some(f) = self
+                    .ide
+                    .as_mut()
+                    .and_then(|i| i.file.as_mut())
+                    .filter(|f| f.image)
+                {
+                    let inner = panels::spf::ide_split(width as usize).1.saturating_sub(2);
+                    let body = (height as usize).saturating_sub(5);
+                    f.lines = render_image_file(&f.path, inner, body)
+                        .unwrap_or_else(|| vec!["<cannot decode image>".into()]);
+                    f.scroll = 0;
+                }
                 // Re-wrap the live answer at the new width instead of discarding it
                 // (the old reset lost any text streamed before the resize).
                 let raw = self.streaming.raw_content().to_string();
@@ -1615,11 +1807,15 @@ impl Model for App {
                 }
                 // /memory panel takes all keys while open.
                 if self.memory.is_some() {
-                    self.memory_key(&key);
-                    return None;
+                    return self.memory_key(&key);
                 }
-                // /ide panel takes all keys while open.
+                // /ide panel takes all keys while open — except while a tool
+                // approval is pending: the prompt is overlaid on the page and
+                // must get the keys, or the turn stalls invisibly.
                 if self.ide.is_some() {
+                    if self.state == State::Awaiting {
+                        return self.handle_approval_key(&key);
+                    }
                     self.ide_key(&key);
                     return None;
                 }
@@ -1783,6 +1979,22 @@ impl Model for App {
                 if self.relay_menu.is_some() {
                     return self.handle_relay_key(&key).unwrap_or(None);
                 }
+                // `&` review issue checklist: consume EVERY key while open.
+                if self.review_open {
+                    return self.handle_review_key(&key);
+                }
+                // `/deploy` project picker: consume EVERY key while open.
+                if self.repo_picker.is_some() {
+                    return self.handle_repo_picker_key(&key);
+                }
+                // `/flow` DAG picker: same.
+                if self.flow.is_some() {
+                    return self.handle_flow_key(&key);
+                }
+                // `/evolve` repo picker: consume EVERY key while open.
+                if self.evolve.is_some() {
+                    return self.handle_evolve_key(&key);
+                }
                 // Shift+End jumps to the latest output and resumes auto-follow.
                 if key.code == KeyCode::End && key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.viewport.update(ViewportMsg::Bottom);
@@ -1802,11 +2014,17 @@ impl Model for App {
                     self.viewport.set_auto_scroll(self.viewport.at_bottom());
                     return None;
                 }
-                // Esc leaves shell/research mode first (discarding the partial
-                // input), taking priority over the streaming interrupt below.
-                if (self.shell_mode || self.research_mode) && key.code == KeyCode::Esc {
+                // Esc leaves shell/research/review mode first (discarding the
+                // partial input), taking priority over the streaming interrupt
+                // below.
+                if (self.shell_mode || self.research_mode || self.review_mode || self.evolve_mode)
+                    && key.code == KeyCode::Esc
+                {
                     self.shell_mode = false;
                     self.research_mode = false;
+                    self.review_mode = false;
+                    self.evolve_mode = false;
+                    self.evolve_target = None;
                     self.textarea.clear();
                     return None;
                 }
@@ -1853,15 +2071,19 @@ impl Model for App {
                     return Some(cmd::msg(Msg::Submit(text)));
                 }
                 // A leading `!` enters shell mode, a leading `?` enters
-                // deep-research mode (the prefix is stripped). Both stay on until
-                // Esc or a submit (handled elsewhere).
+                // deep-research mode, a leading `&` enters code-review mode
+                // (the prefix is stripped). Each stays on until Esc or a
+                // submit (handled elsewhere).
                 let val = self.textarea.value();
-                if !self.shell_mode && !self.research_mode {
+                if !self.shell_mode && !self.research_mode && !self.review_mode {
                     if let Some(rest) = val.strip_prefix('!') {
                         self.shell_mode = true;
                         self.textarea.set_value(rest);
                     } else if let Some(rest) = val.strip_prefix('?') {
                         self.research_mode = true;
+                        self.textarea.set_value(rest);
+                    } else if let Some(rest) = val.strip_prefix('&') {
+                        self.review_mode = true;
                         self.textarea.set_value(rest);
                     }
                 }
@@ -1869,6 +2091,12 @@ impl Model for App {
 
             Msg::Term(Event::Mouse(m)) => {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
+                // Full-screen /ide //config //kb page: the transcript isn't
+                // visible, so transcript scroll/select must not act on it
+                // (a drag would silently copy hidden text).
+                if self.ide.is_some() {
+                    return None;
+                }
                 let vp_rows = self.viewport_rows();
                 // Content columns exclude the rightmost scrollbar column.
                 let max_col = (self.width as usize).saturating_sub(2) as u16;
@@ -1944,6 +2172,9 @@ impl Model for App {
             Msg::StreamError(e) => {
                 self.push_line(&Style::new().fg(TN_RED).render(&format!("  error: {e}")));
                 self.loop_remaining = 0; // a failed turn stops the /loop
+                self.review_pending = false; // a turn that never started can't
+                self.sleep_pending = false; // deliver a review/sleep report
+                self.restore_autonomy();
                 self.finish();
                 // Don't strand messages queued while this turn was starting.
                 return self.drain_queue();
@@ -1967,6 +2198,9 @@ impl Model for App {
                 self.finalize_streaming();
                 self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupted"));
                 self.loop_remaining = 0; // Esc also stops a /loop
+                self.review_pending = false; // and abandons a `&` review
+                self.sleep_pending = false; // and a `/sleep` consolidation
+                self.restore_autonomy();
                 self.finish();
                 return self.drain_queue();
             }
@@ -1978,7 +2212,16 @@ impl Model for App {
                 if self.state == State::Streaming {
                     self.finalize_streaming();
                 }
-                return self.complete_turn();
+                // A `&` review report fully streamed before the drop still
+                // counts — same for a `/sleep` consolidation report.
+                let turn_text = self.turn_text.clone();
+                self.capture_review(&turn_text);
+                let sleep_save = self.capture_sleep(&turn_text);
+                self.disarm_sleep_if_over(sleep_save.is_some());
+                return match (sleep_save, self.complete_turn()) {
+                    (Some(save), Some(next)) => Some(cmd::batch(vec![save, next])),
+                    (save, next) => save.or(next),
+                };
             }
 
             Msg::SpinnerTick => {
@@ -2112,6 +2355,7 @@ impl Model for App {
                         self.messages.clear();
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
+                        self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -2231,6 +2475,14 @@ impl Model for App {
                     self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                         "  ✓ signed in to OS as {label} · capabilities skill active"
                     )));
+                    // Auto-register this machine's SSH public key with OS so
+                    // git-over-SSH works without manual key setup (idempotent,
+                    // best-effort — never blocks the completed login).
+                    if let Some(s) = self.os_session.clone() {
+                        return Some(cmd::cmd(move || async move {
+                            Msg::SshKeySynced(crate::a3s_os::sync_ssh_key(s).await)
+                        }));
+                    }
                 }
                 Err(error) => self.push_line(
                     &Style::new()
@@ -2238,6 +2490,28 @@ impl Model for App {
                         .render(&format!("  login failed: {error}")),
                 ),
             },
+
+            Msg::SshKeySynced(outcome) => {
+                use crate::a3s_os::SshKeyOutcome;
+                match outcome {
+                    SshKeyOutcome::Registered(fp) => self.push_line(&Style::new().fg(TN_GREEN).render(
+                        &format!("  ✓ 本机 SSH 公钥已登记到 OS（{fp}）· git clone(ssh) 就绪"),
+                    )),
+                    SshKeyOutcome::AlreadyRegistered => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  · SSH 公钥已在 OS，跳过登记"),
+                    ),
+                    SshKeyOutcome::NoLocalKey => self.push_line(&Style::new().fg(TN_YELLOW).render(
+                        "  · 未找到本机 SSH 公钥；生成后重新 /login 即可自动登记：ssh-keygen -t ed25519",
+                    )),
+                    SshKeyOutcome::Failed(e) => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render(&format!("  · SSH key 同步跳过：{e}")),
+                    ),
+                }
+            }
 
             Msg::OsRefreshed(result) => {
                 self.os_refreshing = false;
@@ -2345,33 +2619,39 @@ impl Model for App {
                 }
             }
             Msg::Noop => {}
-            Msg::Forked(result) => match result {
-                Ok(new_id) => {
-                    // Swap the active session to the fork (which carries the copied
-                    // history). Set the id first — rebuild_session keys off it — and
-                    // revert on failure so id and session never desync. The
-                    // transcript stays on screen: the fork continues from here.
-                    let prev = std::mem::replace(&mut self.session_id, new_id);
-                    let model = self.model.clone();
-                    match self.rebuild_session(model.as_deref()) {
-                        Ok((s, _)) => {
-                            self.session = Arc::new(s);
-                            let short: String = self.session_id.chars().take(8).collect();
-                            self.push_line(&gutter(
+            Msg::Forked(result) => {
+                match result {
+                    Ok(new_id) => {
+                        // Swap the active session to the fork (which carries the copied
+                        // history). Set the id first — rebuild_session keys off it — and
+                        // revert on failure so id and session never desync. The
+                        // transcript stays on screen: the fork continues from here.
+                        let prev = std::mem::replace(&mut self.session_id, new_id);
+                        let model = self.model.clone();
+                        match self.rebuild_session(model.as_deref()) {
+                            Ok((s, _)) => {
+                                self.session = Arc::new(s);
+                                let short: String = self.session_id.chars().take(8).collect();
+                                self.push_line(&gutter(
                                 TN_CYAN,
                                 &format!("⑂ forked into a new session ({short}) — the original is kept"),
                             ));
-                        }
-                        Err(e) => {
-                            self.session_id = prev;
-                            self.push_line(
-                                &Style::new().fg(TN_RED).render(&format!("  fork failed: {e}")),
-                            );
+                            }
+                            Err(e) => {
+                                self.session_id = prev;
+                                self.push_line(
+                                    &Style::new()
+                                        .fg(TN_RED)
+                                        .render(&format!("  fork failed: {e}")),
+                                );
+                            }
                         }
                     }
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}")))
+                    }
                 }
-                Err(e) => self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}"))),
-            },
+            }
             Msg::RelayData(sessions) => {
                 if self.relay_menu.is_some() {
                     self.relay = sessions;
@@ -2410,6 +2690,24 @@ impl Model for App {
                 };
                 self.push_line(&Style::new().fg(color).render(&format!("  {summary}")));
             }
+            Msg::CtxResults(res) => self.on_ctx_results(res),
+            Msg::CtxWindow(res) => self.on_ctx_window(res),
+            Msg::CtxSaved(res) => self.on_ctx_saved(res),
+
+            Msg::SleepSaved(res) => self.on_sleep_saved(res),
+
+            Msg::FlowOpened(res) => self.on_flow_opened(res),
+            Msg::CtxMemorySource(res) => match res {
+                Ok((event_id, window)) => {
+                    self.memory = None; // leave the panel to show the source
+                    self.open_readonly_in_ide(&format!("ctx-source-{event_id}.txt"), &window);
+                }
+                Err(e) => {
+                    if let Some(m) = self.memory.as_mut() {
+                        m.note = format!("ctx source unavailable: {e}");
+                    }
+                }
+            },
 
             _ => {}
         }
@@ -2427,7 +2725,10 @@ impl Model for App {
             return self.render_memory(m);
         }
         if let Some(ide) = &self.ide {
-            return self.render_ide(ide);
+            // A pending tool approval overlays the full-screen page so it is
+            // never invisible (its keys take priority in the key dispatch).
+            let page = self.render_ide(ide);
+            return self.overlay_approval(page);
         }
         if let Some(chat) = &self.chat {
             return self.render_chat(chat);
@@ -2452,12 +2753,17 @@ impl Model for App {
             self.viewport.scroll_percent(),
         );
         // Input mode hint: `!` = shell command (pink), `?` = deep research (cyan),
-        // `/btw` = side-channel (yellow), otherwise the normal prompt (accent blue).
+        // `&` = code review (purple), `/btw` = side-channel (yellow), otherwise
+        // the normal prompt (accent blue).
         let inp = self.textarea.value();
         let (sym, icolor, border): (&str, Color, Color) = if self.shell_mode {
             ("!", Color::Rgb(255, 105, 180), Color::Rgb(255, 105, 180))
         } else if self.research_mode {
             ("?", TN_CYAN, TN_CYAN)
+        } else if self.review_mode {
+            ("&", TN_PURPLE, TN_PURPLE)
+        } else if self.evolve_mode {
+            ("⟲", TN_GREEN, TN_GREEN)
         } else if inp.starts_with("/btw") {
             ("❯", TN_YELLOW, TN_YELLOW)
         } else {
@@ -2636,7 +2942,9 @@ impl Model for App {
                 .unwrap_or_default();
             line1.push_str(&format!(
                 "  {}",
-                Style::new().fg(TN_CYAN).render(&format!("🎯 Pursuing goal{elapsed}"))
+                Style::new()
+                    .fg(TN_CYAN)
+                    .render(&format!("🎯 Pursuing goal{elapsed}"))
             ));
         }
         if self.loop_remaining > 0 {
@@ -2700,6 +3008,10 @@ impl Model for App {
         let composed = self.overlay_file_menu(composed);
         let composed = self.overlay_model_menu(composed);
         let composed = self.overlay_relay_menu(composed);
+        let composed = self.overlay_review_menu(composed);
+        let composed = self.overlay_repo_picker(composed);
+        let composed = self.overlay_flow_menu(composed);
+        let composed = self.overlay_evolve_menu(composed);
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
@@ -2708,14 +3020,21 @@ impl Model for App {
     }
 
     fn cursor(&self) -> Option<(u16, u16)> {
-        // In the /ide editor, place the cursor at the edit position.
+        // In the /ide editor, place the cursor at the edit position — inside
+        // the right panel: tree width + its left border + the `%4d ` gutter.
         if let Some(ide) = &self.ide {
             if ide.focus_editor {
                 if let Some(f) = &ide.file {
                     let width = self.width as usize;
-                    let tw = (width / 3).clamp(16, 38);
-                    let col = (tw + 8 + f.col).min(width.saturating_sub(1)) as u16;
-                    let row = (2 + f.row.saturating_sub(f.scroll)) as u16;
+                    let (tw, _) = panels::spf::ide_split(width);
+                    let gutter = if panels::spf::ide_gutter_on(width) {
+                        5
+                    } else {
+                        0
+                    };
+                    let x = tw + 1 + gutter + f.display_col().saturating_sub(f.hscroll);
+                    let col = x.min(width.saturating_sub(2)) as u16;
+                    let row = (1 + f.row.saturating_sub(f.scroll)) as u16;
                     return Some((col, row));
                 }
             }
@@ -2752,6 +3071,18 @@ impl App {
         if self.compacting.is_some() || self.updating.is_some() {
             self.textarea.clear();
             return None;
+        }
+        // Evolve mode: the submit after `/evolve` picks a repo is the improvement
+        // direction — set the standing goal + loop budget and kick off the first
+        // dev turn (subsequent turns keep the goal, so it's multi-round).
+        if self.evolve_mode {
+            let direction = trimmed.to_string();
+            self.history.push(trimmed.to_string());
+            self.history_pos = None;
+            self.textarea.clear();
+            let cmd = self.submit_evolve(&direction);
+            self.relayout();
+            return cmd;
         }
         // Shell mode (`!`) runs a shell command directly (not through the agent).
         if self.shell_mode {
@@ -2815,8 +3146,9 @@ impl App {
             ));
             let prompt = deep_research_prompt(&query);
             let display = format!("🔬 {query}");
-            // Long-horizon budget: keep researching across turns toward the goal.
-            self.loop_remaining = 8;
+            // Long-horizon budget: keep researching across turns toward the
+            // goal, with tool prompts auto-approved for the run's duration.
+            self.engage_autonomy(8);
             if self.state == State::Idle {
                 return self.start_stream_inner(prompt, display, true, true, false);
             }
@@ -2829,6 +3161,48 @@ impl App {
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
             return None;
+        }
+        // Code-review mode (`&`): clone the given git repo and run a deep,
+        // strictly read-only quality inspection. The `/loop` mechanism keeps
+        // the agent on it until a turn ends with the machine-readable
+        // ```a3s-review report, which capture_review parses into the checkbox
+        // panel where the user picks (or selects all) issues to fix — nothing
+        // is fixed automatically. Idle-only: review state (pending flag, loop
+        // budget, checklist) is App-wide, so a second review racing the first
+        // through the queue would clobber it.
+        if self.review_mode {
+            // Rejected-while-busy keeps the mode + typed URL for a retry.
+            if self.state != State::Idle {
+                self.push_line(&Style::new().fg(TN_YELLOW).render(
+                    "  a code review can't start while a turn is running — press Esc to stop first",
+                ));
+                return None;
+            }
+            self.review_mode = false;
+            let url = trimmed.trim_start_matches('&').trim().to_string();
+            if url.is_empty() {
+                self.textarea.clear();
+                return None;
+            }
+            self.history.push(trimmed.to_string());
+            self.history_pos = None;
+            self.textarea.clear();
+            self.review_pending = true;
+            self.messages.push(gutter(
+                TN_PURPLE,
+                &Style::new()
+                    .bold()
+                    .render(&format!("🔎 code review: {url}")),
+            ));
+            let clone_dir = repo_dir();
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  clone into {} → deep inspection → issue checklist to pick fixes (no auto-fix · Esc stops)",
+                clone_dir.display()
+            )));
+            let prompt = panels::review::code_review_prompt(&url, &clone_dir.to_string_lossy());
+            let display = format!("🔎 {url}");
+            self.engage_autonomy(8);
+            return self.start_stream_inner(prompt, display, true, true, false);
         }
         // Block session-mutating commands while a turn is streaming.
         if self.state != State::Idle {
@@ -2949,10 +3323,32 @@ impl App {
         // `/kb <text | file | folder>` ingests raw material into the project
         // knowledge base (.a3s/kb/sources/). Deterministic file I/O off the UI
         // thread; `/okf` later compiles the sources into OKF concept pages.
+        // `/ctx <query>` searches past agent sessions; `/ctx <n>` stages hit n
+        // as context for the next message (ctx CLI, local SQLite index).
+        if let Some(rest) = trimmed.strip_prefix("/ctx") {
+            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+                return self.handle_ctx_command(rest);
+            }
+        }
         if let Some(rest) = trimmed.strip_prefix("/kb") {
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 let arg = rest.trim().to_string();
                 self.textarea.clear();
+                // Bare `/kb` opens the vault browser (superfile-style manage:
+                // browse · preview · edit · x delete). With an arg it ingests.
+                if arg.is_empty() {
+                    let root = kbutil::kb_dir(&self.cwd);
+                    if !root.is_dir() {
+                        self.push_line(&Style::new().fg(TN_GRAY).render(
+                            "  KB is empty — /kb <text> | /kb <file> | /kb <folder> adds to it",
+                        ));
+                        return None;
+                    }
+                    let mut ide = Ide::browse(ide_children(&root, 0), "knowledge base");
+                    ide.kb_root = Some(root);
+                    self.ide = Some(ide);
+                    return None;
+                }
                 let cwd = self.cwd.clone();
                 let now = chrono::Utc::now().to_rfc3339();
                 return Some(cmd::cmd(move || async move {
@@ -3060,8 +3456,74 @@ impl App {
                 );
                 return None;
             }
-            self.loop_remaining = 8;
+            self.engage_autonomy(8);
             return Some(cmd::msg(Msg::Submit(task)));
+        }
+        // `/sleep [focus]` — end-of-day consolidation: the `/loop` mechanism
+        // drives the agent through reviewing today's work (cross-session via
+        // `ctx` when installed) until a turn ends with the machine-readable
+        // ```a3s-sleep report, which capture_sleep persists into long-term
+        // memory (experience · preferences · knowledge). Idle-only.
+        if let Some(rest) = trimmed
+            .strip_prefix("/sleep")
+            // Token boundary (the /login pattern): "/sleepy" is a message, not
+            // this command — and must not bypass the IDLE_ONLY gate above.
+            .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+        {
+            let focus = rest.trim().to_string();
+            self.textarea.clear();
+            self.sleep_pending = true;
+            self.engage_autonomy(8);
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  ☾ sleep — consolidating today's work into memory… (Esc stops)"),
+            );
+            let directive = panels::sleep::sleep_directive(
+                &focus,
+                self.ctx_ready,
+                &panels::sleep::sleep_today(),
+            );
+            // Like `&` review: send the directive but show a short display
+            // line (echoing the boilerplate as a user message is just noise).
+            let display = if focus.is_empty() {
+                "☾ sleep".to_string()
+            } else {
+                format!("☾ sleep · {focus}")
+            };
+            return self.start_stream_inner(directive, display, true, true, false);
+        }
+        // `/flow` — pick a local DAG JSON and open it in the OS workflow
+        // designer (login-gated); `/flow <描述>` orchestrates a basic DAG into
+        // the flows folder (local, no login needed). Token-boundary filtered
+        // so "/flowx" stays a normal message and can't bypass the idle gate.
+        if let Some(rest) = trimmed
+            .strip_prefix("/flow")
+            .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+        {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if description.is_empty() {
+                if self.os_session.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /flow needs OS — sign in with /login first"),
+                    );
+                } else {
+                    self.open_flow_panel();
+                }
+                return None;
+            }
+            let dir = flow_dir();
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  ⧉ drafting a flow DAG → {} (then /flow opens it in the designer)",
+                dir.display()
+            )));
+            self.engage_autonomy(8);
+            let prompt = panels::flow::flow_gen_prompt(&description, &dir.to_string_lossy());
+            let display = format!("⧉ flow: {}", truncate(&description, 60));
+            return self.start_stream_inner(prompt, display, true, true, false);
         }
         // Slash commands run inline in any state.
         match trimmed {
@@ -3085,9 +3547,9 @@ impl App {
                                 Err(e) => Msg::Forked(Err(format!("could not save the fork: {e}"))),
                             }
                         }
-                        Ok(None) => {
-                            Msg::Forked(Err("nothing to fork yet — start a conversation first".into()))
-                        }
+                        Ok(None) => Msg::Forked(Err(
+                            "nothing to fork yet — start a conversation first".into(),
+                        )),
                         Err(e) => Msg::Forked(Err(format!("could not read the session: {e}"))),
                     }
                 }));
@@ -3099,6 +3561,14 @@ impl App {
                 self.queue.clear();
                 self.completed = 0;
                 self.textarea.clear();
+                // A fresh conversation can't deliver the old review's report
+                // or sleep consolidation, and must not inherit a staged `/ctx`
+                // window or stale hits.
+                self.review_pending = false;
+                self.sleep_pending = false;
+                self.restore_autonomy();
+                self.pending_ctx = None;
+                self.ctx_hits.clear();
                 // Actually reset the conversation, not just the screen: swap in a
                 // fresh session (new id, no history, no carried compact summary)
                 // and zero the token/ctx counters. /clear is idle-only (guarded
@@ -3113,6 +3583,7 @@ impl App {
                         self.compact_summary = None;
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
+                        self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
                     }
                     Err(_) => self.session_id = prev_id,
                 }
@@ -3277,14 +3748,7 @@ impl App {
             "/ide" => {
                 self.textarea.clear();
                 let entries = ide_children(std::path::Path::new(&self.cwd), 0);
-                self.ide = Some(Ide {
-                    entries,
-                    sel: 0,
-                    tree_scroll: 0,
-                    file: None,
-                    focus_editor: false,
-                    flash: None,
-                });
+                self.ide = Some(Ide::browse(entries, "workspace"));
                 return None;
             }
             "/plugin" | "/plugins" => {
@@ -3311,6 +3775,63 @@ impl App {
                     None => self.push_line(&Style::new().fg(TN_GRAY).render(
                         "  no dynamic workflow yet — run an ultracode task that fans out via parallel_task",
                     )),
+                }
+                return None;
+            }
+            "/review" => {
+                self.textarea.clear();
+                if self.review.is_some() {
+                    // A report exists: /review reopens its checklist.
+                    self.review_open = true;
+                } else {
+                    // No report yet: pick a local repos project to review
+                    // (the `&` flow without the clone; no login needed).
+                    self.open_repo_picker(panels::repos::RepoAction::Review);
+                }
+                return None;
+            }
+            // `/deploy` — login-gated: pick a repos project → Agentic CI/CD →
+            // auto-configure its OS gateway access address.
+            "/deploy" => {
+                self.textarea.clear();
+                if self.os_session.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /deploy needs OS — sign in with /login first"),
+                    );
+                } else {
+                    self.open_repo_picker(panels::repos::RepoAction::Deploy);
+                }
+                return None;
+            }
+            // `/run` — login-gated: pick a repos project → quick dev-mode debug
+            // run on the A3S Runtime → report its access address.
+            "/run" => {
+                self.textarea.clear();
+                if self.os_session.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /run needs OS — sign in with /login first"),
+                    );
+                } else {
+                    self.open_repo_picker(panels::repos::RepoAction::Run);
+                }
+                return None;
+            }
+            // `/evolve` — login-gated: pick a repos project → set an improvement
+            // goal → multi-round auto-improving development session.
+            "/evolve" => {
+                self.textarea.clear();
+                if self.os_session.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /evolve needs OS — sign in with /login first"),
+                    );
+                } else {
+                    self.open_evolve_panel();
                 }
                 return None;
             }
@@ -3432,14 +3953,23 @@ impl App {
         self.messages
             .push(user_bubble(trimmed, self.width as usize));
         self.textarea.clear();
+        // One-shot `/ctx <n>` context: attach the staged transcript to THIS
+        // genuine typed message only (never a `/loop` "Continue." re-entry),
+        // invisibly — the display bubble above stays clean. Travels with the
+        // message whether it runs now or is queued.
+        let loop_cont = std::mem::take(&mut self.loop_continuation);
+        let prompt = match (loop_cont, self.pending_ctx.take()) {
+            (false, Some(c)) => format!("{c}\n\n{trimmed}"),
+            _ => trimmed.to_string(),
+        };
         if self.state == State::Idle {
-            self.start_stream(trimmed.to_string())
+            self.start_stream(prompt)
         } else {
             self.seq += 1;
             self.queue.push(Queued {
                 prio: 1,
                 seq: self.seq,
-                text: trimmed.to_string(),
+                text: prompt,
             });
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
@@ -3504,6 +4034,7 @@ impl App {
     ) -> Option<Cmd<Msg>> {
         self.streaming.clear();
         self.got_delta = false; // track if this turn streamed any text deltas
+        self.turn_text.clear();
         self.turn_had_agent_activity = false;
         self.turn_text_after_activity = false;
         self.ultracode_synthesis_inflight = synthesis;
@@ -3533,6 +4064,9 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
+        // (A `/ctx <n>` staged transcript window is attached upstream, only to a
+        // genuine typed user message — see on_submit — never to a `/loop`, `&`,
+        // `?`, or synthesis continuation.)
         // ultracode no longer rewrites the user turn. Whether a turn plans and
         // fans out is decided by the core's message-gated planning
         // (PlanningMode::Auto) plus the `parallel_task` tool description — not an
@@ -3587,12 +4121,49 @@ impl App {
                     .fg(TN_GRAY)
                     .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
             );
+            // Mark the continuation as machine-driven so on_submit doesn't
+            // attach a staged `/ctx` window to it.
+            self.loop_continuation = true;
             return Some(cmd::msg(Msg::Submit(
                 "Continue. If the task is fully complete, reply DONE and stop.".to_string(),
             )));
         }
+        // The loop is drained (or was never armed): an autonomous run that
+        // auto-switched to auto mode is over — restore the user's mode.
+        if self.loop_remaining == 0 {
+            self.restore_autonomy();
+        }
         // Run the next queued message (submitted while busy), if any.
         self.drain_queue()
+    }
+
+    /// An autonomous directive run is starting (/sleep, reviews, /deploy,
+    /// /run, /flow drafts, /evolve, /loop): switch to auto-approve so tool
+    /// prompts can't stall it, and arm the loop budget that re-prompts until
+    /// the deliverable lands. The prior mode is restored when the run ends
+    /// (loop drained, interrupt, error, or /clear). A user already in auto
+    /// mode keeps it — nothing is remembered or restored.
+    fn engage_autonomy(&mut self, budget: usize) {
+        self.loop_remaining = self.loop_remaining.max(budget);
+        if self.mode != Mode::Auto {
+            self.autonomy_restore = Some(self.mode);
+            self.mode = Mode::Auto;
+            self.push_line(&Style::new().fg(TN_GRAY).render(
+                "  ⏵⏵ auto mode engaged for this task — restores when it completes (Esc stops)",
+            ));
+        }
+    }
+
+    /// Restore the pre-autonomy mode (no-op when nothing was auto-switched).
+    fn restore_autonomy(&mut self) {
+        if let Some(prev) = self.autonomy_restore.take() {
+            self.mode = prev;
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  ⏵ autonomous task ended — auto mode restored to your previous mode"),
+            );
+        }
     }
 
     fn on_agent_event(&mut self, event: AgentEvent) -> Option<Cmd<Msg>> {
@@ -3602,6 +4173,7 @@ impl App {
             AgentEvent::TextDelta { text } => {
                 self.mark_assistant_text(&text);
                 self.got_delta = true;
+                self.turn_text.push_str(&text);
                 self.streaming.push(&text);
                 self.update_viewport_with_stream();
             }
@@ -3646,7 +4218,7 @@ impl App {
                     self.width as usize,
                 ));
                 self.capture_workflow(&name, args.as_ref());
-                // RemoteUI: a 书安OS viewUrl in the tool output is openable. Remember
+                // RemoteUI: a OS viewUrl in the tool output is openable. Remember
                 // it for `/view`, and if the API marked it embeddable (sized popup),
                 // open it now in the native a3s-webview window (auth via $A3S_OS_TOKEN).
                 // The progressive API returns a RELATIVE view url; complete it
@@ -3772,10 +4344,26 @@ impl App {
                 // The core auto-compacted mid-turn (pruned tool outputs + summarized
                 // old messages). The next turn's prompt reflects the smaller context,
                 // so ctx% self-corrects on the following End — just surface a note.
-                let pct = (percent_before * 100.0).round() as u32;
-                self.push_line(&Style::new().fg(TN_GRAY).italic().render(&format!(
-                    "  ✦ context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
-                )));
+                // The core emits this whenever the threshold is crossed, even
+                // when nothing could shrink (short histories can't summarize);
+                // a note per round would spam "auto-compacted" while nothing
+                // happened. Only surface real reductions — prune-only rounds
+                // (equal count, smaller content) show up via ctx% instead.
+                if after_messages < before_messages {
+                    // `percent_before` is relative to the core's fixed 200k
+                    // window; rescale to the model's REAL window to match ctx%.
+                    let pct = if self.context_limit > 0 {
+                        (percent_before * CORE_MAX_CONTEXT_TOKENS * 100.0
+                            / self.context_limit as f32)
+                            .round()
+                            .min(100.0) as u32
+                    } else {
+                        (percent_before * 100.0).round() as u32
+                    };
+                    self.push_line(&Style::new().fg(TN_GRAY).italic().render(&format!(
+                        "  ✦ context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
+                    )));
+                }
             }
             AgentEvent::ConfirmationRequired {
                 tool_id,
@@ -3805,11 +4393,23 @@ impl App {
                 self.pending_tool = Some((tool_id, label));
                 return None; // wait for the user; do not pump
             }
+            // Live context fill: every LLM round-trip reports its prompt size,
+            // so ctx% (and the fill warnings) track DURING long multi-tool
+            // turns instead of freezing until End.
+            AgentEvent::TurnEnd { usage, .. } => {
+                if usage.prompt_tokens > 0 {
+                    self.last_prompt_tokens = usage.prompt_tokens;
+                    self.maybe_warn_ctx();
+                }
+            }
             AgentEvent::End {
                 text, usage, meta, ..
             } => {
                 // /loop: stop once the agent signals completion (the word DONE).
-                if self.loop_remaining > 0 {
+                // Not during /sleep: its completion signal is the a3s-sleep
+                // report itself, and consolidation narration ("what was done
+                // today") would false-trigger this and kill the run early.
+                if self.loop_remaining > 0 && !self.sleep_pending {
                     let r = if text.is_empty() {
                         self.streaming.raw_content().to_string()
                     } else {
@@ -3821,6 +4421,14 @@ impl App {
                         self.loop_remaining = 0;
                     }
                 }
+                // `&` review scans the WHOLE turn's text: with a delta-only
+                // provider a tool call after the report would have cleared the
+                // live buffer, losing a fully delivered report.
+                let review_text = if text.is_empty() {
+                    self.turn_text.clone()
+                } else {
+                    text.clone()
+                };
                 // Only fall back to End.text when the provider never streamed
                 // deltas this turn. Using the live buffer's emptiness here dups
                 // text: a mid-turn finalize (e.g. a tool call) empties the buffer,
@@ -3830,6 +4438,13 @@ impl App {
                     self.streaming.push(&text);
                 }
                 self.finalize_streaming();
+                // `&` code review: a ```a3s-review report in the final message
+                // ends the review loop and opens the issue checklist.
+                self.capture_review(&review_text);
+                // `/sleep`: an ```a3s-sleep report ends the consolidation loop
+                // and persists the distilled memories (async, batched below).
+                let sleep_save = self.capture_sleep(&review_text);
+                self.disarm_sleep_if_over(sleep_save.is_some());
                 // `↓` counts OUTPUT (generated) tokens. Summing total_tokens per
                 // turn re-counts the whole context every turn (the prompt is
                 // re-sent each round) and balloons far past what was generated.
@@ -3840,15 +4455,21 @@ impl App {
                 } else {
                     usage.total_tokens.saturating_sub(usage.prompt_tokens)
                 };
-                // Latest prompt size = how full the context window is (for ctx%).
-                if usage.prompt_tokens > 0 {
-                    self.last_prompt_tokens = usage.prompt_tokens;
-                }
+                // ctx% is NOT updated here: End.usage.prompt_tokens is the
+                // per-turn SUM of every round's prompt (the context is re-sent
+                // each round, same ballooning as above), not the current
+                // context size — a multi-round turn would read rounds× too
+                // high and fire false fill warnings. The TurnEnd arm already
+                // recorded the real per-round size, final round included.
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
                 // Count the turn, idle, then continue /loop or drain the queue.
-                return self.complete_turn();
+                // A captured sleep report's save runs alongside.
+                return match (sleep_save, self.complete_turn()) {
+                    (Some(save), Some(next)) => Some(cmd::batch(vec![save, next])),
+                    (save, next) => save.or(next),
+                };
             }
             AgentEvent::Error { message } => {
                 self.push_line(
@@ -3857,6 +4478,9 @@ impl App {
                         .render(&format!("  error: {message}")),
                 );
                 self.loop_remaining = 0; // a failed turn stops the /loop
+                self.review_pending = false; // and abandons a `&` review
+                self.sleep_pending = false; // and a `/sleep` consolidation
+                self.restore_autonomy();
                 self.finish();
                 // Don't strand messages queued while this turn was running.
                 return self.drain_queue();
@@ -3884,12 +4508,40 @@ impl App {
                 let (g, c) = task_status_style(status);
                 self.set_task_status(&step_id, g, c);
             }
-            // TurnStart/TurnEnd, ToolInputDelta, memory, confirmation echoes,
+            // TurnStart, ToolInputDelta, memory, confirmation echoes,
             // etc. — not surfaced in this MVP.
             _ => {}
         }
         // Keep draining the stream.
         self.rx.clone().map(pump)
+    }
+
+    /// One-shot transcript warning as the context fills: a heads-up at 70%
+    /// and a red alert at 85% (the auto-compact point). Called wherever
+    /// `last_prompt_tokens` updates; the latch re-arms when usage drops.
+    fn maybe_warn_ctx(&mut self) {
+        if self.context_limit == 0 {
+            return;
+        }
+        let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
+        let (latch, warn) = ctx_warn_tier(pct, self.ctx_warned_tier);
+        self.ctx_warned_tier = latch;
+        if warn.is_some() {
+            // push_line rebuilds the viewport from `messages` only, which
+            // would hide a still-streaming round's text (invisible through a
+            // whole approval wait if this round ends in a gated tool call).
+            // Finalize it into the transcript first — same as ToolStart does.
+            self.finalize_streaming();
+        }
+        match warn {
+            Some(85) => self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                "  ✦ context {pct}% full — auto-compacting soon; /compact to summarize now"
+            ))),
+            Some(_) => self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                "  ✦ context {pct}% full — auto-compacts near 85%; /compact to summarize early"
+            ))),
+            None => {}
+        }
     }
 
     fn mark_agent_activity(&mut self) {
@@ -4007,7 +4659,7 @@ impl App {
         self.rebuild_viewport();
     }
 
-    /// Open a 书安OS viewUrl in the native `a3s-webview` window. Silent on success
+    /// Open a OS viewUrl in the native `a3s-webview` window. Silent on success
     /// (the window appearing is feedback enough); only a missing helper binary
     /// leaves a transcript hint.
     fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
@@ -4047,9 +4699,24 @@ impl App {
                 self.session = Arc::new(s);
             }
         }
+        // Login/logout flips whether the A3S Runtime `runtime` tool is available.
+        self.sync_runtime_tool();
         let dirs = self.skill_dirs();
         self.skill_count = count_skill_files(&dirs);
         self.skills = load_skills(&dirs);
+    }
+
+    /// Register the A3S Runtime `runtime` offload tool while signed in to OS,
+    /// unregister it while signed out — so it only appears in the model's toolset
+    /// after login. Called after every auth change (login/logout), once the
+    /// session has been (re)built.
+    fn sync_runtime_tool(&self) {
+        match self.os_session.as_ref() {
+            Some(s) => self.session.register_dynamic_tool(std::sync::Arc::new(
+                crate::runtime_tool::RuntimeTool::new(s),
+            )),
+            None => self.session.unregister_dynamic_tool("runtime"),
+        }
     }
 
     /// Open `path` directly in the built-in IDE editor (tree rooted at its
@@ -4062,14 +4729,10 @@ impl App {
             .lines()
             .map(String::from)
             .collect();
-        self.ide = Some(Ide {
-            entries: ide_children(dir, 0),
-            sel: 0,
-            tree_scroll: 0,
-            file: Some(IdeFile::new(path.to_path_buf(), lines, false, false)),
-            focus_editor: true,
-            flash: None,
-        });
+        let mut ide = Ide::browse(ide_children(dir, 0), "config");
+        ide.file = Some(IdeFile::new(path.to_path_buf(), lines, false, false));
+        ide.focus_editor = true;
+        self.ide = Some(ide);
     }
 
     /// Capture a `parallel_task`/`task` dispatch as a dynamic-workflow artifact:
@@ -4089,19 +4752,19 @@ impl App {
     /// `readonly` blocks edits and Ctrl+S.
     fn open_readonly_in_ide(&mut self, title: &str, content: &str) {
         let lines: Vec<String> = content.lines().map(String::from).collect();
-        self.ide = Some(Ide {
-            entries: ide_children(std::path::Path::new(&self.cwd), 0),
-            sel: 0,
-            tree_scroll: 0,
-            file: Some(IdeFile::new(
-                std::path::PathBuf::from(title),
-                lines,
-                false,
-                true,
-            )),
-            focus_editor: true,
-            flash: Some("read-only".to_string()),
-        });
+        let mut ide = Ide::browse(
+            ide_children(std::path::Path::new(&self.cwd), 0),
+            "workspace",
+        );
+        ide.file = Some(IdeFile::new(
+            std::path::PathBuf::from(title),
+            lines,
+            false,
+            true,
+        ));
+        ide.focus_editor = true;
+        ide.flash = Some("read-only".to_string());
+        self.ide = Some(ide);
     }
 
     /// Format every retained tool call for the `/output` viewer: a header line
@@ -4460,6 +5123,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // directive too (mirrors effort_session_opts) so the very first turn already
     // routes OS questions through the progressive-API skill.
     let os_address = os_session.as_ref().map(|s| s.address.clone());
+    // Past-session recall: when the ctx CLI is installed, teach the agent to
+    // search local agent history before re-deriving prior work.
+    let ctx_ready = panels::ctx::ctx_available();
     let with_instr = |o: SessionOptions| {
         let mut parts: Vec<String> = Vec::new();
         if let Some(i) = &instructions {
@@ -4467,6 +5133,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         }
         if let Some(addr) = &os_address {
             parts.push(os_platform_guide(addr));
+        }
+        if ctx_ready {
+            parts.push(panels::ctx::ctx_history_guide());
         }
         if parts.is_empty() {
             o
@@ -4490,7 +5159,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
                 .with_auto_compact(true)
-                .with_auto_compact_threshold(0.85)
+                // Scaled to the model's real window — the core triggers off a
+                // fixed 200k, so a flat 0.85 would put the trigger past a
+                // smaller window and auto-compact would never fire (see
+                // `auto_compact_threshold_for`).
+                .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
                 .with_file_memory(memory_dir())
                 .with_max_parallel_tasks(8)
                 .with_auto_delegation_enabled(true)
@@ -4511,7 +5184,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
                     .with_auto_compact(true)
-                    .with_auto_compact_threshold(0.85)
+                    .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
                     .with_file_memory(memory_dir())
                     .with_max_parallel_tasks(8)
                     .with_auto_delegation_enabled(true)
@@ -4521,6 +5194,15 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             ))),
         )?,
     };
+
+    // A3S Runtime offload tool: registered only when signed in to OS, so the
+    // model sees `runtime` after login and not before. Auth changes re-sync it via
+    // `refresh_after_auth` → `sync_runtime_tool`.
+    if let Some(os) = os_session.as_ref() {
+        session.register_dynamic_tool(std::sync::Arc::new(crate::runtime_tool::RuntimeTool::new(
+            os,
+        )));
+    }
 
     let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
 
@@ -4618,6 +5300,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         model_ctx,
         context_limit,
         last_prompt_tokens: 0,
+        ctx_warned_tier: 0,
         model_menu: None,
         model_tab: 0,
         llm_override: None,
@@ -4635,6 +5318,22 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         auto_reviewed: false,
         shell_mode: false,
         research_mode: false,
+        review_mode: false,
+        review_pending: false,
+        sleep_pending: false,
+        review: None,
+        review_open: false,
+        repo_picker: None,
+        flow: None,
+        autonomy_restore: None,
+        evolve: None,
+        evolve_mode: false,
+        evolve_target: None,
+        ctx_ready,
+        ctx_hits: Vec::new(),
+        pending_ctx: None,
+        loop_continuation: false,
+        turn_text: String::new(),
         selection: None,
         last_workflow: None,
         pending_images: Vec::new(),
@@ -4805,8 +5504,14 @@ mod tests {
         // Depth rises with effort: thinking budget and tool-round budget both
         // non-decreasing across low → max (so higher effort is never shallower).
         for w in EFFORT_LEVELS[..=ULTRACODE].windows(2) {
-            assert!(w[1].thinking_budget >= w[0].thinking_budget, "thinking budget regressed");
-            assert!(w[1].max_tool_rounds >= w[0].max_tool_rounds, "tool-round budget regressed");
+            assert!(
+                w[1].thinking_budget >= w[0].thinking_budget,
+                "thinking budget regressed"
+            );
+            assert!(
+                w[1].max_tool_rounds >= w[0].max_tool_rounds,
+                "tool-round budget regressed"
+            );
             assert!(
                 w[1].max_continuation_turns >= w[0].max_continuation_turns,
                 "continuation budget regressed"
@@ -4814,10 +5519,17 @@ mod tests {
         }
         // medium is the unsteered baseline; every other level carries a guideline
         // so effort is meaningful even on models with no thinking budget.
-        assert!(EFFORT_LEVELS[1].guideline.is_none(), "medium should be the baseline");
+        assert!(
+            EFFORT_LEVELS[1].guideline.is_none(),
+            "medium should be the baseline"
+        );
         for (i, p) in EFFORT_LEVELS.iter().enumerate() {
             if i != 1 {
-                assert!(p.guideline.is_some(), "level {} has no depth steer", p.label);
+                assert!(
+                    p.guideline.is_some(),
+                    "level {} has no depth steer",
+                    p.label
+                );
             }
         }
     }
@@ -5341,6 +6053,25 @@ mod tests {
         assert_eq!(auto_compact_threshold_for(1_000_000), 1.0);
         // Unknown window (0) falls back to the core default of 0.85.
         assert!((auto_compact_threshold_for(0) - 0.85).abs() < 0.001);
+        // Small window: NOT floored past the window itself — 8k triggers at
+        // 0.034 * 200k = 6.8k = 85% of 8k (the old 0.05 floor meant 10k > 8k,
+        // i.e. compaction could never fire before overflow).
+        assert!((auto_compact_threshold_for(8_000) - 0.034).abs() < 0.001);
+    }
+
+    #[test]
+    fn ctx_warn_tier_latches_once_and_rearms_on_drop() {
+        // Climb: 0 → warn at 70 tier → no re-warn inside the tier → warn at 85.
+        assert_eq!(ctx_warn_tier(40, 0), (0, None));
+        assert_eq!(ctx_warn_tier(72, 0), (70, Some(70)));
+        assert_eq!(ctx_warn_tier(79, 70), (70, None)); // same tier: silent
+        assert_eq!(ctx_warn_tier(91, 70), (85, Some(85)));
+        assert_eq!(ctx_warn_tier(100, 85), (85, None));
+        // Drop (compaction, /clear, wider model): latch re-arms.
+        assert_eq!(ctx_warn_tier(30, 85), (0, None));
+        assert_eq!(ctx_warn_tier(72, 0), (70, Some(70)));
+        // Jump straight past both tiers warns the top one only.
+        assert_eq!(ctx_warn_tier(90, 0), (85, Some(85)));
     }
 
     #[test]

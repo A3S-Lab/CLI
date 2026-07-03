@@ -77,7 +77,10 @@ fn base(address: &str) -> String {
 }
 
 /// GET the caller's conversations (newest activity first).
-pub(crate) async fn list_conversations(address: &str, token: &str) -> Result<Vec<ImConversation>, String> {
+pub(crate) async fn list_conversations(
+    address: &str,
+    token: &str,
+) -> Result<Vec<ImConversation>, String> {
     let resp = client()?
         .get(format!("{}?limit=100", base(address)))
         .bearer_auth(token)
@@ -92,9 +95,16 @@ pub(crate) async fn list_conversations(address: &str, token: &str) -> Result<Vec
 
 /// GET a conversation's messages. The API returns newest-first; we reverse to
 /// oldest-first so the chat pane reads top-to-bottom.
-pub(crate) async fn history(address: &str, token: &str, conversation_id: &str) -> Result<Vec<ImMessage>, String> {
+pub(crate) async fn history(
+    address: &str,
+    token: &str,
+    conversation_id: &str,
+) -> Result<Vec<ImMessage>, String> {
     let resp = client()?
-        .get(format!("{}/{conversation_id}/messages?limit=100", base(address)))
+        .get(format!(
+            "{}/{conversation_id}/messages?limit=100",
+            base(address)
+        ))
         .bearer_auth(token)
         .header("accept", "application/json")
         .send()
@@ -108,7 +118,12 @@ pub(crate) async fn history(address: &str, token: &str, conversation_id: &str) -
 }
 
 /// POST a message into a conversation. Returns the persisted message.
-pub(crate) async fn send(address: &str, token: &str, conversation_id: &str, content: &str) -> Result<ImMessage, String> {
+pub(crate) async fn send(
+    address: &str,
+    token: &str,
+    conversation_id: &str,
+    content: &str,
+) -> Result<ImMessage, String> {
     let resp = client()?
         .post(format!("{}/{conversation_id}/messages", base(address)))
         .bearer_auth(token)
@@ -122,7 +137,11 @@ pub(crate) async fn send(address: &str, token: &str, conversation_id: &str, cont
 }
 
 /// POST to open (or create) the DM with `user_id`.
-pub(crate) async fn open_dm(address: &str, token: &str, user_id: &str) -> Result<ImConversation, String> {
+pub(crate) async fn open_dm(
+    address: &str,
+    token: &str,
+    user_id: &str,
+) -> Result<ImConversation, String> {
     let resp = client()?
         .post(format!("{}/dm", base(address)))
         .bearer_auth(token)
@@ -155,7 +174,11 @@ pub(crate) async fn whoami(address: &str, token: &str) -> Result<String, String>
 }
 
 /// GET the contact directory (org co-members), optionally filtered by `query`.
-pub(crate) async fn contacts(address: &str, token: &str, query: &str) -> Result<Vec<Contact>, String> {
+pub(crate) async fn contacts(
+    address: &str,
+    token: &str,
+    query: &str,
+) -> Result<Vec<Contact>, String> {
     let url = format!(
         "{}/api/v1/im/contacts?query={}",
         os_origin(address),
@@ -189,7 +212,12 @@ fn urlencoding_min(s: &str) -> String {
 }
 
 /// Advance the caller's read cursor. Best-effort (errors are non-fatal).
-pub(crate) async fn mark_read(address: &str, token: &str, conversation_id: &str, message_id: &str) -> Result<(), String> {
+pub(crate) async fn mark_read(
+    address: &str,
+    token: &str,
+    conversation_id: &str,
+    message_id: &str,
+) -> Result<(), String> {
     let resp = client()?
         .post(format!("{}/{conversation_id}/read", base(address)))
         .bearer_auth(token)

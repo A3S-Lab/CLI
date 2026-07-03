@@ -28,8 +28,24 @@ impl App {
                 "browse long-term memory (GitLens-style timeline)",
             ),
             row(
-                "/kb <text|file|folder>",
-                "add to the knowledge base (.a3s/kb)",
+                "/kb [text|file|folder]",
+                "knowledge base — bare /kb browses/manages, an arg adds",
+            ),
+            row(
+                "/ctx <query|n>",
+                "search past sessions (ctx) · /ctx <n> stages a hit · /ctx save <n> → memory",
+            ),
+            row(
+                "/memory  (c)",
+                "long-term memory timeline · c opens a ctx-sourced memory's session",
+            ),
+            row(
+                "/deploy",
+                "pick a repos project → Agentic CI/CD → OS gateway (needs /login)",
+            ),
+            row(
+                "/evolve",
+                "pick a repo → set an improvement goal → multi-round auto-improving dev",
             ),
             row("/top", "live process monitor (Enter to force-kill)"),
             row(
@@ -47,6 +63,10 @@ impl App {
             row(
                 "? <query>",
                 "deep research — goal-driven, auto-continues (cyan)",
+            ),
+            row(
+                "& <git-url>",
+                "clone + deep code review — checklist of issues to fix (purple)",
             ),
             row("/btw <q>", "side-channel question, kept out of the chat"),
             String::new(),

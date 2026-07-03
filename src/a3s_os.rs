@@ -48,6 +48,150 @@ impl StoredOsSession {
     }
 }
 
+/// Result of the post-login SSH-key sync (`sync_ssh_key`). The TUI formats each
+/// variant into a transcript line — the OS side is done, this just reports it.
+pub(crate) enum SshKeyOutcome {
+    /// Uploaded the local public key (carries the short SHA256 fingerprint).
+    Registered(String),
+    /// The local key was already registered — nothing to do.
+    AlreadyRegistered,
+    /// No local public key found — the TUI prints a `ssh-keygen` hint.
+    NoLocalKey,
+    /// Network / OS error (best-effort: login still succeeds).
+    Failed(String),
+}
+
+/// After OS login, make git-over-SSH "just work": read the machine's SSH public
+/// key, and register it with OS (`POST /users/me/developer-config/ssh-keys`)
+/// if it isn't already there. Idempotent (deduped by key body + SHA256
+/// fingerprint) and best-effort — a failure never blocks login. Public keys are
+/// meant to be shared, so uploading one is safe; the private key never leaves.
+pub(crate) async fn sync_ssh_key(session: StoredOsSession) -> SshKeyOutcome {
+    // 1. Read the local public key (prefer ed25519, the modern default).
+    let Some(pubkey_line) = read_local_pubkey() else {
+        return SshKeyOutcome::NoLocalKey;
+    };
+    // 2-3. Dedup + register against the OS.
+    register_ssh_key(
+        &os_origin(&session.address),
+        &session.access_token,
+        &pubkey_line,
+    )
+    .await
+}
+
+/// The network half of [`sync_ssh_key`] (dedup via `GET developer-config`, then
+/// `POST` if new), split out so it's testable against a mock without touching
+/// `$HOME`. `origin` is `scheme://host[:port]`.
+async fn register_ssh_key(origin: &str, token: &str, pubkey_line: &str) -> SshKeyOutcome {
+    let Some(local_body) = ssh_key_body(pubkey_line) else {
+        return SshKeyOutcome::Failed("本机公钥格式无法解析".to_string());
+    };
+    let local_fp = openssh_sha256_fingerprint(pubkey_line);
+
+    let client = match reqwest::Client::builder().timeout(HTTP_TIMEOUT).build() {
+        Ok(c) => c,
+        Err(e) => return SshKeyOutcome::Failed(e.to_string()),
+    };
+
+    // 2. List existing credentials and dedup — by key body (exact, format-
+    //    agnostic) or by fingerprint when the list omits the body.
+    let list_url = format!("{origin}/api/v1/users/me/developer-config");
+    match client.get(&list_url).bearer_auth(token).send().await {
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                let creds = v.get("data").unwrap_or(&v);
+                if let Some(arr) = creds.as_array() {
+                    let already = arr.iter().any(|c| {
+                        let is_key = c.get("type").and_then(|t| t.as_str()) == Some("ssh_key");
+                        let body_match = c
+                            .get("publicKey")
+                            .and_then(|p| p.as_str())
+                            .and_then(ssh_key_body)
+                            .is_some_and(|b| b == local_body);
+                        let fp_match = local_fp.as_deref().is_some_and(|fp| {
+                            c.get("fingerprint").and_then(|f| f.as_str()) == Some(fp)
+                        });
+                        is_key && (body_match || fp_match)
+                    });
+                    if already {
+                        return SshKeyOutcome::AlreadyRegistered;
+                    }
+                }
+            }
+        }
+        Err(e) => return SshKeyOutcome::Failed(e.to_string()),
+    }
+
+    // 3. Register the key. Name it after the pubkey's own comment (usually
+    //    user@host) so it's identifiable in the OS credential list.
+    let comment = pubkey_line
+        .split_whitespace()
+        .nth(2)
+        .unwrap_or("this machine");
+    let name = format!("a3s-code · {comment}");
+    let post_url = format!("{origin}/api/v1/users/me/developer-config/ssh-keys");
+    match client
+        .post(&post_url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "name": name, "publicKey": pubkey_line }))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let short = local_fp
+                .as_deref()
+                .map(|fp| fp.chars().take(23).collect::<String>())
+                .unwrap_or_else(|| "registered".to_string());
+            SshKeyOutcome::Registered(short)
+        }
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            let msg = resp
+                .text()
+                .await
+                .ok()
+                .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+                .unwrap_or_else(|| "请求失败".to_string());
+            SshKeyOutcome::Failed(format!("HTTP {code}: {msg}"))
+        }
+        Err(e) => SshKeyOutcome::Failed(e.to_string()),
+    }
+}
+
+/// Read the first available local SSH public key, preferring modern key types.
+/// Returns the trimmed one-line contents (`ssh-ed25519 AAAA… comment`).
+fn read_local_pubkey() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let ssh = Path::new(&home).join(".ssh");
+    for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
+        if let Ok(s) = std::fs::read_to_string(ssh.join(name)) {
+            let line = s.trim();
+            if !line.is_empty() {
+                return Some(line.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The base64 key material (the 2nd whitespace token) — uniquely identifies a
+/// key regardless of comment, so it's the exact dedup token.
+fn ssh_key_body(pubkey_line: &str) -> Option<&str> {
+    pubkey_line.split_whitespace().nth(1)
+}
+
+/// OpenSSH `SHA256:<base64-no-pad>` fingerprint of a public key line (matches
+/// `ssh-keygen -lf`), used as a fallback dedup key.
+fn openssh_sha256_fingerprint(pubkey_line: &str) -> Option<String> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+    let raw = STANDARD.decode(ssh_key_body(pubkey_line)?).ok()?;
+    let digest = Sha256::digest(&raw);
+    Some(format!("SHA256:{}", STANDARD_NO_PAD.encode(digest)))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct OsAuthStore {
     #[serde(default)]
@@ -777,16 +921,126 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    // A real ed25519 public key (test vector) + its ssh-keygen SHA256 fingerprint.
+    const TEST_PUBKEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGx2xh3F0Z8y0i8k1mV7pQ3rT9wLcN4bU6oJ2sK1dE0f tester@host";
+
+    #[test]
+    fn ssh_key_body_and_fingerprint() {
+        assert_eq!(
+            ssh_key_body(TEST_PUBKEY),
+            Some("AAAAC3NzaC1lZDI1NTE5AAAAIGx2xh3F0Z8y0i8k1mV7pQ3rT9wLcN4bU6oJ2sK1dE0f")
+        );
+        // Fingerprint is the OpenSSH SHA256:… form (matches `ssh-keygen -lf`).
+        let fp = openssh_sha256_fingerprint(TEST_PUBKEY).unwrap();
+        assert!(fp.starts_with("SHA256:") && !fp.contains('='));
+        // Deterministic + body-derived (comment is ignored).
+        let no_comment =
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGx2xh3F0Z8y0i8k1mV7pQ3rT9wLcN4bU6oJ2sK1dE0f";
+        assert_eq!(openssh_sha256_fingerprint(no_comment), Some(fp));
+        assert_eq!(openssh_sha256_fingerprint("garbage"), None);
+    }
+
+    /// Minimal HTTP/1.1 mock replaying the OS credential endpoints. `existing`
+    /// is the JSON array returned by GET developer-config; the POST body is
+    /// captured. Returns `http://127.0.0.1:port`.
+    async fn spawn_mock_os(existing: &'static str, captured: Arc<Mutex<Option<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let cap = captured.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let line = req.lines().next().unwrap_or("");
+                    let data = if line.starts_with("POST") {
+                        *cap.lock().unwrap() =
+                            Some(req.split("\r\n\r\n").nth(1).unwrap_or("").to_string());
+                        r#"{"id":"cred-1","type":"ssh_key"}"#.to_string()
+                    } else {
+                        existing.to_string()
+                    };
+                    let payload = format!(r#"{{"code":200,"status":"OK","data":{data}}}"#);
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        payload.len(), payload
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        origin
+    }
+
+    #[tokio::test]
+    async fn register_ssh_key_uploads_when_absent() {
+        let cap = Arc::new(Mutex::new(None));
+        let origin = spawn_mock_os("[]", cap.clone()).await;
+        let out = register_ssh_key(&origin, "tok", TEST_PUBKEY).await;
+        assert!(matches!(out, SshKeyOutcome::Registered(_)));
+        // Posted exactly {name, publicKey} — the OS DTO's required fields.
+        let sent: serde_json::Value =
+            serde_json::from_str(cap.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(sent["publicKey"], TEST_PUBKEY);
+        assert!(sent["name"].as_str().unwrap().starts_with("a3s-code · "));
+    }
+
+    #[tokio::test]
+    async fn register_ssh_key_dedups_by_body_and_fingerprint() {
+        // Already present by key body → no POST, AlreadyRegistered.
+        let body = ssh_key_body(TEST_PUBKEY).unwrap();
+        let by_body: &'static str = Box::leak(
+            format!(r#"[{{"type":"ssh_key","publicKey":"ssh-ed25519 {body} old"}}]"#)
+                .into_boxed_str(),
+        );
+        let cap = Arc::new(Mutex::new(None));
+        let origin = spawn_mock_os(by_body, cap.clone()).await;
+        assert!(matches!(
+            register_ssh_key(&origin, "tok", TEST_PUBKEY).await,
+            SshKeyOutcome::AlreadyRegistered
+        ));
+        assert!(cap.lock().unwrap().is_none(), "must not POST a duplicate");
+
+        // Already present by fingerprint (list omits publicKey) → also dedups.
+        let fp = openssh_sha256_fingerprint(TEST_PUBKEY).unwrap();
+        let by_fp: &'static str =
+            Box::leak(format!(r#"[{{"type":"ssh_key","fingerprint":"{fp}"}}]"#).into_boxed_str());
+        let cap2 = Arc::new(Mutex::new(None));
+        let origin2 = spawn_mock_os(by_fp, cap2.clone()).await;
+        assert!(matches!(
+            register_ssh_key(&origin2, "tok", TEST_PUBKEY).await,
+            SshKeyOutcome::AlreadyRegistered
+        ));
+    }
 
     #[test]
     fn parses_gateway_context_from_common_fields() {
         let j = |s: &str| serde_json::from_str::<serde_json::Value>(s).unwrap();
         // OpenAI-compatible variants seen across gateways.
-        assert_eq!(parse_gateway_context(&j(r#"{"context_length":200000}"#)), Some(200000));
-        assert_eq!(parse_gateway_context(&j(r#"{"max_model_len":32768}"#)), Some(32768));
-        assert_eq!(parse_gateway_context(&j(r#"{"context_window":128000}"#)), Some(128000));
+        assert_eq!(
+            parse_gateway_context(&j(r#"{"context_length":200000}"#)),
+            Some(200000)
+        );
+        assert_eq!(
+            parse_gateway_context(&j(r#"{"max_model_len":32768}"#)),
+            Some(32768)
+        );
+        assert_eq!(
+            parse_gateway_context(&j(r#"{"context_window":128000}"#)),
+            Some(128000)
+        );
         // LiteLLM nests it.
-        assert_eq!(parse_gateway_context(&j(r#"{"model_info":{"max_input_tokens":1000000}}"#)), Some(1_000_000));
+        assert_eq!(
+            parse_gateway_context(&j(r#"{"model_info":{"max_input_tokens":1000000}}"#)),
+            Some(1_000_000)
+        );
         // Absent or zero → None so the caller keeps its default.
         assert_eq!(parse_gateway_context(&j(r#"{"id":"m"}"#)), None);
         assert_eq!(parse_gateway_context(&j(r#"{"context_length":0}"#)), None);

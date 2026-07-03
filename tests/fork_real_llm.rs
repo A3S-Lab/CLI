@@ -85,7 +85,11 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     let a = agent
         .session(cwd.clone(), Some(opts("fork-A")))
         .expect("session A");
-    let a1 = turn(&a, "Remember this secret code exactly, I'll ask later: BANANA-42. Reply with only: OK").await;
+    let a1 = turn(
+        &a,
+        "Remember this secret code exactly, I'll ask later: BANANA-42. Reply with only: OK",
+    )
+    .await;
     eprintln!("[A1 plant]   {a1:?}");
     // Persist A — this is exactly what /fork copies from (the TUI relies on the
     // session being auto-saved at idle; we save deterministically).
@@ -105,8 +109,14 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     store.save(&data).await.expect("save fork B");
 
     // 3. Resume the FORK and ask for the secret -> proves context carried over.
-    let b = agent.resume_session("fork-B", opts("fork-B")).expect("resume fork B");
-    let b1 = turn(&b, "What was the secret code I told you earlier? Reply with ONLY the code.").await;
+    let b = agent
+        .resume_session("fork-B", opts("fork-B"))
+        .expect("resume fork B");
+    let b1 = turn(
+        &b,
+        "What was the secret code I told you earlier? Reply with ONLY the code.",
+    )
+    .await;
     eprintln!("[B1 recall]  {b1:?}");
     assert!(
         b1.to_uppercase().contains("BANANA-42") || b1.contains("42"),
@@ -114,7 +124,11 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     );
 
     // 4. Diverge the fork: change the secret ONLY in B, then confirm B took it.
-    let b2 = turn(&b, "Forget that. The secret code is now CHERRY-99. Reply with only: OK").await;
+    let b2 = turn(
+        &b,
+        "Forget that. The secret code is now CHERRY-99. Reply with only: OK",
+    )
+    .await;
     eprintln!("[B2 change]  {b2:?}");
     let b3 = turn(&b, "What is the secret code now? Reply with ONLY the code.").await;
     eprintln!("[B3 recheck] {b3:?}");
@@ -124,8 +138,14 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
     );
 
     // 5. Resume the ORIGINAL A -> proves it's untouched and diverged from B.
-    let a_again = agent.resume_session("fork-A", opts("fork-A")).expect("resume original A");
-    let a2 = turn(&a_again, "What is the secret code? Reply with ONLY the code.").await;
+    let a_again = agent
+        .resume_session("fork-A", opts("fork-A"))
+        .expect("resume original A");
+    let a2 = turn(
+        &a_again,
+        "What is the secret code? Reply with ONLY the code.",
+    )
+    .await;
     eprintln!("[A2 intact]  {a2:?}");
     assert!(
         a2.to_uppercase().contains("BANANA-42") || a2.contains("42"),

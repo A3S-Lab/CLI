@@ -23,16 +23,24 @@ fn imp_bar(importance: f32) -> String {
 }
 
 impl App {
-    /// Handle a key while the `/memory` panel is open.
-    pub(crate) fn memory_key(&mut self, key: &KeyEvent) {
+    /// Handle a key while the `/memory` panel is open. Returns a `Cmd` only for
+    /// the `c` back-jump (memory → its ctx source session).
+    pub(crate) fn memory_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
         if key.code == KeyCode::Esc {
             self.memory = None;
-            return;
+            return None;
+        }
+        // `c` — jump to the originating ctx session for a memory promoted from
+        // history (`source=ctx`): pull `ctx show event <id>` into a read-only
+        // viewer. The back-link that closes the ctx↔memory loop.
+        if matches!(key.code, KeyCode::Char('c')) {
+            if let Some(cmd) = self.memory_open_ctx_source() {
+                return Some(cmd);
+            }
+            return None;
         }
         let body = (self.height as usize).saturating_sub(3);
-        let Some(m) = self.memory.as_mut() else {
-            return;
-        };
+        let m = self.memory.as_mut()?;
         let last = m.entries.len().saturating_sub(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -67,6 +75,36 @@ impl App {
             }
             _ => {}
         }
+        None
+    }
+
+    /// Spawn `ctx show event <id>` for the selected memory's `ctx_event_id`
+    /// provenance (nothing if it has none / ctx isn't installed).
+    fn memory_open_ctx_source(&mut self) -> Option<Cmd<Msg>> {
+        let m = self.memory.as_mut()?;
+        let Some(event_id) = m.detail.metadata.get("ctx_event_id").cloned() else {
+            m.note = "this memory has no ctx source (press c only on source=ctx)".to_string();
+            return None;
+        };
+        if !self.ctx_ready {
+            if let Some(m) = self.memory.as_mut() {
+                m.note = "ctx is not installed — can't open the source session".to_string();
+            }
+            return None;
+        }
+        Some(cmd::cmd(move || async move {
+            let out = tokio::process::Command::new("ctx")
+                .args(["show", "event", &event_id, "--window", "8"])
+                .output()
+                .await;
+            Msg::CtxMemorySource(match out {
+                Ok(o) if o.status.success() => {
+                    Ok((event_id, String::from_utf8_lossy(&o.stdout).into_owned()))
+                }
+                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+                Err(e) => Err(e.to_string()),
+            })
+        }))
     }
 
     /// Full-screen `/memory` panel: timeline (left) + selected detail (right).
@@ -161,7 +199,7 @@ impl App {
         }
 
         let hint =
-            "  ↑↓/jk select · g/G top/bottom · PgUp/PgDn scroll detail · r refresh · Esc close";
+            "  ↑↓/jk select · g/G top/bottom · PgUp/PgDn scroll · c open ctx source · r refresh · Esc close";
         while out.len() + 1 < h {
             out.push(String::new());
         }

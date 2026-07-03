@@ -7,6 +7,7 @@ mod a3s_os;
 mod box_cmd;
 mod claude;
 mod codex;
+mod runtime_tool;
 mod tools;
 mod top;
 mod tui;

@@ -49,10 +49,15 @@ back into the next Claude turn as structured history.
 ```sh
 cargo test --all-targets
 cargo test --test box_command_soak -- --ignored
+cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
 ```
 
 The ignored soak test repeats `a3s box` after a fake first-use install and
-verifies later runs reuse the installed `a3s-box`.
+verifies later runs reuse the installed `a3s-box`. The ignored
+`ctx_compact_real_llm` test drives the configured model (`~/.a3s/config.acl`)
+until the context crosses the auto-compact threshold and asserts streaming
+usage is reported, compaction shrinks the history, and the next prompt drops —
+the machinery behind the TUI's ctx%, fill warnings, and auto-compaction.
 
 ## Updating
 

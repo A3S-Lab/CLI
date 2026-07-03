@@ -35,7 +35,13 @@ impl App {
         let mut cmds = vec![
             {
                 let s = sess.clone();
-                cmd::cmd(move || async move { Msg::ImMe(os_im::whoami(&s.address, &s.access_token).await.unwrap_or_default()) })
+                cmd::cmd(move || async move {
+                    Msg::ImMe(
+                        os_im::whoami(&s.address, &s.access_token)
+                            .await
+                            .unwrap_or_default(),
+                    )
+                })
             },
             {
                 let s = sess.clone();
@@ -146,7 +152,8 @@ impl App {
                 }
                 if let (Some(mid), Some(sess)) = (last, self.os_session.clone()) {
                     return Some(cmd::cmd(move || async move {
-                        let _ = os_im::mark_read(&sess.address, &sess.access_token, &id, &mid).await;
+                        let _ =
+                            os_im::mark_read(&sess.address, &sess.access_token, &id, &mid).await;
                         Msg::Noop
                     }));
                 }
@@ -340,7 +347,11 @@ impl App {
         let search = chat.mode == ChatMode::Search;
 
         // Header: title + a mode-aware hint (errors surface here in red).
-        let title = if search { "OS chat · find people" } else { "OS chat" };
+        let title = if search {
+            "OS chat · find people"
+        } else {
+            "OS chat"
+        };
         let hint = if let Some(err) = &chat.error {
             Style::new().fg(TN_RED).render(&format!("⚠ {err}"))
         } else if search {
@@ -354,7 +365,10 @@ impl App {
         };
         let mut out = vec![
             pad_to(
-                &format!("  {}    {hint}", Style::new().fg(ACCENT).bold().render(title)),
+                &format!(
+                    "  {}    {hint}",
+                    Style::new().fg(ACCENT).bold().render(title)
+                ),
                 width,
             ),
             pad_to(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
@@ -368,30 +382,45 @@ impl App {
             let left = if search {
                 match chat.contacts.get(i) {
                     Some(c) => {
-                        let label = if c.name.is_empty() { &c.username } else { &c.name };
+                        let label = if c.name.is_empty() {
+                            &c.username
+                        } else {
+                            &c.name
+                        };
                         let detail = if c.email.is_empty() {
                             format!("@{}", c.username)
                         } else {
                             c.email.clone()
                         };
-                        let plain = pad_to(&clip(&format!("  {}  {}", clip(label, 14), clip(&detail, 20)), tw), tw);
+                        let plain = pad_to(
+                            &clip(&format!("  {}  {}", clip(label, 14), clip(&detail, 20)), tw),
+                            tw,
+                        );
                         if i == chat.contact_sel {
                             Style::new().fg(Color::Black).bg(ACCENT).render(&plain)
                         } else {
                             Style::new().fg(TN_FG).render(&plain)
                         }
                     }
-                    None if i == 0 && chat.contacts.is_empty() => {
-                        Style::new().fg(TN_GRAY).render(&pad_to("  no matching contacts", tw))
-                    }
+                    None if i == 0 && chat.contacts.is_empty() => Style::new()
+                        .fg(TN_GRAY)
+                        .render(&pad_to("  no matching contacts", tw)),
                     None => " ".repeat(tw),
                 }
             } else {
                 match chat.convs.get(i) {
                     Some(c) => {
-                        let base = c.title.clone().filter(|t| !t.is_empty()).unwrap_or_else(|| {
-                            if c.kind == "group" { "group".into() } else { "DM".into() }
-                        });
+                        let base = c
+                            .title
+                            .clone()
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_else(|| {
+                                if c.kind == "group" {
+                                    "group".into()
+                                } else {
+                                    "DM".into()
+                                }
+                            });
                         let name = if c.kind == "group" {
                             format!("{base} ({})", c.member_ids.len())
                         } else {
@@ -408,7 +437,13 @@ impl App {
                             .map(|m| format!("  {}", clip(&m.content, 14)))
                             .unwrap_or_default();
                         let mark = if i == chat.sel { "▸" } else { " " };
-                        let plain = pad_to(&clip(&format!("  {mark} {}{unread}{preview}", clip(&name, 16)), tw), tw);
+                        let plain = pad_to(
+                            &clip(
+                                &format!("  {mark} {}{unread}{preview}", clip(&name, 16)),
+                                tw,
+                            ),
+                            tw,
+                        );
                         if i == chat.sel {
                             Style::new().fg(ACCENT).bold().render(&plain)
                         } else {
@@ -455,7 +490,10 @@ impl App {
         }
 
         // Bottom: the shared input — composer in Chat mode, search box in Search.
-        out.push(pad_to(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width));
+        out.push(pad_to(
+            &Style::new().fg(TN_GRAY).render(&"─".repeat(width)),
+            width,
+        ));
         let inp = clip(&self.textarea.value(), width.saturating_sub(8));
         let bottom = if search {
             format!("  🔍 {}▌", Style::new().fg(TN_FG).render(&inp))
