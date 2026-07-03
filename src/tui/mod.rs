@@ -686,8 +686,8 @@ fn osc52_copy(text: &str) -> String {
 
 /// Marker the agent puts inline in its reply to offer the RemoteUI popup. The
 /// host recognises a mouse click on any reply line containing it and opens the
-/// remembered view (`/view` does the same). The link lives in the message text —
-/// the host renders no button of its own.
+/// remembered view (`/view` does the same). The styled button is still transcript
+/// text, so ANSI stripping keeps this marker clickable.
 const VIEW_BUTTON_MARKER: &str = "Open view";
 
 fn remote_view_button(detail: &str) -> String {
