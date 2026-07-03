@@ -47,6 +47,7 @@ pub(crate) struct ReviewState {
 
 /// Fence tag of the report block (the TUI parses it from the final message).
 pub(crate) const REVIEW_FENCE: &str = "```a3s-review";
+const MAX_REVIEW_ISSUES: usize = 40;
 
 /// Directive for a `&` turn: clone the repo, inspect deeply, report — never fix.
 /// `clone_dir` is where clones live (config `repo_dir`, default ~/.a3s/repos).
@@ -151,7 +152,8 @@ pub(crate) fn parse_review_report(text: &str) -> Option<(String, Vec<ReviewIssue
     while let Some(start) = hay.rfind(REVIEW_FENCE) {
         let body = &hay[start + REVIEW_FENCE.len()..];
         if let Some(end) = body.find("\n```") {
-            if let Ok(report) = serde_json::from_str::<ReviewReport>(body[..end].trim()) {
+            if let Ok(mut report) = serde_json::from_str::<ReviewReport>(body[..end].trim()) {
+                report.issues.truncate(MAX_REVIEW_ISSUES);
                 return Some((report.repo_dir, report.issues));
             }
         }
@@ -167,6 +169,26 @@ fn severity_color(sev: &str) -> Color {
         "medium" => TN_YELLOW,
         _ => TN_GRAY,
     }
+}
+
+fn review_menu_hint(width: usize) -> String {
+    truncate(
+        "  ↑/↓ move · Space check · a all · Enter fix checked · Esc close",
+        width,
+    )
+}
+
+fn review_state(repo: String, issues: Vec<ReviewIssue>) -> Option<ReviewState> {
+    let n = issues.len();
+    if n == 0 {
+        return None;
+    }
+    Some(ReviewState {
+        repo,
+        checked: vec![false; n],
+        issues,
+        sel: 0,
+    })
 }
 
 impl App {
@@ -190,7 +212,10 @@ impl App {
         // The deliverable arrived — stop the loop that was driving it.
         self.review_pending = false;
         self.loop_remaining = 0;
-        if issues.is_empty() {
+        self.review_open = false;
+        let n = issues.len();
+        self.review = review_state(repo, issues);
+        if n == 0 {
             self.push_line(
                 &Style::new()
                     .fg(TN_GREEN)
@@ -198,13 +223,6 @@ impl App {
             );
             return;
         }
-        let n = issues.len();
-        self.review = Some(ReviewState {
-            repo,
-            checked: vec![false; n],
-            issues,
-            sel: 0,
-        });
         // Only pop the checklist open when nothing else is going on: the panel
         // consumes every key, so opening over in-flight typing or a queued
         // message would steal keystrokes ('a' = check all, Enter = fix!).
@@ -260,6 +278,11 @@ impl App {
                     .map(|(i, _)| i.clone())
                     .collect();
                 if picked.is_empty() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  select issues with Space, then press Enter to fix"),
+                    );
                     return None; // nothing checked — Space toggles, `a` selects all
                 }
                 // Uncheck what was sent so reopening `/review` can't resubmit
@@ -284,6 +307,7 @@ impl App {
                     prio: 1,
                     seq: self.seq,
                     text: prompt,
+                    display: label,
                 });
                 self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             }
@@ -313,9 +337,7 @@ impl App {
         let mut menu = vec![
             pad_to(&Style::new().fg(TN_PURPLE).bold().render(&header), width),
             pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  ↑/↓ move · Space check · a all · Enter fix checked · Esc close"),
+                &Style::new().fg(TN_GRAY).render(&review_menu_hint(width)),
                 width,
             ),
         ];
@@ -342,7 +364,10 @@ impl App {
                 width,
             );
             menu.push(if row == sel {
-                Style::new().fg(Color::Black).bg(TN_PURPLE).render(&raw)
+                Style::new()
+                    .fg(Color::BrightWhite)
+                    .bg(TN_PURPLE)
+                    .render(&raw)
             } else {
                 Style::new()
                     .fg(severity_color(&issue.severity))
@@ -417,6 +442,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_review_report_caps_issue_count() {
+        let issues = (0..45)
+            .map(|i| {
+                format!("{{\"severity\":\"low\",\"file\":\"src/{i}.rs\",\"title\":\"issue {i}\"}}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let text = format!("{REVIEW_FENCE}\n{{\"repo_dir\":\"/r\",\"issues\":[{issues}]}}\n```");
+        let (_, parsed) = parse_review_report(&text).unwrap();
+        assert_eq!(parsed.len(), MAX_REVIEW_ISSUES);
+        assert_eq!(parsed.last().unwrap().title, "issue 39");
+    }
+
+    #[test]
     fn review_fix_prompt_neutralizes_injected_issue_text() {
         let fix = review_fix_prompt(
             "/tmp/x",
@@ -456,5 +495,34 @@ mod tests {
         assert!(fix.contains("/tmp/x"));
         assert!(fix.contains("src/a.rs:3"));
         assert!(fix.contains("ONLY"));
+    }
+
+    #[test]
+    fn review_hint_fits_narrow_width() {
+        let hint = review_menu_hint(36);
+        assert!(a3s_tui::style::visible_len(&hint) <= 36, "{hint}");
+        assert!(hint.contains('…'), "{hint}");
+    }
+
+    #[test]
+    fn review_state_is_absent_for_clean_reports_and_unchecked_for_issues() {
+        assert!(review_state("/repo".into(), Vec::new()).is_none());
+
+        let state = review_state(
+            "/repo".into(),
+            vec![ReviewIssue {
+                severity: "high".into(),
+                file: "src/lib.rs".into(),
+                line: Some(7),
+                title: "bug".into(),
+                detail: String::new(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(state.repo, "/repo");
+        assert_eq!(state.issues.len(), 1);
+        assert_eq!(state.checked, vec![false]);
+        assert_eq!(state.sel, 0);
     }
 }

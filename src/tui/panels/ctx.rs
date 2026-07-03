@@ -413,7 +413,7 @@ mod tests {
     fn parse_ctx_search_extracts_hits() {
         let json = r#"{"results":[
             {"ctx_event_id":"ev-1","ctx_session_id":"ses-1","provider":"claude","timestamp":"2026-06-22T01:41:08.332Z",
-             "title":"claude assistant message","snippet":"A 方案确定:box 当执行后端\n第二行"},
+             "title":"claude assistant message","snippet":"Plan A decided: box runs backend\nsecond line"},
             {"ctx_event_id":"","provider":"x","timestamp":"","title":"dropped","snippet":""}
         ]}"#;
         let hits = parse_ctx_search(json).unwrap();
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(hits[0].event_id, "ev-1");
         assert_eq!(hits[0].session_id, "ses-1"); // provenance for the memory back-link
         assert_eq!(hits[0].time, "2026-06-22");
-        assert!(hits[0].snippet.contains("box 当执行后端 第二行")); // flattened
+        assert!(hits[0].snippet.contains("box runs backend second line")); // flattened
         assert!(parse_ctx_search("not json").is_err());
         assert!(parse_ctx_search("{}").is_err());
     }

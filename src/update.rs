@@ -11,6 +11,7 @@ use std::process::Command;
 struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
+    stderr: Vec<u8>,
 }
 
 trait CommandRunner {
@@ -26,6 +27,7 @@ impl CommandRunner for RealCommandRunner {
         Some(CommandOutput {
             success: out.status.success(),
             stdout: out.stdout,
+            stderr: out.stderr,
         })
     }
 
@@ -41,6 +43,11 @@ impl CommandRunner for RealCommandRunner {
 fn args(items: &[&str]) -> Vec<OsString> {
     items.iter().map(OsString::from).collect()
 }
+
+const BREW_TAP: &str = "a3s-lab/tap";
+const BREW_TAP_URL: &str = "https://github.com/A3S-Lab/homebrew-tap";
+const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
+const BREW_SHORT_FORMULA: &str = "a3s";
 
 fn numeric_version_parts(s: &str) -> Vec<u32> {
     let trimmed = s.trim().trim_start_matches('v');
@@ -79,13 +86,21 @@ pub(crate) fn version_ge(a: &str, b: &str) -> bool {
 /// release server is unreachable. Blocking — call via `spawn_blocking` in async.
 ///
 /// Uses the `releases/latest` REDIRECT on github.com (which 302s to
-/// `…/releases/tag/vX.Y.Z`), NOT the `api.github.com` REST endpoint — the API
-/// is rate-limited to 60 req/hr/IP unauthenticated, which strands users behind
-/// shared IPs / CI; the redirect has no such limit.
+/// `…/releases/tag/vX.Y.Z`) first because it avoids unauthenticated REST API
+/// rate limits, then falls back to the GitHub API when the redirect is
+/// unavailable.
 pub(crate) fn fetch_latest() -> Option<String> {
+    fetch_latest_from_redirect().or_else(fetch_latest_from_api)
+}
+
+fn fetch_latest_from_redirect() -> Option<String> {
     let out = Command::new("curl")
         .args([
             "-fsSL",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "12",
             "-o",
             "/dev/null",
             "-w",
@@ -100,12 +115,53 @@ pub(crate) fn fetch_latest() -> Option<String> {
     version_from_release_url(&String::from_utf8_lossy(&out.stdout))
 }
 
+fn fetch_latest_from_api() -> Option<String> {
+    let out = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            "5",
+            "--max-time",
+            "12",
+            "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    version_from_api_response(&out.stdout)
+}
+
 /// Extract `X.Y.Z` from a `…/releases/tag/vX.Y.Z` URL.
 fn version_from_release_url(url: &str) -> Option<String> {
     url.trim()
         .rsplit_once("/tag/")
-        .map(|(_, v)| v.trim().trim_start_matches('v').to_string())
-        .filter(|v| !v.is_empty())
+        .map(|(_, v)| {
+            v.trim()
+                .split(['?', '#'])
+                .next()
+                .unwrap_or(v)
+                .trim_start_matches('v')
+                .to_string()
+        })
+        .filter(|v| numeric_version_parts(v).len() >= 2)
+}
+
+fn version_from_api_response(bytes: &[u8]) -> Option<String> {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()?
+        .get("tag_name")?
+        .as_str()
+        .map(|s| {
+            s.trim()
+                .trim_start_matches('v')
+                .split(['-', '+'])
+                .next()
+                .unwrap_or(s)
+                .to_string()
+        })
+        .filter(|v| numeric_version_parts(v).len() >= 2)
 }
 
 fn version_from_output(text: &str) -> Option<String> {
@@ -138,18 +194,37 @@ pub(crate) fn can_self_update() -> bool {
     release_target().is_some()
 }
 
-fn brew_manages_a3s(runner: &impl CommandRunner) -> bool {
+fn brew_manages_formula(runner: &impl CommandRunner, formula: &str) -> bool {
     runner
-        .output(OsStr::new("brew"), &args(&["list", "--versions", "a3s"]))
+        .output(OsStr::new("brew"), &args(&["list", "--versions", formula]))
         .map(|o| o.success && !o.stdout.is_empty())
         .unwrap_or(false)
 }
 
-fn brew_has_version(runner: &impl CommandRunner, v: &str) -> bool {
+fn managed_brew_formula(runner: &impl CommandRunner) -> Option<&'static str> {
+    if brew_manages_formula(runner, BREW_SHORT_FORMULA)
+        || brew_manages_formula(runner, BREW_FORMULA)
+    {
+        Some(BREW_FORMULA)
+    } else {
+        None
+    }
+}
+
+fn brew_has_version(runner: &impl CommandRunner, formula: &str, v: &str) -> bool {
     runner
-        .output(OsStr::new("brew"), &args(&["list", "--versions", "a3s"]))
+        .output(OsStr::new("brew"), &args(&["list", "--versions", formula]))
         .map(|o| o.success && String::from_utf8_lossy(&o.stdout).contains(v))
         .unwrap_or(false)
+}
+
+fn brew_prefix_bin(runner: &impl CommandRunner, formula: &str) -> Option<PathBuf> {
+    let out = runner.output(OsStr::new("brew"), &args(&["--prefix", formula]))?;
+    if !out.success {
+        return None;
+    }
+    let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!prefix.is_empty()).then(|| PathBuf::from(prefix).join("bin").join("a3s"))
 }
 
 fn verify_binary_version(
@@ -161,20 +236,31 @@ fn verify_binary_version(
     if !out.success {
         return None;
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
     let version = version_from_output(&text)?;
     version_ge(&version, latest).then_some(version)
 }
 
+fn verify_brew_binary(runner: &impl CommandRunner, formula: &str, latest: &str) -> Option<PathBuf> {
+    let path_bin = PathBuf::from("a3s");
+    if verify_binary_version(runner, path_bin.as_os_str(), latest).is_some() {
+        return Some(path_bin);
+    }
+    let prefix_bin = brew_prefix_bin(runner, formula)?;
+    verify_binary_version(runner, prefix_bin.as_os_str(), latest).map(|_| prefix_bin)
+}
+
 /// Upgrade to `latest` in place. Returns the binary to exec on success —
 /// Homebrew repoints `a3s` on PATH (exec by name); a direct download swaps
-/// `current_exe` (exec that path) — or `None` if every path failed.
+/// `current_exe` (exec that path) — or an error explaining why every path failed.
 ///
 /// Run after the TUI has exited (terminal restored) so child stdio shows real
 /// download/upgrade progress.
-pub(crate) fn perform_upgrade(latest: &str) -> Option<PathBuf> {
+pub(crate) fn perform_upgrade(latest: &str) -> Result<PathBuf, String> {
     let runner = RealCommandRunner;
-    let exe = std::env::current_exe().ok()?;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate current binary: {e}"))?;
     perform_upgrade_with(latest, &runner, exe)
 }
 
@@ -182,17 +268,19 @@ fn perform_upgrade_with(
     latest: &str,
     runner: &impl CommandRunner,
     current_exe: PathBuf,
-) -> Option<PathBuf> {
+) -> Result<PathBuf, String> {
     if latest.trim().is_empty() {
-        return None;
+        return Err("latest version is empty".to_string());
     }
 
-    if brew_manages_a3s(runner) {
+    let mut failures = Vec::new();
+    if let Some(formula) = managed_brew_formula(runner) {
         // `brew upgrade` reads a *cached* formula — refresh the tap first, else
         // it no-ops with "already installed". Prefer a fast targeted git pull,
         // fall back to a full `brew update`.
+        let _ = runner.status(OsStr::new("brew"), &args(&["tap", BREW_TAP, BREW_TAP_URL]));
         let tap = runner
-            .output(OsStr::new("brew"), &args(&["--repo", "a3s-lab/tap"]))
+            .output(OsStr::new("brew"), &args(&["--repo", BREW_TAP]))
             .filter(|o| o.success)
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
             .filter(|s| !s.is_empty());
@@ -215,42 +303,59 @@ fn perform_upgrade_with(
             let _ = runner.status(OsStr::new("brew"), &args(&["update"]));
         }
         println!("\n⬇  upgrading a3s {latest} via Homebrew…\n");
-        let _ = runner.status(OsStr::new("brew"), &args(&["upgrade", "a3s"]));
-        let brew_bin = PathBuf::from("a3s");
-        if verify_binary_version(runner, brew_bin.as_os_str(), latest).is_some() {
-            return Some(PathBuf::from("a3s"));
+        let upgrade_ok = runner.status(OsStr::new("brew"), &args(&["upgrade", formula]));
+        if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+            return Ok(bin);
         }
 
         // Homebrew metadata can claim the new version while PATH still runs an
         // older binary (stale link, failed pour, or partial tap refresh). Reinstall
         // once before falling back to the standalone updater.
-        if brew_has_version(runner, latest) {
-            eprintln!(
-                "\n⚠  Homebrew metadata says {latest}, but `a3s --version` did not — reinstalling…"
-            );
-            let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", "a3s"]));
-            if verify_binary_version(runner, brew_bin.as_os_str(), latest).is_some() {
-                return Some(PathBuf::from("a3s"));
-            }
+        let metadata_has_latest = brew_has_version(runner, formula, latest);
+        let reason = if metadata_has_latest {
+            format!("Homebrew metadata says {latest}, but `a3s --version` did not")
+        } else if upgrade_ok {
+            "Homebrew upgrade finished, but the installed binary is still old".to_string()
+        } else {
+            "Homebrew upgrade failed".to_string()
+        };
+        eprintln!("\n⚠  {reason} — reinstalling…");
+        let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", formula]));
+        if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+            return Ok(bin);
         }
 
+        let failure = format!("Homebrew formula {formula} did not install a3s {latest}");
+        failures.push(failure);
         eprintln!("\n⚠  Homebrew didn't install a3s {latest} — falling back to a direct download…");
     }
-    standalone_upgrade_with(latest, runner, current_exe)
+    standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
+        failures.push(e);
+        failures.join("; ")
+    })
 }
 
 fn standalone_upgrade_with(
     latest: &str,
     runner: &impl CommandRunner,
     exe: PathBuf,
-) -> Option<PathBuf> {
-    let target = release_target()?;
+) -> Result<PathBuf, String> {
+    let target = release_target().ok_or_else(|| {
+        format!(
+            "automatic self-update is not supported on {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
     let url = format!(
         "https://github.com/A3S-Lab/Cli/releases/download/v{latest}/a3s-v{latest}-{target}.tar.gz"
     );
     let tmp = unique_update_dir();
     if std::fs::create_dir_all(&tmp).is_err() {
-        return None;
+        return Err(format!(
+            "could not create temporary directory {}",
+            tmp.display()
+        ));
     }
     let tarball = tmp.join("a3s.tar.gz");
     println!("\n⬇  downloading a3s {latest}…\n");
@@ -258,6 +363,12 @@ fn standalone_upgrade_with(
         OsStr::new("curl"),
         &[
             OsString::from("-fL"),
+            OsString::from("--retry"),
+            OsString::from("3"),
+            OsString::from("--connect-timeout"),
+            OsString::from("10"),
+            OsString::from("--max-time"),
+            OsString::from("180"),
             OsString::from("--progress-bar"),
             OsString::from("-o"),
             tarball.as_os_str().to_os_string(),
@@ -266,7 +377,7 @@ fn standalone_upgrade_with(
     );
     if !dl {
         let _ = std::fs::remove_dir_all(&tmp);
-        return None;
+        return Err(format!("download failed: {url}"));
     }
     let extracted = runner.status(
         OsStr::new("tar"),
@@ -277,11 +388,12 @@ fn standalone_upgrade_with(
             tmp.as_os_str().to_os_string(),
         ],
     );
-    let new_bin = tmp.join("a3s");
-    if !extracted || !new_bin.exists() {
+    let new_bin = find_downloaded_binary(&tmp);
+    if !extracted || new_bin.is_none() {
         let _ = std::fs::remove_dir_all(&tmp);
-        return None;
+        return Err("release archive did not contain an a3s binary".to_string());
     }
+    let new_bin = new_bin.unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -290,17 +402,45 @@ fn standalone_upgrade_with(
     if verify_binary_version(runner, new_bin.as_os_str(), latest).is_none() {
         eprintln!("\n✗ downloaded a3s did not report version {latest}");
         let _ = std::fs::remove_dir_all(&tmp);
-        return None;
+        return Err(format!(
+            "downloaded binary {} did not report version {latest}",
+            new_bin.display()
+        ));
     }
     let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => Some(exe),
+        Ok(()) => Ok(exe),
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
-            None
+            Err(err)
         }
     };
     let _ = std::fs::remove_dir_all(&tmp);
     result
+}
+
+fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
+    let direct = root.join("a3s");
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .file_name()
+                .is_some_and(|name| name == OsStr::new("a3s"))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 fn unique_update_dir() -> PathBuf {
@@ -404,11 +544,22 @@ mod tests {
         assert_eq!(v.as_deref(), Some("1.2.30"));
         let v = version_from_release_url("https://github.com/A3S-Lab/Cli/releases/tag/1.2.31");
         assert_eq!(v.as_deref(), Some("1.2.31"));
+        let v = version_from_release_url(
+            "https://github.com/A3S-Lab/Cli/releases/tag/v1.2.32?expanded=true",
+        );
+        assert_eq!(v.as_deref(), Some("1.2.32"));
         // No redirect to a tag (e.g. the bare releases page) → None, not garbage.
         assert_eq!(
             version_from_release_url("https://github.com/A3S-Lab/Cli/releases"),
             None
         );
+    }
+
+    #[test]
+    fn parse_version_from_api_json() {
+        let json = br#"{"tag_name":"v2.3.4"}"#;
+        assert_eq!(version_from_api_response(json).as_deref(), Some("2.3.4"));
+        assert_eq!(version_from_api_response(br#"{"name":"v2.3.4"}"#), None);
     }
 
     #[test]
@@ -473,6 +624,7 @@ mod tests {
             Some(CommandOutput {
                 success: true,
                 stdout,
+                stderr: Vec::new(),
             })
         }
 
@@ -487,10 +639,15 @@ mod tests {
         let runner = FakeRunner::default();
         let result = perform_upgrade_with("9.9.9", &runner, PathBuf::from("/unused/a3s"));
 
-        assert_eq!(result.as_deref(), Some(Path::new("a3s")));
+        assert_eq!(result.as_deref(), Ok(Path::new("a3s")));
         let commands = runner.commands();
-        assert!(commands.iter().any(|c| c == "brew upgrade a3s"));
-        assert!(commands.iter().any(|c| c == "brew reinstall a3s"));
+        assert!(commands
+            .iter()
+            .any(|c| c == "brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap"));
+        assert!(commands.iter().any(|c| c == "brew upgrade a3s-lab/tap/a3s"));
+        assert!(commands
+            .iter()
+            .any(|c| c == "brew reinstall a3s-lab/tap/a3s"));
         assert_eq!(runner.version_checks.load(Ordering::SeqCst), 2);
     }
 
@@ -598,10 +755,12 @@ mod tests {
     impl CommandRunner for FakeStandaloneRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
-            if line == "brew list --versions a3s" {
+            if line == "brew list --versions a3s" || line == "brew list --versions a3s-lab/tap/a3s"
+            {
                 return Some(CommandOutput {
                     success: false,
                     stdout: Vec::new(),
+                    stderr: Vec::new(),
                 });
             }
             RealCommandRunner.output(program, args)
@@ -652,7 +811,7 @@ mod tests {
         let runner = FakeStandaloneRunner::default();
         let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
 
-        assert_eq!(result.as_deref(), Some(current.as_path()));
+        assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
 
@@ -661,5 +820,73 @@ mod tests {
             .iter()
             .any(|c| c.contains(&format!("a3s-v9.9.9-{target}.tar.gz"))));
         assert!(commands.iter().any(|c| c.starts_with("tar xzf ")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn standalone_upgrade_accepts_nested_archive_binary() {
+        let tmp = TempDir::new("standalone-nested");
+        let current = tmp.path("a3s");
+        write_executable(&current, "0.1.0");
+
+        #[derive(Default)]
+        struct NestedRunner {
+            commands: Mutex<Vec<String>>,
+        }
+
+        impl NestedRunner {
+            fn record(&self, program: &OsStr, args: &[OsString]) -> String {
+                let mut line = program.to_string_lossy().to_string();
+                for arg in args {
+                    line.push(' ');
+                    line.push_str(&arg.to_string_lossy());
+                }
+                self.commands.lock().unwrap().push(line.clone());
+                line
+            }
+        }
+
+        impl CommandRunner for NestedRunner {
+            fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
+                let line = self.record(program, args);
+                if line == "brew list --versions a3s"
+                    || line == "brew list --versions a3s-lab/tap/a3s"
+                {
+                    return Some(CommandOutput {
+                        success: false,
+                        stdout: Vec::new(),
+                        stderr: Vec::new(),
+                    });
+                }
+                RealCommandRunner.output(program, args)
+            }
+
+            fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
+                self.record(program, args);
+                match program.to_string_lossy().as_ref() {
+                    "curl" => args
+                        .windows(2)
+                        .find(|pair| pair[0] == "-o")
+                        .map(|pair| PathBuf::from(&pair[1]))
+                        .is_some_and(|out| std::fs::write(out, "fake tarball\n").is_ok()),
+                    "tar" => args
+                        .windows(2)
+                        .find(|pair| pair[0] == "-C")
+                        .map(|pair| PathBuf::from(&pair[1]))
+                        .is_some_and(|dest| {
+                            write_executable(&dest.join("pkg").join("bin").join("a3s"), "9.9.9");
+                            true
+                        }),
+                    _ => false,
+                }
+            }
+        }
+
+        let runner = NestedRunner::default();
+        let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
+
+        assert_eq!(result.as_deref(), Ok(current.as_path()));
+        let out = Command::new(&current).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
     }
 }

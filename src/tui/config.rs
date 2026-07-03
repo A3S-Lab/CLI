@@ -18,6 +18,9 @@ default_model = "openai/my-model"
 # Optional: where /flow workflow DAG JSONs are stored (default ~/.a3s/flows).
 # flow_dir = "~/.a3s/flows"
 
+# Optional: where /agent agent definitions are stored (default ~/.a3s/agents).
+# agent_dir = "~/.a3s/agents"
+
 providers "openai" {
   apiKey  = "sk-REPLACE-ME"
   baseUrl = "https://api.openai.com/v1/"   # or any OpenAI-compatible endpoint
@@ -85,6 +88,27 @@ pub(crate) fn flow_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(|h| std::path::Path::new(&h).join(".a3s/flows"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/flows"))
+}
+
+/// Where `/agent` definitions are stored: `$A3S_AGENT_DIR`, else a top-level
+/// `agent_dir = "…"` in config.acl, else `~/.a3s/agents`. Read at use time so
+/// a `/config` edit takes effect without a restart.
+pub(crate) fn agent_dir() -> std::path::PathBuf {
+    if let Some(d) = std::env::var_os("A3S_AGENT_DIR") {
+        if !d.is_empty() {
+            return std::path::PathBuf::from(d);
+        }
+    }
+    if let Some(path) = find_config() {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Some(d) = top_level_str(&text, "agent_dir") {
+                return expand_home(&d);
+            }
+        }
+    }
+    std::env::var_os("HOME")
+        .map(|h| std::path::Path::new(&h).join(".a3s/agents"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".a3s/agents"))
 }
 
 /// Extract a top-level `key = "value"` scalar from HCL-ish text. Only lines at

@@ -16,26 +16,82 @@ pub(crate) fn kb_dir(cwd: &str) -> PathBuf {
 const MAX_DIR_FILES: usize = 300;
 /// Skip any single file larger than this (KB stores text notes, not blobs).
 const MAX_FILE_BYTES: u64 = 1_048_576; // 1 MiB
+const MAX_SEARCH_HITS: usize = 30;
 
-/// Ingest `arg` into the KB and return a one-line human summary. `now` is an
-/// RFC3339 timestamp (injected so the logic is testable).
-pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KbStats {
+    pub(crate) sources: usize,
+    pub(crate) concepts: usize,
+    pub(crate) imports: usize,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImportKind {
+    File,
+    Folder,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportPreview {
+    pub(crate) arg: String,
+    pub(crate) path: PathBuf,
+    pub(crate) kind: ImportKind,
+    pub(crate) addable: usize,
+    pub(crate) skipped: usize,
+    pub(crate) capped: bool,
+    pub(crate) bytes: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SearchHit {
+    pub(crate) path: String,
+    pub(crate) line: usize,
+    pub(crate) snippet: String,
+}
+
+pub(crate) fn kb_stats(cwd: &str) -> KbStats {
+    let kb = kb_dir(cwd);
+    KbStats {
+        sources: count_regular_files(&kb.join("sources"), true),
+        concepts: count_md(&kb.join("wiki")),
+        imports: count_source_log(&kb.join("sources").join("SOURCES.md")),
+        bytes: dir_bytes(&kb),
+    }
+}
+
+pub(crate) fn recent_sources(cwd: &str, limit: usize) -> Vec<String> {
+    let root = kb_dir(cwd).join("sources");
+    let mut files = Vec::new();
+    collect_files(&root, &mut files);
+    files.sort_by_key(|p| {
+        std::fs::metadata(p)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(std::cmp::Reverse)
+    });
+    files
+        .into_iter()
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some("SOURCES.md"))
+        .take(limit)
+        .map(|p| show(cwd, &p))
+        .collect()
+}
+
+pub(crate) fn add_text_to_kb(cwd: &str, text: &str, now: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() {
+        return "✗ /kb add needs text".to_string();
+    }
+    ingest_text(text, &kb_dir(cwd).join("sources"), now)
+        .map(|dest| format!("✔ captured note to KB · {}", show(cwd, &dest)))
+        .unwrap_or_else(|e| format!("✗ /kb add failed: {e}"))
+}
+
+pub(crate) fn import_to_kb(cwd: &str, arg: &str, now: &str) -> String {
     let arg = arg.trim();
     let sources = kb_dir(cwd).join("sources");
-    if arg.is_empty() {
-        let n = count_md(&kb_dir(cwd));
-        return format!(
-            "KB at .a3s/kb · {n} note(s). usage: /kb <text> | /kb <file> | /kb <folder>"
-        );
-    }
-    let path = {
-        let p = Path::new(arg);
-        if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            Path::new(cwd).join(p)
-        }
-    };
+    let path = resolve_path(cwd, arg);
     let result = if path.is_file() {
         ingest_file(&path, &sources).map(|dest| {
             log_source(&sources, now, "file", arg, &dest);
@@ -57,10 +113,99 @@ pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
             )
         })
     } else {
-        ingest_text(arg, &sources, now)
-            .map(|dest| format!("✔ captured note to KB · {}", show(cwd, &dest)))
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "path not found",
+        ))
     };
-    result.unwrap_or_else(|e| format!("✗ /kb failed: {e}"))
+    result.unwrap_or_else(|e| format!("✗ /kb import failed: {e}"))
+}
+
+pub(crate) fn preview_import(cwd: &str, arg: &str) -> Result<ImportPreview, String> {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        return Err("usage: /kb import <file|folder>".to_string());
+    }
+    let path = resolve_path(cwd, arg);
+    if path.is_file() {
+        let bytes = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if !is_text_file(&path).map_err(|e| e.to_string())? {
+            return Err("not a text file (KB stores text)".to_string());
+        }
+        return Ok(ImportPreview {
+            arg: arg.to_string(),
+            path,
+            kind: ImportKind::File,
+            addable: 1,
+            skipped: 0,
+            capped: false,
+            bytes,
+        });
+    }
+    if path.is_dir() {
+        let (addable, skipped, capped, bytes) = preview_dir(&path);
+        return Ok(ImportPreview {
+            arg: arg.to_string(),
+            path,
+            kind: ImportKind::Folder,
+            addable,
+            skipped,
+            capped,
+            bytes,
+        });
+    }
+    Err("path not found · use `/kb add <text>` to add a text note".to_string())
+}
+
+pub(crate) fn search_kb(cwd: &str, query: &str) -> Vec<SearchHit> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    collect_files(&kb_dir(cwd), &mut files);
+    let mut hits = Vec::new();
+    for path in files {
+        if hits.len() >= MAX_SEARCH_HITS {
+            break;
+        }
+        if !is_text_file(&path).unwrap_or(false) {
+            continue;
+        }
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (idx, line) in body.lines().enumerate() {
+            if line.to_lowercase().contains(&q) {
+                hits.push(SearchHit {
+                    path: show(cwd, &path),
+                    line: idx + 1,
+                    snippet: line.trim().chars().take(180).collect(),
+                });
+                break;
+            }
+        }
+    }
+    hits
+}
+
+/// Ingest `arg` into the KB and return a one-line human summary. `now` is an
+/// RFC3339 timestamp (injected so the logic is testable).
+#[cfg(test)]
+pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
+    let arg = arg.trim();
+    if arg.is_empty() {
+        let n = kb_stats(cwd).sources;
+        return format!(
+            "KB at .a3s/kb · {n} source(s). usage: /kb add <text> | /kb import <file|folder>"
+        );
+    }
+    let path = resolve_path(cwd, arg);
+    if path.is_file() || path.is_dir() {
+        import_to_kb(cwd, arg, now)
+    } else {
+        add_text_to_kb(cwd, arg, now)
+    }
 }
 
 /// Capture typed text as an OKF note (frontmatter + body).
@@ -154,6 +299,44 @@ fn is_text_file(p: &Path) -> std::io::Result<bool> {
     Ok(!buf[..n].contains(&0))
 }
 
+fn preview_dir(dir: &Path) -> (usize, usize, bool, u64) {
+    let (mut addable, mut skipped, mut bytes) = (0usize, 0usize, 0u64);
+    let mut capped = false;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if addable >= MAX_DIR_FILES {
+            capped = true;
+            break;
+        }
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            skipped += 1;
+            continue;
+        };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with('.') || matches!(name, "target" | "node_modules") {
+                continue;
+            }
+            if p.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if addable >= MAX_DIR_FILES {
+                capped = true;
+                break;
+            }
+            if is_text_file(&p).unwrap_or(false) {
+                addable += 1;
+                bytes += std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            } else {
+                skipped += 1;
+            }
+        }
+    }
+    (addable, skipped, capped, bytes)
+}
+
 /// Append a provenance line to `sources/SOURCES.md` (copied files carry no
 /// frontmatter, so this is where their origin is recorded).
 fn log_source(sources: &Path, now: &str, kind: &str, origin: &str, dest: &Path) {
@@ -187,6 +370,54 @@ fn count_md(kb: &Path) -> usize {
         }
     }
     n
+}
+
+fn count_regular_files(root: &Path, exclude_sources_log: bool) -> usize {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    files
+        .into_iter()
+        .filter(|p| {
+            !exclude_sources_log || p.file_name().and_then(|n| n.to_str()) != Some("SOURCES.md")
+        })
+        .count()
+}
+
+fn count_source_log(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .filter(|l| l.trim_start().starts_with("- "))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn dir_bytes(root: &Path) -> u64 {
+    let mut files = Vec::new();
+    collect_files(root, &mut files);
+    files
+        .into_iter()
+        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+        .sum()
+}
+
+fn collect_files(root: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_files(&path, out);
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
 }
 
 /// Filesystem-safe slug from a title (keeps unicode letters/digits, e.g. CJK).
@@ -226,6 +457,21 @@ fn unique_path(p: &Path) -> PathBuf {
         }
     }
     p.to_path_buf()
+}
+
+fn resolve_path(cwd: &str, arg: &str) -> PathBuf {
+    if arg == "~" || arg.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let rest = arg.strip_prefix("~/").unwrap_or("");
+            return Path::new(&home).join(rest);
+        }
+    }
+    let p = Path::new(arg);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(cwd).join(p)
+    }
 }
 
 fn dir_name(p: &Path) -> String {
@@ -332,9 +578,82 @@ mod tests {
     }
 
     #[test]
+    fn explicit_add_text_and_import_path() {
+        let cwd = tmp();
+        let cwds = cwd.to_str().unwrap();
+        let note = add_text_to_kb(cwds, "A reusable API note", "2026-07-01T00:00:00Z");
+        assert!(note.contains("captured note"), "{note}");
+
+        let f = cwd.join("source.md");
+        std::fs::write(&f, "Runtime evidence").unwrap();
+        let imported = import_to_kb(cwds, f.to_str().unwrap(), "2026-07-01T00:00:00Z");
+        assert!(imported.contains("added file"), "{imported}");
+        assert!(kb_dir(cwds).join("sources/source.md").exists());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn preview_import_file_and_folder_counts() {
+        let cwd = tmp();
+        let cwds = cwd.to_str().unwrap();
+        let file = cwd.join("one.txt");
+        std::fs::write(&file, "one").unwrap();
+        let p = preview_import(cwds, file.to_str().unwrap()).unwrap();
+        assert_eq!(p.kind, ImportKind::File);
+        assert_eq!(p.addable, 1);
+        assert_eq!(p.bytes, 3);
+
+        let dir = cwd.join("docs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "alpha").unwrap();
+        std::fs::write(dir.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let p = preview_import(cwds, dir.to_str().unwrap()).unwrap();
+        assert_eq!(p.kind, ImportKind::Folder);
+        assert_eq!(p.addable, 1);
+        assert_eq!(p.skipped, 1);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn search_kb_finds_source_lines() {
+        let cwd = tmp();
+        let cwds = cwd.to_str().unwrap();
+        let _ = add_text_to_kb(
+            cwds,
+            "Alpha\nThe Runtime needs parallel workers\nOmega",
+            "2026-07-01T00:00:00Z",
+        );
+        let hits = search_kb(cwds, "parallel workers");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].line, 8); // frontmatter + blank + body line 2
+        assert!(hits[0].snippet.contains("Runtime needs parallel workers"));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn missing_import_path_guides_to_add() {
+        let cwd = tmp();
+        let err = preview_import(cwd.to_str().unwrap(), "missing.md").unwrap_err();
+        assert!(err.contains("/kb add <text>"), "{err}");
+        let out = import_to_kb(cwd.to_str().unwrap(), "missing.md", "2026-07-01T00:00:00Z");
+        assert!(out.contains("/kb import failed"), "{out}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn resolve_path_expands_home_prefix() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            resolve_path("/tmp/project", "~/notes.md"),
+            Path::new(&home).join("notes.md")
+        );
+        assert_eq!(resolve_path("/tmp/project", "~"), PathBuf::from(home));
+    }
+
+    #[test]
     fn slug_keeps_unicode_and_dedupes() {
         assert_eq!(slug("Hello, World!"), "hello-world");
-        assert_eq!(slug("用 HCL 配置"), "用-hcl-配置");
+        assert_eq!(slug("Café HCL Config"), "café-hcl-config");
         assert_eq!(slug("   "), "note");
     }
 }

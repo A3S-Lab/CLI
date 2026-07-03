@@ -49,6 +49,38 @@ pub fn codex_models() -> Vec<String> {
     from_cache().unwrap_or_else(|| vec!["gpt-5.5".to_string()])
 }
 
+pub(crate) fn codex_model_context(model: &str) -> Option<u32> {
+    let home = std::env::var_os("HOME")?;
+    let path = std::path::Path::new(&home).join(".codex/models_cache.json");
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    v.get("models")?
+        .as_array()?
+        .iter()
+        .find(|m| m.get("slug").and_then(|x| x.as_str()) == Some(model))
+        .and_then(parse_model_context)
+}
+
+fn parse_model_context(model: &Value) -> Option<u32> {
+    const KEYS: &[&str] = &[
+        "context_length",
+        "max_context_length",
+        "max_model_len",
+        "context_window",
+        "max_input_tokens",
+    ];
+    for key in KEYS {
+        if let Some(n) = model.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0) {
+            return Some(n as u32);
+        }
+    }
+    model
+        .get("model_info")
+        .and_then(|info| info.get("max_input_tokens"))
+        .and_then(|v| v.as_u64())
+        .filter(|n| *n > 0)
+        .map(|n| n as u32)
+}
+
 pub struct CodexClient {
     access_token: String,
     account_id: String,
@@ -428,4 +460,23 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_model_context_from_cache_shapes() {
+        assert_eq!(
+            parse_model_context(&json!({"context_length": 200000})),
+            Some(200_000)
+        );
+        assert_eq!(
+            parse_model_context(&json!({"model_info": {"max_input_tokens": 1000000}})),
+            Some(1_000_000)
+        );
+        assert_eq!(parse_model_context(&json!({"context_window": 0})), None);
+        assert_eq!(parse_model_context(&json!({"slug": "gpt"})), None);
+    }
 }

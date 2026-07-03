@@ -13,7 +13,7 @@ use super::super::*;
 /// What Enter does with the picked project: full Agentic CI/CD (`/deploy`),
 /// a quick dev-mode debug run on the A3S Runtime (`/run`), or a read-only
 /// code review of the local clone (`/review` without a URL).
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RepoAction {
     Deploy,
     Run,
@@ -95,6 +95,13 @@ pub(crate) fn deploy_prompt(project_dir: &str, project: &str, access_url: &str) 
     format!(
         "Run Agentic CI/CD for the project at {project_dir} and deploy it to OS, then \
          make it reachable at its gateway access address.\n\
+         RemoteUI requirement: before the build/deploy work starts, use the signed-in \
+         OS progressive API / Runtime capability to create or open the live CI/CD \
+         execution view for this run (GitHub Actions-style timeline, step status, \
+         streaming logs, artifacts, and gateway link). Execute the relevant OS \
+         operation with `\"shaped\":true` and keep the whole execute response in \
+         the tool output so its `.view` / `viewUrl` survives; the TUI will auto-open \
+         the first RemoteUI view it sees. Do not print a raw authenticated URL.\n\
          IMPORTANT: {project_dir} is OUTSIDE this session's workspace, so the \
          path-scoped file tools (read/ls/glob/grep/edit) will reject it — use the \
          `bash` tool for everything under it (e.g. `ls`, `cat`, `find`, `sed -n`, and \
@@ -123,6 +130,13 @@ pub(crate) fn run_prompt(project_dir: &str, project: &str, access_url: &str) -> 
     format!(
         "Start the project at {project_dir} in DEVELOPMENT mode on the A3S Runtime for \
          quick debugging, and make it reachable at its dev access address.\n\
+         RemoteUI requirement: before starting the dev process, use the signed-in OS \
+         progressive API / Runtime capability to create or open the live Runtime run \
+         view for this session (GitHub Actions-style timeline, step status, streaming \
+         logs, health checks, and access link). Execute the relevant OS operation with \
+         `\"shaped\":true` and keep the whole execute response in the tool output so \
+         its `.view` / `viewUrl` survives; the TUI will auto-open the first RemoteUI \
+         view it sees. Do not print a raw authenticated URL.\n\
          IMPORTANT: {project_dir} is OUTSIDE this session's workspace, so the \
          path-scoped file tools (read/ls/glob/grep/edit) will reject it — use the \
          `bash` tool for everything under it (with `cd {project_dir}`).\n\
@@ -141,6 +155,39 @@ pub(crate) fn run_prompt(project_dir: &str, project: &str, access_url: &str) -> 
          failing command and its error — don't claim success you didn't verify.\n\
          Project: {project}"
     )
+}
+
+fn repo_picker_header(
+    action: RepoAction,
+    total: usize,
+    root: &std::path::Path,
+    width: usize,
+) -> String {
+    let (icon_title, _) = repo_picker_copy(action);
+    truncate(
+        &format!(
+            "  {icon_title} — pick a project ({total} in {})",
+            root.to_string_lossy()
+        ),
+        width,
+    )
+}
+
+fn repo_picker_hint(action: RepoAction, width: usize) -> String {
+    let (_, enter_hint) = repo_picker_copy(action);
+    truncate(&format!("  ↑/↓ select · {enter_hint} · Esc cancel"), width)
+}
+
+fn repo_picker_copy(action: RepoAction) -> (&'static str, &'static str) {
+    match action {
+        RepoAction::Deploy => ("🚀 deploy", "Enter run Agentic CI/CD"),
+        RepoAction::Run => ("▶ run", "Enter start dev mode on A3S Runtime"),
+        RepoAction::Review => ("🔎 review", "Enter review (read-only)"),
+    }
+}
+
+fn repo_picker_project_row(name: &str, width: usize) -> String {
+    pad_to(&truncate(&format!("  {name}"), width), width)
 }
 
 impl App {
@@ -190,6 +237,8 @@ impl App {
                     let prompt =
                         super::review::local_review_prompt(&dir.to_string_lossy(), &project);
                     let label = format!("🔎 review: {project}");
+                    self.review = None;
+                    self.review_open = false;
                     self.messages
                         .push(gutter(TN_PURPLE, &Style::new().bold().render(&label)));
                     self.push_line(&Style::new().fg(TN_GRAY).render(
@@ -211,19 +260,23 @@ impl App {
                         let access = gateway_access_url(&gateway, &project);
                         let prompt = deploy_prompt(&dir.to_string_lossy(), &project, &access);
                         let label = format!("🚀 Agentic CI/CD: {project} → {access}");
-                        let hint = format!("  build → test → deploy → gateway access {access}");
+                        let hint = format!(
+                            "  build → test → deploy → gateway access {access} · RemoteUI opens live CI/CD view"
+                        );
                         (prompt, label, hint)
                     }
                     RepoAction::Run => {
                         let access = dev_access_url(&gateway, &project);
                         let prompt = run_prompt(&dir.to_string_lossy(), &project, &access);
                         let label = format!("▶ dev run: {project} → {access}");
-                        let hint =
-                            format!("  dev mode on A3S Runtime · debug run → access {access}");
+                        let hint = format!(
+                            "  dev mode on A3S Runtime · debug run → access {access} · RemoteUI opens live run view"
+                        );
                         (prompt, label, hint)
                     }
                     RepoAction::Review => unreachable!("handled above"),
                 };
+                self.arm_runtime_view_auto_open(panel.action, project.clone());
                 self.messages
                     .push(gutter(ACCENT, &Style::new().bold().render(&label)));
                 self.push_line(&Style::new().fg(TN_GRAY).render(&hint));
@@ -236,6 +289,7 @@ impl App {
                     prio: 1,
                     seq: self.seq,
                     text: prompt,
+                    display: label,
                 });
                 self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             }
@@ -251,24 +305,18 @@ impl App {
         };
         let width = self.width as usize;
         let total = p.projects.len();
-        let (icon_title, enter_hint) = match p.action {
-            RepoAction::Deploy => ("🚀 deploy", "Enter run Agentic CI/CD"),
-            RepoAction::Run => ("▶ run", "Enter start dev mode on A3S Runtime"),
-            RepoAction::Review => ("🔎 review", "Enter review (read-only)"),
-        };
         let mut menu = vec![
             pad_to(
-                &Style::new().fg(ACCENT).bold().render(&format!(
-                    "  {icon_title} — pick a project ({} in {})",
-                    total,
-                    truncate(&p.root.to_string_lossy(), width.saturating_sub(28))
-                )),
+                &Style::new()
+                    .fg(ACCENT)
+                    .bold()
+                    .render(&repo_picker_header(p.action, total, &p.root, width)),
                 width,
             ),
             pad_to(
                 &Style::new()
                     .fg(TN_GRAY)
-                    .render(&format!("  ↑/↓ select · {enter_hint} · Esc cancel")),
+                    .render(&repo_picker_hint(p.action, width)),
                 width,
             ),
         ];
@@ -281,9 +329,9 @@ impl App {
         };
         let end = (start + max_rows).min(total);
         for (row, name) in p.projects.iter().enumerate().take(end).skip(start) {
-            let raw = pad_to(&format!("  {name}"), width);
+            let raw = repo_picker_project_row(name, width);
             menu.push(if row == sel {
-                Style::new().fg(Color::Black).bg(ACCENT).render(&raw)
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
                 Style::new().fg(TN_FG).render(&raw)
             });
@@ -351,6 +399,8 @@ mod tests {
         assert!(p.contains("http://os/apps/svc-dev")); // the concrete dev address
         assert!(p.contains("<gateway-origin>/apps/<project-slug>-dev")); // the rule
         assert!(p.contains("DEVELOPMENT mode") && p.contains("A3S Runtime"));
+        assert!(p.contains("RemoteUI requirement") && p.contains("GitHub Actions-style"));
+        assert!(p.contains("\"shaped\":true") && p.contains(".view") && p.contains("viewUrl"));
         // Speed-first: a debug run must not turn into full CI/CD.
         assert!(p.contains("skip full builds, tests, and linters"));
         // The deliverable: the access address on its own line.
@@ -367,8 +417,33 @@ mod tests {
         assert!(p.contains("http://os/apps/svc")); // the concrete access address, twice
         assert!(p.contains("<gateway-origin>/apps/<project-slug>")); // the rule
         assert!(p.contains("run its tests") && p.contains("gateway"));
+        assert!(p.contains("RemoteUI requirement") && p.contains("GitHub Actions-style"));
+        assert!(p.contains("\"shaped\":true") && p.contains(".view") && p.contains("viewUrl"));
         // Out-of-workspace fix: the directive must steer the agent to bash
         // (the file tools are workspace-scoped and reject ~/.a3s/repos).
         assert!(p.contains("OUTSIDE this session's workspace") && p.contains("bash"));
+    }
+
+    #[test]
+    fn picker_rows_fit_fixed_width_for_long_project_names() {
+        let row = repo_picker_project_row(
+            "very-long-project-name-that-would-otherwise-spill-across-the-terminal",
+            28,
+        );
+        assert_eq!(a3s_tui::style::visible_len(&row), 28);
+        assert!(row.contains('…'), "{row}");
+    }
+
+    #[test]
+    fn picker_header_and_hint_fit_fixed_width() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/repos/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        for action in [RepoAction::Deploy, RepoAction::Run, RepoAction::Review] {
+            let header = repo_picker_header(action, 42, &root, 42);
+            let hint = repo_picker_hint(action, 42);
+            assert!(a3s_tui::style::visible_len(&header) <= 42, "{header}");
+            assert!(a3s_tui::style::visible_len(&hint) <= 42, "{hint}");
+        }
     }
 }

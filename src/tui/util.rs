@@ -13,12 +13,12 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 }
 
 /// Prefix a message block with a colored ● gutter on its first line and align
-/// the rest under the text — marks user (blue) vs assistant (green) messages.
+/// the rest under the text.
 /// A user-input message rendered with a subtle background "bubble" so it stands
 /// out from agent output in the transcript.
 pub(crate) fn user_bubble(content: &str, width: usize) -> String {
     let margin = " ".repeat(PAD);
-    let bg = Color::Rgb(38, 45, 64);
+    let bg = SURFACE_SOFT;
     // Full-width bar (minus the outer margins) with inner left/right padding.
     let bar = width.saturating_sub(PAD * 2).max(8);
     content
@@ -171,11 +171,11 @@ pub(crate) fn shimmer(text: &str, phase: usize) -> String {
         let d = (head - i as isize).abs() as f32;
         let t = (1.0 - d / 5.0).clamp(0.0, 1.0);
         let lerp = |a: f32, b: f32| (a + (b - a) * t) as u8;
-        // ACCENT (37,99,235) → bright tint (228,236,255).
+        // ACCENT (#0070f3) → link-soft tint (#d3e5ff).
         let mut s = Style::new().fg(Color::Rgb(
-            lerp(37.0, 228.0),
-            lerp(99.0, 236.0),
-            lerp(235.0, 255.0),
+            lerp(0.0, 211.0),
+            lerp(112.0, 229.0),
+            lerp(243.0, 255.0),
         ));
         if t > 0.65 {
             s = s.bold();
@@ -227,24 +227,24 @@ mod tests {
     }
 
     #[test]
-    fn wrap_words_counts_display_columns_for_cjk() {
-        // 6 CJK chars = 12 columns; CJK has no spaces so it's one token that
+    fn wrap_words_counts_display_columns_for_wide_unicode() {
+        // 6 wide chars = 12 columns; this text has no spaces so it's one token that
         // must hard-break by COLUMN budget, never exceeding the width.
-        let lines = wrap_words("中文测试内容", 8);
+        let lines = wrap_words("かなテストあ", 8);
         for l in &lines {
             assert!(
                 a3s_tui::style::visible_len(l) <= 8,
                 "line wider than 8 columns: {l:?}"
             );
         }
-        assert_eq!(lines.concat(), "中文测试内容");
+        assert_eq!(lines.concat(), "かなテストあ");
     }
 
     #[test]
     fn truncate_budgets_display_columns_not_chars() {
-        // 5 CJK chars = 10 columns; a 6-column budget must fit (≤ 6 cols incl …),
+        // 5 wide chars = 10 columns; a 6-column budget must fit (<= 6 cols incl ...),
         // which char-counting would have overflowed to ~10 columns.
-        let out = truncate("一二三四五", 6);
+        let out = truncate("アイウエオ", 6);
         assert!(
             a3s_tui::style::visible_len(&out) <= 6,
             "truncated string exceeds 6 columns: {out:?}"

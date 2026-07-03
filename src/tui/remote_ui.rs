@@ -7,7 +7,11 @@
 //! token into localStorage (from `A3S_OS_TOKEN`, which the TUI exports) and loads
 //! the page authenticated. Plain links still go to the user's browser.
 
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+
+static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
 
 /// A `viewUrl` (+ optional size / embeddable hint) extracted from a tool result.
 #[derive(Clone, Debug, PartialEq)]
@@ -119,26 +123,63 @@ fn parse_legacy_view_url(
 
 /// Locate the `a3s-webview` binary: prefer a sibling of the running `a3s`
 /// executable (how it ships), else fall back to the bare name on `PATH`.
-fn webview_bin() -> std::path::PathBuf {
-    let name = if cfg!(windows) {
+fn webview_binary_name() -> &'static str {
+    if cfg!(windows) {
         "a3s-webview.exe"
     } else {
         "a3s-webview"
-    };
+    }
+}
+
+fn executable_path(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        Some(path.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find_map(|path| executable_path(&path))
+}
+
+fn find_existing_webview() -> Option<PathBuf> {
+    let name = webview_binary_name();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(sibling) = exe.parent().map(|d| d.join(name)) {
-            if sibling.exists() {
-                return sibling;
+            if let Some(path) = executable_path(&sibling) {
+                return Some(path);
             }
         }
     }
-    std::path::PathBuf::from(name)
+    find_on_path(name)
+}
+
+fn resolve_webview_bin() -> PathBuf {
+    find_existing_webview().unwrap_or_else(|| PathBuf::from(webview_binary_name()))
+}
+
+fn webview_bin() -> &'static PathBuf {
+    WEBVIEW_BIN.get_or_init(resolve_webview_bin)
+}
+
+/// Warm the helper lookup so clicking "Open view" only spawns the process.
+pub(crate) fn prime_webview_lookup() {
+    let _ = webview_bin();
 }
 
 /// Build the `a3s-webview` argv for a view (url + optional size). Split out from
 /// spawning so the spec→argv mapping is unit-testable.
 fn webview_args(spec: &ViewSpec) -> Vec<String> {
-    let mut args = vec!["--url".to_string(), spec.url.clone()];
+    let mut args = vec![
+        "--url".to_string(),
+        spec.url.clone(),
+        "--title".to_string(),
+        "A3S RemoteUI".to_string(),
+    ];
     if let Some(w) = spec.width {
         args.push("--width".to_string());
         args.push(w.to_string());
@@ -156,6 +197,9 @@ fn webview_args(spec: &ViewSpec) -> Vec<String> {
 pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<()> {
     Command::new(webview_bin())
         .args(webview_args(spec))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map(|_child| ())
 }
@@ -260,6 +304,8 @@ mod tests {
             vec![
                 "--url",
                 "https://os.x/p?embed=1",
+                "--title",
+                "A3S RemoteUI",
                 "--width",
                 "720",
                 "--height",
@@ -272,7 +318,28 @@ mod tests {
             height: None,
             embeddable: false,
         };
-        assert_eq!(webview_args(&no_size), vec!["--url", "https://os.x/p"]);
+        assert_eq!(
+            webview_args(&no_size),
+            vec!["--url", "https://os.x/p", "--title", "A3S RemoteUI"]
+        );
+    }
+
+    #[test]
+    fn webview_binary_name_tracks_platform() {
+        if cfg!(windows) {
+            assert_eq!(webview_binary_name(), "a3s-webview.exe");
+        } else {
+            assert_eq!(webview_binary_name(), "a3s-webview");
+        }
+    }
+
+    #[test]
+    fn webview_lookup_can_be_primed_and_reused() {
+        prime_webview_lookup();
+        let first = webview_bin().clone();
+        prime_webview_lookup();
+        assert_eq!(webview_bin(), &first);
+        assert!(!first.as_os_str().to_string_lossy().is_empty());
     }
 
     /// End-to-end: a progressive-API `execute` response carrying a `view` object

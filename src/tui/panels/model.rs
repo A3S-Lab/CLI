@@ -27,10 +27,10 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
         .unwrap_or((0, 0))
 }
 
-// Per-source accents, tuned to the Tokyo Night palette (blue / orange / teal).
+// Per-source accents, tuned to the DESIGN.md brand palette.
 const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
-const CODEX_COLOR: Color = Color::Rgb(115, 218, 202); // tokyo teal
+const CODEX_COLOR: Color = TN_CYAN;
 
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
@@ -141,7 +141,6 @@ impl App {
                 }
                 match provider {
                     None => {
-                        self.llm_override = None; // config.acl credentials
                         if let Some(model) = model {
                             self.switch_model(&model);
                         }
@@ -167,6 +166,21 @@ impl App {
         }
     }
 
+    fn active_context_limit_for(&self, model: &str) -> u32 {
+        ctx_limit_for_model(&self.model_ctx, model)
+    }
+
+    fn commit_model_switch(&mut self, session: AgentSession, model: String) {
+        self.session = Arc::new(session);
+        self.model = Some(model);
+        // The next LLM round will report the new prompt fill for the new model.
+        // Until then, do not show the previous model's prompt/token counters as
+        // if they belonged to this context window.
+        self.last_prompt_tokens = 0;
+        self.ctx_warned_tier = 0;
+        self.output_tokens = 0;
+    }
+
     /// Sign in with the local Claude Code login and switch to one of its models
     /// by injecting the Claude account client (OAuth Bearer auth).
     fn sign_in_claude(&mut self, model: &str) {
@@ -181,15 +195,15 @@ impl App {
         }
         match crate::claude::ClaudeClient::from_claude_login(&model) {
             Ok(client) => {
+                let prev_override = self.llm_override.clone();
+                let prev_ctx = self.context_limit;
                 self.llm_override = Some(Arc::new(client));
-                self.model = Some(model.clone());
                 // Before rebuild: effort_session_opts scales the auto-compact
                 // threshold from context_limit, so it must reflect the NEW model.
-                let prev_ctx = self.context_limit;
-                self.context_limit = resolve_ctx_limit(self.model_ctx.get(&model).copied());
+                self.context_limit = self.active_context_limit_for(&model);
                 match self.rebuild_session(Some(&model)) {
                     Ok((session, _)) => {
-                        self.session = Arc::new(session);
+                        self.commit_model_switch(session, model.clone());
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -197,7 +211,7 @@ impl App {
                         );
                     }
                     Err(error) => {
-                        self.llm_override = None;
+                        self.llm_override = prev_override;
                         self.context_limit = prev_ctx;
                         self.push_line(
                             &Style::new()
@@ -228,13 +242,13 @@ impl App {
         }
         match crate::codex::CodexClient::from_codex_login(model, &self.session_id) {
             Ok(client) => {
-                self.llm_override = Some(Arc::new(client));
-                self.model = Some(model.to_string()); // before rebuild
+                let prev_override = self.llm_override.clone();
                 let prev_ctx = self.context_limit;
-                self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
+                self.llm_override = Some(Arc::new(client));
+                self.context_limit = self.active_context_limit_for(model);
                 match self.rebuild_session(Some(model)) {
                     Ok((s, _)) => {
-                        self.session = Arc::new(s);
+                        self.commit_model_switch(s, model.to_string());
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -242,7 +256,7 @@ impl App {
                         );
                     }
                     Err(e) => {
-                        self.llm_override = None;
+                        self.llm_override = prev_override;
                         self.context_limit = prev_ctx;
                         self.push_line(
                             &Style::new()
@@ -298,13 +312,13 @@ impl App {
                 .with_base_url(origin)
                 .with_chat_completions_path("/api/v1/llm/chat/completions")
                 .with_provider_name("OS Gateway");
-        self.llm_override = Some(Arc::new(client));
-        self.model = Some(model.to_string());
+        let prev_override = self.llm_override.clone();
         let prev_ctx = self.context_limit;
-        self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
+        self.llm_override = Some(Arc::new(client));
+        self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
-                self.session = Arc::new(s);
+                self.commit_model_switch(s, model.to_string());
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -312,7 +326,7 @@ impl App {
                 );
             }
             Err(e) => {
-                self.llm_override = None;
+                self.llm_override = prev_override;
                 self.context_limit = prev_ctx;
                 self.push_line(
                     &Style::new()
@@ -455,12 +469,13 @@ impl App {
         }
         // Before rebuild: effort_session_opts scales the auto-compact threshold
         // from context_limit, so it must reflect the NEW model's window.
+        let prev_override = self.llm_override.clone();
         let prev_ctx = self.context_limit;
-        self.context_limit = resolve_ctx_limit(self.model_ctx.get(model).copied());
+        self.llm_override = None;
+        self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
-                self.session = Arc::new(s);
-                self.model = Some(model.to_string());
+                self.commit_model_switch(s, model.to_string());
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -468,6 +483,7 @@ impl App {
                 );
             }
             Err(e) => {
+                self.llm_override = prev_override;
                 self.context_limit = prev_ctx;
                 self.push_line(
                     &Style::new()
@@ -495,8 +511,8 @@ impl App {
                 if self.effort == ULTRACODE {
                     // Unattended fan-out: auto-approve so subagents run freely.
                     self.mode = Mode::Auto;
-                    self.rainbow_until = Some(Instant::now()); // rainbow flourish
-                    self.rainbow_frame = 0;
+                    self.gradient_until = Some(Instant::now()); // brand-gradient flourish
+                    self.gradient_frame = 0;
                     self.push_line(&Style::new().fg(ACCENT).bold().render(
                         "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on)",
                     ));

@@ -444,10 +444,10 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
                 }
                 let raw = change.value();
                 let raw = raw.strip_suffix('\n').unwrap_or(raw);
-                // Deleted lines get a red background, inserted lines a green one,
-                // so the change type reads at a glance. Context lines stay dim and
-                // unbackgrounded. (Plain high-contrast text, not syntax-highlight:
-                // syntax colors clash on a colored background.)
+                // Deleted lines get a red wash, inserted lines use the active
+                // blue wash from the DESIGN.md palette. Context lines stay dim.
+                // Plain high-contrast text, not syntax-highlight: syntax colors
+                // clash on a colored background.
                 let (no, marker, line_bg, line_fg) = match change.tag() {
                     ChangeTag::Delete => (
                         change.old_index().map(|i| i + 1).unwrap_or(0),
@@ -458,8 +458,8 @@ pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -
                     ChangeTag::Insert => (
                         change.new_index().map(|i| i + 1).unwrap_or(0),
                         '+',
-                        Some(Color::Rgb(26, 60, 36)),
-                        Color::Rgb(205, 255, 210),
+                        Some(SURFACE_SELECTED),
+                        Color::Rgb(211, 229, 255),
                     ),
                     ChangeTag::Equal => (
                         change.old_index().map(|i| i + 1).unwrap_or(0),

@@ -85,7 +85,7 @@ pub(crate) async fn sync_ssh_key(session: StoredOsSession) -> SshKeyOutcome {
 /// `$HOME`. `origin` is `scheme://host[:port]`.
 async fn register_ssh_key(origin: &str, token: &str, pubkey_line: &str) -> SshKeyOutcome {
     let Some(local_body) = ssh_key_body(pubkey_line) else {
-        return SshKeyOutcome::Failed("本机公钥格式无法解析".to_string());
+        return SshKeyOutcome::Failed("Could not parse the local public key format".to_string());
     };
     let local_fp = openssh_sha256_fingerprint(pubkey_line);
 
@@ -154,7 +154,7 @@ async fn register_ssh_key(origin: &str, token: &str, pubkey_line: &str) -> SshKe
                 .ok()
                 .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok())
                 .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-                .unwrap_or_else(|| "请求失败".to_string());
+                .unwrap_or_else(|| "request failed".to_string());
             SshKeyOutcome::Failed(format!("HTTP {code}: {msg}"))
         }
         Err(e) => SshKeyOutcome::Failed(e.to_string()),
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     #[test]
-    fn login_callback_page_is_chinese_and_branded() {
+    fn login_callback_page_is_english_and_branded() {
         for outcome in [
             LoginOutcome::Success,
             LoginOutcome::NotApproved,

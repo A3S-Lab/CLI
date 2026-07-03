@@ -397,7 +397,10 @@ impl App {
                             tw,
                         );
                         if i == chat.contact_sel {
-                            Style::new().fg(Color::Black).bg(ACCENT).render(&plain)
+                            Style::new()
+                                .fg(Color::BrightWhite)
+                                .bg(ACCENT)
+                                .render(&plain)
                         } else {
                             Style::new().fg(TN_FG).render(&plain)
                         }

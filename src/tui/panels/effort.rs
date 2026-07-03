@@ -8,25 +8,16 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        // Ultracode confirm flourish: a rainbow "⚡ ULTRACODE ⚡" burst.
+        // Ultracode confirm flourish: a compact brand-gradient burst.
         if self.effort_anim.is_some() {
-            const PALETTE: [Color; 7] = [
-                Color::Rgb(255, 0, 0),
-                Color::Rgb(255, 127, 0),
-                Color::Rgb(255, 255, 0),
-                Color::Rgb(0, 220, 0),
-                Color::Rgb(0, 150, 255),
-                Color::Rgb(75, 0, 200),
-                Color::Rgb(160, 0, 230),
-            ];
-            let f = self.rainbow_frame;
+            let f = self.gradient_frame;
             let title = "⚡  U L T R A C O D E  ⚡";
             let colored: String = title
                 .chars()
                 .enumerate()
                 .map(|(i, ch)| {
                     Style::new()
-                        .fg(PALETTE[(i + f) % PALETTE.len()])
+                        .fg(BRAND_GRADIENT[(i + f) % BRAND_GRADIENT.len()])
                         .bold()
                         .render(&ch.to_string())
                 })
@@ -35,7 +26,7 @@ impl App {
             let wave: String = (0..barw)
                 .map(|i| {
                     Style::new()
-                        .fg(PALETTE[(i + f) % PALETTE.len()])
+                        .fg(BRAND_GRADIENT[(i + f) % BRAND_GRADIENT.len()])
                         .bold()
                         .render("━")
                 })
@@ -82,14 +73,13 @@ impl App {
             track[pos] = '▲';
         }
         let track: String = track.iter().collect();
-        // Level names centred under their tick, each in its own colour
-        // (faster→smarter gradient; ultracode is magenta).
+        // Level names centred under their tick with sparse brand accents.
         let level_colors = [
-            TN_GREEN,
+            TN_GRAY,
             TN_CYAN,
             ACCENT,
             TN_YELLOW,
-            Color::Rgb(255, 140, 0),
+            GRADIENT_SHIP_START,
             TN_PURPLE,
         ];
         let mut labels = String::new();

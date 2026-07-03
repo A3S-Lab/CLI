@@ -253,13 +253,13 @@ impl App {
                     tree_iw,
                 );
                 if ide.tree_scroll + i == ide.sel && !ide.focus_editor {
-                    Style::new().fg(Color::Black).bg(ACCENT).render(&plain)
+                    Style::new()
+                        .fg(Color::BrightWhite)
+                        .bg(ACCENT)
+                        .render(&plain)
                 } else if ide.tree_scroll + i == ide.sel {
                     // Selection stays visible (dim) while the editor has focus.
-                    Style::new()
-                        .fg(TN_FG)
-                        .bg(Color::Rgb(38, 45, 64))
-                        .render(&plain)
+                    Style::new().fg(TN_FG).bg(SURFACE_SELECTED).render(&plain)
                 } else if e.is_dir {
                     Style::new().fg(ACCENT).render(&plain)
                 } else {

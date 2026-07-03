@@ -35,7 +35,7 @@ impl App {
             r"╚═╝  ╚═╝╚═════╝ ╚══════╝     ╚═════╝ ╚═════╝ ╚═════╝ ╚══════╝",
         ];
         let margin = " ".repeat(PAD);
-        let steel = Color::Rgb(150, 162, 188);
+        let steel = TN_GRAY;
         // The 7-line mascot leads with its helmet; the 6-line wordmark aligns
         // from row 2 down (art row j sits on mascot row j+1).
         let logo = mascot

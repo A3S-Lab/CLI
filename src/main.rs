@@ -48,11 +48,10 @@ async fn self_update() -> anyhow::Result<()> {
         return Ok(());
     }
     match update::perform_upgrade(&latest) {
-        Some(_) => println!("✓ updated to a3s {latest} — run `a3s code` to use it"),
-        None => {
-            eprintln!(
-                "upgrade failed — get the latest from https://github.com/A3S-Lab/Cli/releases/latest"
-            );
+        Ok(_) => println!("✓ updated to a3s {latest} — run `a3s code` to use it"),
+        Err(error) => {
+            eprintln!("upgrade failed: {error}");
+            eprintln!("get the latest from https://github.com/A3S-Lab/Cli/releases/latest");
             std::process::exit(1);
         }
     }

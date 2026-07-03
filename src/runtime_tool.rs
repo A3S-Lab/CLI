@@ -71,7 +71,10 @@ impl RuntimeTool {
     /// model sees why a call failed.
     fn unwrap_envelope(body: &str, status: u16) -> Result<Value> {
         let v: Value = serde_json::from_str(body).map_err(|e| {
-            anyhow::anyhow!("非 JSON 响应 (HTTP {status}): {e}: {}", truncate(body, 200))
+            anyhow::anyhow!(
+                "Non-JSON response (HTTP {status}): {e}: {}",
+                truncate(body, 200)
+            )
         })?;
         let code = v
             .get("code")
@@ -81,8 +84,8 @@ impl RuntimeTool {
             let msg = v
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("请求失败");
-            anyhow::bail!("A3S Runtime 返回 {code}: {msg}");
+                .unwrap_or("request failed");
+            anyhow::bail!("A3S Runtime returned {code}: {msg}");
         }
         Ok(v.get("data").cloned().unwrap_or(v))
     }
@@ -95,13 +98,11 @@ impl Tool for RuntimeTool {
     }
 
     fn description(&self) -> &str {
-        "把一批相互独立的子任务并行 offload 到 OS A3S Runtime（远程 pod 算力），\
-         等全部完成后汇总返回，执行期间流式显示进度。适合可拆解的工作（如 deep-research \
-         的多个子问题）：比本地串行执行快得多。worker 填 tool 型智能体资产的 UUID 或名字\
-         （名字会自动解析；填错会列出可用 worker）。\
-         Offload N independent subtasks to OS A3S Runtime for parallel remote \
-         execution with live progress. `worker` is a tool-kind agent asset UUID or \
-         name (names auto-resolve; a bad one lists the available workers)."
+        "Offload independent subtasks to OS A3S Runtime for parallel remote \
+         execution, stream progress while they run, then return a combined result. \
+         Use it for decomposable work such as multiple deep-research subquestions. \
+         `worker` is a tool-kind agent asset UUID or name. Names auto-resolve; \
+         invalid names list the available workers."
     }
 
     fn parameters(&self) -> Value {
@@ -110,18 +111,17 @@ impl Tool for RuntimeTool {
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "description": "要并行执行的子任务列表。每个元素是喂给 worker 的输入\
-                                    （通常是一个子问题字符串，或一个符合 worker inputSchema 的对象）。",
+                    "description": "Independent subtasks to run in parallel. Each item is passed to the worker as input, usually a subquestion string or an object matching the worker inputSchema.",
                     "items": { "type": ["string", "object"] },
                     "minItems": 1
                 },
                 "worker": {
                     "type": "string",
-                    "description": "运行每个子任务的 worker：tool 型智能体资产的 UUID 或名字。必填。"
+                    "description": "Worker that runs each subtask: a tool-kind agent asset UUID or name. Required."
                 },
                 "timeout_ms": {
                     "type": "integer",
-                    "description": "整批等待上限（毫秒）。省略用默认 10 分钟；超时返回已完成的部分结果。"
+                    "description": "Maximum wait for the full batch in milliseconds. Defaults to 10 minutes; on timeout, returns completed results."
                 }
             },
             "required": ["tasks", "worker"]
@@ -131,13 +131,13 @@ impl Tool for RuntimeTool {
     async fn execute(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let tasks: Vec<Value> = match args.get("tasks").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a.clone(),
-            _ => return Ok(ToolOutput::error("`tasks` 必须是非空数组")),
+            _ => return Ok(ToolOutput::error("`tasks` must be a non-empty array")),
         };
         let worker = match args.get("worker").and_then(Value::as_str) {
             Some(w) if !w.trim().is_empty() => w.trim().to_string(),
             _ => {
                 return Ok(ToolOutput::error(
-                    "`worker` 必填：tool 型智能体资产的 UUID 或名字",
+                    "`worker` is required: use a tool-kind agent asset UUID or name",
                 ))
             }
         };
@@ -149,7 +149,9 @@ impl Tool for RuntimeTool {
         match self.run_batch(&worker, tasks, budget_ms, ctx).await {
             Ok(out) => Ok(ToolOutput::success(out)),
             // A3S Runtime / network failure is a tool failure, not a crash — surface it.
-            Err(e) => Ok(ToolOutput::error(format!("A3S Runtime offload 失败: {e}"))),
+            Err(e) => Ok(ToolOutput::error(format!(
+                "A3S Runtime offload failed: {e}"
+            ))),
         }
     }
 }
@@ -177,7 +179,7 @@ impl RuntimeTool {
             worker.to_string()
         } else {
             let id = self.resolve_worker_name(&client, worker).await?;
-            progress(format!("worker「{worker}」→ {id}\n"));
+            progress(format!("worker {worker} -> {id}\n"));
             id
         };
 
@@ -196,7 +198,7 @@ impl RuntimeTool {
         let batch_id = data
             .get("batchId")
             .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("batch 响应缺少 batchId"))?
+            .ok_or_else(|| anyhow::anyhow!("batch response did not include batchId"))?
             .to_string();
         let invocation_ids: Vec<String> = data
             .get("invocationIds")
@@ -207,7 +209,9 @@ impl RuntimeTool {
                     .collect()
             })
             .unwrap_or_default();
-        progress(format!("已提交 {n} 个并行子任务（batch {batch_id}）\n"));
+        progress(format!(
+            "{n} parallel subtasks submitted (batch {batch_id})\n"
+        ));
 
         // 2. Poll until every member is terminal or the budget expires — with
         //    exponential backoff, live progress, and transient-failure tolerance.
@@ -237,7 +241,8 @@ impl RuntimeTool {
                     let done = c("succeeded") + c("failed") + c("canceled") + c("unknown");
                     let pending = queued + running;
                     // Emit progress only when the picture changes (no spam).
-                    let report = format!("⏳ {done}/{n} 完成 · {running} 运行 · {queued} 排队\n");
+                    let report =
+                        format!("⏳ {done}/{n} done · {running} running · {queued} queued\n");
                     if report != last_report {
                         progress(report.clone());
                         last_report = report;
@@ -256,11 +261,11 @@ impl RuntimeTool {
                     consecutive_failures += 1;
                     if consecutive_failures > MAX_POLL_FAILURES {
                         return Err(e.context(format!(
-                            "轮询 batch {batch_id} 连续失败 {consecutive_failures} 次"
+                            "polling batch {batch_id} failed {consecutive_failures} consecutive times"
                         )));
                     }
                     progress(format!(
-                        "轮询失败（第 {consecutive_failures} 次，将重试）\n"
+                        "poll failed (attempt {consecutive_failures}; retrying)\n"
                     ));
                 }
             }
@@ -304,8 +309,8 @@ impl RuntimeTool {
         if timed_out_pending > 0 {
             summary["partial"] = json!(true);
             summary["note"] = json!(format!(
-                "等待 {waited}ms 超时，仍有 {timed_out_pending} 个子任务未完成；已返回其余结果，\
-                 可稍后用 batchId={batch_id} 继续查询未完成项。"
+                "Timed out after {waited}ms with {timed_out_pending} subtasks still pending; \
+                 completed results were returned. Query batchId={batch_id} later for unfinished items."
             ));
         }
         Ok(serde_json::to_string_pretty(&summary)?)
@@ -346,11 +351,11 @@ impl RuntimeTool {
             .map(|(id, n)| format!("{n} ({id})"))
             .collect();
         anyhow::bail!(
-            "找不到名为「{name}」的 tool 型 worker。可用 worker：{}",
+            "No tool-kind worker named \"{name}\". Available workers: {}",
             if available.is_empty() {
-                "（无 tool 型智能体资产——先在 OS 资产中心创建）".to_string()
+                "none; create a tool-kind agent asset in the OS Asset Center first".to_string()
             } else {
-                available.join("、")
+                available.join(", ")
             }
         )
     }
@@ -383,7 +388,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
-        // char-based to avoid panicking on a multibyte boundary (responses are Chinese).
+        // Char-based to avoid panicking on a multibyte boundary.
         format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
@@ -406,8 +411,8 @@ mod tests {
         .unwrap();
         assert_eq!(ok.get("batchId").unwrap(), "b1");
         let err =
-            RuntimeTool::unwrap_envelope(r#"{"code":403,"message":"权限不足"}"#, 200).unwrap_err();
-        assert!(err.to_string().contains("403") && err.to_string().contains("权限不足"));
+            RuntimeTool::unwrap_envelope(r#"{"code":403,"message":"Forbidden"}"#, 200).unwrap_err();
+        assert!(err.to_string().contains("403") && err.to_string().contains("Forbidden"));
         assert!(RuntimeTool::unwrap_envelope(r#"{"message":"x"}"#, 500).is_err());
         assert!(RuntimeTool::unwrap_envelope("<html>502</html>", 502).is_err());
         let bare = RuntimeTool::unwrap_envelope(r#"{"batchId":"b2"}"#, 200).unwrap();
@@ -434,7 +439,8 @@ mod tests {
 
     // ── mock A3S Runtime speaking the exact OS contract ─────────────────────
 
-    /// Scripted mock state:每次 poll 消耗 `poll_plan` 的下一项（耗尽后重复最后一项）。
+    /// Scripted mock state: each poll consumes the next `poll_plan` item and
+    /// repeats the final item after the plan is exhausted.
     struct MockState {
         submit_path: Option<String>,
         submit_body: Option<String>,
@@ -584,9 +590,9 @@ mod tests {
             deltas.push(s);
         }
         let all = deltas.join("");
-        assert!(all.contains("已提交 2 个并行子任务"), "{all}");
+        assert!(all.contains("2 parallel subtasks submitted"), "{all}");
         assert!(
-            all.contains("0/2 完成") && all.contains("2/2 完成"),
+            all.contains("0/2 done") && all.contains("2/2 done"),
             "{all}"
         );
 
@@ -639,7 +645,11 @@ mod tests {
             .await
             .unwrap();
         assert!(!out2.success);
-        assert!(out2.content.contains("连续失败"), "{}", out2.content);
+        assert!(
+            out2.content.contains("consecutive times"),
+            "{}",
+            out2.content
+        );
     }
 
     #[tokio::test]

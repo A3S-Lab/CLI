@@ -1,13 +1,13 @@
 ---
 name: a3s-os-capabilities
-description: "书安OS progressive API — the way to answer ANY question about the signed-in 书安OS platform: your platform account/identity, what the platform can do, and its data / resources / state (LLM/OCR, assets, packages, runtime, knowledge, observability, …). One action-dispatched endpoint, broad-to-narrow: list -> search -> describe -> execute. Use this — NOT the local shell (whoami/paths) — for anything about the OS platform. Available only when signed in."
+description: "A3S OS progressive API — the way to answer ANY question about the signed-in A3S OS platform: your platform account/identity, what the platform can do, and its data / resources / state (LLM/OCR, assets, packages, runtime, knowledge, observability, …). One action-dispatched endpoint, broad-to-narrow: list -> search -> describe -> execute. Use this — NOT the local shell (whoami/paths) — for anything about the OS platform. Available only when signed in."
 kind: instruction
 allowed-tools: "bash(*), read(*)"
 ---
 
-# 书安OS progressive API (渐进式 API)
+# A3S OS progressive API
 
-Discover and call the 书安OS platform capabilities you are authorized for,
+Discover and call the A3S OS platform capabilities you are authorized for,
 *progressively* (broad → narrow), through **one** endpoint. This is the whole
 platform's capability surface — not just one domain: AI capabilities (LLM/OCR
 config), assets, packages, registry, runtime, resources, knowledge bases,
@@ -27,7 +27,7 @@ Single endpoint (`action`-dispatched, always `POST` with a JSON body):
 POST {{BASE_URL}}/api/v1/kernel/capabilities
 ```
 
-Flow ("先广后窄" / broad-then-narrow) — like a CLI, expand on demand instead of
+Flow (broad-then-narrow) — like a CLI, expand on demand instead of
 loading every manual into context:
 
 ```
@@ -80,7 +80,7 @@ signed-in user may access.
   to peek a shape) so the result is a few relevant lines, not a raw JSON blob.
   **Exception — `execute`:** send `"shaped": true` and pipe the response WHOLE (do
   not narrow it); it is already compact and its `.view` field is what gives the
-  user the 查看视图 popup — narrowing it away loses the link. In your reply,
+  user the Open view button — narrowing it away loses the view affordance. In your reply,
   summarize in a few lines either way — do NOT paste the whole response back.
 - Never guess `module`, `operation`, field names, or enums. `list` / `search` /
   `describe` first, then build `params` from the returned schema. `describe` with
@@ -101,9 +101,9 @@ signed-in user may access.
   1. **Send `"shaped": true`** on every `execute` call, and **do NOT `jq`-narrow
      the execute response** — pipe it whole (it is already compact). Without the
      flag, or if you strip `.view`, no view is produced and the user gets no link.
-  2. **Do NOT print any `查看视图` line yourself.** The host inspects the execute
+  2. **Do NOT print any `Open view` line yourself.** The host inspects the execute
      output and, whenever a `.view` is present, automatically renders a one-click
-     `🔗 查看视图` line that opens the **渐进式UI** popup (the user's current OS
+     `Open view` button that opens the **Progressive UI** popup (the user's current OS
      login is injected — no re-login). It is **user-triggered**: the popup is NOT
      opened automatically; the user clicks that line (or runs `/view`). Never
      print the raw URL. Printing the link yourself only duplicates the host's.
@@ -147,7 +147,7 @@ post '{"action":"search","query":"ocr"}'                             # 2. find o
 post '{"action":"describe","module":"kernel","operation":"runOcr"}'  # 3. exact schema
 
 # execute: send "shaped":true and DON'T narrow — the whole (compact) response
-# carries `.view`, which the host turns into the 查看视图 popup link.
+# carries `.view`, which the host turns into the Open view button.
 post '{"action":"execute","module":"assets","operation":"listAssets","shaped":true}'
 ```
 

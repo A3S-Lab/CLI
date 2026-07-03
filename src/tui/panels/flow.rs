@@ -5,7 +5,7 @@
 //! or the `flow_dir` config key); Enter pushes the picked DAG into an OS
 //! workflow asset (find-or-create by name, then commit it as
 //! `.a3s/workflows/main.design.json` — the designer's canonical load path)
-//! and opens `/admin/assets/<id>/workflow-designer` in the authenticated
+//! and opens `/workflow-designer/<asset-id>` in the authenticated
 //! RemoteUI window, where it can be edited and debug-run.
 //!
 //! `/flow <natural language>` asks the agent to orchestrate a BASIC DAG in
@@ -58,6 +58,36 @@ pub(crate) fn designer_url(origin: &str, asset_id: &str) -> String {
         origin.trim_end_matches('/'),
         asset_id
     )
+}
+
+pub(crate) fn designer_view_spec(url: String) -> remote_ui::ViewSpec {
+    remote_ui::ViewSpec {
+        url,
+        width: Some(1440),
+        height: Some(900),
+        embeddable: true,
+    }
+}
+
+fn flow_picker_header(total: usize, root: &std::path::Path, width: usize) -> String {
+    truncate(
+        &format!(
+            "  ⧉ flow — pick a DAG ({total} in {})",
+            root.to_string_lossy()
+        ),
+        width,
+    )
+}
+
+fn flow_picker_hint(width: usize) -> String {
+    truncate(
+        "  ↑/↓ select · Enter open in the OS workflow designer · Esc cancel",
+        width,
+    )
+}
+
+fn flow_picker_row(name: &str, width: usize) -> String {
+    pad_to(&truncate(&format!("  {name}"), width), width)
 }
 
 /// Directive for `/flow <description>`: orchestrate a BASIC DAG in the
@@ -279,20 +309,15 @@ impl App {
     }
 
     /// The upload finished: open the designer in the RemoteUI window (and keep
-    /// it as `last_view` so `/view` / clicking 查看视图 reopens it).
+    /// it as `last_view` so `/view` / clicking the Open view button reopens it).
     pub(crate) fn on_flow_opened(&mut self, res: Result<(String, String), String>) {
         match res {
             Ok((name, url)) => {
-                let spec = remote_ui::ViewSpec {
-                    url,
-                    width: Some(1440),
-                    height: Some(900),
-                    embeddable: true,
-                };
+                let spec = designer_view_spec(url);
                 self.last_view = Some(spec.clone());
                 self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!("🔗 {VIEW_BUTTON_MARKER}  workflow designer · {name} (click or /view reopens · edit + debug run)"),
+                    ACCENT,
+                    &remote_view_button(&format!("workflow designer · {name} · edit + debug run")),
                 ));
                 self.open_remote_view(&spec);
             }
@@ -315,17 +340,14 @@ impl App {
         let total = p.flows.len();
         let mut menu = vec![
             pad_to(
-                &Style::new().fg(ACCENT).bold().render(&format!(
-                    "  ⧉ flow — pick a DAG ({} in {})",
-                    total,
-                    truncate(&p.root.to_string_lossy(), width.saturating_sub(24))
-                )),
+                &Style::new()
+                    .fg(ACCENT)
+                    .bold()
+                    .render(&flow_picker_header(total, &p.root, width)),
                 width,
             ),
             pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  ↑/↓ select · Enter open in the OS workflow designer · Esc cancel"),
+                &Style::new().fg(TN_GRAY).render(&flow_picker_hint(width)),
                 width,
             ),
         ];
@@ -338,9 +360,9 @@ impl App {
         };
         let end = (start + max_rows).min(total);
         for (row, name) in p.flows.iter().enumerate().take(end).skip(start) {
-            let raw = pad_to(&format!("  {name}"), width);
+            let raw = flow_picker_row(name, width);
             menu.push(if row == sel {
-                Style::new().fg(Color::Black).bg(ACCENT).render(&raw)
+                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
                 Style::new().fg(TN_FG).render(&raw)
             });
@@ -384,6 +406,31 @@ mod tests {
             "http://180.163.156.38:49164/workflow-designer/abc-123"
         );
         assert_eq!(flow_asset_name("Daily Report 2"), "flow-daily-report-2");
+    }
+
+    #[test]
+    fn designer_view_spec_auto_opens_workflow_designer_size() {
+        let spec = designer_view_spec(designer_url("https://os.example.com", "asset-1"));
+        assert_eq!(spec.url, "https://os.example.com/workflow-designer/asset-1");
+        assert_eq!((spec.width, spec.height), (Some(1440), Some(900)));
+        assert!(spec.embeddable);
+    }
+
+    #[test]
+    fn flow_picker_rows_fit_fixed_width() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/flows/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let header = flow_picker_header(9, &root, 40);
+        let hint = flow_picker_hint(40);
+        let row = flow_picker_row(
+            "very-long-workflow-file-name-that-would-overflow-the-panel.json",
+            40,
+        );
+        assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
+        assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
+        assert_eq!(a3s_tui::style::visible_len(&row), 40);
+        assert!(row.contains('…'), "{row}");
     }
 
     #[test]
