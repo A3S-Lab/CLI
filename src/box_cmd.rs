@@ -8,7 +8,7 @@ use std::process::Command;
 
 const BOX_BINARY: &str = "a3s-box";
 const PRIMARY_BOX_RELEASE_BASE: &str = "https://github.com/A3S-Lab/Box";
-const BOX_RELEASE_BASES: &[&str] = &[PRIMARY_BOX_RELEASE_BASE, "https://github.com/AI45Lab/Box"];
+const BOX_RELEASE_BASES: &[&str] = &[PRIMARY_BOX_RELEASE_BASE];
 
 pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let binary = ensure_a3s_box()?;

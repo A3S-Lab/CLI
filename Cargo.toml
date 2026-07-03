@@ -14,11 +14,11 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = { git = "https://github.com/AI45Lab/Code.git", rev = "b63dca7d09e8f1c6e94d3768d4a508d2be82b047" }
+a3s-code-core = { version = "4.1.0", git = "https://github.com/A3S-Lab/Code.git", rev = "b63dca7d09e8f1c6e94d3768d4a508d2be82b047" }
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.1"
-a3s-tui = { git = "https://github.com/A3S-Lab/TUI.git", rev = "091f6ba172bf47a9c38c57d96f19a53cbb74c6a3" }
+a3s-tui = { version = "=0.1.4", git = "https://github.com/A3S-Lab/TUI.git", rev = "091f6ba172bf47a9c38c57d96f19a53cbb74c6a3" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
