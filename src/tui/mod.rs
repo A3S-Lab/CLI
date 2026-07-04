@@ -1477,6 +1477,20 @@ fn is_new_remote_view(last_view: Option<&remote_ui::ViewSpec>, spec: &remote_ui:
     last_view != Some(spec)
 }
 
+fn take_pending_tool_label(
+    pending_tool: &mut Option<(String, String)>,
+    tool_id: &str,
+) -> Option<String> {
+    if pending_tool
+        .as_ref()
+        .is_some_and(|(pending_id, _)| pending_id == tool_id)
+    {
+        pending_tool.take().map(|(_, label)| label)
+    } else {
+        None
+    }
+}
+
 struct App {
     session: Arc<AgentSession>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
@@ -4991,7 +5005,53 @@ impl App {
                 self.approval_sel = 0;
                 let label = tool_label(&tool_name, Some(&args));
                 self.pending_tool = Some((tool_id, label));
-                return None; // wait for the user; do not pump
+                // Keep one pump parked on the event stream while awaiting input:
+                // the confirmation can also resolve by timeout or an external
+                // provider, and those events must clear the overlay.
+                return self.rx.clone().map(pump);
+            }
+            AgentEvent::ConfirmationReceived {
+                tool_id,
+                approved,
+                reason,
+            } => {
+                if let Some(label) = take_pending_tool_label(&mut self.pending_tool, &tool_id) {
+                    self.state = State::Streaming;
+                    if !approved {
+                        let suffix = reason
+                            .filter(|value| !value.trim().is_empty())
+                            .map(|value| format!(" · {value}"))
+                            .unwrap_or_default();
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  ⎿ denied {label}{suffix}")),
+                        );
+                    }
+                }
+            }
+            AgentEvent::ConfirmationTimeout {
+                tool_id,
+                action_taken,
+            } => {
+                if let Some(label) = take_pending_tool_label(&mut self.pending_tool, &tool_id) {
+                    self.state = State::Streaming;
+                    let (color, note) = if action_taken == "auto_approved" {
+                        (
+                            TN_YELLOW,
+                            format!("  ⎿ confirmation timed out · auto-approved {label}"),
+                        )
+                    } else {
+                        (
+                            TN_RED,
+                            format!("  ⎿ confirmation timed out · denied {label}"),
+                        )
+                    };
+                    self.push_line(&Style::new().fg(color).render(&note));
+                }
+            }
+            AgentEvent::PermissionDenied { tool_id, .. } => {
+                self.runtime.remove_tool(&tool_id);
             }
             // Live context fill: every LLM round-trip reports its prompt size,
             // so ctx% (and the fill warnings) track DURING long multi-tool
@@ -6456,6 +6516,23 @@ mod tests {
                 "log line should respect narrow width: {line:?}"
             );
         }
+    }
+
+    #[test]
+    fn pending_tool_label_is_taken_only_for_matching_tool_id() {
+        let mut pending = Some(("tool-a".to_string(), "edit file".to_string()));
+
+        assert!(take_pending_tool_label(&mut pending, "tool-b").is_none());
+        assert_eq!(
+            pending,
+            Some(("tool-a".to_string(), "edit file".to_string()))
+        );
+
+        assert_eq!(
+            take_pending_tool_label(&mut pending, "tool-a"),
+            Some("edit file".to_string())
+        );
+        assert!(pending.is_none());
     }
 
     // ── `?` deep-research mode ─────────────────────────────────────────────
