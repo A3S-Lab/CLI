@@ -151,15 +151,24 @@ impl RuntimeProjection {
     ) -> CompletedTool {
         let run = match self.tools.remove(id) {
             Some(run) => Some(run),
-            None => self
-                .latest_tool_id
-                .clone()
-                .and_then(|latest| self.tools.remove(&latest)),
+            // Some synthetic/tool-guard events can arrive without the same id
+            // shape as their start event. Only fall back when the live set is
+            // unambiguous; otherwise keep the remaining live tools intact.
+            None if self.tools.len() == 1 => self
+                .tool_order
+                .last()
+                .cloned()
+                .and_then(|only| self.tools.remove(&only)),
+            None => None,
         };
         let active_ids = &self.tools;
         self.tool_order
             .retain(|tool_id| active_ids.contains_key(tool_id));
-        if self.latest_tool_id.as_deref() == Some(id) {
+        if self
+            .latest_tool_id
+            .as_deref()
+            .is_some_and(|latest| !active_ids.contains_key(latest))
+        {
             self.latest_tool_id = self.tool_order.last().cloned();
         }
 
@@ -270,6 +279,39 @@ mod tests {
         assert_eq!(projection.active_tool_count(), 0);
         assert_eq!(projection.tool_log().len(), 1);
         assert_eq!(projection.tool_log()[0].output, "hi\n");
+    }
+
+    #[test]
+    fn unknown_tool_end_uses_single_live_tool_as_legacy_fallback() {
+        let mut projection = RuntimeProjection::default();
+
+        projection.start_tool("actual".into(), "bash".into());
+        projection.push_tool_input(r#"{"command":"pwd"}"#);
+
+        let completed = projection.end_tool("missing", "bash".into(), "/work\n".into(), 0);
+
+        assert_eq!(completed.args.unwrap()["command"], "pwd");
+        assert_eq!(projection.active_tool_count(), 0);
+        assert!(projection.live_tool().is_none());
+        assert_eq!(projection.tool_log()[0].output, "/work\n");
+    }
+
+    #[test]
+    fn unknown_tool_end_does_not_clear_ambiguous_live_tools() {
+        let mut projection = RuntimeProjection::default();
+
+        projection.start_tool("a".into(), "bash".into());
+        projection.push_tool_input(r#"{"command":"cargo test"}"#);
+        projection.start_tool("b".into(), "grep".into());
+        projection.push_tool_input(r#"{"pattern":"TODO"}"#);
+
+        let completed = projection.end_tool("missing", "bash".into(), "done\n".into(), 0);
+
+        assert!(completed.args.is_none());
+        assert_eq!(projection.active_tool_count(), 2);
+        assert_eq!(projection.live_tool().unwrap().name, "grep");
+        assert_eq!(projection.tool_log().len(), 1);
+        assert_eq!(projection.tool_log()[0].output, "done\n");
     }
 
     #[test]
