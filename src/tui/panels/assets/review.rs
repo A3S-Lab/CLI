@@ -304,7 +304,7 @@ impl App {
                 width,
             ),
         ];
-        // Scroll a window around the selection (same as the /relay list).
+        // Scroll a window around the selection so long review lists stay usable.
         let sel = r.sel.min(total.saturating_sub(1));
         let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
         let start = if sel < max_rows {

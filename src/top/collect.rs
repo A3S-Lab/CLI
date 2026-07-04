@@ -159,8 +159,8 @@ fn remainder_after_fields(line: &str, n: usize) -> Option<&str> {
 /// Process CWDs change rarely, so cache them by pid across refreshes; only
 /// brand-new agent pids pay the `lsof`/proc lookup. Pruned to live pids each
 /// pass, so the map stays bounded by the agent processes on the host.
-// ponytail: process-global cache shared by both `top` callers; fine because a
-// pid's cwd is stable and the map is pruned to live pids every call.
+// Process-global cache shared by both `top` callers; pid cwd is stable enough
+// for display and the map is pruned to live pids every call.
 static CWD_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
 
 async fn enrich_agent_process_cwds(rows: &mut [ProcessRow]) {

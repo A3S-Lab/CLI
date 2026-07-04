@@ -2810,7 +2810,7 @@ impl App {
                 };
                 self.mcp_dev = None;
                 self.skill_dev = None;
-                self.kb_dev = None;
+                self.okf_dev = None;
                 self.agent_dev = Some(AgentDevSession {
                     name: def.name.clone(),
                     description: agent_description(&def),

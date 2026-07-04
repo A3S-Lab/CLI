@@ -63,7 +63,11 @@ impl RuntimeTool {
     }
 
     fn client(&self) -> Result<reqwest::Client> {
-        Ok(reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?)
+        let mut builder = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
+        if is_loopback_origin(&self.origin) {
+            builder = builder.no_proxy();
+        }
+        Ok(builder.build()?)
     }
 
     /// Unwrap the shared OS response envelope `{code,status,message,data,...}` and
@@ -89,6 +93,15 @@ impl RuntimeTool {
         }
         Ok(v.get("data").cloned().unwrap_or(v))
     }
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin.starts_with("http://127.")
+        || origin.starts_with("https://127.")
+        || origin.starts_with("http://localhost")
+        || origin.starts_with("https://localhost")
+        || origin.starts_with("http://[::1]")
+        || origin.starts_with("https://[::1]")
 }
 
 #[async_trait]

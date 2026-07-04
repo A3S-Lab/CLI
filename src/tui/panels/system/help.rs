@@ -110,11 +110,11 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     ),
     (
         "/agent open [agentic|application|tool]",
-        "observe the OS agent asset without mutating it",
+        "inspect the OS agent asset without mutating it",
     ),
     (
         "/agent logs [agentic|application|tool]",
-        "observe service log ViewLinks for the selected agent kind",
+        "open service log ViewLinks for the selected agent kind",
     ),
     (
         "/agent status [agentic|application|tool]",
@@ -151,10 +151,10 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "/mcp test",
         "publish and batch-test MCP tools through OS Function as a Service",
     ),
-    ("/mcp open", "observe the OS MCP asset without mutating it"),
+    ("/mcp open", "inspect the OS MCP asset without mutating it"),
     (
         "/mcp logs",
-        "observe OS Function as a Service logs through ViewLinks",
+        "open OS Function as a Service logs through ViewLinks",
     ),
     (
         "/mcp status",
@@ -232,11 +232,11 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     ),
     (
         "/skill deploy",
-        "publish the selected skill's serving Function as a Service binding",
+        "publish serving binding and prefer a shaped deployment ViewLink",
     ),
     (
         "/skill open",
-        "observe the OS skill asset without mutating it",
+        "inspect the OS skill asset without mutating it",
     ),
     (
         "/skill status",
@@ -273,7 +273,7 @@ fn help_body_lines(width: usize) -> Vec<String> {
         row("! <cmd>", "run a shell command directly"),
         row(
             "? <query>",
-            "deep research with Runtime-backed evidence when signed in",
+            "deep research with Runtime fan-out + RemoteUI evidence when signed in",
         ),
         row("@<path>", "attach a workspace file from the file picker"),
         row("Ctrl+V", "attach a clipboard image to the next message"),
@@ -300,7 +300,6 @@ fn help_body_lines(width: usize) -> Vec<String> {
             "/ide /config /kb",
             "full-screen file editors and knowledge-base browser",
         ),
-        row("/git", "read-only status, diff, and recent log"),
         row(
             "/memory",
             "memory graph with entities, tiers, aliases, and forget candidates",
@@ -448,6 +447,7 @@ mod tests {
         assert!(body.contains("/agent clone"));
         assert!(body.contains("/skill clone"));
         assert!(body.contains("typed OS services"));
+        assert!(body.contains("Runtime fan-out + RemoteUI evidence"));
         assert!(!body.contains(&format!("OS-backed {}", "runs")));
         assert!(!body.contains("/kb open"));
         assert!(!body.contains("/kb dashboard"));

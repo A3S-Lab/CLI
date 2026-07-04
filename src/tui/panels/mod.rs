@@ -18,15 +18,16 @@ pub(crate) mod review;
 #[path = "assets/skill.rs"]
 pub(crate) mod skill;
 
-// Local and shared knowledge.
+// Local personal knowledge.
 #[path = "knowledge/kb.rs"]
 pub(crate) mod kb;
+// Shareable OKF knowledge-package assets.
+#[path = "knowledge/okf.rs"]
+pub(crate) mod okf;
 
 // Local workspace.
 #[path = "workspace/files.rs"]
 mod files;
-#[path = "workspace/git.rs"]
-mod git;
 #[path = "workspace/ide.rs"]
 mod ide;
 #[path = "workspace/loop_engineering.rs"]
@@ -61,8 +62,6 @@ mod model;
 mod plan;
 #[path = "system/plugins.rs"]
 mod plugins;
-#[path = "system/relay.rs"]
-mod relay;
 #[path = "system/spf.rs"]
 pub(crate) mod spf;
 #[path = "system/theme.rs"]

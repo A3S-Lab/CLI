@@ -1,13 +1,10 @@
-//! `/kb`: ingest raw material — typed text, a file, or a folder — into the
-//! project knowledge base at `.a3s/kb/sources/`. `/okf` later compiles these
-//! sources into cross-linked OKF concept pages. Ingestion is deterministic plain
-//! file I/O (no LLM): it always works, never mangles the originals (files are
-//! copied verbatim; provenance is logged separately in `SOURCES.md`).
+//! `/kb`: ingest typed text, a file, or a folder into the local personal
+//! knowledge base at `.a3s/kb/sources/`. Shareable OKF knowledge-package assets
+//! live under `.a3s/okf` and are managed by `/okf`.
 
 use std::path::{Path, PathBuf};
 
-/// The KB vault root (`<cwd>/.a3s/kb`). OKF concept pages live here; ingested raw
-/// material lands under `sources/`.
+/// The local personal KB vault root (`<cwd>/.a3s/kb`).
 pub(crate) fn kb_dir(cwd: &str) -> PathBuf {
     Path::new(cwd).join(".a3s").join("kb")
 }
@@ -208,7 +205,7 @@ pub(crate) fn add_to_kb(cwd: &str, arg: &str, now: &str) -> String {
     }
 }
 
-/// Capture typed text as an OKF note (frontmatter + body).
+/// Capture typed text as a local KB note (frontmatter + body).
 fn ingest_text(text: &str, sources: &Path, now: &str) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(sources)?;
     let title = text.lines().next().unwrap_or("note").trim();

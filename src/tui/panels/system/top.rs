@@ -1,6 +1,6 @@
-//! `/top` process observation panel. Reuses `a3s top`'s shared process-table view
-//! so the panel and the standalone monitor agree on columns, colours, agent
-//! detection, and risk. Enter drills into a coding agent's process subtree.
+//! `/top` agent-activity observation panel. Reuses `a3s top`'s shared
+//! process-table view for columns, colours, agent detection, and risk. Enter
+//! drills into a coding agent's process subtree.
 
 use super::super::*;
 
@@ -11,24 +11,24 @@ fn top_panel_line(rendered: &str, width: usize) -> String {
 fn top_panel_title(processes: usize, agents: usize, focus: Option<(&str, u32)>) -> String {
     match focus {
         Some((label, pid)) => {
-            format!("  /top ▸ {label} (pid {pid}) — {processes} processes · Esc back")
+            format!("  /top ▸ {label} (pid {pid}) — {processes} activity rows · Esc back")
         }
         None => format!(
-            "  /top — {processes} processes · {agents} agent(s) · Enter focus agent · Esc close"
+            "  /top — {processes} agent activity rows · {agents} agent(s) · Enter focus agent · Esc close"
         ),
     }
 }
 
 impl App {
     /// Rows currently shown in `/top`: the focused agent's process subtree, or
-    /// all processes when not focused.
+    /// coding-agent roots plus their descendants when not focused.
     pub(crate) fn top_rows(&self) -> Vec<ProcessRow> {
         let Some(all) = &self.top else {
             return Vec::new();
         };
         match self.top_focus {
             Some(root) => process_subtree(all, root),
-            None => all.clone(),
+            None => agent_activity_rows(all),
         }
     }
 
@@ -83,6 +83,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::top::AgentKind;
 
     fn row(pid: u32, ppid: u32, command: &str) -> ProcessRow {
         ProcessRow {
@@ -138,13 +139,65 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(pids, vec![10, 11, 12]);
     }
+
+    #[test]
+    fn agent_activity_rows_hide_unrelated_processes() {
+        let mut agent = row(20, 1, "a3s code");
+        agent.agent = Some(AgentKind::A3sCode);
+        let rows = vec![
+            row(10, 1, "unrelated-server"),
+            agent,
+            row(21, 20, "agent-child"),
+            row(11, 10, "unrelated-child"),
+        ];
+
+        let pids = agent_activity_rows(&rows)
+            .into_iter()
+            .map(|row| row.pid)
+            .collect::<Vec<_>>();
+        assert_eq!(pids, vec![20, 21]);
+    }
+
+    #[test]
+    fn agent_activity_rows_include_transitive_agent_children() {
+        let mut agent = row(30, 1, "codex");
+        agent.agent = Some(AgentKind::Codex);
+        let rows = vec![
+            agent,
+            row(31, 30, "shell"),
+            row(32, 31, "test runner"),
+            row(40, 1, "database"),
+        ];
+
+        let pids = agent_activity_rows(&rows)
+            .into_iter()
+            .map(|row| row.pid)
+            .collect::<Vec<_>>();
+        assert_eq!(pids, vec![30, 31, 32]);
+    }
+}
+
+/// Coding-agent roots plus all transitive children by ppid, preserving input order.
+fn agent_activity_rows(rows: &[ProcessRow]) -> Vec<ProcessRow> {
+    let roots = rows
+        .iter()
+        .filter(|row| row.agent.is_some())
+        .map(|row| row.pid)
+        .collect::<HashSet<_>>();
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    process_forest(rows, roots)
 }
 
 /// All processes in `root`'s subtree (root + transitive children by ppid),
 /// preserving the input order.
-// ponytail: O(n²) fixpoint over the process list; n is small (host processes).
 fn process_subtree(rows: &[ProcessRow], root: u32) -> Vec<ProcessRow> {
-    let mut included: HashSet<u32> = HashSet::from([root]);
+    process_forest(rows, HashSet::from([root]))
+}
+
+fn process_forest(rows: &[ProcessRow], roots: HashSet<u32>) -> Vec<ProcessRow> {
+    let mut included = roots;
     loop {
         let mut added = false;
         for r in rows {

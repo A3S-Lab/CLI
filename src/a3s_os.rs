@@ -89,7 +89,7 @@ async fn register_ssh_key(origin: &str, token: &str, pubkey_line: &str) -> SshKe
     };
     let local_fp = openssh_sha256_fingerprint(pubkey_line);
 
-    let client = match reqwest::Client::builder().timeout(HTTP_TIMEOUT).build() {
+    let client = match http_client_for_origin(origin) {
         Ok(c) => c,
         Err(e) => return SshKeyOutcome::Failed(e.to_string()),
     };
@@ -159,6 +159,23 @@ async fn register_ssh_key(origin: &str, token: &str, pubkey_line: &str) -> SshKe
         }
         Err(e) => SshKeyOutcome::Failed(e.to_string()),
     }
+}
+
+fn http_client_for_origin(origin: &str) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder().timeout(HTTP_TIMEOUT);
+    if is_loopback_origin(origin) {
+        builder = builder.no_proxy();
+    }
+    builder.build()
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin.starts_with("http://127.")
+        || origin.starts_with("https://127.")
+        || origin.starts_with("http://localhost")
+        || origin.starts_with("https://localhost")
+        || origin.starts_with("http://[::1]")
+        || origin.starts_with("https://[::1]")
 }
 
 /// Read the first available local SSH public key, preferring modern key types.

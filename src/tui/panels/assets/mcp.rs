@@ -1856,7 +1856,7 @@ impl App {
                 let picked = panel.projects.get(panel.sel.min(last))?.clone();
                 self.agent_dev = None;
                 self.skill_dev = None;
-                self.kb_dev = None;
+                self.okf_dev = None;
                 self.mcp_dev = Some(McpDevSession {
                     name: picked.name.clone(),
                     description: picked.description.clone(),

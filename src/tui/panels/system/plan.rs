@@ -123,22 +123,18 @@ impl App {
     /// Bottom tracker for parallel subagents (Claude-style): a durable summary
     /// row plus live rows for agents still running.
     pub(crate) fn subagent_lines(&self) -> Vec<String> {
-        if self.subagents.is_empty() {
+        let subagents = self.runtime.subagents();
+        if subagents.is_empty() {
             return Vec::new();
         }
         let width = self.width as usize;
         let now = Instant::now();
-        let total = self.subagents.len();
-        let done = self.subagents.iter().filter(|s| s.done).count();
-        let tokens = self.subagents.iter().map(|s| s.tokens).sum::<u64>();
-        let started = self
-            .subagents
-            .iter()
-            .map(|s| s.started)
-            .min()
-            .unwrap_or(now);
+        let total = subagents.len();
+        let done = subagents.iter().filter(|s| s.done).count();
+        let tokens = subagents.iter().map(|s| s.tokens).sum::<u64>();
+        let started = subagents.iter().map(|s| s.started).min().unwrap_or(now);
         let ended = if done == total {
-            self.subagents
+            subagents
                 .iter()
                 .filter_map(|s| s.ended)
                 .max()
@@ -181,7 +177,7 @@ impl App {
             Style::new().fg(TN_GRAY).render(&right),
         )];
 
-        for s in self.subagents.iter().filter(|s| !s.done).take(4) {
+        for s in subagents.iter().filter(|s| !s.done).take(4) {
             let el = fmt_elapsed(s.started.elapsed());
             let right = if s.tokens > 0 {
                 format!("{el} · ↓ {} tokens", fmt_tokens(s.tokens))

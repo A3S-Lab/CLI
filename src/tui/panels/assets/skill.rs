@@ -991,6 +991,17 @@ fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -
                 action_hit = true;
             }
         }
+        SkillOsAction::Deploy => {
+            if combined.contains("deploy")
+                || combined.contains("serve")
+                || combined.contains("serving")
+                || combined.contains("release")
+                || combined.contains("binding")
+            {
+                score += 8;
+                action_hit = true;
+            }
+        }
         _ => {}
     }
     if combined.contains("view") || combined.contains("shaped") {
@@ -1002,7 +1013,7 @@ fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -
     {
         score -= 10;
     }
-    if matches!(action, SkillOsAction::Open) && !action_hit {
+    if matches!(action, SkillOsAction::Open | SkillOsAction::Deploy) && !action_hit {
         0
     } else if score >= 8 {
         score
@@ -1021,7 +1032,8 @@ async fn try_skill_progressive_action(
 ) -> Option<(remote_ui::ViewSpec, String)> {
     let query = match action {
         SkillOsAction::Open => "Function as a Service open skill asset shaped ViewLink",
-        SkillOsAction::Publish | SkillOsAction::Deploy | SkillOsAction::Status => return None,
+        SkillOsAction::Deploy => "Function as a Service deploy skill asset shaped ViewLink",
+        SkillOsAction::Publish | SkillOsAction::Status => return None,
     };
     let execution = os_progressive::execute_first_matching(
         client,
@@ -1033,7 +1045,9 @@ async fn try_skill_progressive_action(
     )
     .await?;
     let fallback = match action {
-        SkillOsAction::Open => skill_view_spec(skill_asset_url(origin, &asset.id)),
+        SkillOsAction::Open | SkillOsAction::Deploy => {
+            skill_view_spec(skill_asset_url(origin, &asset.id))
+        }
         _ => unreachable!(),
     };
     Some((
@@ -1113,13 +1127,24 @@ pub(crate) async fn publish_skill_to_os(
                 dev.name
             ),
         ),
-        SkillOsAction::Deploy => (
-            skill_view_spec(skill_asset_url(&origin, &asset.id)),
-            format!(
-                "Deployed `{}` by publishing its serving skill runtime binding for Function as a Service.",
-                dev.name
-            ),
-        ),
+        SkillOsAction::Deploy => try_skill_progressive_action(
+            &client,
+            &origin,
+            &session.access_token,
+            &asset,
+            &dev.name,
+            action,
+        )
+        .await
+        .unwrap_or_else(|| {
+            (
+                skill_view_spec(skill_asset_url(&origin, &asset.id)),
+                format!(
+                    "Deployed `{}` by publishing its serving skill runtime binding for Function as a Service.",
+                    dev.name
+                ),
+            )
+        }),
         SkillOsAction::Open | SkillOsAction::Status => {
             unreachable!("read-only skill actions return before publish flow")
         }
@@ -1242,7 +1267,7 @@ impl App {
                 let picked = panel.skills.get(panel.sel.min(last))?.clone();
                 self.agent_dev = None;
                 self.mcp_dev = None;
-                self.kb_dev = None;
+                self.okf_dev = None;
                 self.skill_dev = Some(SkillDevSession {
                     name: picked.name.clone(),
                     description: picked.description.clone(),
@@ -1384,7 +1409,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_progressive_score_prefers_faas_observe_viewlinks() {
+    fn skill_progressive_score_prefers_faas_viewlinks() {
         let asset = SkillAssetRef {
             id: "asset-1".into(),
             name: "skill-ops-triage".into(),
@@ -1432,6 +1457,22 @@ mod tests {
                 "Function as a Service Skill RemoteUI ViewLink OPEN",
                 "SkillFunctionController_openView"
             ) > 0
+        );
+        assert!(
+            skill_progressive_score(
+                SkillOsAction::Deploy,
+                "Function as a Service Skill deploy shaped ViewLink",
+                "SkillFunctionController_deploy"
+            ) > 0
+        );
+        assert_eq!(
+            skill_progressive_score(
+                SkillOsAction::Deploy,
+                "Function as a Service skill asset metadata",
+                "FunctionController_getAsset",
+            ),
+            0,
+            "deploy must require an actual deploy/serving operation hint"
         );
     }
 
@@ -1597,6 +1638,76 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[tokio::test]
+    async fn deploy_skill_to_os_uses_progressive_function_service_view_when_available() {
+        let root = std::env::temp_dir().join(format!("a3s-skill-deploy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ops")).unwrap();
+        std::fs::write(
+            root.join("ops/SKILL.md"),
+            "---\nname: ops-triage\ndescription: Triage incidents\n---\nBody\n",
+        )
+        .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_skill_publish_mock(captured.clone()).await;
+        let session = crate::a3s_os::StoredOsSession {
+            address: origin.clone(),
+            access_token: "token".into(),
+            refresh_token: None,
+            token_type: Some("Bearer".into()),
+            expires_at_ms: None,
+            account_label: None,
+            login_at_ms: 1,
+        };
+        let dev = SkillDevSession {
+            name: "ops-triage".into(),
+            description: "Triage incidents".into(),
+            rel: "ops/SKILL.md".into(),
+            path: root.join("ops/SKILL.md"),
+            root: root.clone(),
+        };
+
+        let result = publish_skill_to_os(session, dev, SkillOsAction::Deploy)
+            .await
+            .expect("skill deploy should use OS Function as a Service");
+
+        assert_eq!(result.action, SkillOsAction::Deploy);
+        assert_eq!(
+            result.view.url,
+            format!("{origin}/admin/functions/skill-ops-triage/deploy?embed=1")
+        );
+        assert!(
+            result.note.contains("progressive capabilities"),
+            "{}",
+            result.note
+        );
+        assert!(
+            result.note.contains("runtime binding was synced"),
+            "{}",
+            result.note
+        );
+
+        let requests = captured.lock().unwrap().clone();
+        let joined = requests.join("\n");
+        assert!(
+            joined.contains("POST /api/v1/kernel/capabilities HTTP/1.1"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains(r#""action":"search""#)
+                && joined.contains("Function as a Service deploy skill asset shaped ViewLink"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains(r#""action":"execute""#)
+                && joined.contains(r#""shaped":true"#)
+                && joined.contains("SkillFunctionController_deploy"),
+            "{joined}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn lists_skill_assets_from_skill_md_dirs() {
         let root = std::env::temp_dir().join(format!("a3s-skill-panel-{}", std::process::id()));
@@ -1652,6 +1763,36 @@ mod tests {
     }
 
     fn skill_publish_mock_response(line: &str, body: &str) -> (&'static str, &'static str) {
+        if line.starts_with("POST /api/v1/kernel/capabilities HTTP/1.1") {
+            if body.contains(r#""action":"search""#)
+                && body.contains("Function as a Service deploy skill asset shaped ViewLink")
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"results":[{"module":"functions","operation":"FunctionController_getAsset","description":"Function as a Service skill asset metadata"},{"module":"functions","operation":"SkillFunctionController_deploy","description":"Function as a Service skill deploy shaped ViewLink"}]}}"#,
+                );
+            }
+            if body.contains(r#""action":"describe""#)
+                && body.contains("SkillFunctionController_deploy")
+            {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"operation":{"name":"SkillFunctionController_deploy","inputSchema":{"body":{"properties":{"functionRef":{"type":"string"},"assetId":{"type":"string"},"input":{"type":"object"},"agentKind":{"type":"string"},"idempotencyKey":{"type":"string"}}}}}}}"#,
+                );
+            }
+            if body.contains(r#""action":"execute""#)
+                && body.contains(r#""shaped":true"#)
+                && body.contains("SkillFunctionController_deploy")
+                && body.contains(r#""functionRef":"skill-ops-triage""#)
+                && body.contains(r#""agentKind":"tool""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"deploymentId":"skill-deploy-1"},"view":{"url":"/admin/functions/skill-ops-triage/deploy?embed=1","width":1280,"height":860}}"#,
+                );
+            }
+            return ("404 Not Found", r#"{"code":404,"message":"not found"}"#);
+        }
         if line.starts_with("GET /api/v1/assets?") {
             return ("200 OK", r#"{"data":{"items":[]}}"#);
         }

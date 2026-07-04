@@ -13,6 +13,8 @@ pub(crate) enum LifecycleStage {
     Run,
     Publish,
     Deploy,
+    Inspect,
+    Activity,
     Observe,
 }
 
@@ -73,15 +75,26 @@ pub(crate) const TOOL_AGENT_STAGES: &[LifecycleStage] = &[
     LifecycleStage::Create,
     LifecycleStage::Develop,
     LifecycleStage::Publish,
+    LifecycleStage::Activity,
     LifecycleStage::Observe,
 ];
 
-pub(crate) const PUBLISH_DEPLOY_OBSERVE_STAGES: &[LifecycleStage] = &[
+pub(crate) const SKILL_STAGES: &[LifecycleStage] = &[
     LifecycleStage::Create,
     LifecycleStage::Develop,
     LifecycleStage::Publish,
     LifecycleStage::Deploy,
-    LifecycleStage::Observe,
+    LifecycleStage::Inspect,
+    LifecycleStage::Activity,
+];
+
+pub(crate) const OKF_STAGES: &[LifecycleStage] = &[
+    LifecycleStage::Create,
+    LifecycleStage::Develop,
+    LifecycleStage::Publish,
+    LifecycleStage::Deploy,
+    LifecycleStage::Inspect,
+    LifecycleStage::Activity,
 ];
 
 pub(crate) const WORKFLOW_STAGES: &[LifecycleStage] = &[
@@ -90,6 +103,7 @@ pub(crate) const WORKFLOW_STAGES: &[LifecycleStage] = &[
     LifecycleStage::Publish,
     LifecycleStage::Run,
     LifecycleStage::Deploy,
+    LifecycleStage::Activity,
     LifecycleStage::Observe,
 ];
 
@@ -162,7 +176,7 @@ pub(crate) const ASSET_LIFECYCLES: &[AssetLifecycle] = &[
             protocol: Some("skill"),
             agent_kind: Some("tool"),
         },
-        stages: PUBLISH_DEPLOY_OBSERVE_STAGES,
+        stages: SKILL_STAGES,
     },
     AssetLifecycle {
         family: "OKF knowledge package",
@@ -176,7 +190,7 @@ pub(crate) const ASSET_LIFECYCLES: &[AssetLifecycle] = &[
             protocol: Some("okf"),
             agent_kind: None,
         },
-        stages: PUBLISH_DEPLOY_OBSERVE_STAGES,
+        stages: OKF_STAGES,
     },
     AssetLifecycle {
         family: "workflow flow",
@@ -222,8 +236,8 @@ mod tests {
             ("application agent", APPLICATION_AGENT_STAGES),
             ("tool agent", TOOL_AGENT_STAGES),
             ("MCP server", MCP_STAGES),
-            ("skill", PUBLISH_DEPLOY_OBSERVE_STAGES),
-            ("OKF knowledge package", PUBLISH_DEPLOY_OBSERVE_STAGES),
+            ("skill", SKILL_STAGES),
+            ("OKF knowledge package", OKF_STAGES),
             ("workflow flow", WORKFLOW_STAGES),
         ];
 
@@ -296,6 +310,20 @@ mod tests {
             assert!(
                 !lifecycle(family).stages.contains(&LifecycleStage::Run),
                 "{family} should not claim a direct run stage"
+            );
+        }
+        for family in ["skill", "OKF knowledge package"] {
+            assert!(
+                !lifecycle(family).stages.contains(&LifecycleStage::Observe),
+                "{family} should not claim a generic observe stage; use inspect/activity commands"
+            );
+            assert!(
+                lifecycle(family).stages.contains(&LifecycleStage::Inspect),
+                "{family} should expose read-only status/open inspection"
+            );
+            assert!(
+                lifecycle(family).stages.contains(&LifecycleStage::Activity),
+                "{family} should expose asset-scoped Runtime activity"
             );
         }
     }
@@ -552,8 +580,8 @@ mod tests {
         ] {
             assert!(
                 !matches!(
-                    panels::kb::parse_okf_command(input),
-                    panels::kb::KbCommand::Prototype(_)
+                    panels::okf::parse_okf_command(input),
+                    panels::okf::OkfCommand::Prototype(_)
                 ),
                 "/okf should parse lifecycle subcommand `{input}`"
             );
@@ -574,8 +602,8 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    panels::kb::parse_okf_command(input),
-                    panels::kb::KbCommand::Usage(_)
+                    panels::okf::parse_okf_command(input),
+                    panels::okf::OkfCommand::Usage(_)
                 ),
                 "/okf should reject unsupported subcommand `{input}`"
             );

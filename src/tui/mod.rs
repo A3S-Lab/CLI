@@ -70,6 +70,7 @@ mod os_progressive;
 mod remote_ui;
 #[path = "os/runtime_policy.rs"]
 mod runtime_policy;
+mod runtime_projection;
 
 // Terminal UI support.
 #[path = "ui/design_markdown.rs"]
@@ -92,6 +93,7 @@ use image::*;
 use memutil::*;
 use render::*;
 use runtime_policy::RuntimePolicy;
+use runtime_projection::{RuntimeProjection, ToolCallRecord};
 use skills::*;
 use syntax::*;
 use update::*;
@@ -206,9 +208,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
     ("/btw", "ask a background side-question (/btw <prompt>)"),
-    ("/top", "observe local agent process activity"),
+    ("/top", "inspect local agent process activity"),
     ("/ide", "superfile-style file browser + editor"),
-    ("/git", "read-only git status, diff, and recent log"),
     (
         "/memory",
         "browse memory as an event/entity graph with tiers and forget candidates",
@@ -232,7 +233,6 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/sleep",
         "consolidate today's work into memory (experience · preferences · knowledge)",
     ),
-    ("/relay", "continue an unfinished task from another agent"),
     ("/help", "show commands and shortcuts"),
     (
         "/fork",
@@ -246,8 +246,8 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// Slash commands that mutate the session / conversation and so must NOT run
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
-    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/reload", "/update",
-    "/init", "/fork", "/sleep", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
+    "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
+    "/fork", "/sleep", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).
@@ -541,18 +541,6 @@ fn workflow_doc_for_tasks(
     Some((doc, label))
 }
 
-/// Brand/theme colour for a coding agent, used to tag its rows and tabs.
-fn agent_color(agent: &str) -> Color {
-    match agent {
-        "a3s-code" => ACCENT,
-        "claude code" => Color::Rgb(217, 119, 87), // Claude clay
-        "codex" => Color::Rgb(16, 163, 127),       // OpenAI green
-        "cursor" => Color::Rgb(180, 182, 200),
-        "gemini" => Color::Rgb(124, 137, 245),
-        _ => TN_GRAY,
-    }
-}
-
 /// Snapshot host processes for the `/top` panel via the shared `a3s top`
 /// collector, so the panel and `a3s top` agree on rows, agent detection, risk,
 /// CWD, and ordering (agents first, then CPU descending).
@@ -621,14 +609,6 @@ impl IdeFile {
             clip_linewise: false,
         }
     }
-}
-
-/// One completed tool call this session, retained for `/output`.
-struct ToolCallRecord {
-    name: String,
-    args: Option<serde_json::Value>,
-    output: String,
-    exit_code: i32,
 }
 
 /// Render the `/output` viewer body. It mirrors the main transcript's tool
@@ -1110,243 +1090,6 @@ run those branches as parallel background subagents via `parallel_task` (keep \
 each child prompt bounded and evidence-oriented), then synthesize their results \
 before continuing dependent work.";
 
-/// A resumable/relayable session from this or another coding agent.
-struct RelaySession {
-    agent: &'static str,
-    /// Native a3s-code session id (resume in place), if ours.
-    native_id: Option<String>,
-    /// Extracted last task, to continue here (foreign agents).
-    seed: Option<String>,
-    label: String,
-    mtime: std::time::SystemTime,
-}
-
-/// Last user message in a Claude Code / Codex `.jsonl` transcript.
-/// Extract a user message's text from one transcript line, across formats —
-/// Claude `{message:{role,content}}` / `{role,content}` and Codex
-/// `{payload:{role,content}}` with `input_text` parts. None if not a user line.
-fn parse_user_line(line: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(line).ok()?;
-    let role = v
-        .get("message")
-        .and_then(|m| m.get("role"))
-        .or_else(|| v.get("payload").and_then(|p| p.get("role")))
-        .or_else(|| v.get("role"))
-        .and_then(|r| r.as_str());
-    if role != Some("user") {
-        return None;
-    }
-    let content = v
-        .get("message")
-        .and_then(|m| m.get("content"))
-        .or_else(|| v.get("payload").and_then(|p| p.get("content")))
-        .or_else(|| v.get("content"))?;
-    let txt = match content {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Array(a) => a
-            .iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-            .collect::<Vec<_>>()
-            .join(" "),
-        _ => return None,
-    };
-    let txt = txt.trim();
-    if txt.is_empty() || txt.starts_with('<') {
-        return None;
-    }
-    Some(txt.to_string())
-}
-
-/// Most recent user message — read only the file tail (transcripts are big).
-fn last_user_msg_jsonl(path: &std::path::Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    let start = len.saturating_sub(128 * 1024);
-    f.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut lines: Vec<&str> = text.lines().collect();
-    if start > 0 && !lines.is_empty() {
-        lines.remove(0); // drop the partial first line
-    }
-    lines.iter().rev().find_map(|l| parse_user_line(l))
-}
-
-/// First user message — the initial task. Read the file head (cheap). Used as a
-/// fallback for Codex, whose huge rollouts keep the prompt far from the tail.
-fn first_user_msg_jsonl(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
-    let mut f = std::fs::File::open(path).ok()?;
-    let mut buf = vec![0u8; 96 * 1024];
-    let n = f.read(&mut buf).ok()?;
-    let text = String::from_utf8_lossy(&buf[..n]);
-    text.lines().find_map(parse_user_line)
-}
-
-/// Last user message from an a3s-code session JSON (for a task description).
-fn last_user_msg_a3s(path: &std::path::Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
-    for m in v.get("messages")?.as_array()?.iter().rev() {
-        if m.get("role").and_then(|r| r.as_str()) != Some("user") {
-            continue;
-        }
-        let txt = match m.get("content") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Array(a)) => a
-                .iter()
-                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ => continue,
-        };
-        if !txt.trim().is_empty() {
-            return Some(txt.trim().to_string());
-        }
-    }
-    None
-}
-
-/// A readable session name from a transcript filename (Codex/Claude fallback).
-fn jsonl_session_name(p: &std::path::Path) -> String {
-    p.file_stem()
-        .and_then(|s| s.to_str())
-        .map(|s| {
-            let s = s.strip_prefix("rollout-").unwrap_or(s);
-            s.chars().take(19).collect::<String>().replace('T', " ")
-        })
-        .unwrap_or_else(|| "session".into())
-}
-
-/// Scan a3s-code (native), Claude Code, and Codex session stores for this dir.
-fn scan_relay(cwd: &str) -> Vec<RelaySession> {
-    let mut out: Vec<RelaySession> = Vec::new();
-
-    // The cwd plus its ancestors — so launching from a subdirectory still finds
-    // the project root's sessions (Claude/Codex usually run at the root).
-    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
-    let mut p = std::path::Path::new(cwd);
-    loop {
-        dirs.push(p.to_path_buf());
-        match p.parent() {
-            Some(par) if par != p && dirs.len() < 6 => p = par,
-            _ => break,
-        }
-    }
-
-    // a3s-code: our own session store under cwd/ancestors (resume natively).
-    for d in &dirs {
-        if let Ok(entries) = std::fs::read_dir(d.join(".a3s/tui-sessions")) {
-            for e in entries.flatten() {
-                let f = e.path();
-                if let Some(id) = f.is_file().then(|| f.file_stem()?.to_str()).flatten() {
-                    let mtime = std::fs::metadata(&f)
-                        .and_then(|m| m.modified())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    // Show the last task as the description, like Claude/Codex.
-                    let label = match last_user_msg_a3s(&f) {
-                        Some(m) => format!("a3s-code · {}", truncate(&m, 56)),
-                        None => format!("a3s-code · session {id}"),
-                    };
-                    out.push(RelaySession {
-                        agent: "a3s-code",
-                        native_id: Some(id.to_string()),
-                        seed: None,
-                        label,
-                        mtime,
-                    });
-                }
-            }
-        }
-    }
-
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
-        // Claude Code: ~/.claude/projects/<encoded path>/**.jsonl for cwd+ancestors.
-        for d in &dirs {
-            let encoded = format!(
-                "-{}",
-                d.to_string_lossy()
-                    .trim_start_matches('/')
-                    .replace('/', "-")
-            );
-            collect_jsonl(
-                &home.join(".claude/projects").join(&encoded),
-                "claude code",
-                &mut out,
-            );
-        }
-        // Codex stores all sessions under one tree.
-        collect_jsonl(&home.join(".codex/sessions"), "codex", &mut out);
-    }
-
-    // Newest first, then keep only the most recent few per agent — users care
-    // about recent sessions, not the whole history.
-    out.sort_by_key(|e| std::cmp::Reverse(e.mtime));
-    const PER_AGENT: usize = 8;
-    let mut kept: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
-    out.retain(|s| {
-        let n = kept.entry(s.agent).or_insert(0);
-        *n += 1;
-        *n <= PER_AGENT
-    });
-    out
-}
-
-/// Recursively gather `.jsonl` paths (+ mtime) under `dir` — Claude nests them
-/// one level (`<id>/…`), Codex several (`sessions/YYYY/MM/DD/…`).
-fn gather_jsonl(
-    dir: &std::path::Path,
-    depth: usize,
-    max: usize,
-    out: &mut Vec<(std::path::PathBuf, std::time::SystemTime)>,
-) {
-    if depth > max {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            gather_jsonl(&p, depth + 1, max, out);
-        } else if p.extension().and_then(|x| x.to_str()) == Some("jsonl") {
-            let mtime = e
-                .metadata()
-                .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            out.push((p, mtime));
-        }
-    }
-}
-
-/// Add relay sessions for the most recent transcripts under `dir`. Only the
-/// newest dozen are read for a description (cheap), the rest are stat-only.
-fn collect_jsonl(dir: &std::path::Path, agent: &'static str, out: &mut Vec<RelaySession>) {
-    let mut paths: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();
-    gather_jsonl(dir, 0, 6, &mut paths);
-    paths.sort_by_key(|e| std::cmp::Reverse(e.1)); // newest first
-    paths.truncate(12);
-    for (p, mtime) in paths {
-        // Most-recent task (tail); fall back to the initial prompt (head).
-        let desc = last_user_msg_jsonl(&p).or_else(|| first_user_msg_jsonl(&p));
-        let label = match &desc {
-            Some(m) => format!("{agent} · {}", truncate(m, 56)),
-            None => format!("{agent} · {}", jsonl_session_name(&p)),
-        };
-        out.push(RelaySession {
-            agent,
-            native_id: None,
-            seed: desc,
-            label,
-            mtime,
-        });
-    }
-}
-
 /// Run mode, cycled with Shift+Tab.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -1502,24 +1245,16 @@ enum Msg {
     TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
     TopRefresh,
-    /// No-op — lets fire-and-forget async work satisfy the `Cmd -> Msg` contract.
-    Noop,
     /// `/fork` copied the session under a new id (Ok) — swap the active session to
     /// it — or failed (Err with a reason).
     Forked(Result<String, String>),
-    /// Result of the async `/relay` session scan.
-    RelayData(Vec<RelaySession>),
-    /// `/git` status + recent log snapshot.
-    GitStatus(Vec<GitFile>, Vec<String>),
-    /// `/git` diff for the selected file.
-    GitDiff(Vec<String>),
     /// `/memory` graph data loaded (timeline + details + derived graph).
     MemoryLoaded(MemPanelData),
     /// A `/memory` forget-candidate deletion finished, with fresh graph data.
     MemoryForgotten(Result<(String, MemPanelData), String>),
     /// Asset-scoped OS asset list loaded.
     AssetListLoaded(Result<panels::asset_resources::AssetListFetch, String>),
-    /// Runtime activity rows loaded for an asset-scoped observation panel.
+    /// Runtime activity rows loaded for an asset-scoped activity panel.
     RuntimeActivityLoaded(Result<panels::asset_resources::RuntimeActivityFetch, String>),
     /// `/kb import` finished; carries the one-line summary to show.
     KbAdded(String),
@@ -1537,10 +1272,10 @@ enum Msg {
     AgentOsCompleted(Result<panels::agent::AgentOsResult, String>),
     /// `/mcp` published/debugged/tested an OS Function as a Service MCP asset.
     McpOsCompleted(Result<panels::mcp::McpOsResult, String>),
-    /// `/skill` published/deployed/observed an OS Function as a Service skill asset.
+    /// `/skill` published/deployed/inspected an OS Function as a Service skill asset.
     SkillOsCompleted(Result<panels::skill::SkillOsResult, String>),
     /// `/okf` published/deployed an OS Knowledge service package asset.
-    KbOsCompleted(Result<panels::kb::KbOsResult, String>),
+    OkfOsCompleted(Result<panels::okf::OkfOsResult, String>),
     /// Asset source was cloned into the local asset workspace.
     AssetCloned(Result<asset_clone::AssetCloneResult, String>),
     /// `/memory` → ctx back-jump finished: (ctx event id, transcript window).
@@ -1623,18 +1358,6 @@ fn touch_workspace_file_path_for_manifest(
     }
 }
 
-/// A running (or just-finished) parallel subagent task, for the bottom tracker.
-struct SubAgent {
-    task_id: String,
-    agent: String,
-    description: String,
-    started: Instant,
-    ended: Option<Instant>,
-    tokens: u64,
-    done: bool,
-    success: Option<bool>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeEvidenceMode {
     Any,
@@ -1668,13 +1391,6 @@ impl RuntimeExpectation {
     fn required_report_view(label: impl Into<String>) -> Self {
         Self {
             evidence_mode: RuntimeEvidenceMode::ParallelReportView,
-            ..Self::required(label)
-        }
-    }
-
-    fn preferred(label: impl Into<String>) -> Self {
-        Self {
-            policy: RuntimePolicy::Preferred,
             ..Self::required(label)
         }
     }
@@ -1740,6 +1456,21 @@ impl RuntimeExpectation {
             self.missing_expectation()
         ))
     }
+
+    fn corrective_prompt(&self) -> Option<String> {
+        if self.policy != RuntimePolicy::Required || self.is_satisfied() {
+            return None;
+        }
+        Some(format!(
+            "The previous turn ended without the required OS Runtime evidence for {}: {}. \
+             Continue the same task, explicitly use OS Runtime or `parallel_task` fan-out as required, \
+             create or surface the shaped OS `.view`/`viewUrl` report response when required, \
+             and only then give the final answer. If the OS capability is unavailable, explain exactly \
+             which OS endpoint or response field is missing and provide local report artifact paths.",
+            self.label,
+            self.missing_expectation()
+        ))
+    }
 }
 
 fn is_new_remote_view(last_view: Option<&remote_ui::ViewSpec>, spec: &remote_ui::ViewSpec) -> bool {
@@ -1791,8 +1522,8 @@ struct App {
     /// `/view` or clicking the inline "Open view" button; owned workflows like
     /// `/flow` may also open their prepared designer view directly.
     last_view: Option<remote_ui::ViewSpec>,
-    /// Required/preferred Runtime use for the current autonomous workflow, plus
-    /// observed evidence from tool/subagent/view events.
+    /// Required Runtime use for the current autonomous workflow, plus observed
+    /// evidence from tool/subagent/view events.
     runtime_expectation: Option<RuntimeExpectation>,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
@@ -1800,11 +1531,6 @@ struct App {
     effort_panel: Option<usize>,
     /// `/theme` picker: temp theme index while open.
     theme_panel: Option<usize>,
-    /// /relay panel: resumable/relayable sessions, the active agent tab, and the
-    /// selected index within that tab (when open).
-    relay: Vec<RelaySession>,
-    relay_menu: Option<usize>,
-    relay_tab: usize,
     /// First Ctrl+C arms quit; a second within the window exits.
     quit_armed: Option<Instant>,
     /// Last user activity; drives the inactivity auto-review.
@@ -1850,11 +1576,11 @@ struct App {
     /// The local skill currently being developed by ordinary user turns.
     skill_dev: Option<panels::skill::SkillDevSession>,
     /// `/okf` OKF package picker; open when `Some`.
-    kb_picker: Option<panels::kb::KbPackagePanel>,
+    okf_picker: Option<panels::okf::OkfPackagePanel>,
     /// A `/okf <action>` submitted before an OKF package was active; run after selection.
-    pending_kb_subcommand: Option<panels::kb::KbCommand>,
+    pending_okf_subcommand: Option<panels::okf::OkfCommand>,
     /// The local OKF package currently being developed by ordinary user turns.
-    kb_dev: Option<panels::kb::KbDevSession>,
+    okf_dev: Option<panels::okf::OkfDevSession>,
     /// Whether the review issue-checklist overlay is showing.
     review_open: bool,
     /// `ctx` CLI detected at startup (past-session history search).
@@ -1887,11 +1613,9 @@ struct App {
     goal_since: Option<Instant>,
     /// Remaining auto-continue turns for `/loop` (0 = off).
     loop_remaining: usize,
-    /// Live parallelism for the status bar: running tools + running subagents.
-    active_tools: usize,
-    active_agents: usize,
-    /// Parallel subagent tasks shown in the bottom tracker panel.
-    subagents: Vec<SubAgent>,
+    /// ECS-style projection of live runtime entities (tools/subagents) plus
+    /// completed tool-call records used by `/output`.
+    runtime: RuntimeProjection,
     /// True once this turn used tools/planning/subagents that need a final
     /// user-facing synthesis if the model stops without text afterwards.
     turn_had_agent_activity: bool,
@@ -1952,18 +1676,8 @@ struct App {
     model: Option<String>,
     /// Cumulative OUTPUT (generated) tokens this session — what `↓` reports.
     output_tokens: usize,
-    /// Accumulated streamed JSON args of the in-progress tool call, so the
-    /// result line can show what the tool actually did (command/path/pattern).
-    tool_args: String,
-    /// Live stdout of the in-progress tool (e.g. a running command), shown
-    /// dimmed under the action and cleared when the tool completes.
-    tool_output: String,
-    /// Every completed tool call this session (name/args/output), shown by `/output`.
-    tool_log: Vec<ToolCallRecord>,
     /// When the current run started, for the live elapsed-time indicator.
     stream_started: Option<Instant>,
-    /// Name of the tool currently executing (shown live with a blinking dot).
-    running_tool: Option<String>,
     /// Animation counter for the blinking running-tool dot (advances per tick).
     blink_tick: u8,
     /// Frame counter for the welcome-mascot animation.
@@ -1992,13 +1706,11 @@ struct App {
     top_focus: Option<u32>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
-    /// `/git` full-screen panel (Some when open).
-    git: Option<Git>,
     /// `/memory` full-screen timeline panel (Some when open).
     memory: Option<MemPanel>,
     /// Asset-scoped OS digital-asset browser.
     asset_list: Option<panels::asset_resources::AssetListPanel>,
-    /// Asset-scoped OS Runtime activity observation panel.
+    /// Asset-scoped OS Runtime activity panel.
     runtime_activity: Option<panels::asset_resources::RuntimeActivityPanel>,
     /// `/kb` full-screen local personal knowledge-base panel (Some when open).
     kb: Option<panels::kb::KbPanel>,
@@ -2136,10 +1848,6 @@ impl Model for App {
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
                     return self.handle_help_key(&key);
-                }
-                // /git panel takes all keys while open.
-                if self.git.is_some() {
-                    return self.git_key(&key);
                 }
                 // /memory panel takes all keys while open.
                 if self.memory.is_some() {
@@ -2297,11 +2005,6 @@ impl Model for App {
                     }
                     return None;
                 }
-                // /relay picker takes keys while open.
-                // /relay picker: consume EVERY key so none leaks to the input.
-                if self.relay_menu.is_some() {
-                    return self.handle_relay_key(&key).unwrap_or(None);
-                }
                 // Asset review issue checklist: consume EVERY key while open.
                 if self.review_open {
                     return self.handle_review_key(&key);
@@ -2321,8 +2024,8 @@ impl Model for App {
                 if self.skill_picker.is_some() {
                     return self.handle_skill_key(&key);
                 }
-                if self.kb_picker.is_some() {
-                    return self.handle_kb_package_key(&key);
+                if self.okf_picker.is_some() {
+                    return self.handle_okf_package_key(&key);
                 }
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
@@ -2387,8 +2090,8 @@ impl Model for App {
                     self.exit_skill_dev();
                     return None;
                 }
-                if self.state == State::Idle && self.kb_dev.is_some() && key.code == KeyCode::Esc {
-                    self.exit_kb_dev();
+                if self.state == State::Idle && self.okf_dev.is_some() && key.code == KeyCode::Esc {
+                    self.exit_okf_dev();
                     return None;
                 }
                 // Slash-command menu: ↑/↓ select, Enter run, Tab complete, Esc
@@ -2606,7 +2309,6 @@ impl Model for App {
                     && self.state == State::Idle
                     && self.top.is_none()
                     && self.ide.is_none()
-                    && self.git.is_none()
                     && self.memory.is_none()
                     && !self.help_open
                 {
@@ -2935,7 +2637,6 @@ impl Model for App {
                     return Some(cmd::cmd(|| async { Msg::TopData(fetch_top().await) }));
                 }
             }
-            Msg::Noop => {}
             Msg::Forked(result) => {
                 match result {
                     Ok(new_id) => {
@@ -2967,28 +2668,6 @@ impl Model for App {
                     Err(e) => {
                         self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}")))
                     }
-                }
-            }
-            Msg::RelayData(sessions) => {
-                if self.relay_menu.is_some() {
-                    self.relay = sessions;
-                }
-            }
-
-            Msg::GitStatus(files, log) => {
-                if let Some(g) = &mut self.git {
-                    g.files = files;
-                    g.log = log;
-                    g.sel = g.sel.min(g.files.len().saturating_sub(1));
-                    g.log_sel = g.log_sel.min(g.log.len().saturating_sub(1));
-                    g.note.clear();
-                    return self.git_load_diff();
-                }
-            }
-            Msg::GitDiff(lines) => {
-                if let Some(g) = &mut self.git {
-                    g.diff = lines;
-                    g.diff_scroll = 0;
                 }
             }
             Msg::MemoryLoaded(data) => {
@@ -3048,7 +2727,7 @@ impl Model for App {
             Msg::AgentOsCompleted(res) => self.on_agent_os_completed(res),
             Msg::McpOsCompleted(res) => self.on_mcp_os_completed(res),
             Msg::SkillOsCompleted(res) => self.on_skill_os_completed(res),
-            Msg::KbOsCompleted(res) => self.on_kb_os_completed(res),
+            Msg::OkfOsCompleted(res) => self.on_okf_os_completed(res),
             Msg::AssetCloned(res) => match res {
                 Ok(result) => self.on_asset_cloned(result),
                 Err(error) => self.push_line(
@@ -3077,9 +2756,6 @@ impl Model for App {
     fn view(&self) -> String {
         if self.help_open {
             return self.render_help();
-        }
-        if let Some(g) = &self.git {
-            return self.render_git(g);
         }
         if let Some(m) = &self.memory {
             return self.render_memory(m);
@@ -3137,7 +2813,7 @@ impl Model for App {
             ("◆", TN_CYAN, TN_CYAN)
         } else if self.skill_dev.is_some() {
             ("✦", TN_CYAN, TN_CYAN)
-        } else if self.kb_dev.is_some() {
+        } else if self.okf_dev.is_some() {
             ("⌁", TN_CYAN, TN_CYAN)
         } else if inp.starts_with("/btw") {
             ("❯", TN_YELLOW, TN_YELLOW)
@@ -3345,7 +3021,7 @@ impl Model for App {
                 ))
             ));
         }
-        if let Some(dev) = &self.kb_dev {
+        if let Some(dev) = &self.okf_dev {
             line1.push_str(&format!(
                 "  {}",
                 Style::new()
@@ -3356,11 +3032,14 @@ impl Model for App {
         if self.loop_remaining > 0 {
             line1.push_str(&format!("  ↻{}", self.loop_remaining));
         }
-        if self.active_agents > 0 {
-            line1.push_str(&format!("  ⇉ {} agents", self.active_agents));
+        if self.runtime.active_subagent_count() > 0 {
+            line1.push_str(&format!(
+                "  ⇉ {} agents",
+                self.runtime.active_subagent_count()
+            ));
         }
-        if self.active_tools > 0 {
-            line1.push_str(&format!("  ⚙ {} running", self.active_tools));
+        if self.runtime.active_tool_count() > 0 {
+            line1.push_str(&format!("  ⚙ {} running", self.runtime.active_tool_count()));
         }
         if let Some(v) = &self.update_available {
             line1.push_str(&format!("  ⬆ {v}"));
@@ -3415,13 +3094,12 @@ impl Model for App {
         let composed = self.overlay_slash_menu(composed);
         let composed = self.overlay_file_menu(composed);
         let composed = self.overlay_model_menu(composed);
-        let composed = self.overlay_relay_menu(composed);
         let composed = self.overlay_review_menu(composed);
         let composed = self.overlay_flow_menu(composed);
         let composed = self.overlay_agent_menu(composed);
         let composed = self.overlay_mcp_menu(composed);
         let composed = self.overlay_skill_menu(composed);
-        let composed = self.overlay_kb_package_menu(composed);
+        let composed = self.overlay_okf_package_menu(composed);
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
@@ -3455,7 +3133,6 @@ impl Model for App {
         // only during an approval prompt.
         if self.state == State::Awaiting
             || self.top.is_some()
-            || self.git.is_some()
             || self.memory.is_some()
             || self.asset_list.is_some()
             || self.runtime_activity.is_some()
@@ -3505,7 +3182,7 @@ impl App {
             "agent" => self.open_agent_panel_focused(&result.path),
             "mcp" => self.open_mcp_panel_focused(&result.path),
             "skill" => self.open_skill_panel_focused(&result.path),
-            "okf" | "knowledge" => self.open_kb_package_panel_focused(&result.path),
+            "okf" | "knowledge" => self.open_okf_package_panel_focused(&result.path),
             "workflow" => self.open_flow_panel_focused(&result.path),
             _ => self.push_line(
                 &Style::new()
@@ -3589,9 +3266,9 @@ impl App {
         );
     }
 
-    fn open_kb_package_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = panels::kb::kb_package_dir(&self.cwd);
-        let packages = panels::kb::list_kb_packages(&root);
+    fn open_okf_package_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = panels::okf::okf_package_dir(&self.cwd);
+        let packages = panels::okf::list_okf_packages(&root);
         let Some(sel) = packages
             .iter()
             .position(|package| Self::path_is_within(&package.path, cloned_path))
@@ -3603,7 +3280,7 @@ impl App {
             );
             return;
         };
-        self.kb_picker = Some(panels::kb::KbPackagePanel {
+        self.okf_picker = Some(panels::okf::OkfPackagePanel {
             root,
             packages,
             sel,
@@ -4508,7 +4185,7 @@ impl App {
             "/clear" => {
                 self.messages.clear();
                 self.plan.clear();
-                self.subagents.clear();
+                self.runtime.clear_turn_entities();
                 self.queue.clear();
                 self.completed = 0;
                 self.textarea.clear();
@@ -4527,9 +4204,9 @@ impl App {
                 self.pending_mcp_subcommand = None;
                 self.skill_dev = None;
                 self.pending_skill_subcommand = None;
-                self.kb_picker = None;
-                self.pending_kb_subcommand = None;
-                self.kb_dev = None;
+                self.okf_picker = None;
+                self.pending_okf_subcommand = None;
+                self.okf_dev = None;
                 self.asset_list = None;
                 self.runtime_activity = None;
                 self.kb = None;
@@ -4784,24 +4461,6 @@ impl App {
                     Msg::UpdatePlan(latest)
                 }));
             }
-            "/git" => {
-                self.textarea.clear();
-                self.git = Some(Git {
-                    files: Vec::new(),
-                    sel: 0,
-                    diff: Vec::new(),
-                    diff_scroll: 0,
-                    log: Vec::new(),
-                    log_sel: 0,
-                    view: GitView::Status,
-                    note: "loading…".into(),
-                });
-                let workspace = self.cwd.clone();
-                return Some(cmd::cmd(move || async move {
-                    let (files, log) = git_status_log(workspace).await;
-                    Msg::GitStatus(files, log)
-                }));
-            }
             "/memory" => {
                 self.textarea.clear();
                 // Open immediately ("loading…"); load the file snapshot off the
@@ -4819,21 +4478,6 @@ impl App {
                     note: "loading…".into(),
                 });
                 return Some(self.load_memory_panel(dir));
-            }
-            "/relay" => {
-                self.textarea.clear();
-                // Open immediately (tabs show right away); scan off the UI thread
-                // so reading large transcripts never freezes the panel.
-                self.relay.clear();
-                self.relay_menu = Some(0);
-                self.relay_tab = 0;
-                let cwd = self.cwd.clone();
-                return Some(cmd::cmd(move || async move {
-                    let sessions = tokio::task::spawn_blocking(move || scan_relay(&cwd))
-                        .await
-                        .unwrap_or_default();
-                    Msg::RelayData(sessions)
-                }));
             }
             _ => {}
         }
@@ -4869,9 +4513,9 @@ impl App {
                         panels::skill::skill_dev_prompt(dev, &prompt),
                         format!("✦ {}: {}", dev.name, truncate(trimmed, 60)),
                     ),
-                    None => match &self.kb_dev {
+                    None => match &self.okf_dev {
                         Some(dev) => (
-                            panels::kb::kb_dev_prompt(dev, &prompt),
+                            panels::okf::okf_dev_prompt(dev, &prompt),
                             format!("⌁ {}: {}", dev.name, truncate(trimmed, 60)),
                         ),
                         None => (prompt, trimmed.to_string()),
@@ -4986,7 +4630,11 @@ impl App {
         self.viewport.set_auto_scroll(true); // sending a message jumps to latest
         if clear_turn_artifacts {
             self.plan.clear(); // fresh plan per user turn; planning events refill it
-            self.subagents.clear(); // keep completed agents visible until the next user turn
+                               // Keep completed agents visible until the next user turn; a fresh
+                               // user turn starts a fresh runtime-entity projection.
+            self.runtime.clear_turn_entities();
+        } else {
+            self.runtime.clear_live_tools();
         }
         self.running_task = Some(display_task);
         self.state = State::Streaming;
@@ -5059,6 +4707,24 @@ impl App {
         self.finish();
         if let Some((prompt, display_task)) = synthesis {
             return self.start_ultracode_synthesis(prompt, display_task);
+        }
+        // Required OS Runtime evidence is a deliverable, not just a warning. In
+        // autonomous runs, spend the next loop turn on a targeted correction
+        // before falling back to the generic "Continue" prompt.
+        if self.loop_remaining > 0 && self.queue.is_empty() {
+            if let Some(prompt) = self
+                .runtime_expectation
+                .as_ref()
+                .and_then(RuntimeExpectation::corrective_prompt)
+            {
+                self.loop_remaining -= 1;
+                let n = self.loop_remaining;
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  ↻ runtime evidence retry ({n} left · Esc to stop)"
+                )));
+                self.loop_continuation = true;
+                return Some(cmd::msg(Msg::Submit(prompt)));
+            }
         }
         // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
         // Queued user messages take priority.
@@ -5159,27 +4825,31 @@ impl App {
                 self.thinking.push_str(&text);
                 self.update_viewport_with_stream();
             }
-            AgentEvent::ToolStart { name, .. } => {
+            AgentEvent::ToolStart { id, name } => {
                 // Finalize any assistant text; show the tool live with a blinking
                 // dot. The final "• action / └ result" lands on ToolEnd.
                 self.mark_agent_activity();
                 self.finalize_streaming();
-                self.tool_args.clear();
-                self.tool_output.clear();
-                self.active_tools += 1;
-                self.running_tool = Some(name);
+                self.runtime.start_tool(id, name);
             }
             AgentEvent::ToolInputDelta { delta } => {
-                self.tool_args.push_str(&delta);
+                self.runtime.push_tool_input(&delta);
             }
-            AgentEvent::ToolOutputDelta { delta, .. } => {
-                self.tool_output.push_str(&delta);
-                if let Some(spec) = self.find_remote_view_spec(&self.tool_output) {
-                    self.remember_remote_view(spec);
+            AgentEvent::ToolOutputDelta { id, name, delta } => {
+                self.runtime.push_tool_output(id, name, &delta);
+                if let Some(output) = self
+                    .runtime
+                    .live_tool()
+                    .map(|tool| tool.output().to_string())
+                {
+                    if let Some(spec) = self.find_remote_view_spec(&output) {
+                        self.remember_remote_view(spec);
+                    }
                 }
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolEnd {
+                id,
                 name,
                 output,
                 exit_code,
@@ -5187,40 +4857,22 @@ impl App {
                 ..
             } => {
                 self.mark_agent_activity();
-                self.running_tool = None;
-                self.active_tools = self.active_tools.saturating_sub(1);
-                let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
+                let completed = self
+                    .runtime
+                    .end_tool(&id, name.clone(), output.clone(), exit_code);
                 self.push_line(&render_tool_end(
                     &name,
                     exit_code,
                     &output,
                     metadata.as_ref(),
-                    args.as_ref(),
+                    completed.args.as_ref(),
                     self.width as usize,
                 ));
                 self.record_runtime_tool_evidence(&name);
-                self.capture_workflow(&name, args.as_ref());
+                self.capture_workflow(&name, completed.args.as_ref());
                 if let Some(spec) = self.find_remote_view_spec(&output) {
                     self.remember_remote_view(spec);
                 }
-                // Retain the call for `/output`. Cap each output so a huge build
-                // log can't bloat the in-memory record.
-                // ponytail: 8 KB/call cap; the transcript already holds the full text
-                let logged = if output.len() > 8192 {
-                    let mut s: String = output.chars().take(8000).collect();
-                    s.push_str("\n… (output truncated — see transcript)");
-                    s
-                } else {
-                    output
-                };
-                self.tool_log.push(ToolCallRecord {
-                    name,
-                    args,
-                    output: logged,
-                    exit_code,
-                });
-                self.tool_args.clear();
-                self.tool_output.clear();
             }
             // Parallel/child task lifecycle (parallel_task, task) — show each
             // sub-task starting, its progress, and how it finished.
@@ -5233,18 +4885,9 @@ impl App {
                 self.mark_agent_activity();
                 self.finalize_streaming();
                 self.record_runtime_parallel_evidence();
-                self.active_agents += 1;
                 // Track it in the live bottom panel instead of a transcript line.
-                self.subagents.push(SubAgent {
-                    task_id,
-                    agent,
-                    description,
-                    started: Instant::now(),
-                    ended: None,
-                    tokens: 0,
-                    done: false,
-                    success: None,
-                });
+                self.runtime
+                    .start_subagent(task_id, agent, description, Instant::now());
                 self.relayout();
             }
             AgentEvent::SubagentProgress {
@@ -5260,10 +4903,8 @@ impl App {
                     .get("completion_tokens")
                     .or_else(|| metadata.pointer("/usage/completion_tokens"))
                     .and_then(|v| v.as_u64());
-                if let Some(s) = self.subagents.iter_mut().find(|s| s.task_id == task_id) {
-                    if let Some(t) = toks {
-                        s.tokens += t;
-                    }
+                if let Some(t) = toks {
+                    self.runtime.add_subagent_tokens(&task_id, t);
                 }
             }
             AgentEvent::SubagentEnd {
@@ -5274,12 +4915,8 @@ impl App {
                 ..
             } => {
                 self.mark_agent_activity();
-                self.active_agents = self.active_agents.saturating_sub(1);
-                if let Some(s) = self.subagents.iter_mut().find(|s| s.task_id == task_id) {
-                    s.done = true;
-                    s.success = Some(success);
-                    s.ended = Some(Instant::now());
-                }
+                self.runtime
+                    .end_subagent(task_id, agent.clone(), success, Instant::now());
                 self.relayout();
                 let (mark, color) = if success {
                     ("✓", TN_GREEN)
@@ -5350,8 +4987,7 @@ impl App {
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.
                 self.state = State::Awaiting;
-                self.running_tool = None;
-                self.active_tools = self.active_tools.saturating_sub(1);
+                self.runtime.clear_live_tools();
                 self.approval_sel = 0;
                 let label = tool_label(&tool_name, Some(&args));
                 self.pending_tool = Some((tool_id, label));
@@ -5559,9 +5195,10 @@ impl App {
             }
         }
 
-        if !self.subagents.is_empty() {
+        let subagents = self.runtime.subagents();
+        if !subagents.is_empty() {
             prompt.push_str("\nSubagents:\n");
-            for agent in &self.subagents {
+            for agent in subagents {
                 let status = match agent.success {
                     Some(true) => "done",
                     Some(false) => "failed",
@@ -5604,12 +5241,10 @@ impl App {
     fn finish(&mut self) {
         self.state = State::Idle;
         self.running_task = None;
-        self.active_tools = 0;
-        self.active_agents = 0;
         // Clear the parallel-subagent panel when the turn ends — it's a live
         // progress tracker, so leaving completed agents pinned at the bottom once
         // the work is done just clutters the idle screen.
-        self.subagents.clear();
+        self.runtime.clear_turn_entities();
         self.ultracode_synthesis_inflight = false;
         self.relayout();
         self.stream_started = None;
@@ -5761,7 +5396,7 @@ impl App {
 
     /// Format every retained tool call for the `/output` viewer.
     fn format_tool_log(&self) -> Option<String> {
-        format_tool_log_records(&self.tool_log, self.width as usize)
+        format_tool_log_records(self.runtime.tool_log(), self.width as usize)
     }
 
     /// Move through prompt history and load the entry into the input. Going
@@ -5820,19 +5455,20 @@ impl App {
             blocks.push(gutter(TN_GREEN, &rendered));
         }
         // Currently-executing tool: "• Running <cmd>…" with a blinking bullet.
-        if let Some(name) = &self.running_tool {
-            let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
+        if let Some(tool) = self.runtime.live_tool() {
             let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
             blocks.push(render_live_tool_status(
-                name,
-                args.as_ref(),
+                &tool.name,
+                tool.args().as_ref(),
                 self.width as usize,
                 on,
             ));
         }
         // Live stdout of the running tool — tail prefixed with "│" like Codex.
-        if let Some(body) = render_live_tool_output(&self.tool_output, self.width as usize) {
-            blocks.push(body);
+        if let Some(tool) = self.runtime.live_tool() {
+            if let Some(body) = render_live_tool_output(tool.output(), self.width as usize) {
+                blocks.push(body);
+            }
         }
         // Same "\n…\n" framing as rebuild_viewport so the transcript doesn't
         // jump a line when streaming starts/ends.
@@ -6264,9 +5900,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         confirmation,
         session_id: session_id.clone(),
         models,
-        relay: Vec::new(),
-        relay_menu: None,
-        relay_tab: 0,
         model_ctx,
         context_limit,
         last_prompt_tokens: 0,
@@ -6304,9 +5937,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         skill_picker: None,
         pending_skill_subcommand: None,
         skill_dev: None,
-        kb_picker: None,
-        pending_kb_subcommand: None,
-        kb_dev: None,
+        okf_picker: None,
+        pending_okf_subcommand: None,
+        okf_dev: None,
         autonomy_restore: None,
         ctx_ready,
         ctx_hits: Vec::new(),
@@ -6319,9 +5952,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         goal: None,
         goal_since: None,
         loop_remaining: 0,
-        active_tools: 0,
-        active_agents: 0,
-        subagents: Vec::new(),
+        runtime: RuntimeProjection::default(),
         turn_had_agent_activity: false,
         turn_text_after_activity: false,
         ultracode_synthesis_inflight: false,
@@ -6359,11 +5990,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         history_pos: None,
         model: default_model,
         output_tokens: 0,
-        tool_args: String::new(),
-        tool_output: String::new(),
-        tool_log: Vec::new(),
         stream_started: None,
-        running_tool: None,
         blink_tick: 0,
         anim: 0,
         mode: Mode::Default,
@@ -6376,7 +6003,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_sel: 0,
         top_focus: None,
         ide: None,
-        git: None,
         memory: None,
         asset_list: None,
         runtime_activity: None,
@@ -7495,7 +7121,7 @@ mod tests {
         }
 
         let removed_commands = [
-            "im", "run", "deploy", "review", "list", "ps", "workflow", "repo",
+            "im", "run", "deploy", "review", "list", "ps", "workflow", "repo", "git", "relay",
         ]
         .into_iter()
         .map(|name| format!("/{name}"))
@@ -7568,7 +7194,7 @@ mod tests {
         let exact = HashSet::from([
             "/logout", "/exit", "/fork", "/clear", "/init", "/compact", "/help", "/view", "/auto",
             "/config", "/model", "/effort", "/top", "/ide", "/plugin", "/theme", "/output",
-            "/reload", "/update", "/git", "/memory", "/relay",
+            "/reload", "/update", "/memory",
         ]);
 
         for (cmd, _) in SLASH_COMMANDS {
@@ -7720,12 +7346,6 @@ mod tests {
                 scope: Local,
             },
             SlashAuditRow {
-                command: "/git",
-                handler: Exact,
-                idle_only: false,
-                scope: Local,
-            },
-            SlashAuditRow {
                 command: "/memory",
                 handler: Exact,
                 idle_only: false,
@@ -7770,12 +7390,6 @@ mod tests {
             SlashAuditRow {
                 command: "/sleep",
                 handler: Parameterized,
-                idle_only: true,
-                scope: Local,
-            },
-            SlashAuditRow {
-                command: "/relay",
-                handler: Exact,
                 idle_only: true,
                 scope: Local,
             },
@@ -7879,6 +7493,7 @@ mod tests {
             "/plugins".to_string(),
             "/quit".to_string(),
             format!("/{}{}", "re", "po"),
+            format!("/{}{}", "re", "lay"),
         ];
         for alias in removed {
             assert!(
@@ -7969,12 +7584,12 @@ mod tests {
             .unwrap()
             .is_err());
         assert!(matches!(
-            panels::kb::parse_okf_command("activity"),
-            panels::kb::KbCommand::Activity(_)
+            panels::okf::parse_okf_command("activity"),
+            panels::okf::OkfCommand::Activity(_)
         ));
         assert!(matches!(
-            panels::kb::parse_okf_command("ps"),
-            panels::kb::KbCommand::Usage(_)
+            panels::okf::parse_okf_command("ps"),
+            panels::okf::OkfCommand::Usage(_)
         ));
     }
 
@@ -8004,21 +7619,26 @@ mod tests {
         let warning = report_only_runtime.missing_warning().unwrap();
         assert!(warning.contains("report"), "{warning}");
         assert!(warning.contains(".view"), "{warning}");
+        let correction = report_only_runtime.corrective_prompt().unwrap();
+        assert!(correction.contains("deep research"), "{correction}");
+        assert!(correction.contains("OS Runtime"), "{correction}");
+        assert!(correction.contains(".view"), "{correction}");
+        assert!(correction.contains("viewUrl"), "{correction}");
 
         let mut report_only_view = RuntimeExpectation::required_report_view("loop daily-triage");
         report_only_view.record_remote_view();
         assert!(!report_only_view.is_satisfied());
         let warning = report_only_view.missing_warning().unwrap();
         assert!(warning.contains("fan-out"), "{warning}");
+        let correction = report_only_view.corrective_prompt().unwrap();
+        assert!(correction.contains("fan-out"), "{correction}");
 
         let mut full_report = RuntimeExpectation::required_report_view("deep research");
         full_report.record_tool("runtime");
         full_report.record_remote_view();
         assert!(full_report.is_satisfied());
         assert!(full_report.missing_warning().is_none());
-
-        let mut preferred = RuntimeExpectation::preferred("code review");
-        assert!(preferred.missing_warning().is_none());
+        assert!(full_report.corrective_prompt().is_none());
     }
 
     #[test]

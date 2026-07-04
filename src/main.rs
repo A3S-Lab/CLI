@@ -16,17 +16,31 @@ mod update;
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+fn usage_text() -> String {
+    [
+        format!("a3s {} — A3S coding agent CLI", env!("CARGO_PKG_VERSION")),
+        String::new(),
+        "usage:".to_string(),
+        "  a3s code                  launch the interactive coding agent (TUI)".to_string(),
+        "  a3s code resume <id>      resume a saved session by id".to_string(),
+        "  a3s box <args...>         run a3s-box, installing it automatically if needed"
+            .to_string(),
+        "  a3s list                  list installed a3s-* tools on PATH".to_string(),
+        "  a3s top                   live monitor for boxes, agents, and diagnostics".to_string(),
+        "  a3s update                check for and install a newer version".to_string(),
+        "  a3s --version             show version".to_string(),
+        "  a3s --help                show this help".to_string(),
+    ]
+    .join("\n")
+        + "\n"
+}
+
 fn usage() {
-    println!("a3s {} — A3S coding agent CLI\n", env!("CARGO_PKG_VERSION"));
-    println!("usage:");
-    println!("  a3s code                  launch the interactive coding agent (TUI)");
-    println!("  a3s code resume <id>      resume a saved session by id");
-    println!("  a3s box <args...>         run a3s-box, installing it automatically if needed");
-    println!("  a3s list                  list installed a3s-* tools on PATH");
-    println!("  a3s top                   live monitor for boxes, agents, and diagnostics");
-    println!("  a3s update                check for and install a newer version");
-    println!("  a3s --version             show version");
-    println!("  a3s --help                show this help");
+    print!("{}", usage_text());
+}
+
+fn version_text() -> String {
+    format!("a3s {}\n", env!("CARGO_PKG_VERSION"))
 }
 
 /// Check the latest GitHub release and upgrade in place via the shared `update`
@@ -79,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some("-V") | Some("--version") => {
-            println!("a3s {}", env!("CARGO_PKG_VERSION"));
+            print!("{}", version_text());
             Ok(())
         }
         None | Some("-h") | Some("--help") | Some("help") => {
@@ -95,39 +109,19 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    fn cargo_command() -> std::ffi::OsString {
-        std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+    #[test]
+    fn test_help_command() {
+        let text = super::usage_text();
+        assert!(text.contains("usage:"));
+        assert!(text.contains("  a3s code"));
+        assert!(text.contains("a3s --version"));
     }
 
-    #[tokio::test]
-    async fn test_help_command() {
-        let _guard = cargo_run_guard();
-        let output = std::process::Command::new(cargo_command())
-            .args(["run", "--", "--help"])
-            .output()
-            .expect("Failed to execute process");
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("usage:"));
-    }
-
-    #[tokio::test]
-    async fn test_version_command() {
-        let _guard = cargo_run_guard();
-        let output = std::process::Command::new(cargo_command())
-            .args(["run", "--", "--version"])
-            .output()
-            .expect("Failed to execute process");
-
-        assert!(output.status.success());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains(env!("CARGO_PKG_VERSION")));
-    }
-
-    fn cargo_run_guard() -> std::sync::MutexGuard<'static, ()> {
-        crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner())
+    #[test]
+    fn test_version_command() {
+        assert_eq!(
+            super::version_text(),
+            format!("a3s {}\n", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

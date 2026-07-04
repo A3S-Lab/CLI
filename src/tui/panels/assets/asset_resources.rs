@@ -2,7 +2,7 @@
 //!
 //! Asset-scoped list subcommands show the signed-in user's OS digital assets
 //! (agents, workflows, applications, etc.) through the assets REST API.
-//! Asset-scoped runtime observation subcommands show runtime activity rows
+//! Asset-scoped runtime activity subcommands show Runtime activity rows
 //! through a small set of endpoint candidates, parsed leniently so the panel
 //! survives OS API shape drift.
 
@@ -1404,7 +1404,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_activity_hint_stays_observe_only() {
+    fn runtime_activity_hint_stays_read_only() {
         let hint = runtime_activity_hint();
 
         assert!(hint.contains("open"), "{hint}");

@@ -1,10 +1,12 @@
 # a3s code TUI — Knowledge Base ("Vault") design
 
-> Status: design proposal (for maintainer review). Audience: a3s maintainers.
+> Status: historical design note, superseded by the current `/kb` + `/okf`
+> boundary. Audience: a3s maintainers.
 > Method: synthesized from a 4-way design judge-panel (minimal / Obsidian-faithful / agent-native / hybrid), grounded in the live codebase.
-> Scope: a project-scoped, human+agent-shared markdown knowledge base surfaced in the a3s code TUI, built as an **Extension** (CLAUDE.md Rule 2) on top of the existing `/ide` panel, the comrak markdown renderer, the skills frontmatter parser, and the agent file tools. No new core subsystem, no new root crate.
-> Populated by: [knowledge-compilation.md](./knowledge-compilation.md) — the LLM-wiki compiler (the `okf` skill, invoked as `/okf`) that auto-generates cross-linked OKF pages into the vault.
-> Format: **Google Open Knowledge Format (OKF v0.1)** — the *single* knowledge format throughout (markdown + a required `type` frontmatter field + standard markdown links). There is **no** parallel Obsidian-`[[wikilink]]` mechanism; the "Obsidian-like" framing below means "a browsable markdown vault," realized as OKF.
+> Current boundary: `/kb` is the local personal knowledge base at `.a3s/kb`;
+> `/okf` manages shareable OKF knowledge-package assets under `.a3s/okf` and
+> publishes them through OS Knowledge service. Do not store OKF package assets
+> under the personal KB vault and do not add compatibility aliases.
 
 ---
 
@@ -35,7 +37,7 @@ The differentiator versus Obsidian: the same `.a3s/kb/*.md` files are a **shared
 | **Daily notes / calendar / periodic notes** | **DRY violation.** The agent memory layer already writes journal-style `memory/YYYY-MM-DD.md` daily logs (`crates/memory/src/sqlite/markdown.rs`). A coding KB is topic-keyed (architecture, gotchas), not date-keyed. We do not duplicate the journal. |
 | **Templates / Templater JS** | Arbitrary templating is a scope+security hole. If a note needs scaffolding, ask the agent — it already authors files. |
 | **Community plugin ecosystem** | a3s already has a skills/plugins system. A second plugin runtime violates Minimal-Core. KB extensibility is the `MemoryStore` / `ContextProvider` traits + skills. |
-| **Sync / publish / encryption** | The vault is a git-tracked workspace folder; `git` (and the existing `/git` panel) is the sync, versioning, and publish mechanism. |
+| **Sync / publish / encryption** | The vault is plain workspace content. Source-control, encryption, and publishing are handled outside the TUI boundary. |
 | **Dataview / properties query DSL** | A whole sub-product. Tag filter (P1) + full-text/semantic search (P2) covers the real need. |
 | **Embeds / transclusion `![[ ]]`** | Recursive render + cycle handling for marginal benefit. Following a link covers reuse-of-content. YAGNI until asked. |
 | **Themes / per-note CSS** | `/theme` already cycles the syntect theme the comrak renderer respects (`SYNTAX_THEME`, `syntax.rs:156`). Per-note CSS is meaningless in ANSI rows. |
@@ -125,15 +127,13 @@ The KB **is** the `/ide` panel, re-seeded at the vault root, with a markdown rea
 
 ### Command plumbing
 
-> **Shipped (v0.5.15):** `/kb` was implemented as an **ingestion** command, not the
-> browse panel proposed below. `/kb <text | file | folder>` deterministically adds
-> raw material to `.a3s/kb/sources/` (typed text → an OKF note with frontmatter;
-> a file → copied verbatim; a folder → its text files copied, structure preserved,
-> binaries/oversized skipped; provenance logged in `sources/SOURCES.md`). It runs
-> off the UI thread (`kbutil::add_to_kb`) and never mangles originals. **Browsing**
-> the vault is done through the existing `/ide` tree (`.a3s/kb/` shows there with no
-> new wiring); **compiling** sources into concept pages is `/okf`. The read-mode
-> browse panel below remains a future proposal.
+> **Current shipped boundary:** `/kb` is local personal-KB ingestion, search, and
+> vault browsing only. `/kb add <text>` and `/kb import <path>` write local notes
+> and copied text sources under `.a3s/kb/sources/`; `/kb search <query>` searches
+> that personal vault; `/kb vault` opens it in the local file browser. Shareable
+> OKF knowledge-package assets live under `.a3s/okf` and are handled only by
+> `/okf <description>`, `/okf clone`, `/okf review`, `/okf publish`,
+> `/okf deploy`, `/okf status`, `/okf list`, and `/okf activity`.
 
 - Add one entry to `SLASH_COMMANDS` (`crates/cli/src/tui/mod.rs:103`):
   `("/kb", "browse/edit the project knowledge base")`.
@@ -191,7 +191,7 @@ The vault is just `.a3s/kb/*.md` inside the workspace sandbox, so the agent **al
 The only addition is a shipped built-in **`kb` SKILL.md**, loaded by the existing skills registry (`registry.rs:124` `load_from_dir`), mirroring the `crates/box/integrations/skills/` pattern. It teaches the agent the **convention**, not a capability:
 
 - where the vault is (`.a3s/kb/`);
-- the OKF note format (required `type` frontmatter + CommonMark + standard markdown links);
+- the OKF package format (required `type` frontmatter + CommonMark + standard markdown links);
 - *when* to capture (a settled decision, a gotcha hit, an architecture map) and to link related notes with `[name](/dir/other.md)` and the code it touched with `[runtime.rs](crates/box/src/runtime.rs#L42)`.
 
 This captures the auto-curation value with **zero new tool**, which is why the skill ships in **P0/P1, not P2**. Because the links are standard markdown (which P1 follows + backlinks via `rg`), the agent participates in the OKF link graph using only `WriteTool`.
