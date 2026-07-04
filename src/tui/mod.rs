@@ -4987,7 +4987,7 @@ impl App {
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.
                 self.state = State::Awaiting;
-                self.runtime.clear_live_tools();
+                self.runtime.remove_tool(&tool_id);
                 self.approval_sel = 0;
                 let label = tool_label(&tool_name, Some(&args));
                 self.pending_tool = Some((tool_id, label));

@@ -76,6 +76,12 @@ impl RuntimeProjection {
         self.latest_tool_id = None;
     }
 
+    pub(crate) fn remove_tool(&mut self, id: &str) -> bool {
+        let removed = self.tools.remove(id).is_some();
+        self.sync_live_tool_order();
+        removed
+    }
+
     pub(crate) fn active_tool_count(&self) -> usize {
         self.tools.len()
     }
@@ -161,16 +167,7 @@ impl RuntimeProjection {
                 .and_then(|only| self.tools.remove(&only)),
             None => None,
         };
-        let active_ids = &self.tools;
-        self.tool_order
-            .retain(|tool_id| active_ids.contains_key(tool_id));
-        if self
-            .latest_tool_id
-            .as_deref()
-            .is_some_and(|latest| !active_ids.contains_key(latest))
-        {
-            self.latest_tool_id = self.tool_order.last().cloned();
-        }
+        self.sync_live_tool_order();
 
         let args = run
             .as_ref()
@@ -244,6 +241,19 @@ impl RuntimeProjection {
             run.ended = Some(now);
         }
     }
+
+    fn sync_live_tool_order(&mut self) {
+        let active_ids = &self.tools;
+        self.tool_order
+            .retain(|tool_id| active_ids.contains_key(tool_id));
+        if self
+            .latest_tool_id
+            .as_deref()
+            .is_some_and(|latest| !active_ids.contains_key(latest))
+        {
+            self.latest_tool_id = self.tool_order.last().cloned();
+        }
+    }
 }
 
 fn bounded_log_output(output: String) -> String {
@@ -312,6 +322,21 @@ mod tests {
         assert_eq!(projection.live_tool().unwrap().name, "grep");
         assert_eq!(projection.tool_log().len(), 1);
         assert_eq!(projection.tool_log()[0].output, "done\n");
+    }
+
+    #[test]
+    fn remove_tool_clears_only_the_matching_live_tool() {
+        let mut projection = RuntimeProjection::default();
+
+        projection.start_tool("a".into(), "bash".into());
+        projection.start_tool("b".into(), "read".into());
+
+        assert!(projection.remove_tool("b"));
+        assert_eq!(projection.active_tool_count(), 1);
+        assert_eq!(projection.live_tool().unwrap().name, "bash");
+
+        assert!(!projection.remove_tool("missing"));
+        assert_eq!(projection.active_tool_count(), 1);
     }
 
     #[test]
