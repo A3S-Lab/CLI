@@ -29,35 +29,77 @@ use a3s_tui::components::{Spinner, Textarea, Viewport};
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
-use a3s_tui::streaming::StreamingMarkdown;
 use a3s_tui::style::{Color, Style};
 use a3s_tui::{Event, KeyCode, KeyModifiers, Model, ProgramBuilder};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTableView};
 
+// Team digital assets.
+#[path = "assets/clone.rs"]
+mod asset_clone;
+#[path = "assets/lifecycle.rs"]
+mod asset_lifecycle;
+#[path = "assets/naming.rs"]
+mod asset_naming;
+
+// System configuration and integrations.
+#[path = "system/config.rs"]
 mod config;
-mod gitutil;
-mod image;
-mod kbutil;
-mod memutil;
-mod os_im;
-mod panels;
-mod remote_ui;
-mod render;
+#[path = "system/skills.rs"]
 pub(crate) mod skills;
-mod syntax;
+#[path = "system/update.rs"]
 mod update;
+
+// Local workspace.
+#[path = "workspace/gitutil.rs"]
+mod gitutil;
+
+// Local and shared knowledge.
+#[path = "knowledge/kbutil.rs"]
+mod kbutil;
+
+// Context and memory.
+#[path = "context/memutil.rs"]
+mod memutil;
+
+// OS Runtime bridge.
+#[path = "os/progressive.rs"]
+mod os_progressive;
+#[path = "os/remote_ui.rs"]
+mod remote_ui;
+#[path = "os/runtime_policy.rs"]
+mod runtime_policy;
+
+// Terminal UI support.
+#[path = "ui/design_markdown.rs"]
+mod design_markdown;
+#[path = "ui/image.rs"]
+mod image;
+#[path = "ui/render.rs"]
+mod render;
+#[path = "ui/syntax.rs"]
+mod syntax;
+#[path = "ui/util.rs"]
 mod util;
+
+mod panels;
+use asset_naming::*;
 use config::*;
+use design_markdown::StreamingMarkdown;
 use gitutil::*;
 use image::*;
 use memutil::*;
 use render::*;
+use runtime_policy::RuntimePolicy;
 use skills::*;
 use syntax::*;
 use update::*;
 use util::*;
+
+const HITL_CONFIRM_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+const BACKGROUND_CONFIRM_TIMEOUT_MS: u64 = 500;
+const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
 /// Terminal-safe mapping of the DESIGN.md Geist/Vercel palette.
 const ACCENT: Color = Color::Rgb(0, 112, 243); // link / active / success
@@ -134,40 +176,28 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/config", "edit config.acl in the built-in editor"),
     ("/theme", "cycle the code-highlight theme (Geist Dark …)"),
     (
-        "/workflow",
-        "view the latest ultracode dynamic workflow (read-only)",
-    ),
-    (
-        "/review",
-        "reopen the review checklist · or pick a local repos project to review",
-    ),
-    (
-        "/deploy",
-        "pick a repos project → Agentic CI/CD → OS gateway (needs /login)",
-    ),
-    (
-        "/run",
-        "pick a repos project → dev-mode debug run on A3S Runtime → access URL (needs /login)",
-    ),
-    (
         "/flow",
-        "pick a flow DAG → OS workflow designer (edit + debug run, needs /login) · /flow <text> drafts one",
+        "select a workflow asset → OS Workflow as a Service designer (needs /login) · /flow <text> drafts one",
     ),
     (
         "/agent",
-        "pick an agent definition → local multi-turn dev · /goal and /loop stay scoped",
+        "select an agent definition → local dev · Agent as a Service or Function as a Service by kind",
+    ),
+    (
+        "/mcp",
+        "select an MCP server asset → local dev · publish/debug/test via OS Function as a Service",
+    ),
+    (
+        "/skill",
+        "select a skill asset → local dev · publish/deploy via OS Function as a Service",
+    ),
+    (
+        "/okf",
+        "select an OKF package → local dev · publish/deploy via OS Knowledge service",
     ),
     (
         "/output",
         "view every tool call this session (name · args · result)",
-    ),
-    (
-        "/list",
-        "OS digital assets/apps panel (search/manage, needs /login)",
-    ),
-    (
-        "/ps",
-        "OS deployed process services panel (search/manage, needs /login)",
     ),
     ("/login", "sign in to the configured OS account"),
     ("/logout", "sign out from the configured OS account"),
@@ -176,17 +206,16 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/reload", "re-scan skills/plugins (hot-reload the / menu)"),
     ("/update", "upgrade a3s to the latest release"),
     ("/btw", "ask a background side-question (/btw <prompt>)"),
-    ("/top", "live process monitor (highlights coding agents)"),
+    ("/top", "observe local agent process activity"),
     ("/ide", "superfile-style file browser + editor"),
-    ("/im", "OS chat — DMs & groups (standalone; needs /login)"),
-    ("/git", "git status / diff / stage / commit (gitui-style)"),
+    ("/git", "read-only git status, diff, and recent log"),
     (
         "/memory",
-        "browse the agent's long-term memory (GitLens-style timeline)",
+        "browse memory as an event/entity graph with tiers and forget candidates",
     ),
     (
         "/kb",
-        "knowledge base dashboard · add/import/search/open",
+        "open the local personal knowledge base · add/import/search/vault",
     ),
     (
         "/ctx",
@@ -218,7 +247,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/relay", "/reload", "/update",
-    "/init", "/fork", "/review", "/run", "/deploy", "/sleep", "/flow", "/agent",
+    "/init", "/fork", "/sleep", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).
@@ -228,6 +257,46 @@ fn slash_candidates(input: &str) -> Vec<(&'static str, &'static str)> {
         .filter(|(cmd, _)| cmd.starts_with(input))
         .copied()
         .collect()
+}
+
+fn slash_tail<'a>(input: &'a str, command: &str) -> Option<&'a str> {
+    input
+        .strip_prefix(command)
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn os_asset_category_query(category: &str, query: &str) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        format!("category:{category}")
+    } else {
+        format!("category:{category} {query}")
+    }
+}
+
+fn runtime_asset_query(category: &str, asset_hint: &str, query: &str) -> String {
+    let category = category.trim();
+    let asset_hint = asset_hint.trim();
+    let query = query.trim();
+    let mut parts = Vec::new();
+    if !category.is_empty() {
+        parts.push(format!("category:{category}"));
+    }
+    if !asset_hint.is_empty() {
+        parts.push(asset_hint.to_string());
+    }
+    if !query.is_empty() {
+        parts.push(query.to_string());
+    }
+    parts.join(" ")
+}
+
+fn cancel_pending_picker<Panel, Pending>(
+    picker: &mut Option<Panel>,
+    pending: &mut Option<Pending>,
+) {
+    *picker = None;
+    *pending = None;
 }
 
 fn os_required_message(cmd: &str, os_configured: bool) -> String {
@@ -394,7 +463,7 @@ fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option
                 .filter(|s| !s.is_empty())?;
             Some((
                 format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
-                "dynamic workflow script · /workflow to view read-only".to_string(),
+                "dynamic workflow script · /flow workflow to view read-only".to_string(),
             ))
         }
         "parallel_task" => {
@@ -459,12 +528,12 @@ fn workflow_doc_for_tasks(
 
     let label = if parallel {
         format!(
-            "dynamic workflow · {} parallel tasks · /workflow to view read-only",
+            "dynamic workflow · {} parallel tasks · /flow workflow to view read-only",
             tasks.len()
         )
     } else {
         format!(
-            "dynamic workflow · {} delegated task{} · /workflow to view read-only",
+            "dynamic workflow · {} delegated task{} · /flow workflow to view read-only",
             tasks.len(),
             if tasks.len() == 1 { "" } else { "s" }
         )
@@ -562,12 +631,14 @@ struct ToolCallRecord {
     exit_code: i32,
 }
 
-/// Render the `/output` viewer body: one `#n · name · status` header per call,
-/// then its args and indented output. None when nothing has run.
-fn format_tool_log_records(records: &[ToolCallRecord]) -> Option<String> {
+/// Render the `/output` viewer body. It mirrors the main transcript's tool
+/// vocabulary while staying plain-text for the read-only editor.
+fn format_tool_log_records(records: &[ToolCallRecord], width: usize) -> Option<String> {
     if records.is_empty() {
         return None;
     }
+    const OUTPUT_TAIL: usize = 24;
+
     let mut out = String::new();
     for (i, rec) in records.iter().enumerate() {
         if i > 0 {
@@ -578,24 +649,54 @@ fn format_tool_log_records(records: &[ToolCallRecord]) -> Option<String> {
         } else {
             format!("exit {}", rec.exit_code)
         };
-        out.push_str(&format!("#{} · {} · {}\n", i + 1, rec.name, status));
+        let arg = rec
+            .args
+            .as_ref()
+            .and_then(|args| arg_summary_for_tool(&rec.name, args))
+            .unwrap_or_default();
+        let action = if arg.is_empty() {
+            tool_verb(&rec.name).to_string()
+        } else {
+            format!("{} {}", tool_verb(&rec.name), arg)
+        };
+        push_bounded_log_line(
+            &mut out,
+            &format!("#{} · {} · {}", i + 1, status, action),
+            width,
+        );
         if let Some(args) = &rec.args {
-            out.push_str(&format!(
-                "  args: {}\n",
-                serde_json::to_string(args).unwrap_or_default()
-            ));
+            push_bounded_log_line(
+                &mut out,
+                &format!(
+                    "  args: {}",
+                    serde_json::to_string(args).unwrap_or_default()
+                ),
+                width,
+            );
         }
         let trimmed = rec.output.trim_end();
         if !trimmed.is_empty() {
-            out.push_str("  output:\n");
-            for line in trimmed.lines() {
-                out.push_str("    ");
-                out.push_str(line);
-                out.push('\n');
+            push_bounded_log_line(&mut out, "  output:", width);
+            let lines = trimmed.lines().collect::<Vec<_>>();
+            let start = lines.len().saturating_sub(OUTPUT_TAIL);
+            if start > 0 {
+                push_bounded_log_line(&mut out, &format!("    … +{start} earlier lines"), width);
+            }
+            for line in lines.iter().skip(start) {
+                push_bounded_log_line(&mut out, &format!("    {line}"), width);
             }
         }
     }
     Some(out)
+}
+
+fn push_bounded_log_line(out: &mut String, line: &str, width: usize) {
+    if width == 0 {
+        out.push('\n');
+        return;
+    }
+    out.push_str(&a3s_tui::style::truncate_visible(line, width));
+    out.push('\n');
 }
 
 /// The directive sent to the agent for a `?` deep-research turn: decompose the
@@ -604,20 +705,26 @@ fn format_tool_log_records(records: &[ToolCallRecord]) -> Option<String> {
 /// the final report through RemoteUI.
 fn deep_research_prompt(query: &str, os_runtime: bool) -> String {
     let runtime_directive = if os_runtime {
-        "OS runtime is available. Use it: split the query into 4-8 independent \
+        format!(
+            "OS runtime is available. Use it: split the query into 4-8 independent \
          research tracks and run them in parallel with the OS A3S Runtime / \
          `parallel_task` before synthesis. Do not do all source gathering serially. \
          Ask each worker to return URLs, dates, key evidence, contradictions, and \
          confidence notes. After merging the tracks, create both a Markdown report \
          and a standalone HTML page, then use the OS progressive UI/RemoteUI path \
          (shaped response with `.view`/`viewUrl` as documented by the OS capability \
-         guide) so the TUI can show the user a one-click view. Do not print a raw \
-         authenticated URL; summarize and let the host surface the RemoteUI view."
+         guide) so the TUI can show the user a one-click view. Runtime evidence must \
+         include both fan-out (`runtime` or `parallel_task`) and the report view. Do \
+         not print a raw authenticated URL; summarize and let the host surface the \
+         RemoteUI view. {}",
+            RuntimePolicy::Required.directive()
+        )
     } else {
         "OS runtime is not available in this session. Do the research locally with \
          available web tools, still create a Markdown report and standalone HTML \
          page under `.a3s/research/<slug>/`, and tell the user the local paths. \
          Do not claim a RemoteUI view was created without an OS view response."
+            .to_string()
     };
     format!(
         "Conduct deep research to answer the query below. Be thorough:\n\
@@ -849,38 +956,6 @@ impl Ide {
     }
 }
 
-/// Whether the chat page's left pane + input act on conversations (`Chat`) or on
-/// the contact directory search (`Search`). Tab toggles.
-#[derive(Clone, Copy, PartialEq)]
-enum ChatMode {
-    Chat,
-    Search,
-}
-
-/// `/im` chat page — a STANDALONE OS instant-messaging surface (left pane:
-/// conversations, or a searchable contact directory | right pane: messages;
-/// bottom: composer / search box). Talks to the OS IM REST API directly and is
-/// deliberately kept OUT of the agent loop: chat content is never fed to the
-/// coding agent as context. Live-ish via polling while the page is open.
-struct ChatPanel {
-    convs: Vec<os_im::ImConversation>,
-    /// Selected conversation (index into `convs`).
-    sel: usize,
-    /// The conversation whose messages are currently loaded.
-    active: Option<String>,
-    messages: Vec<os_im::ImMessage>,
-    /// My own user id, to right-align + label my messages.
-    me: Option<String>,
-    error: Option<String>,
-    loading: bool,
-    /// Chat vs. contact-search mode (Tab toggles).
-    mode: ChatMode,
-    /// Contact-search results (populated in `Search` mode).
-    contacts: Vec<os_im::Contact>,
-    /// Selected contact (index into `contacts`).
-    contact_sel: usize,
-}
-
 /// Directory children for the tree, dirs first then files, noise skipped.
 fn ide_children(dir: &std::path::Path, depth: usize) -> Vec<IdeEntry> {
     let mut v: Vec<IdeEntry> = std::fs::read_dir(dir)
@@ -1013,7 +1088,7 @@ changes, verify the narrow path you touched (build / test / type-check) and \
 check the obvious edge cases, then re-read your own diff for correctness before \
 finishing.";
 const EFFORT_XHIGH: &str = "\
-[effort: xhigh] Work rigorously. Before committing to an approach, weigh at \
+[effort: xhigh] Work rigorously. Before choosing an approach, weigh at \
 least one alternative. Verify thoroughly — run the relevant tests/build, probe \
 edge cases and failure modes, and confirm the change actually does what was \
 asked. Do a self-review pass for correctness and simplicity before concluding.";
@@ -1341,6 +1416,7 @@ struct Queued {
     seq: u64,
     text: String,
     display: String,
+    runtime_expectation: Option<RuntimeExpectation>,
 }
 
 impl PartialEq for Queued {
@@ -1426,20 +1502,6 @@ enum Msg {
     TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
     TopRefresh,
-    /// `/im` conversation list loaded (or an error).
-    ImConvs(Result<Vec<os_im::ImConversation>, String>),
-    /// `/im` message history for a conversation loaded.
-    ImHistory(String, Result<Vec<os_im::ImMessage>, String>),
-    /// `/im` send result (the persisted message, or an error).
-    ImSent(Result<Box<os_im::ImMessage>, String>),
-    /// `/im <userId>` opened/created a DM (select + load it).
-    ImDmOpened(Result<Box<os_im::ImConversation>, String>),
-    /// `/im` contact-search results (org co-members matching the query).
-    ImContacts(Result<Vec<os_im::Contact>, String>),
-    /// `/im` resolved the signed-in user's own id (for own-message alignment).
-    ImMe(String),
-    /// Tick to re-poll the open `/im` page (list + active history).
-    ImPoll,
     /// No-op — lets fire-and-forget async work satisfy the `Cmd -> Msg` contract.
     Noop,
     /// `/fork` copied the session under a new id (Ok) — swap the active session to
@@ -1451,17 +1513,15 @@ enum Msg {
     GitStatus(Vec<GitFile>, Vec<String>),
     /// `/git` diff for the selected file.
     GitDiff(Vec<String>),
-    /// `/memory` timeline loaded (the store index, newest first).
-    MemoryLoaded(Vec<MemEntry>),
-    /// `/list` OS assets loaded.
-    OsAssets(Result<panels::os_resources::OsAssetFetch, String>),
-    /// `/ps` OS process/service rows loaded.
-    OsServices(Result<panels::os_resources::OsServiceFetch, String>),
-    /// `/list` delete action completed.
-    OsAssetDeleted(Result<String, String>),
-    /// `/ps` stop/cancel action completed.
-    OsServiceStopped(Result<String, String>),
-    /// `/kb` ingest finished; carries the one-line summary to show.
+    /// `/memory` graph data loaded (timeline + details + derived graph).
+    MemoryLoaded(MemPanelData),
+    /// A `/memory` forget-candidate deletion finished, with fresh graph data.
+    MemoryForgotten(Result<(String, MemPanelData), String>),
+    /// Asset-scoped OS asset list loaded.
+    AssetListLoaded(Result<panels::asset_resources::AssetListFetch, String>),
+    /// Runtime activity rows loaded for an asset-scoped observation panel.
+    RuntimeActivityLoaded(Result<panels::asset_resources::RuntimeActivityFetch, String>),
+    /// `/kb import` finished; carries the one-line summary to show.
     KbAdded(String),
     /// `/ctx <query>` finished: raw `ctx search --json` stdout (or the error).
     CtxResults(Result<String, String>),
@@ -1471,8 +1531,18 @@ enum Msg {
     CtxSaved(Result<String, String>),
     /// `/sleep` finished persisting its consolidated memories (count on Ok).
     SleepSaved(Result<usize, String>),
-    /// `/flow` pushed a DAG into its OS asset: (flow name, designer url).
-    FlowOpened(Result<(String, String), String>),
+    /// `/flow` published/opened/inspected an OS Workflow as a Service asset.
+    FlowOsCompleted(Result<panels::flow::FlowOsResult, String>),
+    /// `/agent` published/opened an OS agent asset through Agent as a Service or Function as a Service.
+    AgentOsCompleted(Result<panels::agent::AgentOsResult, String>),
+    /// `/mcp` published/debugged/tested an OS Function as a Service MCP asset.
+    McpOsCompleted(Result<panels::mcp::McpOsResult, String>),
+    /// `/skill` published/deployed/observed an OS Function as a Service skill asset.
+    SkillOsCompleted(Result<panels::skill::SkillOsResult, String>),
+    /// `/okf` published/deployed an OS Knowledge service package asset.
+    KbOsCompleted(Result<panels::kb::KbOsResult, String>),
+    /// Asset source was cloned into the local asset workspace.
+    AssetCloned(Result<asset_clone::AssetCloneResult, String>),
     /// `/memory` → ctx back-jump finished: (ctx event id, transcript window).
     CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text.
@@ -1534,6 +1604,12 @@ fn with_recent_workspace_context(
     )))
 }
 
+fn tui_session_options(confirmation: a3s_code_core::hitl::ConfirmationPolicy) -> SessionOptions {
+    SessionOptions::new()
+        .with_confirmation_policy(confirmation)
+        .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
+}
+
 fn touch_workspace_file_path_for_manifest(
     manifest: &LocalWorkspaceManifest,
     workspace: &str,
@@ -1559,39 +1635,115 @@ struct SubAgent {
     success: Option<bool>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeEvidenceMode {
+    Any,
+    ParallelReportView,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimeViewAutoOpen {
-    action: panels::repos::RepoAction,
-    project: String,
-    opened: bool,
+struct RuntimeExpectation {
+    label: String,
+    policy: RuntimePolicy,
+    evidence_mode: RuntimeEvidenceMode,
+    runtime_tool: bool,
+    parallel_work: bool,
+    remote_view: bool,
+    warned_missing: bool,
 }
 
-impl RuntimeViewAutoOpen {
-    fn new(action: panels::repos::RepoAction, project: impl Into<String>) -> Self {
+impl RuntimeExpectation {
+    fn required(label: impl Into<String>) -> Self {
         Self {
-            action,
-            project: project.into(),
-            opened: false,
+            label: label.into(),
+            policy: RuntimePolicy::Required,
+            evidence_mode: RuntimeEvidenceMode::Any,
+            runtime_tool: false,
+            parallel_work: false,
+            remote_view: false,
+            warned_missing: false,
         }
     }
 
-    fn label(&self) -> &'static str {
-        match self.action {
-            panels::repos::RepoAction::Deploy => "CI/CD",
-            panels::repos::RepoAction::Run => "Runtime run",
-            panels::repos::RepoAction::Review => "workflow",
+    fn required_report_view(label: impl Into<String>) -> Self {
+        Self {
+            evidence_mode: RuntimeEvidenceMode::ParallelReportView,
+            ..Self::required(label)
         }
+    }
+
+    fn preferred(label: impl Into<String>) -> Self {
+        Self {
+            policy: RuntimePolicy::Preferred,
+            ..Self::required(label)
+        }
+    }
+
+    fn record_tool(&mut self, name: &str) {
+        match name {
+            "runtime" => self.runtime_tool = true,
+            "parallel_task" | "task" => self.parallel_work = true,
+            _ => {}
+        }
+    }
+
+    fn record_parallel_work(&mut self) {
+        self.parallel_work = true;
+    }
+
+    fn record_remote_view(&mut self) {
+        self.remote_view = true;
+    }
+
+    fn has_parallel_evidence(&self) -> bool {
+        self.runtime_tool || self.parallel_work
+    }
+
+    fn is_satisfied(&self) -> bool {
+        match self.evidence_mode {
+            RuntimeEvidenceMode::Any => self.has_parallel_evidence() || self.remote_view,
+            RuntimeEvidenceMode::ParallelReportView => {
+                self.has_parallel_evidence() && self.remote_view
+            }
+        }
+    }
+
+    fn missing_expectation(&self) -> String {
+        match self.evidence_mode {
+            RuntimeEvidenceMode::Any => {
+                "expected `runtime`, `parallel_task`, or an OS shaped `.view`/`viewUrl` response"
+                    .to_string()
+            }
+            RuntimeEvidenceMode::ParallelReportView => match (self.has_parallel_evidence(), self.remote_view) {
+                (false, false) => {
+                    "expected OS Runtime/`parallel_task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
+                }
+                (false, true) => {
+                    "expected OS Runtime/`parallel_task` fan-out before the report view".to_string()
+                }
+                (true, false) => {
+                    "expected an OS shaped `.view`/`viewUrl` response for the report".to_string()
+                }
+                (true, true) => unreachable!("satisfied expectations are filtered before warning"),
+            },
+        }
+    }
+
+    fn missing_warning(&mut self) -> Option<String> {
+        if self.policy != RuntimePolicy::Required || self.is_satisfied() || self.warned_missing {
+            return None;
+        }
+        self.warned_missing = true;
+        Some(format!(
+            "  Runtime evidence missing for {} - {} before the final answer",
+            self.label,
+            self.missing_expectation()
+        ))
     }
 }
 
-fn remote_view_handling(
-    last_view: Option<&remote_ui::ViewSpec>,
-    runtime_auto_open: Option<&RuntimeViewAutoOpen>,
-    spec: &remote_ui::ViewSpec,
-) -> (bool, bool) {
-    let is_new = last_view != Some(spec);
-    let should_auto_open = runtime_auto_open.is_some_and(|s| !s.opened);
-    (is_new, should_auto_open)
+fn is_new_remote_view(last_view: Option<&remote_ui::ViewSpec>, spec: &remote_ui::ViewSpec) -> bool {
+    last_view != Some(spec)
 }
 
 struct App {
@@ -1639,10 +1791,9 @@ struct App {
     /// `/view` or clicking the inline "Open view" button; owned workflows like
     /// `/flow` may also open their prepared designer view directly.
     last_view: Option<remote_ui::ViewSpec>,
-    /// `/run` and `/deploy` arm this so the first live Runtime/CI view returned
-    /// by OS opens immediately, GitHub Actions-style, instead of waiting for a
-    /// manual `/view`.
-    runtime_view_auto_open: Option<RuntimeViewAutoOpen>,
+    /// Required/preferred Runtime use for the current autonomous workflow, plus
+    /// observed evidence from tool/subagent/view events.
+    runtime_expectation: Option<RuntimeExpectation>,
     /// Current model effort (index into EFFORT_LEVELS).
     effort: usize,
     /// `/effort` slider panel: temp selection while open.
@@ -1666,28 +1817,44 @@ struct App {
     /// query — sent to the agent with a multi-source research directive. Box
     /// turns cyan.
     research_mode: bool,
-    /// Code-review mode: a leading `&` turns the input into a git repo URL to
-    /// clone + deep-review, strictly read-only. Box turns purple. The turn's
-    /// ```a3s-review report opens the issue checklist (`review` below).
-    review_mode: bool,
-    /// True from a `&` submit until its report is parsed (or the run is
-    /// interrupted/fails). Gates capture_review so a turn that merely QUOTES
-    /// an a3s-review block can't open a phantom checklist.
+    /// True from an asset-scoped review submit until its report is parsed (or
+    /// the run is interrupted/fails). Gates capture_review so a turn that merely
+    /// QUOTES an a3s-review block can't open a phantom checklist.
     review_pending: bool,
     /// True from a `/sleep` submit until its report is parsed (or the run is
     /// interrupted/fails). Gates capture_sleep the same way.
     sleep_pending: bool,
-    /// Last parsed `&` review report (issues + checkbox state). Survives the
-    /// panel closing so `/review` can reopen it.
+    /// Last parsed asset-review report (issues + checkbox state). Survives the
+    /// panel closing so a follow-up asset review can reopen it.
     review: Option<panels::review::ReviewState>,
-    /// `/deploy` project picker (login-gated); open when `Some`.
-    repo_picker: Option<panels::repos::RepoPanel>,
     /// `/flow` DAG picker (login-gated); open when `Some`.
     flow: Option<panels::flow::FlowPanel>,
+    /// A `/flow <action>` submitted before a flow was selected; run after selection.
+    pending_flow_subcommand: Option<panels::flow::FlowSubcommand>,
     /// `/agent` definition picker; open when `Some`.
     agent_picker: Option<panels::agent::AgentPanel>,
+    /// A `/agent <action>` submitted before an agent was active; run after selection.
+    pending_agent_subcommand: Option<panels::agent::AgentSubcommand>,
     /// The local agent currently being developed by ordinary user turns.
     agent_dev: Option<panels::agent::AgentDevSession>,
+    /// `/mcp` asset selector; open when `Some`.
+    mcp_picker: Option<panels::mcp::McpPanel>,
+    /// A `/mcp <action>` submitted before an MCP was active; run after selection.
+    pending_mcp_subcommand: Option<panels::mcp::McpSubcommand>,
+    /// The local MCP asset currently being developed by ordinary user turns.
+    mcp_dev: Option<panels::mcp::McpDevSession>,
+    /// `/skill` picker; open when `Some`.
+    skill_picker: Option<panels::skill::SkillPanel>,
+    /// A `/skill <action>` submitted before a skill was active; run after selection.
+    pending_skill_subcommand: Option<panels::skill::SkillSubcommand>,
+    /// The local skill currently being developed by ordinary user turns.
+    skill_dev: Option<panels::skill::SkillDevSession>,
+    /// `/okf` OKF package picker; open when `Some`.
+    kb_picker: Option<panels::kb::KbPackagePanel>,
+    /// A `/okf <action>` submitted before an OKF package was active; run after selection.
+    pending_kb_subcommand: Option<panels::kb::KbCommand>,
+    /// The local OKF package currently being developed by ordinary user turns.
+    kb_dev: Option<panels::kb::KbDevSession>,
     /// Whether the review issue-checklist overlay is showing.
     review_open: bool,
     /// `ctx` CLI detected at startup (past-session history search).
@@ -1709,7 +1876,7 @@ struct App {
     /// release); `None` when there's no selection.
     selection: Option<Selection>,
     /// Latest dynamic-workflow artifact (ultracode parallel_task dispatch),
-    /// shown collapsed in the transcript and openable read-only via `/workflow`.
+    /// shown collapsed in the transcript and openable read-only via `/flow workflow`.
     last_workflow: Option<String>,
     /// Clipboard images pasted (Ctrl+V), sent with the next message.
     pending_images: Vec<a3s_code_core::llm::Attachment>,
@@ -1823,21 +1990,17 @@ struct App {
     /// `/top` agent drill-down: `Some(pid)` focuses one coding agent's process
     /// subtree (the agent root + its descendants). `None` shows all processes.
     top_focus: Option<u32>,
-    /// Pending force-kill confirmation in `/top`: (pid, command label).
-    top_kill: Option<(u32, String)>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
-    /// `/im` standalone chat page (Some when open). Independent of the agent loop.
-    chat: Option<ChatPanel>,
     /// `/git` full-screen panel (Some when open).
     git: Option<Git>,
     /// `/memory` full-screen timeline panel (Some when open).
     memory: Option<MemPanel>,
-    /// `/list` OS assets/apps full-screen panel.
-    os_list: Option<panels::os_resources::OsListPanel>,
-    /// `/ps` OS deployed process/services full-screen panel.
-    os_ps: Option<panels::os_resources::OsPsPanel>,
-    /// `/kb` full-screen dashboard (Some when open).
+    /// Asset-scoped OS digital-asset browser.
+    asset_list: Option<panels::asset_resources::AssetListPanel>,
+    /// Asset-scoped OS Runtime activity observation panel.
+    runtime_activity: Option<panels::asset_resources::RuntimeActivityPanel>,
+    /// `/kb` full-screen local personal knowledge-base panel (Some when open).
     kb: Option<panels::kb::KbPanel>,
     /// `/loop` engineered loop dashboard (Some when open).
     loop_panel: Option<panels::loop_engineering::LoopPanel>,
@@ -1862,9 +2025,9 @@ struct App {
     skill_count: usize,
     /// Loaded skills (name, description) for the slash menu + `/plugin`.
     skills: Vec<(String, String)>,
-    /// Skill names the user disabled via `/plugins` (persisted, hidden from `/`).
+    /// Skill names the user disabled via `/plugin` (persisted, hidden from `/`).
     disabled_skills: std::collections::HashSet<String>,
-    /// `/plugins` panel: selected row while open.
+    /// `/plugin` panel: selected row while open.
     plugins_panel: Option<usize>,
     /// Newer release found at startup (latest version), if any.
     update_available: Option<String>,
@@ -1982,14 +2145,14 @@ impl Model for App {
                 if self.memory.is_some() {
                     return self.memory_key(&key);
                 }
-                // OS resource panels take all keys while open.
-                if self.os_list.is_some() {
-                    return self.handle_os_list_key(&key);
+                // Asset resource panels take all keys while open.
+                if self.asset_list.is_some() {
+                    return self.handle_asset_list_key(&key);
                 }
-                if self.os_ps.is_some() {
-                    return self.handle_os_ps_key(&key);
+                if self.runtime_activity.is_some() {
+                    return self.handle_runtime_activity_key(&key);
                 }
-                // /kb dashboard takes all keys while open; an approval prompt
+                // /kb panel takes all keys while open; an approval prompt
                 // still overlays it and must get the keys first.
                 if self.kb.is_some() {
                     if self.state == State::Awaiting {
@@ -2007,31 +2170,8 @@ impl Model for App {
                     self.ide_key(&key);
                     return None;
                 }
-                // /im chat page takes all keys while open (nav + composer).
-                if self.chat.is_some() {
-                    return self.handle_chat_key(&key);
-                }
                 // /top panel takes keys while open.
                 if self.top.is_some() {
-                    // A force-kill confirmation grabs keys first.
-                    if self.top_kill.is_some() {
-                        match key.code {
-                            KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                                let pid = self.top_kill.take().unwrap().0;
-                                return Some(cmd::cmd(move || async move {
-                                    let _ = tokio::process::Command::new("kill")
-                                        .arg("-9")
-                                        .arg(pid.to_string())
-                                        .output()
-                                        .await;
-                                    Msg::TopData(fetch_top().await) // refresh after kill
-                                }));
-                            }
-                            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.top_kill = None,
-                            _ => {}
-                        }
-                        return None;
-                    }
                     let rows = self.top_rows();
                     let last = rows.len().saturating_sub(1);
                     match key.code {
@@ -2065,11 +2205,6 @@ impl Model for App {
                                     }
                                 }
                             }
-                        }
-                        // Shift+K asks to force-kill the highlighted process.
-                        KeyCode::Char('K') => {
-                            self.top_kill =
-                                rows.get(self.top_sel).map(|r| (r.pid, r.command.clone()));
                         }
                         _ => {}
                     }
@@ -2142,7 +2277,7 @@ impl Model for App {
                     }
                     return None;
                 }
-                // /plugins panel: ↑/↓ select, Space enable/disable, Esc close.
+                // /plugin panel: ↑/↓ select, Space enable/disable, Esc close.
                 if let Some(sel) = self.plugins_panel {
                     let last = self.skills.len().saturating_sub(1);
                     match key.code {
@@ -2167,13 +2302,9 @@ impl Model for App {
                 if self.relay_menu.is_some() {
                     return self.handle_relay_key(&key).unwrap_or(None);
                 }
-                // `&` review issue checklist: consume EVERY key while open.
+                // Asset review issue checklist: consume EVERY key while open.
                 if self.review_open {
                     return self.handle_review_key(&key);
-                }
-                // `/deploy` project picker: consume EVERY key while open.
-                if self.repo_picker.is_some() {
-                    return self.handle_repo_picker_key(&key);
                 }
                 // `/flow` DAG picker: same.
                 if self.flow.is_some() {
@@ -2182,6 +2313,16 @@ impl Model for App {
                 // `/agent` definition picker: same.
                 if self.agent_picker.is_some() {
                     return self.handle_agent_key(&key);
+                }
+                // `/mcp` asset selector: same.
+                if self.mcp_picker.is_some() {
+                    return self.handle_mcp_key(&key);
+                }
+                if self.skill_picker.is_some() {
+                    return self.handle_skill_key(&key);
+                }
+                if self.kb_picker.is_some() {
+                    return self.handle_kb_package_key(&key);
                 }
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
@@ -2206,15 +2347,12 @@ impl Model for App {
                     self.viewport.set_auto_scroll(self.viewport.at_bottom());
                     return None;
                 }
-                // Esc leaves shell/research/review mode first (discarding the
+                // Esc leaves shell/research mode first (discarding the
                 // partial input), taking priority over the streaming interrupt
                 // below.
-                if (self.shell_mode || self.research_mode || self.review_mode)
-                    && key.code == KeyCode::Esc
-                {
+                if (self.shell_mode || self.research_mode) && key.code == KeyCode::Esc {
                     self.shell_mode = false;
                     self.research_mode = false;
-                    self.review_mode = false;
                     self.textarea.clear();
                     return None;
                 }
@@ -2238,6 +2376,19 @@ impl Model for App {
                 if self.state == State::Idle && self.agent_dev.is_some() && key.code == KeyCode::Esc
                 {
                     self.exit_agent_dev();
+                    return None;
+                }
+                if self.state == State::Idle && self.mcp_dev.is_some() && key.code == KeyCode::Esc {
+                    self.exit_mcp_dev();
+                    return None;
+                }
+                if self.state == State::Idle && self.skill_dev.is_some() && key.code == KeyCode::Esc
+                {
+                    self.exit_skill_dev();
+                    return None;
+                }
+                if self.state == State::Idle && self.kb_dev.is_some() && key.code == KeyCode::Esc {
+                    self.exit_kb_dev();
                     return None;
                 }
                 // Slash-command menu: ↑/↓ select, Enter run, Tab complete, Esc
@@ -2273,20 +2424,15 @@ impl Model for App {
                 if let Some(TextareaMsg::Submit(text)) = self.textarea.handle_key(&key) {
                     return Some(cmd::msg(Msg::Submit(text)));
                 }
-                // A leading `!` enters shell mode, a leading `?` enters
-                // deep-research mode, a leading `&` enters code-review mode
-                // (the prefix is stripped). Each stays on until Esc or a
-                // submit (handled elsewhere).
+                // A leading `!` enters shell mode and a leading `?` enters
+                // deep-research mode. Each stays on until Esc or submit.
                 let val = self.textarea.value();
-                if !self.shell_mode && !self.research_mode && !self.review_mode {
+                if !self.shell_mode && !self.research_mode {
                     if let Some(rest) = val.strip_prefix('!') {
                         self.shell_mode = true;
                         self.textarea.set_value(rest);
                     } else if let Some(rest) = val.strip_prefix('?') {
                         self.research_mode = true;
-                        self.textarea.set_value(rest);
-                    } else if let Some(rest) = val.strip_prefix('&') {
-                        self.review_mode = true;
                         self.textarea.set_value(rest);
                     }
                 }
@@ -2307,8 +2453,8 @@ impl Model for App {
                 // (a drag would silently copy hidden text).
                 if self.ide.is_some()
                     || self.kb.is_some()
-                    || self.os_list.is_some()
-                    || self.os_ps.is_some()
+                    || self.asset_list.is_some()
+                    || self.runtime_activity.is_some()
                 {
                     return None;
                 }
@@ -2416,7 +2562,7 @@ impl Model for App {
                 self.finalize_streaming();
                 self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupted"));
                 self.loop_remaining = 0; // Esc also stops a /loop
-                self.review_pending = false; // and abandons a `&` review
+                self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
                 self.restore_autonomy();
                 self.finish();
@@ -2431,7 +2577,7 @@ impl Model for App {
                 }
                 // Channel closed without a normal End event (abnormal close).
                 self.finalize_streaming();
-                // A `&` review report fully streamed before the drop still
+                // An asset-review report fully streamed before the drop still
                 // counts — same for a `/sleep` consolidation report.
                 let turn_text = self.turn_text.clone();
                 self.capture_review(&turn_text);
@@ -2493,15 +2639,13 @@ impl Model for App {
                     let history = self.session.history();
                     let review = cmd::cmd(move || async move {
                         let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                            .with_timeout(500, TimeoutAction::Reject);
+                            .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
                         let prompt = "Briefly review this conversation so far: summarise the \
                              key decisions and what's done, then list any open threads or next \
                              steps. Keep it to a few lines.";
                         let mut answer = String::new();
-                        if let Ok(sess) = agent.session(
-                            workspace,
-                            Some(SessionOptions::new().with_confirmation_policy(conf)),
-                        ) {
+                        if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf)))
+                        {
                             if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await {
                                 while let Some(ev) = rx.recv().await {
                                     match ev {
@@ -2791,52 +2935,6 @@ impl Model for App {
                     return Some(cmd::cmd(|| async { Msg::TopData(fetch_top().await) }));
                 }
             }
-            Msg::ImConvs(result) => return self.on_im_convs(result),
-            Msg::ImHistory(id, result) => return self.on_im_history(id, result),
-            Msg::ImSent(result) => {
-                if let Some(chat) = &mut self.chat {
-                    match result {
-                        Ok(msg) => {
-                            chat.error = None;
-                            if chat.active.as_deref() == Some(msg.conversation_id.as_str()) {
-                                chat.messages.push(*msg);
-                            }
-                        }
-                        Err(e) => chat.error = Some(e),
-                    }
-                }
-            }
-            Msg::ImPoll => {
-                if self.chat.is_some() {
-                    // IM is login-gated: if the session went away (logout / failed
-                    // refresh), close the page instead of polling unauthenticated.
-                    if self.os_session.is_none() {
-                        self.chat = None;
-                        return None;
-                    }
-                    return Some(self.chat_refresh());
-                }
-            }
-            Msg::ImDmOpened(result) => return self.on_im_dm_opened(result),
-            Msg::ImMe(id) => {
-                if let Some(chat) = &mut self.chat {
-                    if !id.is_empty() {
-                        chat.me = Some(id);
-                    }
-                }
-            }
-            Msg::ImContacts(result) => {
-                if let Some(chat) = &mut self.chat {
-                    match result {
-                        Ok(contacts) => {
-                            chat.contacts = contacts;
-                            chat.contact_sel = 0;
-                            chat.error = None;
-                        }
-                        Err(e) => chat.error = Some(e),
-                    }
-                }
-            }
             Msg::Noop => {}
             Msg::Forked(result) => {
                 match result {
@@ -2893,18 +2991,42 @@ impl Model for App {
                     g.diff_scroll = 0;
                 }
             }
-            Msg::MemoryLoaded(entries) => {
+            Msg::MemoryLoaded(data) => {
                 if let Some(m) = &mut self.memory {
-                    m.note = format!("{} entries", entries.len());
-                    m.entries = entries;
+                    let source = if data.loaded_from_session {
+                        "session fallback · "
+                    } else {
+                        ""
+                    };
+                    m.note = format!(
+                        "{source}{} memories · {} entities · {} relations",
+                        data.entries.len(),
+                        data.graph.stats.entities,
+                        data.graph.stats.relations
+                    );
                     m.sel = 0;
-                    m.refresh_detail();
+                    m.apply_data(data);
                 }
             }
-            Msg::OsAssets(result) => self.on_os_assets(result),
-            Msg::OsServices(result) => self.on_os_services(result),
-            Msg::OsAssetDeleted(result) => return self.on_os_asset_deleted(result),
-            Msg::OsServiceStopped(result) => return self.on_os_service_stopped(result),
+            Msg::MemoryForgotten(result) => {
+                if let Some(m) = &mut self.memory {
+                    match result {
+                        Ok((id, data)) => {
+                            m.note = format!(
+                                "forgot {id} · {} memories · {} candidates",
+                                data.entries.len(),
+                                data.graph.stats.forget_candidates
+                            );
+                            m.apply_data(data);
+                        }
+                        Err(error) => {
+                            m.note = format!("forget failed: {error}");
+                        }
+                    }
+                }
+            }
+            Msg::AssetListLoaded(result) => self.on_asset_list(result),
+            Msg::RuntimeActivityLoaded(result) => self.on_runtime_activity(result),
             Msg::KbAdded(summary) => {
                 let color = if summary.starts_with('✗') {
                     TN_RED
@@ -2913,7 +3035,7 @@ impl Model for App {
                 };
                 self.push_line(&Style::new().fg(color).render(&format!("  {summary}")));
                 if self.kb.is_some() {
-                    self.open_kb_dashboard(Some(summary));
+                    self.open_kb_home(Some(summary));
                 }
             }
             Msg::CtxResults(res) => self.on_ctx_results(res),
@@ -2922,7 +3044,19 @@ impl Model for App {
 
             Msg::SleepSaved(res) => self.on_sleep_saved(res),
 
-            Msg::FlowOpened(res) => self.on_flow_opened(res),
+            Msg::FlowOsCompleted(res) => self.on_flow_os_completed(res),
+            Msg::AgentOsCompleted(res) => self.on_agent_os_completed(res),
+            Msg::McpOsCompleted(res) => self.on_mcp_os_completed(res),
+            Msg::SkillOsCompleted(res) => self.on_skill_os_completed(res),
+            Msg::KbOsCompleted(res) => self.on_kb_os_completed(res),
+            Msg::AssetCloned(res) => match res {
+                Ok(result) => self.on_asset_cloned(result),
+                Err(error) => self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  clone failed: {error}")),
+                ),
+            },
             Msg::CtxMemorySource(res) => match res {
                 Ok((event_id, window)) => {
                     self.memory = None; // leave the panel to show the source
@@ -2950,11 +3084,11 @@ impl Model for App {
         if let Some(m) = &self.memory {
             return self.render_memory(m);
         }
-        if let Some(panel) = &self.os_list {
-            return self.render_os_list(panel);
+        if let Some(panel) = &self.asset_list {
+            return self.render_asset_list(panel);
         }
-        if let Some(panel) = &self.os_ps {
-            return self.render_os_ps(panel);
+        if let Some(panel) = &self.runtime_activity {
+            return self.render_runtime_activity(panel);
         }
         if let Some(kb) = &self.kb {
             let page = self.render_kb(kb);
@@ -2968,9 +3102,6 @@ impl Model for App {
             // never invisible (its keys take priority in the key dispatch).
             let page = self.render_ide(ide);
             return self.overlay_approval(page);
-        }
-        if let Some(chat) = &self.chat {
-            return self.render_chat(chat);
         }
         if self.top.is_some() {
             return self.render_top_panel();
@@ -2992,18 +3123,22 @@ impl Model for App {
             self.viewport.scroll_percent(),
         );
         // Input mode hint: `!` = shell command (pink), `?` = deep research
-        // (cyan), `&` = code review (purple), `/agent` dev = local agent
-        // development (green), `/btw` = side-channel (yellow), otherwise the
-        // normal prompt (accent blue).
+        // (cyan), `/agent` dev = local agent development (green), `/mcp` dev =
+        // local MCP development (cyan), `/btw` = side-channel (yellow),
+        // otherwise the normal prompt (accent blue).
         let inp = self.textarea.value();
         let (sym, icolor, border): (&str, Color, Color) = if self.shell_mode {
             ("!", GRADIENT_PREVIEW_END, GRADIENT_PREVIEW_END)
         } else if self.research_mode {
             ("?", TN_CYAN, TN_CYAN)
-        } else if self.review_mode {
-            ("&", TN_PURPLE, TN_PURPLE)
         } else if self.agent_dev.is_some() {
             ("◇", TN_GREEN, TN_GREEN)
+        } else if self.mcp_dev.is_some() {
+            ("◆", TN_CYAN, TN_CYAN)
+        } else if self.skill_dev.is_some() {
+            ("✦", TN_CYAN, TN_CYAN)
+        } else if self.kb_dev.is_some() {
+            ("⌁", TN_CYAN, TN_CYAN)
         } else if inp.starts_with("/btw") {
             ("❯", TN_YELLOW, TN_YELLOW)
         } else {
@@ -3102,7 +3237,13 @@ impl Model for App {
 
         let prompt = Style::new().fg(icolor).bold().render(&format!("{sym} "));
         let typed = self.textarea.view();
-        let typed = if sym == "!" || sym == "?" || sym == "◇" || inp.starts_with("/btw") {
+        let typed = if sym == "!"
+            || sym == "?"
+            || sym == "◇"
+            || sym == "◆"
+            || sym == "⌁"
+            || inp.starts_with("/btw")
+        {
             Style::new().fg(icolor).render(&typed)
         } else {
             typed
@@ -3187,6 +3328,31 @@ impl Model for App {
                 ))
             ));
         }
+        if let Some(dev) = &self.mcp_dev {
+            line1.push_str(&format!(
+                "  {}",
+                Style::new()
+                    .fg(TN_CYAN)
+                    .render(&format!("◆ mcp:{} · Esc /mcp off", truncate(&dev.name, 24)))
+            ));
+        }
+        if let Some(dev) = &self.skill_dev {
+            line1.push_str(&format!(
+                "  {}",
+                Style::new().fg(TN_CYAN).render(&format!(
+                    "✦ skill:{} · Esc /skill off",
+                    truncate(&dev.name, 24)
+                ))
+            ));
+        }
+        if let Some(dev) = &self.kb_dev {
+            line1.push_str(&format!(
+                "  {}",
+                Style::new()
+                    .fg(TN_CYAN)
+                    .render(&format!("⌁ okf:{} · Esc /okf off", truncate(&dev.name, 24)))
+            ));
+        }
         if self.loop_remaining > 0 {
             line1.push_str(&format!("  ↻{}", self.loop_remaining));
         }
@@ -3199,27 +3365,29 @@ impl Model for App {
         if let Some(v) = &self.update_available {
             line1.push_str(&format!("  ⬆ {v}"));
         }
-        let status1 = pad_to(&line1, width);
+        let status1 = pad_to(&truncate(&line1, width), width);
         let mode_part = Style::new().fg(self.mode.color()).bold().render(&format!(
             "  {} {} mode on",
             self.mode.glyph(),
             self.mode.name()
         ));
         let hints = dim(" (shift+tab to cycle) · /help · ↑↓ history · esc");
-        let status2 = pad_to(&format!("{mode_part}{hints}"), width);
+        let status2 = pad_to(&truncate(&format!("{mode_part}{hints}"), width), width);
 
         // Gap line between transcript and loading — or a floating "jump to
         // latest" hint when the user has scrolled up away from the bottom.
         let spacer = if self.viewport.at_bottom() {
             String::new()
         } else {
-            let label = " ↓ more below · Shift+End to jump to latest ";
-            let pad = width.saturating_sub(a3s_tui::style::visible_len(label)) / 2;
-            format!(
-                "{}{}",
-                " ".repeat(pad),
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(label)
-            )
+            let label = truncate(
+                &Style::new()
+                    .fg(Color::BrightWhite)
+                    .bg(ACCENT)
+                    .render(" ↓ more below · Shift+End to jump to latest "),
+                width,
+            );
+            let pad = width.saturating_sub(a3s_tui::style::visible_len(&label)) / 2;
+            format!("{}{}", " ".repeat(pad), label)
         };
         let tasks = self.task_lines();
         let task_block = tasks.join("\n");
@@ -3249,9 +3417,11 @@ impl Model for App {
         let composed = self.overlay_model_menu(composed);
         let composed = self.overlay_relay_menu(composed);
         let composed = self.overlay_review_menu(composed);
-        let composed = self.overlay_repo_picker(composed);
         let composed = self.overlay_flow_menu(composed);
         let composed = self.overlay_agent_menu(composed);
+        let composed = self.overlay_mcp_menu(composed);
+        let composed = self.overlay_skill_menu(composed);
+        let composed = self.overlay_kb_package_menu(composed);
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
@@ -3287,10 +3457,14 @@ impl Model for App {
             || self.top.is_some()
             || self.git.is_some()
             || self.memory.is_some()
-            || self.os_list.is_some()
-            || self.os_ps.is_some()
+            || self.asset_list.is_some()
+            || self.runtime_activity.is_some()
             || self.kb.is_some()
             || self.loop_panel.is_some()
+            || self.flow.is_some()
+            || self.agent_picker.is_some()
+            || self.mcp_picker.is_some()
+            || self.skill_picker.is_some()
             || self.help_open
         {
             return None;
@@ -3306,6 +3480,441 @@ impl Model for App {
 }
 
 impl App {
+    fn clone_asset_command(
+        &mut self,
+        family: &'static str,
+        url: String,
+        root: std::path::PathBuf,
+    ) -> Option<Cmd<Msg>> {
+        self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+            "  cloning {family} asset from {url} → {}",
+            root.display()
+        )));
+        Some(cmd::cmd(move || async move {
+            Msg::AssetCloned(asset_clone::clone_asset_source(family, url, root).await)
+        }))
+    }
+
+    fn on_asset_cloned(&mut self, result: asset_clone::AssetCloneResult) {
+        self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+            "  cloned {} asset → {}",
+            result.family,
+            result.path.display()
+        )));
+        match result.family {
+            "agent" => self.open_agent_panel_focused(&result.path),
+            "mcp" => self.open_mcp_panel_focused(&result.path),
+            "skill" => self.open_skill_panel_focused(&result.path),
+            "okf" | "knowledge" => self.open_kb_package_panel_focused(&result.path),
+            "workflow" => self.open_flow_panel_focused(&result.path),
+            _ => self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  run the asset command again to select or operate on it"),
+            ),
+        }
+    }
+
+    fn path_is_within(path: &std::path::Path, root: &std::path::Path) -> bool {
+        path == root || path.starts_with(root)
+    }
+
+    fn open_agent_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = agent_dir();
+        let agents = panels::agent::list_agents(&root);
+        let Some(sel) = agents
+            .iter()
+            .position(|agent| Self::path_is_within(&agent.path, cloned_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  cloned source does not contain a recognized agent definition yet"),
+            );
+            return;
+        };
+        self.agent_picker = Some(panels::agent::AgentPanel { root, agents, sel });
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  selected cloned agent asset · Enter develops locally"),
+        );
+    }
+
+    fn open_mcp_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = mcp_dir();
+        let projects = panels::mcp::list_mcp_projects(&root);
+        let Some(sel) = projects
+            .iter()
+            .position(|project| Self::path_is_within(&project.path, cloned_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  cloned source does not contain a recognized MCP asset yet"),
+            );
+            return;
+        };
+        self.mcp_picker = Some(panels::mcp::McpPanel {
+            root,
+            projects,
+            sel,
+        });
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  selected cloned MCP asset · Enter develops locally"),
+        );
+    }
+
+    fn open_skill_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = skill_dir();
+        let skills = panels::skill::list_skill_assets(&root);
+        let Some(sel) = skills
+            .iter()
+            .position(|skill| Self::path_is_within(&skill.path, cloned_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  cloned source does not contain a recognized skill asset yet"),
+            );
+            return;
+        };
+        self.skill_picker = Some(panels::skill::SkillPanel { root, skills, sel });
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  selected cloned skill asset · Enter develops locally"),
+        );
+    }
+
+    fn open_kb_package_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = panels::kb::kb_package_dir(&self.cwd);
+        let packages = panels::kb::list_kb_packages(&root);
+        let Some(sel) = packages
+            .iter()
+            .position(|package| Self::path_is_within(&package.path, cloned_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  cloned source does not contain a recognized OKF package yet"),
+            );
+            return;
+        };
+        self.kb_picker = Some(panels::kb::KbPackagePanel {
+            root,
+            packages,
+            sel,
+        });
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  selected cloned OKF package · Enter develops locally"),
+        );
+    }
+
+    fn open_flow_panel_focused(&mut self, cloned_path: &std::path::Path) {
+        let root = flow_dir();
+        let flows = panels::flow::list_flows(&root);
+        let Some(sel) = flows
+            .iter()
+            .position(|flow| Self::path_is_within(&root.join(flow), cloned_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  cloned source does not contain a recognized workflow design yet"),
+            );
+            return;
+        };
+        self.flow = Some(panels::flow::FlowPanel { root, flows, sel });
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  selected cloned workflow asset · Enter opens the OS designer"),
+        );
+    }
+
+    fn open_latest_dynamic_workflow(&mut self) {
+        self.textarea.clear();
+        match self.last_workflow.clone() {
+            Some(doc) => self.open_readonly_in_ide("dynamic-workflow.md", &doc),
+            None => {
+                self.push_line(&Style::new().fg(TN_GRAY).render(
+                    "  no dynamic workflow yet — run a task that fans out via parallel_task",
+                ))
+            }
+        }
+    }
+
+    fn execute_agent_subcommand(
+        &mut self,
+        subcommand: panels::agent::AgentSubcommand,
+    ) -> Option<Cmd<Msg>> {
+        match subcommand {
+            panels::agent::AgentSubcommand::Exit => {
+                self.exit_agent_dev();
+                None
+            }
+            panels::agent::AgentSubcommand::Clone(url) => {
+                self.clone_asset_command("agent", url, agent_dir())
+            }
+            panels::agent::AgentSubcommand::List(query) => {
+                self.open_asset_list_panel(os_asset_category_query("agent", &query))
+            }
+            panels::agent::AgentSubcommand::Activity(query) => {
+                let Some(agent_dev) = self.agent_dev.clone() else {
+                    self.pending_agent_subcommand =
+                        Some(panels::agent::AgentSubcommand::Activity(query));
+                    self.open_agent_panel();
+                    return None;
+                };
+                self.open_runtime_activity_panel(runtime_asset_query(
+                    "agent",
+                    &agent_dev.name,
+                    &query,
+                ))
+            }
+            panels::agent::AgentSubcommand::Review => {
+                let Some(agent_dev) = self.agent_dev.clone() else {
+                    self.pending_agent_subcommand = Some(panels::agent::AgentSubcommand::Review);
+                    self.open_agent_panel();
+                    return None;
+                };
+                self.messages
+                    .push(user_bubble("/agent review", self.width as usize));
+                self.engage_autonomy(4);
+                self.review_pending = true;
+                let prompt = panels::agent::agent_review_prompt(&agent_dev);
+                let display = format!("◇ {} review", agent_dev.name);
+                self.start_stream_inner(prompt, display, true, true, false)
+            }
+            other => {
+                let Some(agent_dev) = self.agent_dev.clone() else {
+                    self.pending_agent_subcommand = Some(other);
+                    self.open_agent_panel();
+                    return None;
+                };
+                let Some(session) = self.os_session.clone() else {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /agent OS actions need /login first"),
+                    );
+                    return None;
+                };
+                let action = match other {
+                    panels::agent::AgentSubcommand::Publish(kind) => {
+                        panels::agent::AgentOsAction::Publish(kind)
+                    }
+                    panels::agent::AgentSubcommand::Run => panels::agent::AgentOsAction::Run,
+                    panels::agent::AgentSubcommand::Deploy => panels::agent::AgentOsAction::Deploy,
+                    panels::agent::AgentSubcommand::Open(kind) => {
+                        panels::agent::AgentOsAction::Open(kind)
+                    }
+                    panels::agent::AgentSubcommand::Logs(kind) => {
+                        panels::agent::AgentOsAction::Logs(kind)
+                    }
+                    panels::agent::AgentSubcommand::Status(kind) => {
+                        panels::agent::AgentOsAction::Status(kind)
+                    }
+                    panels::agent::AgentSubcommand::Exit
+                    | panels::agent::AgentSubcommand::Clone(_)
+                    | panels::agent::AgentSubcommand::List(_)
+                    | panels::agent::AgentSubcommand::Activity(_)
+                    | panels::agent::AgentSubcommand::Review => unreachable!(),
+                };
+                let kind = action.target_kind();
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  ◇ {} → OS {} {}…",
+                    agent_dev.name,
+                    kind.label(),
+                    kind.service_label()
+                )));
+                Some(cmd::cmd(move || async move {
+                    let result =
+                        panels::agent::publish_agent_to_os(session, agent_dev, action).await;
+                    Msg::AgentOsCompleted(result)
+                }))
+            }
+        }
+    }
+
+    fn execute_mcp_subcommand(
+        &mut self,
+        subcommand: panels::mcp::McpSubcommand,
+    ) -> Option<Cmd<Msg>> {
+        match subcommand {
+            panels::mcp::McpSubcommand::Exit => {
+                self.exit_mcp_dev();
+                None
+            }
+            panels::mcp::McpSubcommand::Clone(url) => {
+                self.clone_asset_command("mcp", url, mcp_dir())
+            }
+            panels::mcp::McpSubcommand::List(query) => {
+                self.open_asset_list_panel(os_asset_category_query("mcp", &query))
+            }
+            panels::mcp::McpSubcommand::Activity(query) => {
+                let Some(mcp_dev) = self.mcp_dev.clone() else {
+                    self.pending_mcp_subcommand = Some(panels::mcp::McpSubcommand::Activity(query));
+                    self.open_mcp_panel();
+                    return None;
+                };
+                self.open_runtime_activity_panel(runtime_asset_query("mcp", &mcp_dev.name, &query))
+            }
+            panels::mcp::McpSubcommand::Review => {
+                let Some(mcp_dev) = self.mcp_dev.clone() else {
+                    self.pending_mcp_subcommand = Some(panels::mcp::McpSubcommand::Review);
+                    self.open_mcp_panel();
+                    return None;
+                };
+                self.messages
+                    .push(user_bubble("/mcp review", self.width as usize));
+                self.engage_autonomy(4);
+                self.review_pending = true;
+                let prompt = panels::mcp::mcp_review_prompt(&mcp_dev);
+                let display = format!("◆ {} review", mcp_dev.name);
+                self.start_stream_inner(prompt, display, true, true, false)
+            }
+            other => {
+                let Some(action) = other.os_action() else {
+                    unreachable!("local MCP actions handled above")
+                };
+                let Some(mcp_dev) = self.mcp_dev.clone() else {
+                    self.pending_mcp_subcommand = Some(other);
+                    self.open_mcp_panel();
+                    return None;
+                };
+                let Some(session) = self.os_session.clone() else {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /mcp OS actions need /login first"),
+                    );
+                    return None;
+                };
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  ◆ {} → OS MCP Function as a Service {}…",
+                    mcp_dev.name,
+                    action.label()
+                )));
+                Some(cmd::cmd(move || async move {
+                    let result = panels::mcp::publish_mcp_to_os(session, mcp_dev, action).await;
+                    Msg::McpOsCompleted(result)
+                }))
+            }
+        }
+    }
+
+    fn execute_skill_subcommand(
+        &mut self,
+        subcommand: panels::skill::SkillSubcommand,
+    ) -> Option<Cmd<Msg>> {
+        match subcommand {
+            panels::skill::SkillSubcommand::Exit => {
+                self.exit_skill_dev();
+                None
+            }
+            panels::skill::SkillSubcommand::Clone(url) => {
+                self.clone_asset_command("skill", url, skill_dir())
+            }
+            panels::skill::SkillSubcommand::List(query) => {
+                self.open_asset_list_panel(os_asset_category_query("skill", &query))
+            }
+            panels::skill::SkillSubcommand::Activity(query) => {
+                let Some(skill_dev) = self.skill_dev.clone() else {
+                    self.pending_skill_subcommand =
+                        Some(panels::skill::SkillSubcommand::Activity(query));
+                    self.open_skill_panel();
+                    return None;
+                };
+                self.open_runtime_activity_panel(runtime_asset_query(
+                    "skill",
+                    &skill_dev.name,
+                    &query,
+                ))
+            }
+            panels::skill::SkillSubcommand::Review => {
+                if self.skill_dev.is_none() {
+                    self.pending_skill_subcommand = Some(panels::skill::SkillSubcommand::Review);
+                    self.open_skill_panel();
+                    return None;
+                }
+                let skill = self.skill_dev.clone().expect("checked above");
+                let body = match std::fs::read_to_string(&skill.path) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                            "  could not read {}: {error}",
+                            skill.path.display()
+                        )));
+                        return None;
+                    }
+                };
+                self.messages
+                    .push(user_bubble("/skill review", self.width as usize));
+                self.engage_autonomy(4);
+                self.review_pending = true;
+                let prompt = panels::skill::skill_review_prompt(&skill.path, &body);
+                let display = format!("✦ {} review", skill.name);
+                self.start_stream_inner(prompt, display, true, true, false)
+            }
+            panels::skill::SkillSubcommand::Publish => {
+                self.execute_skill_os_action(panels::skill::SkillOsAction::Publish)
+            }
+            panels::skill::SkillSubcommand::Deploy => {
+                if self.skill_dev.is_none() {
+                    self.pending_skill_subcommand = Some(panels::skill::SkillSubcommand::Deploy);
+                    self.open_skill_panel();
+                    return None;
+                }
+                self.execute_skill_os_action(panels::skill::SkillOsAction::Deploy)
+            }
+            panels::skill::SkillSubcommand::Open => {
+                self.execute_skill_os_action(panels::skill::SkillOsAction::Open)
+            }
+            panels::skill::SkillSubcommand::Status => {
+                self.execute_skill_os_action(panels::skill::SkillOsAction::Status)
+            }
+        }
+    }
+
+    fn execute_skill_os_action(
+        &mut self,
+        action: panels::skill::SkillOsAction,
+    ) -> Option<Cmd<Msg>> {
+        let Some(skill_dev) = self.skill_dev.clone() else {
+            self.pending_skill_subcommand = Some(match action {
+                panels::skill::SkillOsAction::Publish => panels::skill::SkillSubcommand::Publish,
+                panels::skill::SkillOsAction::Deploy => panels::skill::SkillSubcommand::Deploy,
+                panels::skill::SkillOsAction::Open => panels::skill::SkillSubcommand::Open,
+                panels::skill::SkillOsAction::Status => panels::skill::SkillSubcommand::Status,
+            });
+            self.open_skill_panel();
+            return None;
+        };
+        let Some(session) = self.os_session.clone() else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  /skill OS actions need /login first"),
+            );
+            return None;
+        };
+        self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+            "  ✦ {} → OS skill Function as a Service {}…",
+            skill_dev.name,
+            action.label()
+        )));
+        Some(cmd::cmd(move || async move {
+            let result = panels::skill::publish_skill_to_os(session, skill_dev, action).await;
+            Msg::SkillOsCompleted(result)
+        }))
+    }
+
     fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
         if trimmed.is_empty() {
@@ -3384,8 +3993,19 @@ impl App {
             // Long-horizon budget: keep researching across turns toward the
             // goal, with tool prompts auto-approved for the run's duration.
             self.engage_autonomy(8);
+            let runtime_expectation = self
+                .os_session
+                .is_some()
+                .then(|| RuntimeExpectation::required_report_view("deep research"));
             if self.state == State::Idle {
-                return self.start_stream_inner(prompt, display, true, true, false);
+                return self.start_stream_inner_with_runtime(
+                    prompt,
+                    display,
+                    true,
+                    true,
+                    false,
+                    runtime_expectation,
+                );
             }
             self.seq += 1;
             self.queue.push(Queued {
@@ -3393,54 +4013,11 @@ impl App {
                 seq: self.seq,
                 text: prompt,
                 display,
+                runtime_expectation,
             });
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
             return None;
-        }
-        // Code-review mode (`&`): clone the given git repo and run a deep,
-        // strictly read-only quality inspection. The `/loop` mechanism keeps
-        // the agent on it until a turn ends with the machine-readable
-        // ```a3s-review report, which capture_review parses into the checkbox
-        // panel where the user picks (or selects all) issues to fix — nothing
-        // is fixed automatically. Idle-only: review state (pending flag, loop
-        // budget, checklist) is App-wide, so a second review racing the first
-        // through the queue would clobber it.
-        if self.review_mode {
-            // Rejected-while-busy keeps the mode + typed URL for a retry.
-            if self.state != State::Idle {
-                self.push_line(&Style::new().fg(TN_YELLOW).render(
-                    "  a code review can't start while a turn is running — press Esc to stop first",
-                ));
-                return None;
-            }
-            self.review_mode = false;
-            let url = trimmed.trim_start_matches('&').trim().to_string();
-            if url.is_empty() {
-                self.textarea.clear();
-                return None;
-            }
-            self.history.push(trimmed.to_string());
-            self.history_pos = None;
-            self.textarea.clear();
-            self.review = None;
-            self.review_open = false;
-            self.review_pending = true;
-            self.messages.push(gutter(
-                TN_PURPLE,
-                &Style::new()
-                    .bold()
-                    .render(&format!("🔎 code review: {url}")),
-            ));
-            let clone_dir = repo_dir();
-            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                "  clone into {} → deep inspection → issue checklist to pick fixes (no auto-fix · Esc stops)",
-                clone_dir.display()
-            )));
-            let prompt = panels::review::code_review_prompt(&url, &clone_dir.to_string_lossy());
-            let display = format!("🔎 {url}");
-            self.engage_autonomy(8);
-            return self.start_stream_inner(prompt, display, true, true, false);
         }
         // Block session-mutating commands while a turn is streaming.
         if self.state != State::Idle {
@@ -3453,73 +4030,69 @@ impl App {
                 return None;
             }
         }
-        if let Some(rest) = trimmed.strip_prefix("/login") {
-            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
-                // e.g. "/login-token" is not the /login command.
-            } else {
-                self.textarea.clear();
-                let Some(os_config) = self.os_config.clone() else {
-                    self.push_line(&format!(
-                        "{}\n{}\n{}\n{}",
-                        Style::new()
-                            .fg(TN_YELLOW)
-                            .render("  /login needs an OS endpoint, but none is configured."),
-                        Style::new().fg(TN_GRAY).render(
-                            "  Add it to ~/.a3s/config.acl (or your project's .a3s/config.acl):"
-                        ),
-                        Style::new()
-                            .fg(TN_CYAN)
-                            .render("      os = \"https://your-os-host.example.com\""),
-                        Style::new()
-                            .fg(TN_GRAY)
-                            .render("  then restart a3s code and run /login again."),
-                    ));
-                    return None;
-                };
-                let token = rest.trim();
-                if !token.is_empty() {
-                    match crate::a3s_os::login_with_token(&os_config, token) {
-                        Ok(session) => {
-                            let label = session.display_label();
-                            crate::a3s_os::export_os_env(&session);
-                            self.os_session = Some(session);
-                            self.refresh_after_auth();
-                            self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
-                                "  ✓ signed in to OS as {label} · capabilities skill active"
-                            )));
-                        }
-                        Err(error) => self.push_line(
-                            &Style::new()
-                                .fg(TN_RED)
-                                .render(&format!("  login failed: {error}")),
-                        ),
-                    }
-                    return None;
-                }
-
-                // Already signed in (restored from a previous run) → no need to
-                // re-authenticate; tell the user how to switch instead.
-                if let Some(s) = &self.os_session {
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  already signed in to OS as {} · /logout to switch accounts",
-                        s.display_label()
-                    )));
-                    return None;
-                }
-
-                self.push_line(
-                    &Style::new()
+        if let Some(rest) = slash_tail(trimmed, "/login") {
+            self.textarea.clear();
+            let Some(os_config) = self.os_config.clone() else {
+                self.push_line(&format!(
+                    "{}\n{}\n{}\n{}",
+                    Style::new()
+                        .fg(TN_YELLOW)
+                        .render("  /login needs an OS endpoint, but none is configured."),
+                    Style::new().fg(TN_GRAY).render(
+                        "  Add it to ~/.a3s/config.acl (or your project's .a3s/config.acl):"
+                    ),
+                    Style::new()
+                        .fg(TN_CYAN)
+                        .render("      os = \"https://your-os-host.example.com\""),
+                    Style::new()
                         .fg(TN_GRAY)
-                        .render("  opening OS login in your browser…"),
-                );
-                return Some(cmd::cmd(move || async move {
-                    let result = crate::a3s_os::login_via_browser(os_config)
-                        .await
-                        .map(|session| session.display_label())
-                        .map_err(|error| error.to_string());
-                    Msg::OsLogin(result)
-                }));
+                        .render("  then restart a3s code and run /login again."),
+                ));
+                return None;
+            };
+            let token = rest.trim();
+            if !token.is_empty() {
+                match crate::a3s_os::login_with_token(&os_config, token) {
+                    Ok(session) => {
+                        let label = session.display_label();
+                        crate::a3s_os::export_os_env(&session);
+                        self.os_session = Some(session);
+                        self.refresh_after_auth();
+                        self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                            "  ✓ signed in to OS as {label} · capabilities skill active"
+                        )));
+                    }
+                    Err(error) => self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  login failed: {error}")),
+                    ),
+                }
+                return None;
             }
+
+            // Already signed in (restored from a previous run) → no need to
+            // re-authenticate; tell the user how to switch instead.
+            if let Some(s) = &self.os_session {
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  already signed in to OS as {} · /logout to switch accounts",
+                    s.display_label()
+                )));
+                return None;
+            }
+
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  opening OS login in your browser…"),
+            );
+            return Some(cmd::cmd(move || async move {
+                let result = crate::a3s_os::login_via_browser(os_config)
+                    .await
+                    .map(|session| session.display_label())
+                    .map_err(|error| error.to_string());
+                Msg::OsLogin(result)
+            }));
         }
         if trimmed == "/logout" {
             self.textarea.clear();
@@ -3532,9 +4105,8 @@ impl App {
             match crate::a3s_os::logout(&os_config) {
                 Ok(true) => {
                     self.os_session = None;
-                    self.chat = None; // IM requires an OS login — close it on sign-out.
-                    self.os_list = None;
-                    self.os_ps = None;
+                    self.asset_list = None;
+                    self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     self.refresh_after_auth();
@@ -3546,9 +4118,8 @@ impl App {
                 }
                 Ok(false) => {
                     self.os_session = None;
-                    self.chat = None; // IM requires an OS login — close it on sign-out.
-                    self.os_list = None;
-                    self.os_ps = None;
+                    self.asset_list = None;
+                    self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
                     self.refresh_after_auth();
@@ -3562,46 +4133,23 @@ impl App {
             }
             return None;
         }
-        // `/kb` opens the knowledge-base dashboard. Notes/imports/search are
+        // `/kb` opens the local personal knowledge-base panel. Notes/imports/search are
         // explicit subcommands so a mistyped path no longer becomes a note.
         // `/ctx <query>` searches past agent sessions; `/ctx <n>` stages hit n
         // as context for the next message (ctx CLI, local SQLite index).
-        if let Some(rest) = trimmed.strip_prefix("/ctx") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return self.handle_ctx_command(rest);
-            }
+        if let Some(rest) = slash_tail(trimmed, "/ctx") {
+            return self.handle_ctx_command(rest);
         }
-        if let Some(rest) = trimmed.strip_prefix("/kb") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                return self.handle_kb_command(rest);
-            }
+        if let Some(rest) = slash_tail(trimmed, "/okf") {
+            return self.handle_okf_command(rest);
         }
-        if let Some(rest) = trimmed.strip_prefix("/list") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                self.textarea.clear();
-                return self.open_os_list_panel(rest.trim().to_string());
-            }
-        }
-        if let Some(rest) = trimmed.strip_prefix("/ps") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                self.textarea.clear();
-                return self.open_os_ps_panel(rest.trim().to_string());
-            }
-        }
-        // `/im [userId]` opens the standalone OS chat page; an optional user
-        // id opens/creates that DM directly. Kept OUT of the agent loop.
-        if let Some(rest) = trimmed.strip_prefix("/im") {
-            if rest.is_empty() || rest.starts_with(char::is_whitespace) {
-                self.textarea.clear();
-                let arg = rest.trim().to_string();
-                let dm_with = (!arg.is_empty()).then_some(arg);
-                return self.open_chat(dm_with);
-            }
+        if let Some(rest) = slash_tail(trimmed, "/kb") {
+            return self.handle_kb_command(rest);
         }
         // `/btw <prompt>` runs a background side-thread (separate ephemeral
         // session, the main conversation as context) without disturbing the
         // current turn; its answer arrives as a side note.
-        if let Some(rest) = trimmed.strip_prefix("/btw") {
+        if let Some(rest) = slash_tail(trimmed, "/btw") {
             let q = rest.trim().to_string();
             self.textarea.clear();
             if q.is_empty() {
@@ -3615,11 +4163,8 @@ impl App {
             return Some(cmd::cmd(move || async move {
                 // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
                 let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                    .with_timeout(500, TimeoutAction::Reject);
-                let sess = match agent.session(
-                    workspace,
-                    Some(SessionOptions::new().with_confirmation_policy(conf)),
-                ) {
+                    .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+                let sess = match agent.session(workspace, Some(tui_session_options(conf))) {
                     Ok(s) => s,
                     Err(e) => return Msg::SideNote(format!("(/btw failed: {e})")),
                 };
@@ -3642,7 +4187,7 @@ impl App {
             }));
         }
         // `/goal [text|clear]` — a persistent goal prepended to every prompt.
-        if let Some(rest) = trimmed.strip_prefix("/goal") {
+        if let Some(rest) = slash_tail(trimmed, "/goal") {
             let g = rest.trim();
             self.textarea.clear();
             if g.is_empty() {
@@ -3685,8 +4230,8 @@ impl App {
             return None;
         }
         // `/loop` — engineered loop dashboard + subcommands; unknown tails keep
-        // the legacy quick-loop contract (`/loop <task>`).
-        if let Some(rest) = trimmed.strip_prefix("/loop") {
+        // the quick-loop contract (`/loop <task>`).
+        if let Some(rest) = slash_tail(trimmed, "/loop") {
             return self.handle_loop_command(rest);
         }
         // `/sleep [focus]` — end-of-day consolidation: the `/loop` mechanism
@@ -3694,12 +4239,7 @@ impl App {
         // `ctx` when installed) until a turn ends with the machine-readable
         // ```a3s-sleep report, which capture_sleep persists into long-term
         // memory (experience · preferences · knowledge). Idle-only.
-        if let Some(rest) = trimmed
-            .strip_prefix("/sleep")
-            // Token boundary (the /login pattern): "/sleepy" is a message, not
-            // this command — and must not bypass the IDLE_ONLY gate above.
-            .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-        {
+        if let Some(rest) = slash_tail(trimmed, "/sleep") {
             let focus = rest.trim().to_string();
             self.textarea.clear();
             self.sleep_pending = true;
@@ -3714,7 +4254,7 @@ impl App {
                 self.ctx_ready,
                 &panels::sleep::sleep_today(),
             );
-            // Like `&` review: send the directive but show a short display
+            // Like asset reviews: send the directive but show a short display
             // line (echoing the boilerplate as a user message is just noise).
             let display = if focus.is_empty() {
                 "☾ sleep".to_string()
@@ -3723,16 +4263,110 @@ impl App {
             };
             return self.start_stream_inner(directive, display, true, true, false);
         }
-        // `/flow` — pick a local DAG JSON and open it in the OS workflow
+        // `/flow` — select a local DAG JSON and open it in the OS workflow
         // designer (login-gated); `/flow <description>` orchestrates a basic DAG into
         // the flows folder (local, no login needed). Token-boundary filtered
         // so "/flowx" stays a normal message and can't bypass the idle gate.
-        if let Some(rest) = trimmed
-            .strip_prefix("/flow")
-            .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-        {
+        if let Some(rest) = slash_tail(trimmed, "/flow") {
             let description = rest.trim().to_string();
             self.textarea.clear();
+            if let Some(parsed) = panels::flow::parse_flow_subcommand(&description) {
+                match parsed {
+                    Ok(panels::flow::FlowSubcommand::Clone(url)) => {
+                        return self.clone_asset_command("workflow", url, flow_dir());
+                    }
+                    Ok(panels::flow::FlowSubcommand::List(query)) => {
+                        return self
+                            .open_asset_list_panel(os_asset_category_query("workflow", &query));
+                    }
+                    Ok(panels::flow::FlowSubcommand::Activity(query)) => {
+                        if self.os_session.is_none() {
+                            self.push_line(&Style::new().fg(TN_YELLOW).render(
+                                &os_required_message(
+                                    "workflow runtime activity",
+                                    self.os_config.is_some(),
+                                ),
+                            ));
+                        } else {
+                            self.pending_flow_subcommand =
+                                Some(panels::flow::FlowSubcommand::Activity(query));
+                            self.open_flow_panel();
+                        }
+                        return None;
+                    }
+                    Ok(panels::flow::FlowSubcommand::Workflow) => {
+                        self.open_latest_dynamic_workflow();
+                        return None;
+                    }
+                    Ok(panels::flow::FlowSubcommand::Review(target)) => {
+                        let root = flow_dir();
+                        let flows = panels::flow::list_flows(&root);
+                        let picked = match target {
+                            Some(target) => flows
+                                .into_iter()
+                                .find(|flow| flow == &target || flow.ends_with(&target)),
+                            None if flows.len() == 1 => flows.into_iter().next(),
+                            None => None,
+                        };
+                        let Some(file) = picked else {
+                            self.pending_flow_subcommand =
+                                Some(panels::flow::FlowSubcommand::Review(None));
+                            self.open_flow_panel();
+                            return None;
+                        };
+                        let path = root.join(&file);
+                        let design = match std::fs::read_to_string(&path) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                                    "  could not read {}: {error}",
+                                    path.display()
+                                )));
+                                return None;
+                            }
+                        };
+                        if serde_json::from_str::<serde_json::Value>(&design).is_err() {
+                            self.push_line(
+                                &Style::new()
+                                    .fg(TN_RED)
+                                    .render(&format!("  {} is not valid JSON", file)),
+                            );
+                            return None;
+                        }
+                        self.messages.push(user_bubble(
+                            &format!("/flow review {file}"),
+                            self.width as usize,
+                        ));
+                        self.engage_autonomy(4);
+                        self.review_pending = true;
+                        let prompt = panels::flow::flow_review_prompt(&path, &design);
+                        let display = format!("⧉ flow review: {}", truncate(&file, 48));
+                        return self.start_stream_inner(prompt, display, true, true, false);
+                    }
+                    Ok(action @ panels::flow::FlowSubcommand::Publish)
+                    | Ok(action @ panels::flow::FlowSubcommand::Run)
+                    | Ok(action @ panels::flow::FlowSubcommand::Deploy)
+                    | Ok(action @ panels::flow::FlowSubcommand::Open)
+                    | Ok(action @ panels::flow::FlowSubcommand::Logs)
+                    | Ok(action @ panels::flow::FlowSubcommand::Status) => {
+                        if self.os_session.is_none() {
+                            self.push_line(
+                                &Style::new().fg(TN_YELLOW).render(
+                                    "  /flow publish/run/deploy/open/logs/status needs OS — sign in with /login first",
+                                ),
+                            );
+                        } else {
+                            self.pending_flow_subcommand = Some(action);
+                            self.open_flow_panel();
+                        }
+                        return None;
+                    }
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        return None;
+                    }
+                }
+            }
             if description.is_empty() {
                 if self.os_session.is_none() {
                     self.push_line(
@@ -3755,21 +4389,21 @@ impl App {
             let display = format!("⧉ flow: {}", truncate(&description, 60));
             return self.start_stream_inner(prompt, display, true, true, false);
         }
-        // `/agent` — pick a local a3s-code agent definition and enter local
+        // `/agent` — select a local a3s-code agent definition and enter local
         // multi-turn development mode; `/agent <description>` drafts a local Markdown
-        // agent definition; `/agent off` returns to normal mode.
-        if let Some(rest) = trimmed
-            .strip_prefix("/agent")
-            .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
-        {
+        // agent definition; OS subcommands publish/run/deploy the active local
+        // definition through Agent as a Service or Function as a Service according to the kind.
+        if let Some(rest) = slash_tail(trimmed, "/agent") {
             let description = rest.trim().to_string();
             self.textarea.clear();
-            if matches!(
-                description.as_str(),
-                "off" | "exit" | "normal" | "clear" | "stop"
-            ) {
-                self.exit_agent_dev();
-                return None;
+            if let Some(parsed) = panels::agent::parse_agent_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_agent_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
             }
             if description.is_empty() {
                 self.open_agent_panel();
@@ -3785,9 +4419,66 @@ impl App {
             let display = format!("◇ agent: {}", truncate(&description, 60));
             return self.start_stream_inner(prompt, display, true, true, false);
         }
+        // `/mcp` — select a local MCP server asset and enter local multi-turn
+        // development mode; `/mcp <description>` drafts a local MCP asset.
+        // OS publish/debug/test will map MCP tool calls to Function as a Service.
+        if let Some(rest) = slash_tail(trimmed, "/mcp") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::mcp::parse_mcp_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_mcp_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
+            }
+            if description.is_empty() {
+                self.open_mcp_panel();
+                return None;
+            }
+            let dir = mcp_dir();
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  ◆ drafting an MCP server asset → {} (then /mcp starts local dev)",
+                dir.display()
+            )));
+            self.engage_autonomy(8);
+            let prompt = panels::mcp::mcp_gen_prompt(&description, &dir.to_string_lossy());
+            let display = format!("◆ mcp: {}", truncate(&description, 60));
+            return self.start_stream_inner(prompt, display, true, true, false);
+        }
+        // `/skill` — select a local skill asset and enter local multi-turn
+        // development mode; `/skill <description>` drafts a local skill asset.
+        if let Some(rest) = slash_tail(trimmed, "/skill") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::skill::parse_skill_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_skill_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
+            }
+            if description.is_empty() {
+                self.open_skill_panel();
+                return None;
+            }
+            let dir = skill_dir();
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  ✦ drafting a skill asset → {} (then /skill starts local dev)",
+                dir.display()
+            )));
+            self.engage_autonomy(8);
+            let prompt = panels::skill::skill_gen_prompt(&description, &dir.to_string_lossy());
+            let display = format!("✦ skill: {}", truncate(&description, 60));
+            return self.start_stream_inner(prompt, display, true, true, false);
+        }
         // Slash commands run inline in any state.
         match trimmed {
-            "/exit" | "/quit" => return Some(cmd::quit()),
+            "/exit" => return Some(cmd::quit()),
             "/fork" => {
                 // Branch a new session from the current one: copy the persisted
                 // SessionData under a fresh id, then swap the active session to it
@@ -3830,8 +4521,17 @@ impl App {
                 self.pending_ctx = None;
                 self.ctx_hits.clear();
                 self.agent_dev = None;
-                self.os_list = None;
-                self.os_ps = None;
+                self.pending_flow_subcommand = None;
+                self.pending_agent_subcommand = None;
+                self.mcp_dev = None;
+                self.pending_mcp_subcommand = None;
+                self.skill_dev = None;
+                self.pending_skill_subcommand = None;
+                self.kb_picker = None;
+                self.pending_kb_subcommand = None;
+                self.kb_dev = None;
+                self.asset_list = None;
+                self.runtime_activity = None;
                 self.kb = None;
                 // Actually reset the conversation, not just the screen: swap in a
                 // fresh session (new id, no history, no carried compact summary)
@@ -3856,7 +4556,7 @@ impl App {
                 return None;
             }
             "/init" => {
-                // Agent-driven: analyze the repo and write AGENTS.md (auto-loaded
+                // Agent-driven: analyze the workspace and write AGENTS.md (auto-loaded
                 // by the core, like CLAUDE.md). Guarded idle by IDLE_ONLY above.
                 self.textarea.clear();
                 self.messages.push(user_bubble(
@@ -3869,7 +4569,7 @@ impl App {
                      project root. Include: a concise project overview, the exact build / test / \
                      lint / run commands, the high-level architecture and key directories, and \
                      the conventions an AI coding agent should follow. Base everything on what's \
-                     actually in the repo, and write the file with your file-writing tool."
+                     actually in the workspace, and write the file with your file-writing tool."
                         .to_string(),
                 );
             }
@@ -3910,12 +4610,9 @@ impl App {
                 };
                 return Some(cmd::cmd(move || async move {
                     let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                        .with_timeout(500, TimeoutAction::Reject);
+                        .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
                     let mut summary = String::new();
-                    if let Ok(sess) = agent.session(
-                        workspace,
-                        Some(SessionOptions::new().with_confirmation_policy(conf)),
-                    ) {
+                    if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf))) {
                         if let Ok((mut rx, _j)) = sess.stream(&prompt, Some(&history)).await {
                             while let Some(ev) = rx.recv().await {
                                 match ev {
@@ -4016,7 +4713,7 @@ impl App {
                 self.ide = Some(Ide::browse(entries, "workspace"));
                 return None;
             }
-            "/plugin" | "/plugins" => {
+            "/plugin" => {
                 self.textarea.clear();
                 if self.skills.is_empty() {
                     self.push_line(&Style::new().fg(TN_GRAY).render(
@@ -4031,58 +4728,6 @@ impl App {
                 self.textarea.clear();
                 let cur = SYNTAX_THEME.load(std::sync::atomic::Ordering::Relaxed);
                 self.theme_panel = Some(cur.min(THEMES.len() - 1));
-                return None;
-            }
-            "/workflow" => {
-                self.textarea.clear();
-                match self.last_workflow.clone() {
-                    Some(doc) => self.open_readonly_in_ide("dynamic-workflow.md", &doc),
-                    None => self.push_line(&Style::new().fg(TN_GRAY).render(
-                        "  no dynamic workflow yet — run an ultracode task that fans out via parallel_task",
-                    )),
-                }
-                return None;
-            }
-            "/review" => {
-                self.textarea.clear();
-                if self.review.is_some() {
-                    // A report exists: /review reopens its checklist.
-                    self.review_open = true;
-                } else {
-                    // No report yet: pick a local repos project to review
-                    // (the `&` flow without the clone; no login needed).
-                    self.open_repo_picker(panels::repos::RepoAction::Review);
-                }
-                return None;
-            }
-            // `/deploy` — login-gated: pick a repos project → Agentic CI/CD →
-            // auto-configure its OS gateway access address.
-            "/deploy" => {
-                self.textarea.clear();
-                if self.os_session.is_none() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_YELLOW)
-                            .render(&os_required_message("/deploy", self.os_config.is_some())),
-                    );
-                } else {
-                    self.open_repo_picker(panels::repos::RepoAction::Deploy);
-                }
-                return None;
-            }
-            // `/run` — login-gated: pick a repos project → quick dev-mode debug
-            // run on the A3S Runtime → report its access address.
-            "/run" => {
-                self.textarea.clear();
-                if self.os_session.is_none() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_YELLOW)
-                            .render(&os_required_message("/run", self.os_config.is_some())),
-                    );
-                } else {
-                    self.open_repo_picker(panels::repos::RepoAction::Run);
-                }
                 return None;
             }
             "/output" => {
@@ -4149,34 +4794,31 @@ impl App {
                     log: Vec::new(),
                     log_sel: 0,
                     view: GitView::Status,
-                    commit_input: None,
                     note: "loading…".into(),
                 });
-                let repo = self.cwd.clone();
+                let workspace = self.cwd.clone();
                 return Some(cmd::cmd(move || async move {
-                    let (files, log) = git_status_log(repo).await;
+                    let (files, log) = git_status_log(workspace).await;
                     Msg::GitStatus(files, log)
                 }));
             }
             "/memory" => {
                 self.textarea.clear();
-                // Open immediately ("loading…"); parse the store index off the UI
-                // thread (it can be multi-MB) so the panel never janks on open.
+                // Open immediately ("loading…"); load the file snapshot off the
+                // UI thread, with live session memory as a fallback.
                 let dir = memory_dir();
                 self.memory = Some(MemPanel {
                     entries: Vec::new(),
                     sel: 0,
+                    details: std::collections::BTreeMap::new(),
+                    graph: MemoryGraph::default(),
+                    loaded_from_session: false,
                     detail: memutil::MemDetail::default(),
                     detail_scroll: 0,
                     dir: dir.clone(),
                     note: "loading…".into(),
                 });
-                return Some(cmd::cmd(move || async move {
-                    let entries = tokio::task::spawn_blocking(move || memutil::load_timeline(&dir))
-                        .await
-                        .unwrap_or_default();
-                    Msg::MemoryLoaded(entries)
-                }));
+                return Some(self.load_memory_panel(dir));
             }
             "/relay" => {
                 self.textarea.clear();
@@ -4217,7 +4859,25 @@ impl App {
                 panels::agent::agent_dev_prompt(dev, &prompt),
                 format!("◇ {}: {}", dev.name, truncate(trimmed, 60)),
             ),
-            None => (prompt, trimmed.to_string()),
+            None => match &self.mcp_dev {
+                Some(dev) => (
+                    panels::mcp::mcp_dev_prompt(dev, &prompt),
+                    format!("◆ {}: {}", dev.name, truncate(trimmed, 60)),
+                ),
+                None => match &self.skill_dev {
+                    Some(dev) => (
+                        panels::skill::skill_dev_prompt(dev, &prompt),
+                        format!("✦ {}: {}", dev.name, truncate(trimmed, 60)),
+                    ),
+                    None => match &self.kb_dev {
+                        Some(dev) => (
+                            panels::kb::kb_dev_prompt(dev, &prompt),
+                            format!("⌁ {}: {}", dev.name, truncate(trimmed, 60)),
+                        ),
+                        None => (prompt, trimmed.to_string()),
+                    },
+                },
+            },
         };
         if self.state == State::Idle {
             self.start_stream_inner(prompt, display, true, true, false)
@@ -4228,6 +4888,7 @@ impl App {
                 seq: self.seq,
                 text: prompt,
                 display,
+                runtime_expectation: None,
             });
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
@@ -4290,11 +4951,33 @@ impl App {
         include_attachments: bool,
         synthesis: bool,
     ) -> Option<Cmd<Msg>> {
+        self.start_stream_inner_with_runtime(
+            prompt,
+            display_task,
+            clear_turn_artifacts,
+            include_attachments,
+            synthesis,
+            None,
+        )
+    }
+
+    fn start_stream_inner_with_runtime(
+        &mut self,
+        prompt: String,
+        display_task: String,
+        clear_turn_artifacts: bool,
+        include_attachments: bool,
+        synthesis: bool,
+        runtime_expectation: Option<RuntimeExpectation>,
+    ) -> Option<Cmd<Msg>> {
         self.streaming.clear();
         self.got_delta = false; // track if this turn streamed any text deltas
         self.turn_text.clear();
         self.turn_had_agent_activity = false;
         self.turn_text_after_activity = false;
+        if let Some(expectation) = runtime_expectation {
+            self.runtime_expectation = Some(expectation);
+        }
         self.ultracode_synthesis_inflight = synthesis;
         if !synthesis {
             self.ultracode_synthesis_used = false;
@@ -4323,8 +5006,8 @@ impl App {
             None => prompt,
         };
         // (A `/ctx <n>` staged transcript window is attached upstream, only to a
-        // genuine typed user message — see on_submit — never to a `/loop`, `&`,
-        // `?`, or synthesis continuation.)
+        // genuine typed user message — see on_submit — never to a `/loop`,
+        // asset review, `?`, or synthesis continuation.)
         // ultracode no longer rewrites the user turn. Whether a turn plans and
         // fans out is decided by the core's message-gated planning
         // (PlanningMode::Auto) plus the `parallel_task` tool description — not an
@@ -4351,7 +5034,14 @@ impl App {
     /// Pop the next queued message and start streaming it, if any.
     fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
         let next = self.queue.pop()?;
-        self.start_stream_inner(next.text, next.display, true, true, false)
+        self.start_stream_inner_with_runtime(
+            next.text,
+            next.display,
+            true,
+            true,
+            false,
+            next.runtime_expectation,
+        )
     }
 
     /// Shared turn-completion: count the turn, run any ultracode synthesis, go
@@ -4364,6 +5054,7 @@ impl App {
         if self.state == State::Streaming {
             self.completed += 1;
         }
+        self.warn_missing_runtime_evidence();
         let synthesis = self.prepare_ultracode_synthesis();
         self.finish();
         if let Some((prompt, display_task)) = synthesis {
@@ -4395,8 +5086,8 @@ impl App {
         self.drain_queue()
     }
 
-    /// An autonomous directive run is starting (/sleep, reviews, /deploy,
-    /// /run, /flow drafts, /loop): switch to auto-approve so tool
+    /// An autonomous directive run is starting (/sleep, asset reviews,
+    /// asset run/deploy, /flow drafts, /loop): switch to auto-approve so tool
     /// prompts can't stall it, and arm the loop budget that re-prompts until
     /// the deliverable lands. The prior mode is restored when the run ends
     /// (loop drained, interrupt, error, or /clear). A user already in auto
@@ -4412,13 +5103,37 @@ impl App {
         }
     }
 
-    fn arm_runtime_view_auto_open(&mut self, action: panels::repos::RepoAction, project: String) {
-        self.runtime_view_auto_open = Some(RuntimeViewAutoOpen::new(action, project));
+    fn record_runtime_tool_evidence(&mut self, name: &str) {
+        if let Some(expectation) = &mut self.runtime_expectation {
+            expectation.record_tool(name);
+        }
+    }
+
+    fn record_runtime_parallel_evidence(&mut self) {
+        if let Some(expectation) = &mut self.runtime_expectation {
+            expectation.record_parallel_work();
+        }
+    }
+
+    fn record_runtime_view_evidence(&mut self) {
+        if let Some(expectation) = &mut self.runtime_expectation {
+            expectation.record_remote_view();
+        }
+    }
+
+    fn warn_missing_runtime_evidence(&mut self) {
+        let warning = self
+            .runtime_expectation
+            .as_mut()
+            .and_then(RuntimeExpectation::missing_warning);
+        if let Some(warning) = warning {
+            self.push_line(&Style::new().fg(TN_YELLOW).render(&warning));
+        }
     }
 
     /// Restore the pre-autonomy mode (no-op when nothing was auto-switched).
     fn restore_autonomy(&mut self) {
-        self.runtime_view_auto_open = None;
+        self.runtime_expectation = None;
         if let Some(prev) = self.autonomy_restore.take() {
             self.mode = prev;
             self.push_line(
@@ -4483,6 +5198,7 @@ impl App {
                     args.as_ref(),
                     self.width as usize,
                 ));
+                self.record_runtime_tool_evidence(&name);
                 self.capture_workflow(&name, args.as_ref());
                 if let Some(spec) = self.find_remote_view_spec(&output) {
                     self.remember_remote_view(spec);
@@ -4516,6 +5232,7 @@ impl App {
             } => {
                 self.mark_agent_activity();
                 self.finalize_streaming();
+                self.record_runtime_parallel_evidence();
                 self.active_agents += 1;
                 // Track it in the live bottom panel instead of a transcript line.
                 self.subagents.push(SubAgent {
@@ -4633,6 +5350,8 @@ impl App {
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.
                 self.state = State::Awaiting;
+                self.running_tool = None;
+                self.active_tools = self.active_tools.saturating_sub(1);
                 self.approval_sel = 0;
                 let label = tool_label(&tool_name, Some(&args));
                 self.pending_tool = Some((tool_id, label));
@@ -4653,7 +5372,7 @@ impl App {
                 // /loop: stop once the agent signals completion (the word DONE).
                 // Not during /sleep: its completion signal is the a3s-sleep
                 // report itself, and consolidation narration ("what was done
-                // today") would false-trigger this and kill the run early.
+                // today") would false-trigger this and end the run early.
                 if self.loop_remaining > 0 && !self.sleep_pending {
                     let r = if text.is_empty() {
                         self.streaming.raw_content().to_string()
@@ -4666,7 +5385,7 @@ impl App {
                         self.loop_remaining = 0;
                     }
                 }
-                // `&` review scans the WHOLE turn's text: with a delta-only
+                // Asset review scans the WHOLE turn's text: with a delta-only
                 // provider a tool call after the report would have cleared the
                 // live buffer, losing a fully delivered report.
                 let review_text = if text.is_empty() {
@@ -4683,7 +5402,7 @@ impl App {
                     self.streaming.push(&text);
                 }
                 self.finalize_streaming();
-                // `&` code review: a ```a3s-review report in the final message
+                // Asset code review: a ```a3s-review report in the final message
                 // ends the review loop and opens the issue checklist.
                 self.capture_review(&review_text);
                 // `/sleep`: an ```a3s-sleep report ends the consolidation loop
@@ -4723,7 +5442,7 @@ impl App {
                         .render(&format!("  error: {message}")),
                 );
                 self.loop_remaining = 0; // a failed turn stops the /loop
-                self.review_pending = false; // and abandons a `&` review
+                self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
                 self.restore_autonomy();
                 self.finish();
@@ -4934,32 +5653,15 @@ impl App {
         // Remember the view for `/view`, and surface a clickable "Open view"
         // line ourselves (deterministic) rather than trusting the model to
         // print the marker — weaker models often forget it or jq the `.view`
-        // object away. `/run` and `/deploy` additionally auto-open the first
-        // view so the user sees the live Runtime/CI log immediately.
-        let (is_new, should_auto_open) = remote_view_handling(
-            self.last_view.as_ref(),
-            self.runtime_view_auto_open.as_ref(),
-            &spec,
-        );
+        // object away.
+        let is_new = is_new_remote_view(self.last_view.as_ref(), &spec);
         self.last_view = Some(spec.clone());
+        self.record_runtime_view_evidence();
         if is_new {
             self.push_line(&gutter(
                 ACCENT,
                 &remote_view_button("click or /view to open"),
             ));
-        }
-        if should_auto_open {
-            let opening = self.runtime_view_auto_open.as_mut().map(|auto| {
-                auto.opened = true;
-                (auto.label(), truncate(&auto.project, 48))
-            });
-            if let Some((label, project)) = opening {
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!("🔗 opening live {label} view · {project}"),
-                ));
-            }
-            self.open_remote_view(&spec);
         }
     }
 
@@ -5026,18 +5728,18 @@ impl App {
     }
 
     /// Capture a `parallel_task`/`task` dispatch as a dynamic-workflow artifact:
-    /// a readable plan of the fanned-out subtasks. Stored for `/workflow` and
+    /// a readable plan of the fanned-out subtasks. Stored for `/flow workflow` and
     /// announced with a collapsed one-line message in the transcript.
     fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
         let Some((doc, label)) = workflow_doc_for_tool(name, args) else {
             return;
         };
         self.last_workflow = Some(doc);
-        // Collapsed indicator; the full artifact opens read-only via /workflow.
+        // Collapsed indicator; the full artifact opens read-only via /flow workflow.
         self.push_line(&Style::new().fg(ACCENT).render(&format!("  ⊞ {label}")));
     }
 
-    /// Open read-only text content in the built-in IDE (used by `/workflow` to
+    /// Open read-only text content in the built-in IDE (used by `/flow workflow` to
     /// show the dynamic-workflow artifact). Editor-focused for scroll/nav, but
     /// `readonly` blocks edits and Ctrl+S.
     fn open_readonly_in_ide(&mut self, title: &str, content: &str) {
@@ -5057,11 +5759,9 @@ impl App {
         self.ide = Some(ide);
     }
 
-    /// Format every retained tool call for the `/output` viewer: a header line
-    /// per call (index · name · status) followed by its args and output. Returns
-    /// None when nothing has run yet.
+    /// Format every retained tool call for the `/output` viewer.
     fn format_tool_log(&self) -> Option<String> {
-        format_tool_log_records(&self.tool_log)
+        format_tool_log_records(&self.tool_log, self.width as usize)
     }
 
     /// Move through prompt history and load the entry into the input. Going
@@ -5122,34 +5822,16 @@ impl App {
         // Currently-executing tool: "• Running <cmd>…" with a blinking bullet.
         if let Some(name) = &self.running_tool {
             let args: Option<serde_json::Value> = serde_json::from_str(&self.tool_args).ok();
-            let verb = match name.as_str() {
-                "bash" | "shell" | "run" | "exec" => "Running",
-                _ => tool_verb(name),
-            };
-            let arg = args.as_ref().and_then(arg_summary).unwrap_or_default();
             let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
-            let dot = Style::new()
-                .fg(if on { TN_YELLOW } else { TN_GRAY })
-                .bold()
-                .render("•");
-            let m = " ".repeat(PAD);
-            blocks.push(if arg.is_empty() {
-                format!("{m}{dot} {verb}…")
-            } else {
-                format!("{m}{dot} {verb} {arg}…")
-            });
+            blocks.push(render_live_tool_status(
+                name,
+                args.as_ref(),
+                self.width as usize,
+                on,
+            ));
         }
         // Live stdout of the running tool — tail prefixed with "│" like Codex.
-        if !self.tool_output.trim().is_empty() {
-            let m = " ".repeat(PAD + 2);
-            let bar = Style::new().fg(TN_GRAY).render("│");
-            let tail: Vec<&str> = self.tool_output.lines().rev().take(12).collect();
-            let body = tail
-                .into_iter()
-                .rev()
-                .map(|l| format!("{m}{bar} {}", Style::new().fg(TN_GRAY).render(l)))
-                .collect::<Vec<_>>()
-                .join("\n");
+        if let Some(body) = render_live_tool_output(&self.tool_output, self.width as usize) {
             blocks.push(body);
         }
         // Same "\n…\n" framing as rebuild_viewport so the transcript doesn't
@@ -5216,27 +5898,26 @@ impl App {
         };
         let width = self.width as usize;
         let opts = ["Yes", "Yes, and don't ask again", "No"];
-        let mut menu = vec![pad_to(
+        let approval_line = |line: &str| pad_to(&truncate(line, width), width);
+        let mut menu = vec![approval_line(
             &Style::new()
                 .fg(TN_YELLOW)
                 .bold()
                 .render(&format!("  ⏵ Allow {label}?")),
-            width,
         )];
         for (i, o) in opts.iter().enumerate() {
             let marker = if i == self.approval_sel { "❯" } else { " " };
-            let raw = pad_to(&format!("  {marker} {}. {o}", i + 1), width);
+            let raw = approval_line(&format!("  {marker} {}. {o}", i + 1));
             menu.push(if i == self.approval_sel {
                 Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
             } else {
                 Style::new().fg(TN_FG).render(&raw)
             });
         }
-        menu.push(pad_to(
+        menu.push(approval_line(
             &Style::new()
                 .fg(TN_GRAY)
                 .render("  Enter select · ↑/↓ · 1–3 · Esc"),
-            width,
         ));
         self.overlay_list(composed, &menu)
     }
@@ -5382,10 +6063,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // Enable HITL confirmation so file-modifying tools (write/edit/patch) can
     // run — they require a confirmation manager, otherwise they fail with
     // "requires confirmation but no HITL confirmation manager is configured".
-    // The TUI is that manager (approve/deny modal, or /auto). Long timeout so
-    // the modal never expires while the user reads it.
+    // The TUI is that manager (approve/deny modal, or /auto). Keep the human
+    // confirmation wait separate from the tool execution timeout: reading and
+    // deciding must not consume the tool's runtime budget.
     let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-        .with_timeout(3_600_000, TimeoutAction::Reject);
+        .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
     // a3s's own (they share the markdown + YAML-frontmatter format).
     let mut claude_dirs = agent_skill_dirs(&workspace);
@@ -5440,9 +6122,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let session = match agent.resume_session(
         session_id.as_str(),
         with_instr(with_recent_workspace_context(
-            SessionOptions::new()
+            tui_session_options(confirmation.clone())
                 .with_session_store(store.clone())
-                .with_confirmation_policy(confirmation.clone())
                 .with_workspace_backend(workspace_services.clone())
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
@@ -5464,10 +6145,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         Err(_) => agent.session(
             workspace.clone(),
             Some(with_instr(with_recent_workspace_context(
-                SessionOptions::new()
+                tui_session_options(confirmation.clone())
                     .with_session_store(store.clone())
                     .with_session_id(session_id.as_str())
-                    .with_confirmation_policy(confirmation.clone())
                     .with_workspace_backend(workspace_services.clone())
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
@@ -5562,7 +6242,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             "Scroll down",
         )
         // NB: Ctrl+U / Ctrl+D are intentionally NOT bound to scroll — they shadow
-        // readline line-editing (Ctrl+U = kill-to-start) in the input. PageUp/Down
+        // readline line-editing (Ctrl+U = delete-to-start) in the input. PageUp/Down
         // and Ctrl+Home/End cover scrolling.
         .bind(
             KeyBinding::ctrl(KeyCode::Home),
@@ -5600,7 +6280,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         os_gateway_models: None,
         os_gateway_error: None,
         last_view: None,
-        runtime_view_auto_open: None,
+        runtime_expectation: None,
         effort: 2, // high
         effort_panel: None,
         theme_panel: None,
@@ -5609,15 +6289,24 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         auto_reviewed: false,
         shell_mode: false,
         research_mode: false,
-        review_mode: false,
         review_pending: false,
         sleep_pending: false,
         review: None,
         review_open: false,
-        repo_picker: None,
         flow: None,
+        pending_flow_subcommand: None,
         agent_picker: None,
+        pending_agent_subcommand: None,
         agent_dev: None,
+        mcp_picker: None,
+        pending_mcp_subcommand: None,
+        mcp_dev: None,
+        skill_picker: None,
+        pending_skill_subcommand: None,
+        skill_dev: None,
+        kb_picker: None,
+        pending_kb_subcommand: None,
+        kb_dev: None,
         autonomy_restore: None,
         ctx_ready,
         ctx_hits: Vec::new(),
@@ -5686,13 +6375,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         top_scroll: 0,
         top_sel: 0,
         top_focus: None,
-        top_kill: None,
         ide: None,
-        chat: None,
         git: None,
         memory: None,
-        os_list: None,
-        os_ps: None,
+        asset_list: None,
+        runtime_activity: None,
         kb: None,
         loop_panel: None,
         help_open: false,
@@ -5817,6 +6504,14 @@ mod tests {
         }
     }
 
+    fn contains_cjk(s: &str) -> bool {
+        s.chars().any(|ch| {
+            ('\u{3400}'..='\u{4dbf}').contains(&ch)
+                || ('\u{4e00}'..='\u{9fff}').contains(&ch)
+                || ('\u{f900}'..='\u{faff}').contains(&ch)
+        })
+    }
+
     #[test]
     fn tui_palette_tracks_design_tokens() {
         assert_eq!(rgb(ACCENT), (0, 112, 243));
@@ -5848,6 +6543,20 @@ mod tests {
         assert!(
             rendered.contains("\x1b["),
             "button should carry ANSI styling"
+        );
+    }
+
+    #[test]
+    fn tui_session_options_sets_separate_tool_timeout() {
+        let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+            .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+        let opts = tui_session_options(confirmation);
+        let dbg = format!("{opts:?}");
+
+        assert_ne!(HITL_CONFIRM_TIMEOUT_MS, TOOL_EXEC_TIMEOUT_MS);
+        assert!(
+            dbg.contains(&format!("tool_timeout_ms: Some({TOOL_EXEC_TIMEOUT_MS})")),
+            "{dbg}"
         );
     }
 
@@ -6042,11 +6751,11 @@ mod tests {
     // ── `/output` formatting ───────────────────────────────────────────────
     #[test]
     fn format_tool_log_empty_is_none() {
-        assert!(format_tool_log_records(&[]).is_none());
+        assert!(format_tool_log_records(&[], 80).is_none());
     }
 
     #[test]
-    fn format_tool_log_renders_header_args_and_output() {
+    fn format_tool_log_renders_bounded_headers_args_and_output() {
         let recs = vec![
             ToolCallRecord {
                 name: "read".into(),
@@ -6061,14 +6770,66 @@ mod tests {
                 exit_code: 2,
             },
         ];
-        let out = format_tool_log_records(&recs).unwrap();
-        assert!(out.contains("#1 · read · ok"), "{out}");
+        let out = format_tool_log_records(&recs, 48).unwrap();
+        assert!(out.contains("#1 · ok · Read /x"), "{out}");
         assert!(out.contains("args: {\"file_path\":\"/x\"}"), "{out}");
         assert!(
             out.contains("    hello"),
             "output should be indented: {out}"
         );
-        assert!(out.contains("#2 · bash · exit 2"), "{out}");
+        assert!(out.contains("#2 · exit 2 · Ran"), "{out}");
+        for line in out.lines() {
+            assert!(
+                a3s_tui::style::visible_len(line) <= 48,
+                "log line should be bounded: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_tool_log_tails_long_output() {
+        let recs = vec![ToolCallRecord {
+            name: "bash".into(),
+            args: Some(serde_json::json!({
+                "command": "cargo test a-very-long-filter-that-must-not-overflow -- --nocapture"
+            })),
+            output: (0..30)
+                .map(|i| format!("line-{i}-with-a-long-payload-that-must-stay-inside-the-editor"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            exit_code: 0,
+        }];
+        let out = format_tool_log_records(&recs, 52).unwrap();
+
+        assert!(out.contains("… +6 earlier lines"), "{out}");
+        assert!(!out.contains("line-0-with"), "{out}");
+        assert!(out.contains("line-6-with"), "{out}");
+        for line in out.lines() {
+            assert!(
+                a3s_tui::style::visible_len(line) <= 52,
+                "log line should be bounded: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_tool_log_respects_narrow_editor_width() {
+        let recs = vec![ToolCallRecord {
+            name: "bash".into(),
+            args: Some(serde_json::json!({
+                "command": "printf a-very-long-line-that-used-to-force-a-minimum-width"
+            })),
+            output: "a-very-long-output-line-that-must-be-clipped\n".into(),
+            exit_code: 0,
+        }];
+        let out = format_tool_log_records(&recs, 16).unwrap();
+
+        for line in out.lines() {
+            assert!(
+                a3s_tui::style::visible_len(line) <= 16,
+                "log line should respect narrow width: {line:?}"
+            );
+        }
     }
 
     // ── `?` deep-research mode ─────────────────────────────────────────────
@@ -6092,8 +6853,12 @@ mod tests {
             p.contains("OS A3S Runtime") && p.contains("parallel_task"),
             "{p}"
         );
+        assert!(p.contains("Runtime evidence is required"), "{p}");
+        assert!(p.contains("`runtime`"), "{p}");
+        assert!(p.contains("shaped:true"), "{p}");
         assert!(p.contains("RemoteUI"), "{p}");
         assert!(p.contains(".view") && p.contains("viewUrl"), "{p}");
+        assert!(p.contains("must include both fan-out"), "{p}");
         assert!(
             p.contains("Markdown report") && p.contains("HTML page"),
             "{p}"
@@ -6193,6 +6958,76 @@ mod tests {
         assert!(
             names.contains(&"web_search".to_string()) && names.contains(&"web_fetch".to_string()),
             "the `?` deep-research mode relies on web_search + web_fetch; got {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hitl_wait_does_not_consume_tool_timeout_budget() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-hitl-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.acl");
+        test_config(&cfg);
+        std::fs::write(dir.join("sample.txt"), "timeout sentinel").unwrap();
+
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let llm = Arc::new(CaptureLlmClient::new(vec![
+            tool_call_response("read", serde_json::json!({"file_path": "sample.txt"})),
+            done_response(),
+        ]));
+        let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+            .with_timeout(5_000, TimeoutAction::Reject);
+        let opts = tui_session_options(confirmation)
+            .with_tool_timeout(300)
+            .with_llm_client(llm)
+            .with_permission_policy(a3s_code_core::permissions::PermissionPolicy::new())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let (mut rx, join) = session.stream("Read sample.txt.", None).await.unwrap();
+        let mut saw_confirmation = false;
+        let mut tool_output = None;
+        while let Some(event) = rx.recv().await {
+            match event {
+                a3s_code_core::AgentEvent::ConfirmationRequired { tool_id, .. } => {
+                    saw_confirmation = true;
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    assert!(session
+                        .confirm_tool_use(&tool_id, true, None)
+                        .await
+                        .unwrap());
+                }
+                a3s_code_core::AgentEvent::ToolEnd {
+                    output, exit_code, ..
+                } => {
+                    assert_eq!(exit_code, 0, "{output}");
+                    assert!(!output.contains("timed out"), "{output}");
+                    tool_output = Some(output);
+                }
+                a3s_code_core::AgentEvent::End { .. } => break,
+                a3s_code_core::AgentEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        join.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(saw_confirmation, "the tool call should require HITL");
+        assert!(
+            tool_output
+                .as_deref()
+                .is_some_and(|output| output.contains("timeout sentinel")),
+            "tool output should come from read, got {tool_output:?}"
         );
     }
 
@@ -6569,6 +7404,503 @@ mod tests {
     }
 
     #[test]
+    fn slash_tail_requires_a_token_boundary() {
+        let parameterized = [
+            "/login", "/ctx", "/kb", "/okf", "/btw", "/goal", "/loop", "/sleep", "/flow", "/agent",
+            "/mcp", "/skill",
+        ];
+
+        for cmd in parameterized {
+            assert_eq!(slash_tail(cmd, cmd), Some(""), "{cmd} accepts bare form");
+            assert_eq!(
+                slash_tail(&format!("{cmd} argument"), cmd),
+                Some(" argument"),
+                "{cmd} accepts whitespace-delimited arguments"
+            );
+            assert_eq!(
+                slash_tail(&format!("{cmd}x"), cmd),
+                None,
+                "{cmd}x must remain a normal message, not {cmd}"
+            );
+            assert_eq!(
+                slash_tail(&format!("{cmd}-token"), cmd),
+                None,
+                "{cmd}-token must remain a normal message, not {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloned_asset_focus_matches_only_paths_inside_the_clone_root() {
+        let clone_root = std::path::Path::new("/tmp/a3s-assets/weather-agent");
+        assert!(App::path_is_within(clone_root, clone_root));
+        assert!(App::path_is_within(
+            std::path::Path::new("/tmp/a3s-assets/weather-agent/agent.md"),
+            clone_root
+        ));
+        assert!(App::path_is_within(
+            std::path::Path::new("/tmp/a3s-assets/weather-agent/nested/asset.json"),
+            clone_root
+        ));
+        assert!(!App::path_is_within(
+            std::path::Path::new("/tmp/a3s-assets/weather-agent-2/agent.md"),
+            clone_root
+        ));
+    }
+
+    #[test]
+    fn runtime_asset_query_carries_asset_category_and_terms() {
+        assert_eq!(
+            runtime_asset_query("mcp", "Calc Tools", "failed calls"),
+            "category:mcp Calc Tools failed calls"
+        );
+        assert_eq!(
+            runtime_asset_query("workflow", "daily-flow", ""),
+            "category:workflow daily-flow"
+        );
+        assert_eq!(runtime_asset_query("", "", "stale"), "stale");
+    }
+
+    #[test]
+    fn slash_command_registry_is_unique_english_and_idle_safe() {
+        let mut seen = HashSet::new();
+        for (cmd, desc) in SLASH_COMMANDS {
+            assert!(cmd.starts_with('/'), "{cmd} should be a slash command");
+            assert!(
+                !cmd.contains(char::is_whitespace),
+                "{cmd} should be the bare command token"
+            );
+            assert!(seen.insert(*cmd), "{cmd} should not be registered twice");
+            assert!(
+                !desc.trim().is_empty(),
+                "{cmd} should have a menu description"
+            );
+            assert!(
+                !contains_cjk(desc),
+                "{cmd} description should stay English-only: {desc}"
+            );
+            assert!(
+                !desc.to_ascii_lowercase().contains("repo"),
+                "{cmd} slash-menu copy should not expose asset-workspace management: {desc}"
+            );
+        }
+
+        for cmd in IDLE_ONLY {
+            assert!(
+                SLASH_COMMANDS
+                    .iter()
+                    .any(|(registered, _)| registered == cmd),
+                "{cmd} is idle-only but missing from the slash registry"
+            );
+        }
+
+        let removed_commands = [
+            "im", "run", "deploy", "review", "list", "ps", "workflow", "repo",
+        ]
+        .into_iter()
+        .map(|name| format!("/{name}"))
+        .chain([
+            format!("/{}{}", "evo", "lve"),
+            format!("/{}{}", "evo", "love"),
+        ]);
+        for removed in removed_commands {
+            assert!(
+                !SLASH_COMMANDS
+                    .iter()
+                    .any(|(cmd, _)| *cmd == removed.as_str()),
+                "{removed} should stay removed from the slash registry"
+            );
+        }
+    }
+
+    #[test]
+    fn asset_root_commands_are_backed_by_lifecycle_services() {
+        let asset_commands: HashSet<&str> = asset_lifecycle::ASSET_LIFECYCLES
+            .iter()
+            .map(|lifecycle| lifecycle.command)
+            .collect();
+        assert_eq!(
+            asset_commands,
+            HashSet::from(["/agent", "/mcp", "/skill", "/okf", "/flow"])
+        );
+
+        for command in asset_commands {
+            let menu_desc = SLASH_COMMANDS
+                .iter()
+                .find_map(|(cmd, desc)| (*cmd == command).then_some(*desc))
+                .unwrap_or_else(|| panic!("{command} should be registered in the slash menu"));
+            let services: HashSet<&str> = asset_lifecycle::ASSET_LIFECYCLES
+                .iter()
+                .filter(|lifecycle| lifecycle.command == command)
+                .map(|lifecycle| asset_lifecycle::service_label(lifecycle.service))
+                .collect();
+
+            for service in services {
+                assert!(
+                    menu_desc.contains(service),
+                    "{command} slash-menu copy should name {service}: {menu_desc}"
+                );
+            }
+            assert!(
+                !menu_desc.contains("lifecycle"),
+                "{command} slash-menu copy should name concrete OS services, not generic lifecycle wording: {menu_desc}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
+        let mut picker = Some("agent selector");
+        let mut pending = Some("review");
+
+        cancel_pending_picker(&mut picker, &mut pending);
+
+        assert!(picker.is_none());
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn registered_slash_commands_have_declared_handler_paths() {
+        let parameterized = HashSet::from([
+            "/login", "/ctx", "/kb", "/okf", "/btw", "/goal", "/loop", "/sleep", "/flow", "/agent",
+            "/mcp", "/skill",
+        ]);
+        let exact = HashSet::from([
+            "/logout", "/exit", "/fork", "/clear", "/init", "/compact", "/help", "/view", "/auto",
+            "/config", "/model", "/effort", "/top", "/ide", "/plugin", "/theme", "/output",
+            "/reload", "/update", "/git", "/memory", "/relay",
+        ]);
+
+        for (cmd, _) in SLASH_COMMANDS {
+            assert!(
+                parameterized.contains(cmd) || exact.contains(cmd),
+                "{cmd} is registered but not mapped to a handler category"
+            );
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SlashHandlerKind {
+        Exact,
+        Parameterized,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum SlashRuntimeScope {
+        Local,
+        OsAccount,
+        RuntimeConditional,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct SlashAuditRow {
+        command: &'static str,
+        handler: SlashHandlerKind,
+        idle_only: bool,
+        scope: SlashRuntimeScope,
+    }
+
+    fn slash_audit_rows() -> Vec<SlashAuditRow> {
+        use SlashHandlerKind::{Exact, Parameterized};
+        use SlashRuntimeScope::{Local, OsAccount, RuntimeConditional};
+
+        vec![
+            SlashAuditRow {
+                command: "/model",
+                handler: Exact,
+                idle_only: true,
+                scope: OsAccount,
+            },
+            SlashAuditRow {
+                command: "/init",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/config",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/theme",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/flow",
+                handler: Parameterized,
+                idle_only: true,
+                scope: OsAccount,
+            },
+            SlashAuditRow {
+                command: "/agent",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/mcp",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/skill",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/okf",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/output",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/login",
+                handler: Parameterized,
+                idle_only: false,
+                scope: OsAccount,
+            },
+            SlashAuditRow {
+                command: "/logout",
+                handler: Exact,
+                idle_only: false,
+                scope: OsAccount,
+            },
+            SlashAuditRow {
+                command: "/view",
+                handler: Exact,
+                idle_only: false,
+                scope: OsAccount,
+            },
+            SlashAuditRow {
+                command: "/plugin",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/reload",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/update",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/btw",
+                handler: Parameterized,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/top",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/ide",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/git",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/memory",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/kb",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/ctx",
+                handler: Parameterized,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/effort",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/compact",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/goal",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/loop",
+                handler: Parameterized,
+                idle_only: true,
+                scope: RuntimeConditional,
+            },
+            SlashAuditRow {
+                command: "/sleep",
+                handler: Parameterized,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/relay",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/help",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/fork",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/clear",
+                handler: Exact,
+                idle_only: true,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/auto",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+            SlashAuditRow {
+                command: "/exit",
+                handler: Exact,
+                idle_only: false,
+                scope: Local,
+            },
+        ]
+    }
+
+    #[test]
+    fn slash_command_audit_matrix_matches_registry_and_policies() {
+        let rows = slash_audit_rows();
+        let registered = SLASH_COMMANDS
+            .iter()
+            .map(|(cmd, _)| *cmd)
+            .collect::<HashSet<_>>();
+        let audited = rows.iter().map(|row| row.command).collect::<HashSet<_>>();
+
+        assert_eq!(
+            registered, audited,
+            "every registered command must have explicit audit metadata"
+        );
+
+        let idle_from_rows = rows
+            .iter()
+            .filter(|row| row.idle_only)
+            .map(|row| row.command)
+            .collect::<HashSet<_>>();
+        let idle_from_const = IDLE_ONLY.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(
+            idle_from_rows, idle_from_const,
+            "idle-only policy should stay in sync with the audit matrix"
+        );
+
+        let parameterized_names = HashSet::from([
+            "/login", "/ctx", "/kb", "/okf", "/btw", "/goal", "/loop", "/sleep", "/flow", "/agent",
+            "/mcp", "/skill",
+        ]);
+        for row in &rows {
+            match row.handler {
+                SlashHandlerKind::Parameterized => {
+                    assert!(
+                        parameterized_names.contains(row.command),
+                        "{} should be in the token-boundary handler set",
+                        row.command
+                    );
+                    assert!(
+                        slash_tail(row.command, row.command).is_some(),
+                        "{} should be token-boundary parsed",
+                        row.command
+                    );
+                }
+                SlashHandlerKind::Exact => {
+                    assert!(
+                        !parameterized_names.contains(row.command),
+                        "{} exact command should not be in the token-boundary handler set",
+                        row.command
+                    );
+                }
+            }
+        }
+
+        let loop_row = rows.iter().find(|row| row.command == "/loop").unwrap();
+        assert_eq!(loop_row.scope, SlashRuntimeScope::RuntimeConditional);
+        for cmd in ["/agent", "/mcp", "/skill", "/okf", "/kb", "/ctx"] {
+            let row = rows.iter().find(|row| row.command == cmd).unwrap();
+            assert_eq!(row.scope, SlashRuntimeScope::Local);
+        }
+    }
+
+    #[test]
+    fn removed_top_level_aliases_stay_unregistered() {
+        let removed = [
+            "/plugins".to_string(),
+            "/quit".to_string(),
+            format!("/{}{}", "re", "po"),
+        ];
+        for alias in removed {
+            assert!(
+                !SLASH_COMMANDS.iter().any(|(cmd, _)| *cmd == alias.as_str()),
+                "{alias} should stay removed from the slash registry"
+            );
+        }
+    }
+
+    #[test]
+    fn ampersand_clone_review_syntax_stays_removed() {
+        assert!(
+            slash_candidates("&").is_empty(),
+            "asset clone shortcuts must not return to the slash menu"
+        );
+        assert!(
+            !SLASH_COMMANDS.iter().any(|(cmd, _)| cmd.starts_with('&')),
+            "asset clone/review flows must stay under typed asset subcommands"
+        );
+    }
+
+    #[test]
     fn reload_is_idle_only_because_it_rebuilds_the_session() {
         assert!(IDLE_ONLY.contains(&"/reload"));
     }
@@ -6582,11 +7914,11 @@ mod tests {
     }
 
     #[test]
-    fn repo_workflow_commands_are_idle_only_and_listed() {
-        for cmd in ["/review", "/run", "/deploy", "/flow", "/agent"] {
+    fn asset_workflow_commands_are_idle_only_and_listed() {
+        for cmd in ["/flow", "/agent", "/mcp", "/skill", "/okf"] {
             assert!(
                 IDLE_ONLY.contains(&cmd),
-                "{cmd} must not arm repo workflows while another turn is running"
+                "{cmd} must not arm asset workflows while another turn is running"
             );
             assert!(
                 SLASH_COMMANDS.iter().any(|(name, _)| *name == cmd),
@@ -6596,63 +7928,119 @@ mod tests {
     }
 
     #[test]
-    fn os_resource_panels_are_listed_and_not_idle_only() {
-        for cmd in ["/list", "/ps"] {
-            assert!(
-                SLASH_COMMANDS.iter().any(|(name, _)| *name == cmd),
-                "{cmd} should be visible in the slash menu"
-            );
-            assert!(
-                !IDLE_ONLY.contains(&cmd),
-                "{cmd} is a standalone OS panel, not a session-mutating command"
-            );
-        }
+    fn runtime_activity_are_asset_scoped_not_top_level() {
+        let top_level_ps = format!("/{}", "ps");
+        assert!(
+            !SLASH_COMMANDS
+                .iter()
+                .any(|(name, _)| *name == top_level_ps.as_str()),
+            "runtime activity browsing should stay asset-scoped"
+        );
+        assert!(matches!(
+            panels::agent::parse_agent_subcommand("activity")
+                .unwrap()
+                .unwrap(),
+            panels::agent::AgentSubcommand::Activity(_)
+        ));
+        assert!(panels::agent::parse_agent_subcommand("ps")
+            .unwrap()
+            .is_err());
+        assert!(matches!(
+            panels::mcp::parse_mcp_subcommand("activity")
+                .unwrap()
+                .unwrap(),
+            panels::mcp::McpSubcommand::Activity(_)
+        ));
+        assert!(panels::mcp::parse_mcp_subcommand("ps").unwrap().is_err());
+        assert!(matches!(
+            panels::flow::parse_flow_subcommand("activity")
+                .unwrap()
+                .unwrap(),
+            panels::flow::FlowSubcommand::Activity(_)
+        ));
+        assert!(panels::flow::parse_flow_subcommand("ps").unwrap().is_err());
+        assert!(matches!(
+            panels::skill::parse_skill_subcommand("activity")
+                .unwrap()
+                .unwrap(),
+            panels::skill::SkillSubcommand::Activity(_)
+        ));
+        assert!(panels::skill::parse_skill_subcommand("ps")
+            .unwrap()
+            .is_err());
+        assert!(matches!(
+            panels::kb::parse_okf_command("activity"),
+            panels::kb::KbCommand::Activity(_)
+        ));
+        assert!(matches!(
+            panels::kb::parse_okf_command("ps"),
+            panels::kb::KbCommand::Usage(_)
+        ));
     }
 
     #[test]
-    fn runtime_view_auto_open_labels_run_and_deploy() {
-        let run = RuntimeViewAutoOpen::new(panels::repos::RepoAction::Run, "svc");
-        assert_eq!(run.label(), "Runtime run");
-        assert_eq!(run.project, "svc");
-        assert!(!run.opened);
+    fn runtime_expectation_warns_once_until_evidence_arrives() {
+        let mut missing = RuntimeExpectation::required("deep research");
+        let warning = missing.missing_warning().unwrap();
+        assert!(warning.contains("Runtime evidence missing"), "{warning}");
+        assert!(missing.missing_warning().is_none());
 
-        let deploy = RuntimeViewAutoOpen::new(panels::repos::RepoAction::Deploy, "svc");
-        assert_eq!(deploy.label(), "CI/CD");
-        assert_eq!(deploy.project, "svc");
-        assert!(!deploy.opened);
+        let mut via_runtime = RuntimeExpectation::required("run");
+        via_runtime.record_tool("runtime");
+        assert!(via_runtime.is_satisfied());
+        assert!(via_runtime.missing_warning().is_none());
+
+        let mut via_parallel = RuntimeExpectation::required("review");
+        via_parallel.record_tool("parallel_task");
+        assert!(via_parallel.is_satisfied());
+
+        let mut via_view = RuntimeExpectation::required("deploy");
+        via_view.record_remote_view();
+        assert!(via_view.is_satisfied());
+
+        let mut report_only_runtime = RuntimeExpectation::required_report_view("deep research");
+        report_only_runtime.record_tool("runtime");
+        assert!(!report_only_runtime.is_satisfied());
+        let warning = report_only_runtime.missing_warning().unwrap();
+        assert!(warning.contains("report"), "{warning}");
+        assert!(warning.contains(".view"), "{warning}");
+
+        let mut report_only_view = RuntimeExpectation::required_report_view("loop daily-triage");
+        report_only_view.record_remote_view();
+        assert!(!report_only_view.is_satisfied());
+        let warning = report_only_view.missing_warning().unwrap();
+        assert!(warning.contains("fan-out"), "{warning}");
+
+        let mut full_report = RuntimeExpectation::required_report_view("deep research");
+        full_report.record_tool("runtime");
+        full_report.record_remote_view();
+        assert!(full_report.is_satisfied());
+        assert!(full_report.missing_warning().is_none());
+
+        let mut preferred = RuntimeExpectation::preferred("code review");
+        assert!(preferred.missing_warning().is_none());
     }
 
     #[test]
-    fn remote_view_handling_opens_first_runtime_view_once() {
+    fn remote_view_detection_only_marks_new_specs() {
         let spec = remote_ui::ViewSpec {
             url: "https://os.example.com/admin/runtime/jobs/1?embed=1".into(),
             width: Some(1200),
             height: Some(800),
             embeddable: true,
         };
-        let mut auto = RuntimeViewAutoOpen::new(panels::repos::RepoAction::Deploy, "svc");
 
-        assert_eq!(remote_view_handling(None, Some(&auto), &spec), (true, true));
-        assert_eq!(
-            remote_view_handling(Some(&spec), Some(&auto), &spec),
-            (false, true)
-        );
-
-        auto.opened = true;
-        assert_eq!(
-            remote_view_handling(Some(&spec), Some(&auto), &spec),
-            (false, false)
-        );
-        assert_eq!(remote_view_handling(None, None, &spec), (true, false));
+        assert!(is_new_remote_view(None, &spec));
+        assert!(!is_new_remote_view(Some(&spec), &spec));
     }
 
     #[test]
     fn os_required_message_distinguishes_missing_config_from_missing_login() {
-        let configured = os_required_message("/run", true);
+        let configured = os_required_message("/agent run", true);
         assert!(configured.contains("/login"));
         assert!(!configured.contains("configure `os"));
 
-        let missing = os_required_message("/deploy", false);
+        let missing = os_required_message("/agent deploy", false);
         assert!(missing.contains("configure `os"));
         assert!(missing.contains("/login"));
     }

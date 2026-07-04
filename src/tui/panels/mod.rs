@@ -4,30 +4,68 @@
 //! module can see the ancestor `App`'s private fields, so these blocks compile
 //! exactly as if they were still inline in `tui/mod.rs`.
 
+// Team digital assets.
+#[path = "assets/agent.rs"]
 pub(crate) mod agent;
-mod banner;
-mod btw;
-mod chat;
-pub(crate) mod ctx;
-mod effort;
-mod files;
+#[path = "assets/asset_resources.rs"]
+pub(crate) mod asset_resources;
+#[path = "assets/flow.rs"]
 pub(crate) mod flow;
-mod git;
-mod help;
-mod ide;
-pub(crate) mod kb;
-pub(crate) mod login;
-pub(crate) mod loop_engineering;
-mod memory;
-mod menu;
-mod model;
-pub(crate) mod os_resources;
-mod plan;
-mod plugins;
-mod relay;
-pub(crate) mod repos;
+#[path = "assets/mcp.rs"]
+pub(crate) mod mcp;
+#[path = "assets/review.rs"]
 pub(crate) mod review;
+#[path = "assets/skill.rs"]
+pub(crate) mod skill;
+
+// Local and shared knowledge.
+#[path = "knowledge/kb.rs"]
+pub(crate) mod kb;
+
+// Local workspace.
+#[path = "workspace/files.rs"]
+mod files;
+#[path = "workspace/git.rs"]
+mod git;
+#[path = "workspace/ide.rs"]
+mod ide;
+#[path = "workspace/loop_engineering.rs"]
+pub(crate) mod loop_engineering;
+
+// Context and memory.
+#[path = "context/btw.rs"]
+mod btw;
+#[path = "context/ctx.rs"]
+pub(crate) mod ctx;
+#[path = "context/memory.rs"]
+mod memory;
+#[path = "context/sleep.rs"]
 pub(crate) mod sleep;
+
+// OS Runtime bridge.
+#[path = "os/login.rs"]
+pub(crate) mod login;
+
+// System UI.
+#[path = "system/banner.rs"]
+mod banner;
+#[path = "system/effort.rs"]
+mod effort;
+#[path = "system/help.rs"]
+mod help;
+#[path = "system/menu.rs"]
+mod menu;
+#[path = "system/model.rs"]
+mod model;
+#[path = "system/plan.rs"]
+mod plan;
+#[path = "system/plugins.rs"]
+mod plugins;
+#[path = "system/relay.rs"]
+mod relay;
+#[path = "system/spf.rs"]
 pub(crate) mod spf;
+#[path = "system/theme.rs"]
 mod theme;
+#[path = "system/top.rs"]
 mod top;

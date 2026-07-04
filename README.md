@@ -19,7 +19,7 @@ a3s --version
 # from source
 cargo install a3s
 
-# or from this repo
+# or from source
 cargo install --git https://github.com/A3S-Lab/Cli
 
 # or Homebrew
@@ -35,21 +35,21 @@ The Homebrew `a3s` formula installs the native RemoteUI helper
 
 `a3s code` launches the interactive A3S Code terminal UI in the current
 workspace. On first launch it creates `~/.a3s/config.acl`; use `/config` to edit
-models, provider credentials, and optional paths such as `repo_dir`, `flow_dir`,
-and `agent_dir`.
+models, provider credentials, and optional paths such as `flow_dir`,
+`agent_dir`, and `mcp_dir`.
 
 The TUI is a full coding workspace, not just a chat window:
 
 | Area | Capability |
 | --- | --- |
 | Coding loop | Chat with the coding agent, approve tools, switch `/auto`, run shell turns with `!`, set `/goal`, tune `/effort`, and compact long sessions with `/compact`. |
-| Workspace UI | `/ide` opens a superfile-style file tree and editor, `/git` provides status/diff/stage/commit flows, and `/output` shows the raw tool-call log. |
+| Workspace UI | `/ide` opens a superfile-style file tree and editor, `/git` provides a read-only status/diff/log view, and `/output` shows the raw tool-call log. |
 | Models | `/model` switches configured models and signed-in account tabs, including Claude Code account models when available. |
-| Context | The status bar tracks context fill; auto-compaction keeps long sessions usable. `/ctx` searches past sessions and `/memory` browses durable memories. |
-| Knowledge base | `/kb` opens a dashboard for `.a3s/kb`: add notes, import files or folders, search sources, open the vault, and compile concepts. |
-| Review | `/review` runs a read-only repo review checklist. `& <git-url>` clones a repo into the configured repos folder and reviews it. |
-| Process view | `/top` shows live local agent/container/process activity so long-running work stays inspectable. |
-| Session utilities | `/help` shows the full command guide, `/theme` changes code highlighting, `/workflow` opens the latest dynamic workflow, `/sleep` consolidates the day into memory, and `/plugin` + `/reload` manage skills/plugins. |
+| Context | The status bar tracks context fill; auto-compaction keeps long sessions usable. `/ctx` searches past sessions and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, and forget candidates. |
+| Knowledge base | `/kb` opens the local personal knowledge base for notes, imports, search, and vault browsing. `/okf` manages shareable OKF knowledge packages under `.a3s/kb/packages`. |
+| Review | Reviews are asset-scoped: use `/agent review`, `/mcp review`, `/flow review`, `/skill review`, or `/okf review`. Agent, MCP, skill, and OKF reviews enter the matching local development mode when a local asset must be selected first; workflow reviews select a DAG and review it without entering a persistent development mode. |
+| Local activity | `/top` provides a read-only view of local agent/container/process activity so long-running work stays inspectable. |
+| Session utilities | `/help` shows the full command guide, `/theme` changes code highlighting, `/flow workflow` opens the latest dynamic workflow, `/sleep` consolidates the day into memory, and `/plugin` + `/reload` manage skills/plugins. |
 
 ### OS, Runtime, and RemoteUI
 
@@ -69,30 +69,103 @@ After login, A3S Code can use OS capabilities directly from the TUI:
 
 | Command | What it does |
 | --- | --- |
-| `/list` | Browse and manage OS digital assets such as agents, workflows, and apps. |
-| `/ps` | Browse deployed Runtime services/jobs, search them, and stop/cancel supported rows. |
-| `/im` | Open OS chat for direct messages and groups as a standalone TUI surface. |
 | `/view` | Reopen the latest OS RemoteUI view captured from a tool response. |
-| `/run` | Pick a project from `repo_dir`, start it in dev mode on A3S Runtime, and auto-open the live RemoteUI run view. |
-| `/deploy` | Pick a project from `repo_dir`, run Agentic CI/CD, deploy through the OS gateway, and auto-open the live CI/CD RemoteUI view. |
-| `/flow` | Pick a local workflow DAG JSON and open it in the OS workflow designer; `/flow <description>` drafts a new DAG first. |
+| `/flow` | Select a local workflow DAG JSON, publish it as an OS workflow asset, and open the OS workflow designer; `/flow <description>` drafts a new DAG first. |
+| Asset `activity` subcommands | Browse asset-related Runtime activity through `/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, or `/okf activity`; when a local asset is not active, A3S Code opens the matching selection panel first. |
+| `/mcp publish/debug/test` | Publish the active local MCP asset as an OS `mcp` asset, then debug or batch-test it through OS Function as a Service. |
+
+### OS Service Mapping
+
+| OS mechanism | A3S Code TUI path |
+| --- | --- |
+| Agent as a Service | `/agent publish agentic`, `/agent publish application`, `/agent run`, and `/agent deploy` use OS `agent` assets with `agentKind=agentic` or `agentKind=application`. Publish commits the local definition, `.a3s/agent.asset.json`, `.a3s/agent.config.json`, and `.a3s/agent.runtime-binding.json`, then syncs OS agent-config and runtime-binding endpoints when available. Run/deploy first discover the current OS operation through progressive capabilities with `shaped=true`, then fall back to REST probes and the OS asset view. `/agent open` and `/agent logs` observe existing assets and prefer progressive ViewLinks before static OS views. |
+| Function as a Service | Tool-kind agents and MCP tool calls stay Runtime workers. `/agent publish tool` uses OS `agent` assets with `agentKind=tool` and a Function as a Service runtime binding; `/mcp publish`, `/mcp deploy`, `/mcp debug`, and `/mcp test` use OS `mcp` assets with `runtimeBinding.kind=mcp`, `isolation=serving`, and `agentKind=tool`; `/skill publish` and `/skill deploy` use OS `skill` assets with serving Function as a Service binding intent. MCP debug/test paths first try OS progressive capabilities with `shaped=true` so `.view`/`viewUrl` survives as a ViewLink, then fall back to Function invoke or batch endpoints. The `runtime` tool sends parallel batches to `/api/v1/functions/<worker>/batch` with `agentKind=tool`. |
+| Workflow as a Service | `/flow`, `/flow publish`, `/flow run`, and `/flow deploy` create or update OS `workflow` assets, commit `.a3s/workflows/main.design.json`, `.a3s/workflow.asset.json`, and `.a3s/workflow.runtime-binding.json`, then sync the runtime-binding endpoint when available. Run/deploy first try OS progressive capabilities with `shaped=true` for a workflow designer ViewLink and fall back to the standalone workflow designer for edit and run. `/flow open`, `/flow logs`, and `/flow status` observe the asset, logs, and runtime binding without mutating it. |
+| Knowledge service | `/okf` selects local OKF packages. `/okf publish` creates or updates an OS `knowledge` asset, uploads package sources plus `.a3s/knowledge.asset.json` and `.a3s/knowledge.runtime-binding.json`, and syncs the runtime-binding endpoint when available. `/okf deploy` publishes the package first, then tries OS progressive knowledge-service deployment with `shaped=true`; if no matching operation exists, the Knowledge service view opens. `/okf status` checks the OS asset and runtime binding without mutating it. `/kb vault` remains the local personal knowledge-base browser. Without OS, deploy stays local and reports the blocked knowledge-service inputs. |
+
+### AI-Native Asset Lifecycle
+
+A3S Code treats agents, MCP servers, skills, OKF knowledge packages, and
+workflow flows as team digital assets and shared context. Each asset family
+uses the same lifecycle vocabulary in the TUI and OS, while exposing only the
+commands backed by real local or OS surfaces:
+
+| Stage | TUI responsibility | OS responsibility |
+| --- | --- | --- |
+| Create | Draft a local asset or definition from natural language. | Create a private/team asset workspace with typed metadata. |
+| Develop | Agents, MCP servers, skills, and OKF packages enter local multi-turn asset-development mode with a visible active asset and an exit path. Workflow flows use local DAG editing plus the OS workflow designer instead of a persistent local mode. | Keep asset source, metadata, secrets, and collaboration history as shared context. |
+| Debug | Run local smoke checks first; OS debug uses the matching service surface only when the asset family has one. | Agentic agents use Agent as a Service runs, MCP servers use Function as a Service debug/test calls, and workflow flows use Workflow as a Service run surfaces. Application agents deploy instead of direct-debugging; tool agents, skills, and OKF packages do not expose direct TUI run/debug commands. |
+| Publish | Commit source, manifest, config, runtime binding, examples, and tests. | Validate config/runtime binding, package the asset, record release gates, and expose team discovery. |
+| Deploy | Trigger only the deployment shape that matches the asset type. | Launch long-running applications only when needed; prefer serving Function as a Service for stateless tools and MCP calls. |
+| Observe | Open status/log views without mutating assets. | Provide function invocations, batches, runtime activity rows, packages, validation results, and RemoteUI evidence. |
 
 RemoteUI views are captured from OS progressive responses (`.view`/`viewUrl`).
-The TUI remembers the latest view and, for `/run` and `/deploy`, opens the first
-live Runtime/CI view automatically.
+The TUI remembers the latest view and surfaces ViewLinks returned by
+asset-scoped actions that return OS views. Runtime-backed workflows warn if they
+finish without `runtime`, `parallel_task`, or shaped `.view`/`viewUrl` evidence.
 
 ### Agents, Research, and Loops
 
 | Command | What it does |
 | --- | --- |
-| `/agent` | Pick a local agent definition from `agent_dir` and enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped development goal and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
+| `/agent` | Select a local agent definition from `agent_dir` and enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped development goal and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
 | `/agent <description>` | Draft a Markdown agent definition with YAML frontmatter under `agent_dir`, then use `/agent` to iterate on it. |
-| `? <question>` | Starts DeepResearch. When OS is signed in, it should split research across A3S Runtime workers, then create Markdown and HTML reports and surface a RemoteUI view. Without OS, it falls back to local research artifacts under `.a3s/research/`. |
+| `/agent clone <git-url>` | Clone an existing agent asset source into `agent_dir`, then use `/agent` to select it. |
+| `/agent list [query]` | Browse OS agent assets through the asset-scoped list panel. |
+| `/agent activity [query]` | Inspect Runtime activity, jobs, and runs for the selected local agent; when no agent is active, A3S Code opens the agent selection panel first. |
+| `/agent review` | Review the active local agent. If no agent is active, A3S Code opens the agent selection panel first, enters agent-development mode, then reviews the selected agent. |
+| `/agent publish agentic` | Publish the active local agent definition as an OS `agent` asset with `agentKind=agentic`. The definition, manifest, runtime binding intent, and machine-readable agent config are saved with the asset source, then synced to OS agent-config and runtime-binding endpoints when available. |
+| `/agent publish application` | Publish the active local agent definition as an OS `agent` asset with `agentKind=application`, ready for OS-side application-agent deployment. The same manifest, runtime binding intent, agent-config sync, and runtime-binding sync are applied. |
+| `/agent publish tool` | Publish the active local agent definition as an OS `agent` asset with `agentKind=tool` and a Function as a Service runtime binding. The definition, manifest, config metadata, and runtime binding intent are committed; runtime-binding sync is attempted when available. |
+| `/agent run` | Publish or update the active local agent as an agentic asset, then ask OS Agent as a Service to start a run through progressive capabilities. If the deployed OS does not expose a compatible operation yet, the TUI opens the OS asset view instead. |
+| `/agent deploy` | Publish or update the active local agent as an application asset, sync agent config, read the latest asset source revision, trigger the OS application-agent build, and launch it into the selected/default Runtime namespace when package and namespace metadata are available. Otherwise the OS asset view opens for the missing input. |
+| `/agent open [agentic\|application\|tool]` / `/agent logs [agentic\|application\|tool]` | Observe the existing OS asset or Runtime log view for the active local agent without creating or uploading it; progressive ViewLinks are preferred when available. |
+| `/agent status [agentic\|application\|tool]` | Check whether the active local agent has a matching OS asset, valid config/runtime binding, and service-specific binding without creating, uploading, running, or deploying anything. |
+| `/mcp` | Select a local MCP server asset from `mcp_dir` and enter local MCP-development mode. The TUI shows the active MCP asset; press Esc or run `/mcp off` to return to normal mode. |
+| `/mcp <description>` | Draft a local MCP server asset with metadata prepared for OS Function as a Service. |
+| `/mcp clone <git-url>` | Clone an existing MCP asset source into `mcp_dir`, then use `/mcp` to select it. |
+| `/mcp list [query]` | Browse OS MCP assets through the asset-scoped list panel. |
+| `/mcp activity [query]` | Inspect Runtime activity, jobs, and tool invocations for the selected MCP asset; when no MCP is active, A3S Code opens the MCP selection panel first. |
+| `/mcp review` | Review the active local MCP asset. If no MCP is active, A3S Code opens the MCP selector first, enters MCP-development mode, then reviews the selected MCP asset. |
+| `/mcp publish` | Publish the active local MCP asset as an OS `mcp` asset, commit source plus `.a3s/mcp.asset.json`, `.a3s/mcp.server.json`, and `.a3s/mcp.runtime-binding.json`, then sync the OS runtime-binding endpoint when available. |
+| `/mcp deploy` | Publish the active MCP asset and sync its serving Function as a Service runtime binding. |
+| `/mcp debug` | Publish the active MCP asset, then invoke OS Function as a Service through progressive capabilities with `shaped=true`, falling back to `/api/v1/functions/<mcp-asset>/invoke` with `agentKind=tool`. |
+| `/mcp test` | Publish the active MCP asset, then batch-test MCP tools through progressive capabilities with `shaped=true`, falling back to `/api/v1/functions/<mcp-asset>/batch` when needed. |
+| `/mcp open` / `/mcp logs` / `/mcp status` | Inspect the OS MCP asset, logs, or runtime-binding status without mutating the asset; open/logs prefer progressive Function as a Service ViewLinks when available. |
+| `/flow` | Select a local workflow DAG JSON from `flow_dir`, publish it as an OS `workflow` asset with a manifest and Workflow as a Service runtime binding, sync the runtime-binding endpoint when available, and open the workflow designer through a progressive ViewLink or standalone designer fallback. |
+| `/flow <description>` | Draft a local workflow DAG JSON, then use `/flow` to publish and iterate through OS Workflow as a Service. |
+| `/flow clone <git-url>` | Clone an existing workflow asset source into `flow_dir`; cloned OS designer documents under `.a3s/workflows/main.design.json` are discoverable by `/flow`. |
+| `/flow list [query]` | Browse OS workflow assets through the asset-scoped list panel. |
+| `/flow activity [query]` | Inspect Runtime activity and workflow runs for a selected workflow asset. |
+| `/flow workflow` | Open the latest dynamic workflow artifact from the current coding session in read-only mode. |
+| `/flow review [file]` | Review a local workflow DAG without publishing it. |
+| `/flow publish` / `/flow run` / `/flow deploy` | Open the workflow selection panel, publish the selected DAG as an OS workflow asset, sync Workflow as a Service runtime-binding intent, then open the asset view or Workflow as a Service designer/run surface. |
+| `/flow open` / `/flow logs` / `/flow status` | Open the existing OS workflow designer, Workflow as a Service logs, or runtime-binding status without mutating the selected workflow asset. |
+| `/skill` | Select a local skill asset from `skill_dir` and enter local multi-turn skill-development mode. The TUI shows the active skill; press Esc or run `/skill off` to return to normal mode. |
+| `/skill <description>` | Draft a local skill asset prototype with `SKILL.md`, examples, tests, and Function as a Service binding intent. |
+| `/skill clone <git-url>` | Clone an existing skill asset source into `skill_dir`, then use `/skill` to select it. |
+| `/skill list [query]` | Browse OS skill assets through the asset-scoped list panel. |
+| `/skill activity [query]` | Inspect related Function as a Service activity for the selected skill asset. |
+| `/skill review` | Review the selected local skill asset. If no skill is active, A3S Code opens the skill selection panel first and enters skill-development mode. |
+| `/skill publish` | Publish the selected skill as an OS `skill` asset backed by Function as a Service, committing source, `.a3s/skill.asset.json`, and `.a3s/skill.runtime-binding.json`. |
+| `/skill deploy` | Publish the selected skill and sync its serving Function as a Service runtime binding. |
+| `/skill open` / `/skill status` | Inspect the OS skill asset or runtime-binding status without mutating the asset; open prefers progressive Function as a Service ViewLinks when available. |
+| `/kb` | Open the local personal knowledge base for notes, imports, search, and vault browsing. |
+| `/kb add/import/search/vault` | Capture a note, preview/import files or folders, search local knowledge sources, or browse the local `.a3s/kb` vault. |
+| `/okf` | Select a local OKF knowledge package from `.a3s/kb/packages` and enter local package-development mode. The TUI shows the active package; press Esc or run `/okf off` to return to normal mode. |
+| `/okf <description>` | Draft a local OKF package prototype with sources, wiki concepts, eval notes, and OS knowledge asset metadata. |
+| `/okf clone <git-url>` | Clone an existing OKF package source into `.a3s/kb/packages`, then use `/okf` to select it. |
+| `/okf list [query]` | Browse OS knowledge package assets through the asset-scoped list panel. |
+| `/okf activity [query]` | Inspect related Runtime indexing/evaluation activity for the selected knowledge package; when no package is active, A3S Code opens the OKF selection panel first. |
+| `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
+| `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
+| `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
+| `? <question>` | Starts DeepResearch. When OS is signed in, it requires Runtime/parallel evidence, creates Markdown and HTML reports, and surfaces a RemoteUI view. Without OS, it falls back to local research artifacts under `.a3s/research/`. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
-| `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in, normal workspace loops use A3S Runtime parallelism, Markdown/HTML reports, RemoteUI view data, and `/ps` visibility. Inside `/agent` mode, the same command stays local and targets the active agent definition. |
+| `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel evidence, Markdown/HTML reports, RemoteUI view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent definition. |
 | `/loop audit <name>` / `/loop logs <name>` | Check loop readiness or open the append-only run log. |
-| `/loop <task>` | Keeps the legacy quick-loop behavior: auto-continue a task until it reports completion or you stop it. |
+| `/loop <task>` | Runs an autonomous quick loop until the task reports completion or you stop it. |
 
 ## Account Models
 
