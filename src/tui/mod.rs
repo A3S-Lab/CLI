@@ -1325,6 +1325,14 @@ fn spinner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(80), Msg::SpinnerTick)
 }
 
+fn resume_after_pending_confirmation_cmd(rx: Option<SharedRx>) -> Cmd<Msg> {
+    let mut cmds = vec![spinner_tick()];
+    if let Some(rx) = rx {
+        cmds.push(pump(rx));
+    }
+    cmd::batch(cmds)
+}
+
 /// Drives the welcome-mascot animation while the banner is on screen.
 fn banner_tick() -> Cmd<Msg> {
     cmd::tick(Duration::from_millis(280), Msg::BannerTick)
@@ -4766,6 +4774,10 @@ impl App {
         self.drain_queue()
     }
 
+    fn resume_after_pending_confirmation(&self) -> Cmd<Msg> {
+        resume_after_pending_confirmation_cmd(self.rx.clone())
+    }
+
     /// An autonomous directive run is starting (/sleep, asset reviews,
     /// asset run/deploy, /flow drafts, /loop): switch to auto-approve so tool
     /// prompts can't stall it, and arm the loop budget that re-prompts until
@@ -5028,6 +5040,7 @@ impl App {
                                 .render(&format!("  ⎿ denied {label}{suffix}")),
                         );
                     }
+                    return Some(self.resume_after_pending_confirmation());
                 }
             }
             AgentEvent::ConfirmationTimeout {
@@ -5048,6 +5061,7 @@ impl App {
                         )
                     };
                     self.push_line(&Style::new().fg(color).render(&note));
+                    return Some(self.resume_after_pending_confirmation());
                 }
             }
             AgentEvent::PermissionDenied { tool_id, .. } => {
@@ -6533,6 +6547,28 @@ mod tests {
             Some("edit file".to_string())
         );
         assert!(pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmation_resume_rearms_spinner_and_stream_pump() {
+        let cmd = resume_after_pending_confirmation_cmd(None);
+        match cmd.await {
+            a3s_tui::cmd::CmdResult::Batch(cmds) => {
+                assert_eq!(cmds.len(), 1, "spinner should resume without an rx");
+            }
+            _ => panic!("expected batched resume command"),
+        }
+
+        let (_tx, rx) = mpsc::channel::<AgentEvent>(1);
+        let cmd = resume_after_pending_confirmation_cmd(Some(std::sync::Arc::new(
+            tokio::sync::Mutex::new(rx),
+        )));
+        match cmd.await {
+            a3s_tui::cmd::CmdResult::Batch(cmds) => {
+                assert_eq!(cmds.len(), 2, "spinner and stream pump should resume");
+            }
+            _ => panic!("expected batched resume command"),
+        }
     }
 
     // ── `?` deep-research mode ─────────────────────────────────────────────
