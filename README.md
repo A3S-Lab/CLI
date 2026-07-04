@@ -51,6 +51,52 @@ The TUI is a full coding workspace, not just a chat window:
 | Local activity | `/top` provides a read-only view of local agent/container/process activity so long-running work stays inspectable. |
 | Session utilities | `/help` shows the full command guide, `/theme` changes code highlighting, `/flow workflow` opens the latest dynamic workflow, `/sleep` consolidates the day into memory, and `/plugin` + `/reload` manage skills/plugins. |
 
+### Architecture
+
+A3S Code is a TEA-style terminal application: terminal events and agent stream
+events become `Msg` values, `Model.update` mutates one session model, and view
+functions render the current state through `a3s-tui`. The runtime-heavy part is
+kept as a small ECS-style projection: tool runs, subagent runs, and retained
+tool logs are updated by stable event ids and queried by panels instead of
+coupling every panel to the streaming protocol.
+
+```mermaid
+flowchart TD
+    user["Terminal user"] --> cli["a3s CLI<br/>a3s code"]
+    cli --> app["TEA TUI App<br/>App state + Msg"]
+
+    app --> core["a3s-code-core<br/>AgentSession::stream"]
+    core --> events["AgentEvent stream<br/>text, tools, planning, subagents"]
+    events --> pump["event pump<br/>AgentEvent -> Msg::Agent"]
+    pump --> app
+
+    app --> update["Model.update<br/>commands, approvals, panels"]
+    update --> render["view + layout<br/>a3s-tui"]
+    render --> frame["terminal frame"]
+    frame --> user
+
+    events --> projection["RuntimeProjection<br/>local ECS-style projection"]
+    projection --> toolrun["ToolRun entities<br/>live input/output/status"]
+    projection --> subrun["SubagentRun entities<br/>tokens, timing, result"]
+    projection --> toollog["ToolCallRecord log<br/>/output history"]
+
+    projection --> panels["TUI panels<br/>chat, plan, top, output"]
+    app --> assets["Asset panels<br/>agent, MCP, flow, skill, OKF, KB"]
+    panels --> render
+    assets --> render
+
+    core --> workspace["workspace services<br/>shell, files, MCP tools, permissions"]
+    workspace --> project["current workspace<br/>source, config, .a3s assets"]
+    assets --> project
+
+    app --> os["A3S OS progressive APIs<br/>assets, runtime, functions, workflows, knowledge"]
+    assets --> os
+    core --> os
+    os --> remote["RemoteUI ViewLink<br/>.view / viewUrl"]
+    remote --> webview["a3s-webview<br/>browser fallback"]
+    webview --> user
+```
+
 ### OS, Runtime, and RemoteUI
 
 Add an OS endpoint to `config.acl`, then sign in:
