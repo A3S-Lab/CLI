@@ -7,10 +7,12 @@
 
 use super::super::os_progressive;
 use super::super::*;
-use a3s_tui::components::{MenuItem, MenuPanel};
+use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
+use a3s_tui::event::MouseEvent;
 
 const SKILL_MANIFEST_PATH: &str = ".a3s/skill.asset.json";
 const SKILL_RUNTIME_BINDING_PATH: &str = ".a3s/skill.runtime-binding.json";
+const SKILL_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
 pub(crate) struct SkillAsset {
@@ -1185,8 +1187,29 @@ fn skill_picker_lines(
     if width == 0 {
         return Vec::new();
     }
+    let Some((panel, panel_height)) = skill_picker_panel(skills, selected, root, width, height)
+    else {
+        return Vec::new();
+    };
 
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel_height)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn skill_picker_panel(
+    skills: &[SkillAsset],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Option<(MenuPanel, usize)> {
     let total = skills.len();
+    if total == 0 {
+        return None;
+    }
     let max_items = height.saturating_sub(8).clamp(3, 12);
     let selected = selected.min(total.saturating_sub(1));
     let scroll = selected.saturating_add(1).saturating_sub(max_items);
@@ -1195,7 +1218,7 @@ fn skill_picker_lines(
         .map(|skill| MenuItem::new(skill.rel.clone()).description(skill.description.clone()))
         .collect::<Vec<_>>();
 
-    MenuPanel::new(skill_picker_header(total, root, width).trim_start())
+    let panel = MenuPanel::new(skill_picker_header(total, root, width).trim_start())
         .subtitle(skill_picker_hint(width).trim_start())
         .items(items)
         .selected(selected)
@@ -1208,11 +1231,15 @@ fn skill_picker_lines(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
-        .lines()
-        .map(str::to_string)
-        .collect()
+        .selected_colors(Color::BrightWhite, ACCENT);
+    Some((panel, max_items + 3))
+}
+
+fn skill_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(SKILL_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 impl App {
@@ -1298,30 +1325,97 @@ impl App {
             }
             KeyCode::Enter => {
                 let panel = self.skill_picker.take()?;
-                let picked = panel.skills.get(panel.sel.min(last))?.clone();
-                self.agent_dev = None;
-                self.mcp_dev = None;
-                self.okf_dev = None;
-                self.skill_dev = Some(SkillDevSession {
-                    name: picked.name.clone(),
-                    description: picked.description.clone(),
-                    rel: picked.rel.clone(),
-                    path: picked.path.clone(),
-                    root: panel.root,
-                });
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "✦ skill dev: {} ({}) · Esc or /skill off returns to normal mode",
-                        picked.name, picked.rel
-                    ),
-                ));
-                self.relayout();
-                if let Some(pending) = self.pending_skill_subcommand.take() {
-                    return self.execute_skill_subcommand(pending);
-                }
+                let selected = panel.sel.min(last);
+                return self.activate_skill_panel_selection(panel, selected);
             }
             _ => {}
+        }
+        None
+    }
+
+    pub(crate) fn handle_skill_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        let Some(panel_state) = self.skill_picker.as_ref() else {
+            return None;
+        };
+        let total = panel_state.skills.len();
+        if total == 0 {
+            return None;
+        }
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return None;
+        }
+        let selected = panel_state.sel.min(total - 1);
+        let Some((mut panel, panel_height)) = skill_picker_panel(
+            &panel_state.skills,
+            selected,
+            &panel_state.root,
+            width,
+            self.height as usize,
+        ) else {
+            return None;
+        };
+        let row_count = panel.view(width as u16, panel_height).lines().count();
+        if row_count == 0 {
+            return None;
+        }
+        let y_offset = skill_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return None;
+        }
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+
+        match panel.handle_mouse(mouse) {
+            Some(MenuPanelMsg::Selected(index)) | Some(MenuPanelMsg::Toggled(index)) => {
+                let panel_state = self.skill_picker.take()?;
+                self.activate_skill_panel_selection(panel_state, index.min(total - 1))
+            }
+            Some(MenuPanelMsg::Cancelled) => {
+                cancel_pending_picker(&mut self.skill_picker, &mut self.pending_skill_subcommand);
+                None
+            }
+            None => {
+                let after = panel.selected_index().min(total - 1);
+                if after != before {
+                    if let Some(open) = self.skill_picker.as_mut() {
+                        open.sel = after;
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn activate_skill_panel_selection(
+        &mut self,
+        panel: SkillPanel,
+        selected: usize,
+    ) -> Option<Cmd<Msg>> {
+        let last = panel.skills.len().saturating_sub(1);
+        let picked = panel.skills.get(selected.min(last))?.clone();
+        self.agent_dev = None;
+        self.mcp_dev = None;
+        self.okf_dev = None;
+        self.skill_dev = Some(SkillDevSession {
+            name: picked.name.clone(),
+            description: picked.description.clone(),
+            rel: picked.rel.clone(),
+            path: picked.path.clone(),
+            root: panel.root,
+        });
+        self.push_line(&gutter(
+            TN_CYAN,
+            &format!(
+                "✦ skill dev: {} ({}) · Esc or /skill off returns to normal mode",
+                picked.name, picked.rel
+            ),
+        ));
+        self.relayout();
+        if let Some(pending) = self.pending_skill_subcommand.take() {
+            return self.execute_skill_subcommand(pending);
         }
         None
     }
@@ -1487,6 +1581,67 @@ mod tests {
         let hint = skill_picker_hint(40);
         assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
         assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
+    }
+
+    #[test]
+    fn skill_picker_mouse_wheel_moves_selection_at_overlay_offset() {
+        use a3s_tui::event::MouseEventKind;
+
+        let root = std::path::PathBuf::from("/tmp/skills");
+        let skills = (0..4)
+            .map(|index| SkillAsset {
+                rel: format!("skill-{index}/SKILL.md"),
+                path: root.join(format!("skill-{index}/SKILL.md")),
+                name: format!("skill-{index}"),
+                description: format!("Skill asset {index}"),
+            })
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = skill_picker_lines(&skills, 0, &root, width, height).len();
+        let y_offset = skill_overlay_y_offset(height, row_count);
+        let (mut panel, _) = skill_picker_panel(&skills, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 2,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn skill_picker_click_selects_visible_row_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let root = std::path::PathBuf::from("/tmp/skills");
+        let skills = (0..4)
+            .map(|index| SkillAsset {
+                rel: format!("skill-{index}/SKILL.md"),
+                path: root.join(format!("skill-{index}/SKILL.md")),
+                name: format!("skill-{index}"),
+                description: format!("Skill asset {index}"),
+            })
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = skill_picker_lines(&skills, 0, &root, width, height).len();
+        let y_offset = skill_overlay_y_offset(height, row_count);
+        let (mut panel, _) = skill_picker_panel(&skills, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + 3,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
     }
 
     #[test]

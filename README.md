@@ -318,11 +318,12 @@ browsing and click-to-run, approval overlay wheel browsing and click-to-approve
 or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
 click-to-insert, `/agent` picker wheel browsing and click-to-develop,
-`/mcp` picker wheel browsing and click-to-develop, `/plugin` wheel browsing and
-click-to-toggle, approval choices, RemoteUI and jump-to-latest action links, tool
-status truncation, shared alert rows for OS login/configuration warnings,
-overlay composition for menus and prompts, IDE flash footer notifications, live
-tool activity/output tails, `/top` status header actions and CPU/MEM trend
+`/mcp` picker wheel browsing and click-to-develop, `/skill` picker wheel
+browsing and click-to-develop, `/plugin` wheel browsing and click-to-toggle,
+approval choices, RemoteUI and jump-to-latest action links, tool status
+truncation, shared alert rows for OS login/configuration warnings, overlay
+composition for menus and prompts, IDE flash footer notifications, live tool
+activity/output tails, `/top` status header actions and CPU/MEM trend
 sparklines, `/loop` key-value summaries, `/kb` delete confirmations, transcript
 gutters and input bubbles, prompt continuation alignment, input border labels,
 shared
@@ -333,8 +334,9 @@ panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
 `/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
-hit-testing, `/mcp` picker hit-testing, `/plugin` overlay hit-testing, and
-width-bounding fixes are exercised directly by `a3s code`.
+hit-testing, `/mcp` picker hit-testing, `/skill` picker hit-testing, `/plugin`
+overlay hit-testing, and width-bounding fixes are exercised directly by
+`a3s code`.
 
 ```mermaid
 flowchart TD
@@ -522,7 +524,7 @@ These commands are available outside the asset-specific flows:
 | `/flow review [file]` | Review a local workflow DAG without publishing it. |
 | `/flow publish` / `/flow run` / `/flow deploy` | Open the workflow selection panel, publish the selected DAG as an OS workflow asset, sync Workflow as a Service runtime-binding intent, then open the asset view or Workflow as a Service designer/run surface. |
 | `/flow open` / `/flow logs` / `/flow status` | Open the existing OS workflow designer, Workflow as a Service logs, or runtime-binding status without mutating the selected workflow asset. |
-| `/skill` | Select a local skill asset from `skill_dir` and enter local multi-turn skill-development mode. The TUI shows the active skill; press Esc or run `/skill off` to return to normal mode. |
+| `/skill` | Select a local skill asset from `skill_dir` with keyboard, wheel, or click, then enter local multi-turn skill-development mode. The TUI shows the active skill; press Esc or run `/skill off` to return to normal mode. |
 | `/skill <description>` | Draft a local skill asset prototype with `SKILL.md`, examples, tests, and Function as a Service binding intent. |
 | `/skill clone <git-url>` | Clone an existing skill asset source into `skill_dir`, then use `/skill` to select it. |
 | `/skill list [query]` | Browse OS skill assets through the asset-scoped list panel. |
