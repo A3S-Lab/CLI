@@ -25,7 +25,10 @@ use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions, SystemPromp
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
-use a3s_tui::components::{MenuItem, MenuPanel, Spinner, Textarea, Viewport};
+use a3s_tui::components::{
+    MenuItem, MenuPanel, Spinner, Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus,
+    ToolLogView, Viewport,
+};
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
@@ -619,64 +622,48 @@ fn format_tool_log_records(records: &[ToolCallRecord], width: usize) -> Option<S
     }
     const OUTPUT_TAIL: usize = 24;
 
-    let mut out = String::new();
-    for (i, rec) in records.iter().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let status = if rec.exit_code == 0 {
-            "ok".to_string()
-        } else {
-            format!("exit {}", rec.exit_code)
-        };
-        let arg = rec
-            .args
-            .as_ref()
-            .and_then(|args| arg_summary_for_tool(&rec.name, args))
-            .unwrap_or_default();
-        let action = if arg.is_empty() {
-            tool_verb(&rec.name).to_string()
-        } else {
-            format!("{} {}", tool_verb(&rec.name), arg)
-        };
-        push_bounded_log_line(
-            &mut out,
-            &format!("#{} · {} · {}", i + 1, status, action),
-            width,
-        );
-        if let Some(args) = &rec.args {
-            push_bounded_log_line(
-                &mut out,
-                &format!(
-                    "  args: {}",
-                    serde_json::to_string(args).unwrap_or_default()
-                ),
-                width,
-            );
-        }
-        let trimmed = rec.output.trim_end();
-        if !trimmed.is_empty() {
-            push_bounded_log_line(&mut out, "  output:", width);
-            let lines = trimmed.lines().collect::<Vec<_>>();
-            let start = lines.len().saturating_sub(OUTPUT_TAIL);
-            if start > 0 {
-                push_bounded_log_line(&mut out, &format!("    … +{start} earlier lines"), width);
+    let records = records
+        .iter()
+        .map(|rec| {
+            let arg = rec
+                .args
+                .as_ref()
+                .and_then(|args| arg_summary_for_tool(&rec.name, args))
+                .unwrap_or_default();
+            let action = if arg.is_empty() {
+                tool_verb(&rec.name).to_string()
+            } else {
+                format!("{} {}", tool_verb(&rec.name), arg)
+            };
+            let status = if rec.exit_code == 0 {
+                ToolLogStatus::Ok
+            } else {
+                ToolLogStatus::Exit(rec.exit_code)
+            };
+            let args = rec
+                .args
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .unwrap_or_default();
+            let mut record = TuiToolLogRecord::new(action, status).output(rec.output.clone());
+            if let Some(args) = args {
+                record = record.args(args);
             }
-            for line in lines.iter().skip(start) {
-                push_bounded_log_line(&mut out, &format!("    {line}"), width);
-            }
-        }
-    }
-    Some(out)
-}
+            record
+        })
+        .collect::<Vec<_>>();
 
-fn push_bounded_log_line(out: &mut String, line: &str, width: usize) {
-    if width == 0 {
-        out.push('\n');
-        return;
-    }
-    out.push_str(&a3s_tui::style::truncate_visible(line, width));
-    out.push('\n');
+    Some(
+        ToolLogView::new()
+            .records(records)
+            .max_output_lines_per_record(OUTPUT_TAIL)
+            .header_color(TN_FG)
+            .status_colors(TN_GREEN, TN_RED)
+            .muted_color(TN_GRAY)
+            .output_color(TN_FG)
+            .view(width as u16, usize::MAX),
+    )
 }
 
 /// The directive sent to the agent for a `?` deep-research turn: decompose the
@@ -6500,13 +6487,14 @@ mod tests {
             },
         ];
         let out = format_tool_log_records(&recs, 48).unwrap();
-        assert!(out.contains("#1 · ok · Read /x"), "{out}");
-        assert!(out.contains("args: {\"file_path\":\"/x\"}"), "{out}");
+        let plain = a3s_tui::style::strip_ansi(&out);
+        assert!(plain.contains("#1 · Read /x · ok"), "{plain}");
+        assert!(plain.contains("args: {\"file_path\":\"/x\"}"), "{plain}");
         assert!(
-            out.contains("    hello"),
-            "output should be indented: {out}"
+            plain.contains("    hello"),
+            "output should be indented: {plain}"
         );
-        assert!(out.contains("#2 · exit 2 · Ran"), "{out}");
+        assert!(plain.contains("#2 · Ran · exit 2"), "{plain}");
         for line in out.lines() {
             assert!(
                 a3s_tui::style::visible_len(line) <= 48,
@@ -6529,10 +6517,11 @@ mod tests {
             exit_code: 0,
         }];
         let out = format_tool_log_records(&recs, 52).unwrap();
+        let plain = a3s_tui::style::strip_ansi(&out);
 
-        assert!(out.contains("… +6 earlier lines"), "{out}");
-        assert!(!out.contains("line-0-with"), "{out}");
-        assert!(out.contains("line-6-with"), "{out}");
+        assert!(plain.contains("... +6 earlier lines"), "{plain}");
+        assert!(!plain.contains("line-0-with"), "{plain}");
+        assert!(plain.contains("line-6-with"), "{plain}");
         for line in out.lines() {
             assert!(
                 a3s_tui::style::visible_len(line) <= 52,
