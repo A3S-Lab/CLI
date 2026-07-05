@@ -321,6 +321,7 @@ impl App {
                     text: prompt,
                     display: label,
                     runtime_expectation: None,
+                    deep_research: None,
                 });
                 self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             }

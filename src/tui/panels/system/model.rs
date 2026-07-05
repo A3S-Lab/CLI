@@ -226,7 +226,7 @@ impl App {
     }
 
     fn commit_model_switch(&mut self, session: AgentSession, model: String) {
-        self.session = Arc::new(session);
+        self.replace_session(session);
         self.model = Some(model);
         // The next LLM round will report the new prompt fill for the new model.
         // Until then, do not show the previous model's prompt/token counters as
@@ -466,9 +466,7 @@ impl App {
             // plans + fans out only when the core's pre-analysis judges the task to
             // warrant it — a trivial "hi" stays a direct answer. `Enabled` forced a
             // plan every turn, which is what made ultracode explore on a greeting.
-            // The core runtime still upgrades independent plan waves into
-            // `parallel_task` subagents when auto-parallel delegation is enabled.
-            // (Guideline + tool-round budget come from the ultracode profile.)
+            // A3S Flow is registered below as the durable dynamic-workflow runtime.
             opts = opts
                 .with_planning_mode(a3s_code_core::PlanningMode::Auto)
                 .with_goal_tracking(true);
@@ -503,9 +501,11 @@ impl App {
                 .agent
                 .resume_session(self.session_id.as_str(), build(thinking))
             {
+                s.register_dynamic_workflow_runtime();
                 return Ok((s, !thinking));
             }
             if let Ok(s) = self.agent.session(self.cwd.clone(), Some(build(thinking))) {
+                s.register_dynamic_workflow_runtime();
                 return Ok((s, !thinking));
             }
         }
@@ -561,7 +561,7 @@ impl App {
         let model = self.model.clone();
         match self.rebuild_session(model.as_deref()) {
             Ok((s, dropped)) => {
-                self.session = Arc::new(s);
+                self.replace_session(s);
                 if self.effort == ULTRACODE {
                     // Unattended fan-out: auto-approve so subagents run freely.
                     self.mode = Mode::Auto;

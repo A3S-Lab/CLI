@@ -13,8 +13,8 @@ impl RuntimePolicy {
         match self {
             RuntimePolicy::Required => {
                 "Runtime evidence is required before the final answer: call the signed-in \
-                 OS A3S Runtime through `runtime`, dispatch independent branches with \
-                 `parallel_task`, or execute an OS progressive operation with \
+                 OS A3S Runtime through `runtime`, use local `parallel_task` only for \
+                 host-side local fan-out, or execute an OS progressive operation with \
                  `\"shaped\":true` / `shaped:true` that returns `.view` or `viewUrl`. \
                  If this cannot be done, explicitly explain why and do not claim Runtime \
                  or RemoteUI success."

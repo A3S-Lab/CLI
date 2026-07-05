@@ -43,6 +43,18 @@ workspace editor, durable context, local asset development, OS asset publishing,
 Runtime fan-out, RemoteUI views, and engineered automation loops in one terminal
 surface.
 
+Use this README as the TUI capability guide:
+
+- [Capability Overview](#capability-overview) maps the major product surfaces.
+- [Effort Profiles](#effort-profiles) explains how `/effort` changes reasoning,
+  tool rounds, continuations, and `ultracode`.
+- [Dynamic Workflows](#dynamic-workflows) separates `DynamicWorkflowRuntime`
+  from `/flow` OS Workflow as a Service.
+- [OS, Runtime, and RemoteUI](#os-runtime-and-remoteui) shows what `/login`
+  unlocks, including the login-gated `runtime` tool.
+- [Agents, Research, and Loops](#agents-research-and-loops) lists the detailed
+  command forms for assets, DeepResearch, and engineered loops.
+
 ### Capability Overview
 
 | Area | What A3S Code TUI provides |
@@ -117,9 +129,9 @@ activity shimmer, effort overlay, and footer status rows use shared `a3s-tui`
 components such as
 `MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`,
 `ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`, `OutputBlock`,
-`Checklist`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
-`Paragraph`, `ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and
-`ModeLine`. Reusable menu scrolling, selection, tool status truncation,
+`Badge`, `Checklist`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`,
+`Progress`, `Paragraph`, `ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`,
+`SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, tool status truncation,
 transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared display-width wrapping for live reasoning and detail text,
 completed output tail previews,

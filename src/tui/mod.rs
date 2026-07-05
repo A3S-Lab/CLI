@@ -21,7 +21,9 @@ use a3s_code_core::workspace::{
     LocalWorkspaceManifest, LocalWorkspaceManifestSnapshot, ManifestWorkspaceBackend,
     WorkspaceServices,
 };
-use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions, SystemPromptSlots};
+use a3s_code_core::{
+    Agent, AgentEvent, AgentSession, SessionOptions, SystemPromptSlots, ToolCallResult,
+};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
@@ -459,6 +461,16 @@ fn ctx_warn_tier(pct: usize, warned: u8) -> (u8, Option<u8>) {
 
 fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option<(String, String)> {
     match name {
+        "dynamic_workflow" => {
+            let src = args
+                .and_then(|a| a.get("source"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())?;
+            Some((
+                format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
+                "dynamic workflow script captured".to_string(),
+            ))
+        }
         "program" => {
             let src = args
                 .and_then(|a| a.get("source"))
@@ -466,7 +478,7 @@ fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option
                 .filter(|s| !s.is_empty())?;
             Some((
                 format!("# Dynamic workflow script\n\n```javascript\n{src}\n```\n"),
-                "dynamic workflow script · /flow workflow to view read-only".to_string(),
+                "dynamic workflow script captured".to_string(),
             ))
         }
         "parallel_task" => {
@@ -530,13 +542,10 @@ fn workflow_doc_for_tasks(
     }
 
     let label = if parallel {
-        format!(
-            "dynamic workflow · {} parallel tasks · /flow workflow to view read-only",
-            tasks.len()
-        )
+        format!("dynamic workflow · {} parallel tasks captured", tasks.len())
     } else {
         format!(
-            "dynamic workflow · {} delegated task{} · /flow workflow to view read-only",
+            "dynamic workflow · {} delegated task{} captured",
             tasks.len(),
             if tasks.len() == 1 { "" } else { "s" }
         )
@@ -666,46 +675,267 @@ fn format_tool_log_records(records: &[ToolCallRecord], width: usize) -> Option<S
     )
 }
 
+/// PTC source used by the `?` deep-research workflow. The workflow function is
+/// deterministic and only schedules work; side effects live in Flow steps.
+fn deep_research_workflow_source() -> &'static str {
+    r#"
+async function run(ctx, inputs) {
+  const input = inputs.input || {};
+  const query = input.query || "";
+  const tracks = Array.isArray(input.tracks) && input.tracks.length > 0
+    ? input.tracks
+    : [
+        { title: "Facts and timeline", focus: "establish the current facts, dates, and key actors" },
+        { title: "Primary sources", focus: "find official or primary-source evidence" },
+        { title: "Independent analysis", focus: "compare reputable independent analysis and disagreements" },
+        { title: "Risks and caveats", focus: "identify uncertainty, recency caveats, and weak claims" },
+      ];
+  const localTasks = () => tracks.map((track, index) => {
+    const title = track.title || `Track ${index + 1}`;
+    const focus = track.focus || String(track);
+    return {
+      agent: "explore",
+      description: `Research ${index + 1}: ${title}`,
+      prompt: `Deep-research track for: ${query}\n\nFocus: ${focus}\n\nUse web_search and web_fetch. Return URLs, publication dates, key evidence, contradictions, and confidence notes.`
+    };
+  });
+
+  if (inputs.kind === "workflow") {
+    const runtimeResearch = inputs.step_outputs.runtime_research;
+    const localResearch = inputs.step_outputs.local_research;
+    const localFallback = inputs.step_outputs.local_fallback;
+
+    if (localFallback) {
+      return {
+        type: "complete",
+        output: {
+          query,
+          mode: "local_fallback",
+          runtime_error: runtimeResearch && runtimeResearch.runtime_error,
+          research: localFallback
+        }
+      };
+    }
+
+    if (localResearch) {
+      return { type: "complete", output: { query, mode: "local_parallel_task", research: localResearch } };
+    }
+
+    if (runtimeResearch && !runtimeResearch.runtime_error) {
+      return { type: "complete", output: { query, mode: "os_runtime", research: runtimeResearch } };
+    }
+
+    if (runtimeResearch && runtimeResearch.runtime_error) {
+      return {
+        type: "schedule_step",
+        step_id: "local_fallback",
+        step_name: "parallel_task",
+        input: { tasks: localTasks() },
+        retry: { max_attempts: 1, delay_ms: 0 },
+      };
+    }
+
+    if (input.os_runtime) {
+      return {
+        type: "schedule_step",
+        step_id: "runtime_research",
+        step_name: "runtime_research",
+        input: {
+          query,
+          worker: input.worker || "deep-research-worker",
+          tracks,
+        },
+        retry: { max_attempts: 1, delay_ms: 0 },
+      };
+    }
+
+    return {
+      type: "schedule_step",
+      step_id: "local_research",
+      step_name: "parallel_task",
+      input: { tasks: localTasks() },
+      retry: { max_attempts: 1, delay_ms: 0 },
+    };
+  }
+
+  if (inputs.kind === "step" && inputs.step_name === "runtime_research") {
+    const result = await ctx.tool("runtime", {
+      worker: inputs.input.worker,
+      timeout_ms: 600000,
+      tasks: inputs.input.tracks.map((track, index) => ({
+        query: inputs.input.query,
+        title: track.title || `Track ${index + 1}`,
+        focus: track.focus || String(track),
+        requirements: "Use web search and full-page reads. Return URLs, dates, key evidence, contradictions, and confidence notes."
+      }))
+    });
+    if (!result || result.exitCode !== 0) {
+      return {
+        runtime_error: (result && result.output) || "runtime tool failed",
+        runtime_result: result || null
+      };
+    }
+    return { mode: "os_runtime", runtime: result };
+  }
+
+  return { error: `unknown dynamic workflow invocation: ${inputs.kind}/${inputs.step_name || ""}` };
+}
+"#
+}
+
 /// The directive sent to the agent for a `?` deep-research turn: decompose the
-/// question, search and read multiple sources, cross-check, and synthesize a
-/// cited report. When OS is signed in, use A3S Runtime parallelism and publish
-/// the final report through RemoteUI.
+/// question, run the evidence fan-out through DynamicWorkflowRuntime, then
+/// cross-check and synthesize a cited report. When OS is signed in, the Flow step
+/// may call the login-gated A3S Runtime `runtime` tool and publish RemoteUI.
+#[cfg(test)]
 fn deep_research_prompt(query: &str, os_runtime: bool) -> String {
-    let runtime_directive = if os_runtime {
+    let tracks_directive = if os_runtime {
         format!(
-            "OS runtime is available. Use it: split the query into 4-8 independent \
-         research tracks and run them in parallel with the OS A3S Runtime / \
-         `parallel_task` before synthesis. Do not do all source gathering serially. \
-         Ask each worker to return URLs, dates, key evidence, contradictions, and \
-         confidence notes. After merging the tracks, create both a Markdown report \
-         and a standalone HTML page, then use the OS progressive UI/RemoteUI path \
-         (shaped response with `.view`/`viewUrl` as documented by the OS capability \
-         guide) so the TUI can show the user a one-click view. Runtime evidence must \
-         include both fan-out (`runtime` or `parallel_task`) and the report view. Do \
-         not print a raw authenticated URL; summarize and let the host surface the \
-         RemoteUI view. {}",
+            "OS runtime is available. The DynamicWorkflowRuntime step may call \
+         the login-gated `runtime` tool, so set `os_runtime: true` in the \
+         workflow input and include `allowed_tools: [\"runtime\"]`. Split the \
+         query into 4-8 independent research tracks before the call. Do not do \
+         all source gathering serially. After merging the tracks, create both a \
+         Markdown report and a standalone HTML page, then use the OS progressive \
+         UI/RemoteUI path (shaped response with `.view`/`viewUrl`) so the TUI can \
+         show the user a one-click view. Runtime evidence must include \
+         `dynamic_workflow` and the report view. Do not print a raw authenticated \
+         URL; summarize and let the host surface the RemoteUI view. {}",
             RuntimePolicy::Required.directive()
         )
     } else {
-        "OS runtime is not available in this session. Do the research locally with \
-         available web tools, still create a Markdown report and standalone HTML \
-         page under `.a3s/research/<slug>/`, and tell the user the local paths. \
-         Do not claim a RemoteUI view was created without an OS view response."
+        "OS runtime is not available in this session. Set `os_runtime: false`; \
+         the DynamicWorkflowRuntime script will schedule a host-side \
+         `parallel_task` step for local subagent fan-out because PTC itself \
+         cannot call `parallel_task`. Still create a Markdown report and \
+         standalone HTML page under `.a3s/research/<slug>/`, and tell the user \
+         the local paths. Do not claim a RemoteUI view was created without an OS \
+         view response."
             .to_string()
     };
+    let source = deep_research_workflow_source();
     format!(
-        "Conduct deep research to answer the query below. Be thorough:\n\
-         1. Break it into the key sub-questions worth investigating.\n\
-         2. Use web search across those sub-questions, then read the most relevant \
-         sources in full with web_fetch — don't rely on result snippets alone.\n\
-         3. Cross-check claims across multiple independent sources; call out any \
-         disagreement, uncertainty, or recency caveats.\n\
-         4. {runtime_directive}\n\
-         5. Synthesize a comprehensive, well-structured answer with inline \
-         citations, a final \"Sources\" list of the URLs you used, and clear links \
-         to the report artifacts/view.\n\n\
+        "Conduct deep research to answer the query below. Be thorough.\n\n\
+         Required execution path:\n\
+         1. First call `dynamic_workflow` with the JavaScript source below. \
+         The workflow must gather evidence through Flow before final synthesis.\n\
+         2. Provide `input.query` and 4-8 `input.tracks` with `title` and `focus`. \
+         {tracks_directive}\n\
+         3. After `dynamic_workflow` returns, read the evidence, cross-check \
+         claims across independent sources, call out disagreements and recency \
+         caveats, then synthesize a comprehensive answer with inline citations.\n\
+         4. Produce a final \"Sources\" list of URLs used and clear links to \
+         report artifacts/view.\n\n\
+         Dynamic workflow source:\n\
+         ```javascript\n{source}\n```\n\n\
          Query: {query}"
     )
+}
+
+fn deep_research_workflow_args(query: &str, os_runtime: bool) -> serde_json::Value {
+    let allowed_tools = if os_runtime {
+        serde_json::json!(["runtime"])
+    } else {
+        serde_json::json!([])
+    };
+    serde_json::json!({
+        "source": deep_research_workflow_source(),
+        "input": {
+            "query": query,
+            "os_runtime": os_runtime,
+        },
+        "allowed_tools": allowed_tools,
+        "limits": {
+            "timeoutMs": 900000,
+            "maxToolCalls": 8,
+            "maxOutputBytes": 262144
+        }
+    })
+}
+
+fn deep_research_synthesis_prompt(
+    query: &str,
+    os_runtime: bool,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> String {
+    let remoteui_directive = if os_runtime {
+        format!(
+            "OS is signed in. Use the OS progressive UI/RemoteUI path with \
+             shaped:true so the TUI can surface a `.view` or `viewUrl` for the \
+             final report. {}",
+            RuntimePolicy::Required.directive()
+        )
+    } else {
+        "OS runtime is not available. Create a Markdown report and standalone HTML \
+         page under `.a3s/research/<slug>/`, and provide local paths."
+            .to_string()
+    };
+    let metadata = workflow_metadata
+        .and_then(|metadata| serde_json::to_string_pretty(metadata).ok())
+        .unwrap_or_else(|| "{}".to_string());
+    format!(
+        "Synthesize the deep-research answer for the query below.\n\n\
+         A host-controlled DynamicWorkflowRuntime run has already gathered the \
+         research evidence. Do not call `dynamic_workflow` again. Use the workflow \
+         evidence below, cross-check claims, call out disagreements and recency \
+         caveats, and write a comprehensive answer with inline citations and a \
+         final Sources list. If the workflow output reports a `runtime_error` and \
+         `mode: \"local_fallback\"`, clearly mention that OS Runtime was attempted \
+         and local parallel research was used as the fallback.\n\n\
+         {remoteui_directive}\n\n\
+         Query:\n{query}\n\n\
+         DynamicWorkflowRuntime output:\n```json\n{workflow_output}\n```\n\n\
+         DynamicWorkflowRuntime metadata:\n```json\n{metadata}\n```"
+    )
+}
+
+fn deep_research_recovery_prompt(
+    query: &str,
+    os_runtime: bool,
+    workflow_error: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> String {
+    let recovery_path = if os_runtime {
+        format!(
+            "OS is signed in. The host-controlled workflow already attempted the \
+             runtime path and failed before usable evidence was gathered. Recover by \
+             using the signed-in `runtime` tool directly if it is available; if the \
+             runtime worker or endpoint is unavailable, fall back to local web_search \
+             and web_fetch and explicitly explain the OS Runtime failure. {}",
+            RuntimePolicy::Required.directive()
+        )
+    } else {
+        "OS runtime is not available. Recover with local web_search/web_fetch and \
+         local artifacts under `.a3s/research/<slug>/`."
+            .to_string()
+    };
+    let metadata = workflow_metadata
+        .and_then(|metadata| serde_json::to_string_pretty(metadata).ok())
+        .unwrap_or_else(|| "{}".to_string());
+    format!(
+        "Recover and complete the deep-research task for the query below.\n\n\
+         The host-controlled DynamicWorkflowRuntime preflight failed. Do not call \
+         `dynamic_workflow` again in this recovery turn. {recovery_path}\n\n\
+         Query:\n{query}\n\n\
+         DynamicWorkflowRuntime error:\n```text\n{workflow_error}\n```\n\n\
+         DynamicWorkflowRuntime metadata:\n```json\n{metadata}\n```\n\n\
+         Deliver a comprehensive answer with inline citations, a final Sources \
+         list, and report artifacts/view as appropriate."
+    )
+}
+
+fn json_contains_tool_evidence(value: &serde_json::Value, tool: &str) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, value)| {
+            ((key == "name" || key == "tool" || key == "tool_name") && value.as_str() == Some(tool))
+                || json_contains_tool_evidence(value, tool)
+        }),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| json_contains_tool_evidence(item, tool)),
+        _ => false,
+    }
 }
 
 /// The persistent `/goal` north-star for a `?` deep-research task. Kept short
@@ -981,8 +1211,8 @@ const PAD: usize = 2;
 ///   OS models, which have no thinking budget) — `None` = the model's balanced
 ///   default.
 ///
-/// `ultracode` additionally plans, then fans independent work out to parallel
-/// subagents via `parallel_task`.
+/// `ultracode` additionally has DynamicWorkflowRuntime guidance; local fan-out
+/// uses host-side `parallel_task` steps when the work truly splits.
 struct EffortProfile {
     label: &'static str,
     thinking_budget: usize,
@@ -1066,16 +1296,19 @@ solution. Verify exhaustively: tests, build, edge cases, and boundary / \
 adversarial inputs. Finish with a self-critique pass that actively hunts for \
 what you may have missed or gotten wrong, and fix it before concluding.";
 /// Ultracode system-prompt steer: keep the model focused on decomposition and
-/// synthesis while the core planning runtime turns independent plan waves into
-/// visible `parallel_task` subagents.
+/// synthesis while A3S Flow records dynamic workflow progress and PTC steps.
 const ULTRACODE_GUIDELINES: &str = "\
 [ultracode] Dynamic-workflow mode is available — you decide whether a turn needs \
 it. Match the effort to the task: answer trivial or conversational input (a \
 greeting, a single question, a one-step edit) directly, with no plan and no \
-fan-out. When a task genuinely splits into independent branches, decompose it, \
-run those branches as parallel background subagents via `parallel_task` (keep \
-each child prompt bounded and evidence-oriented), then synthesize their results \
-before continuing dependent work.";
+fan-out. When a task genuinely needs a dynamic workflow, call the \
+`dynamic_workflow` tool with one sandboxed JavaScript PTC workflow script. In \
+that script, return A3S Flow commands for workflow replay. Use PTC `ctx` tools \
+inside ordinary steps (`ctx.read`, `ctx.grep`, `ctx.tool(\"runtime\", ...)` when \
+the login-gated runtime tool exists). For local parallel subagent fan-out, \
+schedule a Flow step with `step_name: \"parallel_task\"`; do not call \
+`parallel_task` from PTC. Keep child prompts bounded and evidence-oriented, then \
+synthesize results before completing the workflow.";
 
 /// Run mode, cycled with Shift+Tab.
 #[derive(Clone, Copy, PartialEq)]
@@ -1147,6 +1380,7 @@ struct Queued {
     text: String,
     display: String,
     runtime_expectation: Option<RuntimeExpectation>,
+    deep_research: Option<(String, bool)>,
 }
 
 impl PartialEq for Queued {
@@ -1216,6 +1450,13 @@ enum Msg {
     Interrupted,
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
+    /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
+    DeepResearchWorkflowCompleted {
+        query: String,
+        os_runtime: bool,
+        args: serde_json::Value,
+        result: Result<ToolCallResult, String>,
+    },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
     /// OS login completed.
@@ -1393,7 +1634,7 @@ impl RuntimeExpectation {
     fn record_tool(&mut self, name: &str) {
         match name {
             "runtime" => self.runtime_tool = true,
-            "parallel_task" | "task" => self.parallel_work = true,
+            "dynamic_workflow" | "parallel_task" | "task" => self.parallel_work = true,
             _ => {}
         }
     }
@@ -1422,15 +1663,15 @@ impl RuntimeExpectation {
     fn missing_expectation(&self) -> String {
         match self.evidence_mode {
             RuntimeEvidenceMode::Any => {
-                "expected `runtime`, `parallel_task`, or an OS shaped `.view`/`viewUrl` response"
+                "expected `dynamic_workflow`, `runtime`, `parallel_task`, or an OS shaped `.view`/`viewUrl` response"
                     .to_string()
             }
             RuntimeEvidenceMode::ParallelReportView => match (self.has_parallel_evidence(), self.remote_view) {
                 (false, false) => {
-                    "expected OS Runtime/`parallel_task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out plus an OS shaped `.view`/`viewUrl` report response".to_string()
                 }
                 (false, true) => {
-                    "expected OS Runtime/`parallel_task` fan-out before the report view".to_string()
+                    "expected `dynamic_workflow`/OS Runtime/`parallel_task` fan-out before the report view".to_string()
                 }
                 (true, false) => {
                     "expected an OS shaped `.view`/`viewUrl` response for the report".to_string()
@@ -1458,7 +1699,8 @@ impl RuntimeExpectation {
         }
         Some(format!(
             "The previous turn ended without the required OS Runtime evidence for {}: {}. \
-             Continue the same task, explicitly use OS Runtime or `parallel_task` fan-out as required, \
+             Continue the same task, explicitly use `dynamic_workflow` first; inside it use \
+             the signed-in `runtime` tool or a host-side `parallel_task` step as required, \
              create or surface the shaped OS `.view`/`viewUrl` report response when required, \
              and only then give the final answer. If the OS capability is unavailable, explain exactly \
              which OS endpoint or response field is missing and provide local report artifact paths.",
@@ -1610,8 +1852,8 @@ struct App {
     /// Active transcript text-selection (mouse drag → highlight → copy on
     /// release); `None` when there's no selection.
     selection: Option<Selection>,
-    /// Latest dynamic-workflow artifact (ultracode parallel_task dispatch),
-    /// shown collapsed in the transcript and openable read-only via `/flow workflow`.
+    /// Latest dynamic-workflow artifact (ultracode dynamic workflow or task dispatch),
+    /// retained for synthesis and shown collapsed in the transcript.
     last_workflow: Option<String>,
     /// Clipboard images pasted (Ctrl+V), sent with the next message.
     pending_images: Vec<a3s_code_core::llm::Attachment>,
@@ -2425,7 +2667,7 @@ impl Model for App {
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
                     Ok((s, _)) => {
-                        self.session = Arc::new(s);
+                        self.replace_session(s);
                         self.messages.clear();
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
@@ -2498,6 +2740,13 @@ impl Model for App {
                 let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
                 self.push_line(&gutter(TN_GRAY, body.trim_end()));
             }
+
+            Msg::DeepResearchWorkflowCompleted {
+                query,
+                os_runtime,
+                args,
+                result,
+            } => return self.on_deep_research_workflow_completed(query, os_runtime, args, result),
 
             Msg::UpdatePlan(latest) => {
                 self.updating = None;
@@ -2592,10 +2841,11 @@ impl Model for App {
                 match result {
                     Ok(session) => {
                         // Re-export the fresh token so the agent's $A3S_OS_TOKEN
-                        // stays valid; no session rebuild needed (the skill reads
-                        // the env var at call time). Stay quiet — it's routine.
+                        // stays valid; no session rebuild needed. Re-sync the
+                        // runtime tool too because it owns a token snapshot.
                         crate::a3s_os::export_os_env(&session);
                         self.os_session = Some(session);
+                        self.sync_runtime_tool();
                     }
                     Err(_) => {
                         // Leave the existing session; the next BannerTick retries
@@ -2657,7 +2907,7 @@ impl Model for App {
                         let model = self.model.clone();
                         match self.rebuild_session(model.as_deref()) {
                             Ok((s, _)) => {
-                                self.session = Arc::new(s);
+                                self.replace_session(s);
                                 let short: String = self.session_id.chars().take(8).collect();
                                 self.push_line(&gutter(
                                 TN_CYAN,
@@ -3127,9 +3377,7 @@ impl App {
             );
         }
         if self.loop_remaining > 0 {
-            chips.push(
-                SessionStatusChip::new("↻", self.loop_remaining.to_string()).color(TN_GRAY),
-            );
+            chips.push(SessionStatusChip::new("↻", self.loop_remaining.to_string()).color(TN_GRAY));
         }
         let active_subagents = self.runtime.active_subagent_count();
         if active_subagents > 0 {
@@ -3305,18 +3553,6 @@ impl App {
                 .fg(TN_GRAY)
                 .render("  selected cloned workflow asset · Enter opens the OS designer"),
         );
-    }
-
-    fn open_latest_dynamic_workflow(&mut self) {
-        self.textarea.clear();
-        match self.last_workflow.clone() {
-            Some(doc) => self.open_readonly_in_ide("dynamic-workflow.md", &doc),
-            None => {
-                self.push_line(&Style::new().fg(TN_GRAY).render(
-                    "  no dynamic workflow yet — run a task that fans out via parallel_task",
-                ))
-            }
-        }
     }
 
     fn execute_agent_subcommand(
@@ -3629,11 +3865,10 @@ impl App {
                 Msg::ShellOutput(text)
             }));
         }
-        // Deep-research mode (`?`) is a long-horizon task: it anchors the work
-        // with the `/goal` mechanism (a persistent north-star prepended to every
-        // turn) AND auto-continues via the `/loop` mechanism until the agent
-        // reports completion (or Esc). The first turn carries the full
-        // decompose → search + read → cross-check → synthesize directive.
+        // Deep-research mode (`?`) is host-orchestrated for stability: the TUI
+        // first executes DynamicWorkflowRuntime directly to gather evidence through
+        // OS Runtime (when signed in) or local parallel_task fallback, then starts
+        // one synthesis turn over the gathered evidence.
         if self.research_mode {
             self.research_mode = false;
             let query = trimmed.trim_start_matches('?').trim().to_string();
@@ -3658,32 +3893,26 @@ impl App {
                 "  🎯 goal set · local deep research · report + HTML artifacts (Esc stops)"
             };
             self.push_line(&Style::new().fg(TN_GRAY).render(runtime_hint));
-            let prompt = deep_research_prompt(&query, self.os_session.is_some());
             let display = format!("🔬 {query}");
             // Long-horizon budget: keep researching across turns toward the
             // goal, with tool prompts auto-approved for the run's duration.
             self.engage_autonomy(8);
+            let os_runtime = self.os_session.is_some();
             let runtime_expectation = self
                 .os_session
                 .is_some()
                 .then(|| RuntimeExpectation::required_report_view("deep research"));
             if self.state == State::Idle {
-                return self.start_stream_inner_with_runtime(
-                    prompt,
-                    display,
-                    true,
-                    true,
-                    false,
-                    runtime_expectation,
-                );
+                return self.start_deep_research_workflow(query, os_runtime, runtime_expectation);
             }
             self.seq += 1;
             self.queue.push(Queued {
                 prio: 1,
                 seq: self.seq,
-                text: prompt,
+                text: String::new(),
                 display,
                 runtime_expectation,
+                deep_research: Some((query, os_runtime)),
             });
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
@@ -3964,10 +4193,6 @@ impl App {
                         }
                         return None;
                     }
-                    Ok(panels::flow::FlowSubcommand::Workflow) => {
-                        self.open_latest_dynamic_workflow();
-                        return None;
-                    }
                     Ok(panels::flow::FlowSubcommand::Review(target)) => {
                         let root = flow_dir();
                         let flows = panels::flow::list_flows(&root);
@@ -4213,7 +4438,7 @@ impl App {
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
                     Ok((s, _)) => {
-                        self.session = Arc::new(s);
+                        self.replace_session(s);
                         self.compact_summary = None;
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
@@ -4423,7 +4648,7 @@ impl App {
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
                     Ok((session, _)) => {
-                        self.session = Arc::new(session);
+                        self.replace_session(session);
                         self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                             "  ↻ reloaded — {} skills available",
                             self.skills.len()
@@ -4526,6 +4751,7 @@ impl App {
                 text: prompt,
                 display,
                 runtime_expectation: None,
+                deep_research: None,
             });
             self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             self.relayout();
@@ -4578,6 +4804,129 @@ impl App {
         self.ultracode_synthesis_used = true;
         self.push_line(&Style::new().fg(TN_GRAY).render("  ⇉ synthesizing results…"));
         self.start_stream_inner(prompt, display_task, false, false, true)
+    }
+
+    fn start_deep_research_workflow(
+        &mut self,
+        query: String,
+        os_runtime: bool,
+        runtime_expectation: Option<RuntimeExpectation>,
+    ) -> Option<Cmd<Msg>> {
+        self.streaming.clear();
+        self.got_delta = false;
+        self.turn_text.clear();
+        self.turn_had_agent_activity = false;
+        self.turn_text_after_activity = false;
+        if let Some(expectation) = runtime_expectation {
+            self.runtime_expectation = Some(expectation);
+        }
+        self.ultracode_synthesis_inflight = false;
+        self.ultracode_synthesis_used = false;
+        self.last_paint = None;
+        self.viewport.set_auto_scroll(true);
+        self.plan.clear();
+        self.runtime.clear_turn_entities();
+        self.running_task = Some(format!("🔬 {query}"));
+        self.state = State::Streaming;
+        self.relayout();
+        self.stream_started = Some(Instant::now());
+        self.spinner.start();
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  ⇉ gathering evidence with DynamicWorkflowRuntime…"),
+        );
+        self.rebuild_viewport();
+
+        let args = deep_research_workflow_args(&query, os_runtime);
+        let session = self.session.clone();
+        Some(cmd::batch(vec![
+            cmd::cmd(move || async move {
+                let result = session
+                    .tool("dynamic_workflow", args.clone())
+                    .await
+                    .map_err(|err| err.to_string());
+                Msg::DeepResearchWorkflowCompleted {
+                    query,
+                    os_runtime,
+                    args,
+                    result,
+                }
+            }),
+            spinner_tick(),
+        ]))
+    }
+
+    fn on_deep_research_workflow_completed(
+        &mut self,
+        query: String,
+        os_runtime: bool,
+        args: serde_json::Value,
+        result: Result<ToolCallResult, String>,
+    ) -> Option<Cmd<Msg>> {
+        if self.state != State::Streaming {
+            return None;
+        }
+
+        let (output, exit_code, metadata) = match result {
+            Ok(result) => (result.output, result.exit_code, result.metadata),
+            Err(error) => (error, 1, None),
+        };
+        let tool_id = format!("host-dynamic-workflow-{}", self.seq);
+        self.runtime
+            .start_tool(tool_id.clone(), "dynamic_workflow".to_string());
+        self.runtime
+            .push_tool_input(&serde_json::to_string(&args).unwrap_or_default());
+        let completed = self.runtime.end_tool(
+            &tool_id,
+            "dynamic_workflow".to_string(),
+            output.clone(),
+            exit_code,
+        );
+        self.push_line(&render_tool_end(
+            "dynamic_workflow",
+            exit_code,
+            &output,
+            metadata.as_ref(),
+            completed.args.as_ref(),
+            self.width as usize,
+        ));
+        self.record_runtime_tool_evidence("dynamic_workflow");
+        if metadata
+            .as_ref()
+            .is_some_and(|value| json_contains_tool_evidence(value, "runtime"))
+        {
+            self.record_runtime_tool_evidence("runtime");
+        }
+        if metadata
+            .as_ref()
+            .is_some_and(|value| json_contains_tool_evidence(value, "parallel_task"))
+        {
+            self.record_runtime_parallel_evidence();
+        }
+        self.capture_workflow("dynamic_workflow", completed.args.as_ref());
+        if let Some(spec) = self.find_remote_view_spec(&output) {
+            self.remember_remote_view(spec);
+        }
+
+        let prompt = if exit_code == 0 {
+            deep_research_synthesis_prompt(&query, os_runtime, &output, metadata.as_ref())
+        } else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  ⚠ dynamic workflow failed; starting recovery synthesis…"),
+            );
+            deep_research_recovery_prompt(&query, os_runtime, &output, metadata.as_ref())
+        };
+        self.start_stream_inner_with_runtime(
+            prompt,
+            format!("🔬 synthesize {query}"),
+            false,
+            false,
+            false,
+            None,
+        )
     }
 
     fn start_stream_inner(
@@ -4675,6 +5024,9 @@ impl App {
     /// Pop the next queued message and start streaming it, if any.
     fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
         let next = self.queue.pop()?;
+        if let Some((query, os_runtime)) = next.deep_research {
+            return self.start_deep_research_workflow(query, os_runtime, next.runtime_expectation);
+        }
         self.start_stream_inner_with_runtime(
             next.text,
             next.display,
@@ -5368,7 +5720,7 @@ impl App {
     fn refresh_after_auth(&mut self) {
         if self.state == State::Idle {
             if let Ok((s, _)) = self.rebuild_session(self.model.as_deref()) {
-                self.session = Arc::new(s);
+                self.replace_session(s);
             }
         }
         // Login/logout flips whether the A3S Runtime `runtime` tool is available.
@@ -5382,6 +5734,12 @@ impl App {
     /// unregister it while signed out — so it only appears in the model's toolset
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
+    fn replace_session(&mut self, session: AgentSession) {
+        self.session = Arc::new(session);
+        self.session.register_dynamic_workflow_runtime();
+        self.sync_runtime_tool();
+    }
+
     fn sync_runtime_tool(&self) {
         match self.os_session.as_ref() {
             Some(s) => self.session.register_dynamic_tool(std::sync::Arc::new(
@@ -5407,21 +5765,18 @@ impl App {
         self.ide = Some(ide);
     }
 
-    /// Capture a `parallel_task`/`task` dispatch as a dynamic-workflow artifact:
-    /// a readable plan of the fanned-out subtasks. Stored for `/flow workflow` and
-    /// announced with a collapsed one-line message in the transcript.
+    /// Capture a dynamic workflow or `parallel_task`/`task` dispatch as a
+    /// readable artifact for synthesis and a collapsed transcript marker.
     fn capture_workflow(&mut self, name: &str, args: Option<&serde_json::Value>) {
         let Some((doc, label)) = workflow_doc_for_tool(name, args) else {
             return;
         };
         self.last_workflow = Some(doc);
-        // Collapsed indicator; the full artifact opens read-only via /flow workflow.
         self.push_line(&Style::new().fg(ACCENT).render(&format!("  ⊞ {label}")));
     }
 
-    /// Open read-only text content in the built-in IDE (used by `/flow workflow` to
-    /// show the dynamic-workflow artifact). Editor-focused for scroll/nav, but
-    /// `readonly` blocks edits and Ctrl+S.
+    /// Open read-only text content in the built-in IDE. Editor-focused for
+    /// scroll/nav, but `readonly` blocks edits and Ctrl+S.
     fn open_readonly_in_ide(&mut self, title: &str, content: &str) {
         let lines: Vec<String> = content.lines().map(String::from).collect();
         let mut ide = Ide::browse(
@@ -5828,6 +6183,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         )?,
     };
 
+    // DynamicWorkflowRuntime is always available in the TUI because built-in
+    // `?` deep research and ultracode dynamic workflows both route through it.
+    session.register_dynamic_workflow_runtime();
+
     // A3S Runtime offload tool: registered only when signed in to OS, so the
     // model sees `runtime` after login and not before. Auth changes re-sync it via
     // `refresh_after_auth` → `sync_runtime_tool`.
@@ -6076,7 +6435,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // rebuild. (Resumes the same id, so transcript history is preserved.)
     let launch_model = app.model.clone();
     if let Ok((s, _)) = app.rebuild_session(launch_model.as_deref()) {
-        app.session = Arc::new(s);
+        app.replace_session(s);
     }
 
     ProgramBuilder::new(app)
@@ -6217,7 +6576,10 @@ mod tests {
 
         assert_eq!(a3s_tui::style::visible_len(&status), 72);
         assert!(status_plain.contains("a3s git:(main)"), "{status_plain}");
-        assert!(status_plain.contains("gpt-5 (128k context)"), "{status_plain}");
+        assert!(
+            status_plain.contains("gpt-5 (128k context)"),
+            "{status_plain}"
+        );
         assert!(status_plain.contains("ctx:70%"), "{status_plain}");
         assert!(status_plain.contains("⚙ 1 running"), "{status_plain}");
         assert!(status.contains("\x1b["), "status should be styled");
@@ -6428,8 +6790,8 @@ mod tests {
         .unwrap();
     }
 
-    /// Guard: the parallel/ultracode SessionOptions register `task` +
-    /// `parallel_task` in the session tool surface (so fan-out has a tool to call).
+    /// Guard: ultracode registers A3S Flow plus `task`/`parallel_task` in the
+    /// session tool surface (so dynamic workflows and fan-out have tools to call).
     #[tokio::test]
     async fn parallel_opts_register_parallel_task() {
         let dir = std::env::temp_dir().join(format!("a3s-ptask-{}", std::process::id()));
@@ -6451,11 +6813,20 @@ mod tests {
         let session = agent
             .session(dir.to_string_lossy().to_string(), Some(opts))
             .unwrap();
+        session.register_dynamic_workflow_runtime();
         let names = session.tool_names();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
-            names.contains(&"parallel_task".to_string()) && names.contains(&"task".to_string()),
-            "parallel_task/task registered under the parallel opts; got {names:?}"
+            names.contains(&"dynamic_workflow".to_string()),
+            "dynamic_workflow registered; got {names:?}"
+        );
+        assert!(
+            names.contains(&"parallel_task".to_string()),
+            "parallel_task registered; got {names:?}"
+        );
+        assert!(
+            names.contains(&"task".to_string()),
+            "task registered; got {names:?}"
         );
     }
 
@@ -6591,8 +6962,13 @@ mod tests {
         assert!(p.contains("rust async runtimes"), "{p}");
         let lo = p.to_lowercase();
         assert!(lo.contains("deep research"), "{p}");
+        assert!(p.contains("dynamic_workflow"), "{p}");
         assert!(lo.contains("web search") && lo.contains("web_fetch"), "{p}");
         assert!(lo.contains("source"), "should ask to cite sources: {p}");
+        assert!(
+            p.contains("step_name: \"parallel_task\"") || p.contains("parallel_task"),
+            "{p}"
+        );
         assert!(p.contains(".a3s/research/<slug>/"), "{p}");
         assert!(p.contains("standalone HTML"), "{p}");
     }
@@ -6601,20 +6977,85 @@ mod tests {
     fn deep_research_prompt_uses_os_runtime_and_remoteui_when_available() {
         let p = deep_research_prompt("rust async runtimes", true);
         assert!(p.contains("rust async runtimes"), "{p}");
-        assert!(
-            p.contains("OS A3S Runtime") && p.contains("parallel_task"),
-            "{p}"
-        );
+        assert!(p.contains("dynamic_workflow"), "{p}");
+        assert!(p.contains("OS A3S Runtime") && p.contains("runtime"), "{p}");
         assert!(p.contains("Runtime evidence is required"), "{p}");
         assert!(p.contains("`runtime`"), "{p}");
+        assert!(p.contains("allowed_tools: [\"runtime\"]"), "{p}");
+        assert!(p.contains("result.exitCode !== 0"), "{p}");
+        assert!(p.contains("runtime tool failed"), "{p}");
         assert!(p.contains("shaped:true"), "{p}");
         assert!(p.contains("RemoteUI"), "{p}");
         assert!(p.contains(".view") && p.contains("viewUrl"), "{p}");
-        assert!(p.contains("must include both fan-out"), "{p}");
+        assert!(p.contains("must include `dynamic_workflow`"), "{p}");
         assert!(
             p.contains("Markdown report") && p.contains("HTML page"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn deep_research_workflow_args_use_runtime_then_local_fallback() {
+        let args = deep_research_workflow_args("rust async runtimes", true);
+        let source = args["source"].as_str().unwrap();
+
+        assert_eq!(args["input"]["query"], "rust async runtimes");
+        assert_eq!(args["input"]["os_runtime"], true);
+        assert_eq!(args["allowed_tools"], serde_json::json!(["runtime"]));
+        assert!(source.contains("ctx.tool(\"runtime\""), "{source}");
+        assert!(source.contains("runtime_error"), "{source}");
+        assert!(source.contains("local_fallback"), "{source}");
+        assert!(source.contains("step_name: \"parallel_task\""), "{source}");
+    }
+
+    #[test]
+    fn deep_research_synthesis_prompt_uses_host_workflow_evidence() {
+        let prompt = deep_research_synthesis_prompt(
+            "rust async runtimes",
+            true,
+            r#"{"mode":"os_runtime"}"#,
+            Some(&serde_json::json!({
+                "dynamic_workflow": {
+                    "snapshot": {
+                        "steps": {
+                            "runtime_research": {
+                                "output": { "name": "runtime" }
+                            }
+                        }
+                    }
+                }
+            })),
+        );
+
+        assert!(
+            prompt.contains("Do not call `dynamic_workflow` again"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("rust async runtimes"), "{prompt}");
+        assert!(prompt.contains("mode\":\"os_runtime"), "{prompt}");
+        assert!(prompt.contains("shaped:true"), "{prompt}");
+    }
+
+    #[test]
+    fn deep_research_metadata_detects_runtime_and_local_parallel_evidence() {
+        let metadata = serde_json::json!({
+            "dynamic_workflow": {
+                "snapshot": {
+                    "steps": {
+                        "runtime_research": {
+                            "output": { "name": "runtime" }
+                        },
+                        "local_fallback": {
+                            "output": { "tool": "parallel_task" }
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(json_contains_tool_evidence(&metadata, "runtime"));
+        assert!(json_contains_tool_evidence(&metadata, "parallel_task"));
+        assert!(!json_contains_tool_evidence(&metadata, "program"));
     }
 
     #[test]
@@ -6970,6 +7411,21 @@ mod tests {
         assert!(doc.contains("Design the rendering architecture"));
         assert!(doc.contains("Agent: `plan`"));
         assert!(doc.contains("Plan a layered renderer."));
+    }
+
+    #[test]
+    fn workflow_doc_captures_dynamic_workflow_tool_without_flow_command() {
+        let args = serde_json::json!({
+            "source": "async function run(ctx, inputs) { return { type: 'complete', output: inputs }; }"
+        });
+        let (doc, label) = workflow_doc_for_tool("dynamic_workflow", Some(&args)).unwrap();
+
+        assert!(
+            label.contains("dynamic workflow script captured"),
+            "{label}"
+        );
+        assert!(!label.contains("/flow"), "{label}");
+        assert!(doc.contains("async function run"));
     }
 
     #[test]
@@ -7735,6 +8191,10 @@ mod tests {
         via_parallel.record_tool("parallel_task");
         assert!(via_parallel.is_satisfied());
 
+        let mut via_dynamic_workflow = RuntimeExpectation::required("research");
+        via_dynamic_workflow.record_tool("dynamic_workflow");
+        assert!(via_dynamic_workflow.is_satisfied());
+
         let mut via_view = RuntimeExpectation::required("deploy");
         via_view.record_remote_view();
         assert!(via_view.is_satisfied());
@@ -7747,6 +8207,7 @@ mod tests {
         assert!(warning.contains(".view"), "{warning}");
         let correction = report_only_runtime.corrective_prompt().unwrap();
         assert!(correction.contains("deep research"), "{correction}");
+        assert!(correction.contains("dynamic_workflow"), "{correction}");
         assert!(correction.contains("OS Runtime"), "{correction}");
         assert!(correction.contains(".view"), "{correction}");
         assert!(correction.contains("viewUrl"), "{correction}");
@@ -7760,7 +8221,7 @@ mod tests {
         assert!(correction.contains("fan-out"), "{correction}");
 
         let mut full_report = RuntimeExpectation::required_report_view("deep research");
-        full_report.record_tool("runtime");
+        full_report.record_tool("dynamic_workflow");
         full_report.record_remote_view();
         assert!(full_report.is_satisfied());
         assert!(full_report.missing_warning().is_none());

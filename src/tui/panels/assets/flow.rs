@@ -38,7 +38,6 @@ pub(crate) enum FlowSubcommand {
     List(String),
     Review(Option<String>),
     Activity(String),
-    Workflow,
     Publish,
     Run,
     Deploy,
@@ -156,13 +155,10 @@ pub(crate) fn parse_flow_subcommand(input: &str) -> Option<Result<FlowSubcommand
             parts.collect::<Vec<_>>().join(" "),
         ))),
         "ps" | "runs" | "jobs" => Some(Err("usage: /flow activity [query]".to_string())),
-        "workflow" => {
-            if parts.next().is_some() {
-                return Some(Err("usage: /flow workflow".to_string()));
-            }
-            Some(Ok(FlowSubcommand::Workflow))
-        }
-        "artifact" => Some(Err("usage: /flow workflow".to_string())),
+        "workflow" | "artifact" => Some(Err(
+            "/flow is for OS Workflow as a Service assets; use /flow open, /flow run, or /flow status"
+                .to_string(),
+        )),
         "publish" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /flow publish".to_string()));
@@ -1278,7 +1274,6 @@ impl App {
                     }
                     Some(FlowSubcommand::Clone(_))
                     | Some(FlowSubcommand::List(_))
-                    | Some(FlowSubcommand::Workflow)
                     | Some(FlowSubcommand::Open)
                     | Some(FlowSubcommand::Logs)
                     | Some(FlowSubcommand::Status)
@@ -1517,6 +1512,7 @@ mod tests {
         assert!(parse_flow_subcommand("open now").unwrap().is_err());
         assert!(parse_flow_subcommand("logs now").unwrap().is_err());
         assert!(parse_flow_subcommand("run now").unwrap().is_err());
+        assert!(parse_flow_subcommand("workflow").unwrap().is_err());
         assert!(parse_flow_subcommand("artifact").unwrap().is_err());
         assert!(parse_flow_subcommand("inspect").unwrap().is_err());
         assert!(parse_flow_subcommand("debug").unwrap().is_err());

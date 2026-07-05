@@ -182,10 +182,6 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "inspect Runtime activity for a workflow",
     ),
     (
-        "/flow workflow",
-        "view the latest dynamic workflow artifact read-only",
-    ),
-    (
         "/flow publish",
         "publish the selected workflow through OS Workflow as a Service",
     ),
@@ -268,7 +264,7 @@ fn help_panel() -> HelpPanel {
                 .row("! <cmd>", "run a shell command directly")
                 .row(
                     "? <query>",
-                    "deep research with Runtime fan-out + RemoteUI evidence when signed in",
+                    "deep research through DynamicWorkflowRuntime; uses runtime when signed in",
                 )
                 .row("@<path>", "attach a workspace file from the file picker")
                 .row("Ctrl+V", "attach a clipboard image to the next message"),
@@ -461,7 +457,8 @@ mod tests {
         assert!(body.contains("/agent clone"));
         assert!(body.contains("/skill clone"));
         assert!(body.contains("typed OS services"));
-        assert!(body.contains("Runtime fan-out + RemoteUI evidence"));
+        assert!(body.contains("DynamicWorkflowRuntime"));
+        assert!(body.contains("uses runtime when signed in"));
         assert!(!body.contains(&format!("OS-backed {}", "runs")));
         assert!(!body.contains("/kb open"));
         assert!(!body.contains("/kb dashboard"));

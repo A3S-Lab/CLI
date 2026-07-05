@@ -5,7 +5,9 @@
 //! metadata, graph neighborhood, aliases, relations, and full content.
 
 use super::super::*;
-use a3s_tui::components::{DetailPanel, DetailRow, Paragraph, Timeline, TimelineItem, TimelineRow};
+use a3s_tui::components::{
+    Badge, DetailPanel, DetailRow, Paragraph, Timeline, TimelineItem, TimelineRow,
+};
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
 
@@ -63,6 +65,17 @@ fn memory_detail_metadata_lines(
     } else {
         &e.memory_type
     };
+    let header = format!(
+        "{} {}",
+        Badge::new(ty).color(color).view(),
+        Style::new().fg(TN_GRAY).render(&format!(
+            "{} importance {:.2} · {}",
+            imp_bar(e.importance),
+            e.importance,
+            rel_time(e.timestamp, now)
+        ))
+    );
+    let mut lines = vec![a3s_tui::style::fit_visible(&header, width)];
     let mut panel = DetailPanel::without_title()
         .show_separator(false)
         .indent(0)
@@ -70,17 +83,7 @@ fn memory_detail_metadata_lines(
         .label_color(TN_GRAY)
         .value_color(TN_GRAY)
         .muted_color(TN_GRAY)
-        .unlimited_rows()
-        .row(
-            DetailRow::text(format!(
-                "● {ty}   {} importance {:.2} · {}",
-                imp_bar(e.importance),
-                e.importance,
-                rel_time(e.timestamp, now)
-            ))
-            .color(color)
-            .bold(),
-        );
+        .unlimited_rows();
 
     if !e.tags.is_empty() {
         panel = panel.row(DetailRow::pair("tags", e.tags.join(", ")).color(TN_CYAN));
@@ -157,11 +160,13 @@ fn memory_detail_metadata_lines(
         panel = panel.pair(k.clone(), v.clone());
     }
 
-    panel
-        .view(width.min(u16::MAX as usize) as u16, panel.rows().len())
-        .lines()
-        .map(str::to_string)
-        .collect()
+    lines.extend(
+        panel
+            .view(width.min(u16::MAX as usize) as u16, panel.rows().len())
+            .lines()
+            .map(str::to_string),
+    );
+    lines
 }
 
 impl App {
@@ -598,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_detail_metadata_lines_use_shared_detail_panel_and_fit_width() {
+    fn memory_detail_metadata_lines_use_shared_badge_and_detail_panel() {
         let now = test_ts("2026-06-30T12:00:00Z");
         let mut entry = test_entry(
             "m1",
@@ -635,11 +640,17 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(plain.contains("● semantic"), "{plain}");
+        assert!(plain.contains("[semantic]"), "{plain}");
         assert!(plain.contains("tags"), "{plain}");
         assert!(plain.contains("lifecycle"), "{plain}");
         assert!(plain.contains("long-term"), "{plain}");
         assert!(plain.contains("ctx_event_id"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("\x1b[1;{}m[semantic]", TN_CYAN.fg_ansi()))),
+            "{lines:?}"
+        );
         assert!(lines.iter().any(|line| line.contains("\x1b[")));
         assert!(
             lines

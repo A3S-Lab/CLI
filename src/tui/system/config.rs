@@ -12,7 +12,7 @@ default_model = "openai/my-model"
 # Optional OS endpoint. When set, a3s code enables /login and /logout.
 # os = "https://os.example.com"
 
-# Optional: where /flow workflow DAG JSONs are stored (default ~/.a3s/flows).
+# Optional: where /flow DAG JSONs are stored (default ~/.a3s/flows).
 # flow_dir = "~/.a3s/flows"
 
 # Optional: where /agent agent definitions are stored (default ~/.a3s/agents).
