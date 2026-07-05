@@ -130,6 +130,32 @@ pub(crate) fn thinking_block(text: &str, width: usize) -> String {
         .view()
 }
 
+pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let pct = ((elapsed.as_secs_f64() / 30.0) * 100.0).min(95.0);
+    let prefix = Style::new().fg(ACCENT).render(&format!(
+        "  ✦ Compacting context… ({}) ",
+        fmt_elapsed(elapsed)
+    ));
+    let progress_width = width
+        .saturating_sub(a3s_tui::style::visible_len(&prefix))
+        .min(29)
+        .max(1);
+    let progress = a3s_tui::components::Progress::new()
+        .value(pct / 100.0)
+        .width(progress_width.min(u16::MAX as usize) as u16)
+        .filled_char('▰')
+        .empty_char('▱')
+        .filled_color(ACCENT)
+        .empty_color(TN_GRAY)
+        .view();
+
+    a3s_tui::style::fit_visible(&format!("{prefix}{progress}"), width)
+}
+
 /// Greedy word-wrap of plain (unstyled) text to `width` display columns, with
 /// blank lines dropped so a preview stays single-spaced. Used for the reasoning
 /// ("thinking") block so it lays out like other messages instead of being one
@@ -270,10 +296,11 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        gutter, input_gradient_rule, input_prompt_line, input_rule, input_status_rule,
-        thinking_block, truncate, user_bubble, wrap_words,
+        compact_progress_line, gutter, input_gradient_rule, input_prompt_line, input_rule,
+        input_status_rule, thinking_block, truncate, user_bubble, wrap_words,
     };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
+    use std::time::Duration;
 
     #[test]
     fn wraps_on_word_boundaries_without_splitting_words() {
@@ -459,5 +486,32 @@ mod tests {
         assert!(rows[0].starts_with("  💭 中文测试"));
         assert!(rows[1].starts_with("     内容"));
         assert!(rendered.lines().all(|line| visible_len(line) == 13));
+    }
+
+    #[test]
+    fn compact_progress_line_uses_shared_progress_bar() {
+        let rendered = compact_progress_line(Duration::from_secs(15), 80);
+        let plain = strip_ansi(&rendered);
+
+        assert!(plain.contains("Compacting context"), "{plain}");
+        assert!(plain.contains("50%"), "{plain}");
+        assert!(plain.contains('▰'), "{plain}");
+        assert!(plain.contains('▱'), "{plain}");
+        assert!(rendered.contains("\x1b[38;2;0;112;243m"));
+        assert!(visible_len(&rendered) <= 80);
+    }
+
+    #[test]
+    fn compact_progress_line_caps_estimated_progress() {
+        let rendered = compact_progress_line(Duration::from_secs(60), 80);
+
+        assert!(strip_ansi(&rendered).contains("95%"));
+    }
+
+    #[test]
+    fn compact_progress_line_stays_bounded_on_narrow_widths() {
+        let rendered = compact_progress_line(Duration::from_secs(8), 18);
+
+        assert_eq!(visible_len(&rendered), 18);
     }
 }

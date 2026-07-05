@@ -2862,15 +2862,7 @@ impl Model for App {
                 .fg(TN_GREEN)
                 .render("  ⬇ checking for updates…")
         } else if let Some(t0) = self.compacting {
-            // Time-estimated progress bar (compaction has no real % to report).
-            let secs = t0.elapsed().as_secs();
-            let pct = ((secs as f64 / 30.0) * 100.0).min(95.0) as usize;
-            let filled = pct * 24 / 100;
-            let bar = format!("{}{}", "▰".repeat(filled), "▱".repeat(24 - filled));
-            Style::new().fg(ACCENT).render(&format!(
-                "  ✦ Compacting context… ({}) {bar} {pct}%",
-                fmt_elapsed(t0.elapsed())
-            ))
+            compact_progress_line(t0.elapsed(), width)
         } else {
             match self.state {
                 State::Streaming => {
