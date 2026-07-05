@@ -15,13 +15,15 @@
 use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
-use a3s_tui::components::{MenuItem, MenuPanel};
+use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
+use a3s_tui::event::MouseEvent;
 
 /// Canonical, first-probed path where the designer loads/saves a workflow
 /// inside the asset source workspace.
 pub(crate) const DESIGN_DOCUMENT_PATH: &str = ".a3s/workflows/main.design.json";
 const WORKFLOW_MANIFEST_PATH: &str = ".a3s/workflow.asset.json";
 const WORKFLOW_RUNTIME_BINDING_PATH: &str = ".a3s/workflow.runtime-binding.json";
+const FLOW_OVERLAY_ROWS_BELOW: usize = 5;
 
 /// `/flow` selection panel: the DAG JSONs under the flows folder + cursor.
 pub(crate) struct FlowPanel {
@@ -655,8 +657,29 @@ fn flow_picker_lines(
     if width == 0 {
         return Vec::new();
     }
+    let Some((panel, panel_height)) = flow_picker_panel(flows, selected, root, width, height)
+    else {
+        return Vec::new();
+    };
 
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel_height)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn flow_picker_panel(
+    flows: &[String],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Option<(MenuPanel, usize)> {
     let total = flows.len();
+    if total == 0 {
+        return None;
+    }
     let max_items = height.saturating_sub(8).clamp(3, 12);
     let selected = selected.min(total.saturating_sub(1));
     let scroll = selected.saturating_add(1).saturating_sub(max_items);
@@ -665,7 +688,7 @@ fn flow_picker_lines(
         .map(|name| MenuItem::new(name.clone()))
         .collect::<Vec<_>>();
 
-    MenuPanel::new(flow_picker_header(total, root, width).trim_start())
+    let panel = MenuPanel::new(flow_picker_header(total, root, width).trim_start())
         .subtitle(flow_picker_hint(width).trim_start())
         .items(items)
         .selected(selected)
@@ -678,11 +701,15 @@ fn flow_picker_lines(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
-        .lines()
-        .map(str::to_string)
-        .collect()
+        .selected_colors(Color::BrightWhite, ACCENT);
+    Some((panel, max_items + 3))
+}
+
+fn flow_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(FLOW_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 /// Directive for `/flow <description>`: orchestrate a BASIC DAG in the
@@ -1319,6 +1346,67 @@ impl App {
         None
     }
 
+    pub(crate) fn handle_flow_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        let Some(panel_state) = self.flow.as_ref() else {
+            return None;
+        };
+        let total = panel_state.flows.len();
+        if total == 0 {
+            return None;
+        }
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return None;
+        }
+        let selected = panel_state.sel.min(total - 1);
+        let Some((mut panel, panel_height)) = flow_picker_panel(
+            &panel_state.flows,
+            selected,
+            &panel_state.root,
+            width,
+            self.height as usize,
+        ) else {
+            return None;
+        };
+        let row_count = panel.view(width as u16, panel_height).lines().count();
+        if row_count == 0 {
+            return None;
+        }
+        let y_offset = flow_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return None;
+        }
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+
+        match panel.handle_mouse(mouse) {
+            Some(MenuPanelMsg::Selected(index)) | Some(MenuPanelMsg::Toggled(index)) => {
+                if let Some(open) = self.flow.as_mut() {
+                    open.sel = index.min(total - 1);
+                }
+                self.handle_flow_key(&KeyEvent {
+                    code: KeyCode::Enter,
+                    modifiers: a3s_tui::KeyModifiers::NONE,
+                })
+            }
+            Some(MenuPanelMsg::Cancelled) => {
+                cancel_pending_picker(&mut self.flow, &mut self.pending_flow_subcommand);
+                None
+            }
+            None => {
+                let after = panel.selected_index().min(total - 1);
+                if after != before {
+                    if let Some(open) = self.flow.as_mut() {
+                        open.sel = after;
+                    }
+                }
+                None
+            }
+        }
+    }
+
     pub(crate) fn on_flow_os_completed(&mut self, res: Result<FlowOsResult, String>) {
         match res {
             Ok(result) => {
@@ -1875,6 +1963,57 @@ mod tests {
         let hint = flow_picker_hint(40);
         assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
         assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
+    }
+
+    #[test]
+    fn flow_picker_mouse_wheel_moves_selection_at_overlay_offset() {
+        use a3s_tui::event::MouseEventKind;
+
+        let root = std::path::PathBuf::from("/tmp/flows");
+        let flows = (0..4)
+            .map(|index| format!("flow-{index}.json"))
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = flow_picker_lines(&flows, 0, &root, width, height).len();
+        let y_offset = flow_overlay_y_offset(height, row_count);
+        let (mut panel, _) = flow_picker_panel(&flows, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 2,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn flow_picker_click_selects_visible_row_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let root = std::path::PathBuf::from("/tmp/flows");
+        let flows = (0..4)
+            .map(|index| format!("flow-{index}.json"))
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = flow_picker_lines(&flows, 0, &root, width, height).len();
+        let y_offset = flow_overlay_y_offset(height, row_count);
+        let (mut panel, _) = flow_picker_panel(&flows, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + 3,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
     }
 
     #[test]

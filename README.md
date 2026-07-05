@@ -319,14 +319,14 @@ or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
 click-to-insert, `/agent` picker wheel browsing and click-to-develop,
 `/mcp` picker wheel browsing and click-to-develop, `/skill` picker wheel
-browsing and click-to-develop, `/plugin` wheel browsing and click-to-toggle,
-approval choices, RemoteUI and jump-to-latest action links, tool status
-truncation, shared alert rows for OS login/configuration warnings, overlay
-composition for menus and prompts, IDE flash footer notifications, live tool
-activity/output tails, `/top` status header actions and CPU/MEM trend
-sparklines, `/loop` key-value summaries, `/kb` delete confirmations, transcript
-gutters and input bubbles, prompt continuation alignment, input border labels,
-shared
+browsing and click-to-develop, `/flow` picker wheel browsing and click-to-open,
+`/plugin` wheel browsing and click-to-toggle, approval choices, RemoteUI and
+jump-to-latest action links, tool status truncation, shared alert rows for OS
+login/configuration warnings, overlay composition for menus and prompts, IDE
+flash footer notifications, live tool activity/output tails, `/top` status
+header actions and CPU/MEM trend sparklines, `/loop` key-value summaries, `/kb`
+delete confirmations, transcript gutters and input bubbles, prompt continuation
+alignment, input border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
@@ -334,9 +334,9 @@ panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
 `/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
-hit-testing, `/mcp` picker hit-testing, `/skill` picker hit-testing, `/plugin`
-overlay hit-testing, and width-bounding fixes are exercised directly by
-`a3s code`.
+hit-testing, `/mcp` picker hit-testing, `/skill` picker hit-testing, `/flow`
+picker hit-testing, `/plugin` overlay hit-testing, and width-bounding fixes are
+exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -516,7 +516,7 @@ These commands are available outside the asset-specific flows:
 | `/mcp debug` | Publish the active MCP asset, then invoke OS Function as a Service through progressive capabilities with `shaped=true`, falling back to `/api/v1/functions/<mcp-asset>/invoke` with `agentKind=tool`. |
 | `/mcp test` | Publish the active MCP asset, then batch-test MCP tools through progressive capabilities with `shaped=true`, falling back to `/api/v1/functions/<mcp-asset>/batch` when needed. |
 | `/mcp open` / `/mcp logs` / `/mcp status` | Inspect the OS MCP asset, logs, or runtime-binding status without mutating the asset; open/logs prefer progressive Function as a Service ViewLinks when available. |
-| `/flow` | Select a local workflow DAG JSON from `flow_dir`, publish it as an OS `workflow` asset with a manifest and Workflow as a Service runtime binding, sync the runtime-binding endpoint when available, and open the workflow designer through a progressive ViewLink or standalone designer fallback. |
+| `/flow` | Select a local workflow DAG JSON from `flow_dir` with keyboard, wheel, or click, publish it as an OS `workflow` asset with a manifest and Workflow as a Service runtime binding, sync the runtime-binding endpoint when available, and open the workflow designer through a progressive ViewLink or standalone designer fallback. |
 | `/flow <description>` | Draft a local workflow DAG JSON, then use `/flow` to publish and iterate through OS Workflow as a Service. This is an OS asset workflow, not `DynamicWorkflowRuntime`. |
 | `/flow clone <git-url>` | Clone an existing workflow asset source into `flow_dir`; cloned OS designer documents under `.a3s/workflows/main.design.json` are discoverable by `/flow`. |
 | `/flow list [query]` | Browse OS workflow assets through the asset-scoped list panel. |
