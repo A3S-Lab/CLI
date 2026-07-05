@@ -1,9 +1,31 @@
 //! `/btw` side-chat overlay: a background side-question + its answer.
 
 use super::super::*;
+use a3s_tui::components::SideNotePanel;
 
-fn btw_line(rendered: &str, width: usize) -> String {
-    pad_to(&truncate(rendered, width), width)
+fn btw_panel_lines(question: &str, answer: Option<&str>, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut panel = SideNotePanel::new("↘ by the way · Esc to close")
+        .question(question)
+        .loading_text("thinking…")
+        .max_body_lines(12)
+        .indent(2)
+        .title_color(TN_YELLOW)
+        .question_color(TN_YELLOW)
+        .answer_color(TN_YELLOW)
+        .muted_color(TN_GRAY);
+    if let Some(answer) = answer {
+        panel = panel.answer(answer);
+    }
+
+    panel
+        .view(width.min(u16::MAX as usize) as u16, usize::MAX)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -13,39 +35,7 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let cap = width.saturating_sub(4).max(8);
-        let wrap = |s: &str| -> Vec<String> {
-            s.lines()
-                .flat_map(|l| {
-                    let cs: Vec<char> = l.chars().collect();
-                    if cs.is_empty() {
-                        vec![String::new()]
-                    } else {
-                        cs.chunks(cap).map(|c| c.iter().collect()).collect()
-                    }
-                })
-                .collect::<Vec<_>>()
-        };
-        let mut lines = vec![btw_line(
-            &Style::new()
-                .fg(TN_YELLOW)
-                .bold()
-                .render("  ↘ by the way · Esc to close"),
-            width,
-        )];
-        for l in wrap(&format!("Q: {q}")) {
-            lines.push(btw_line(
-                &Style::new().fg(TN_YELLOW).bold().render(&format!("  {l}")),
-                width,
-            ));
-        }
-        let ans = a.as_deref().unwrap_or("thinking…");
-        for l in wrap(ans).into_iter().take(12) {
-            lines.push(btw_line(
-                &Style::new().fg(TN_YELLOW).render(&format!("  {l}")),
-                width,
-            ));
-        }
+        let lines = btw_panel_lines(q, a.as_deref(), width);
         self.overlay_list(composed, &lines)
     }
 }
@@ -55,19 +45,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn btw_lines_are_width_bounded_with_styles() {
-        let line = btw_line(
-            &Style::new()
-                .fg(TN_YELLOW)
-                .bold()
-                .render("  by the way side answer with a very long heading"),
+    fn btw_panel_lines_are_width_bounded_with_styles() {
+        let lines = btw_panel_lines(
+            "Can this long side question stay inside the available width?",
+            Some("Yes, the shared side-note panel wraps the compact answer safely."),
             24,
         );
 
         assert!(
-            a3s_tui::style::visible_len(&line) <= 24,
-            "{}",
-            a3s_tui::style::strip_ansi(&line)
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 24),
+            "{:?}",
+            lines
+                .iter()
+                .map(|line| a3s_tui::style::strip_ansi(line))
+                .collect::<Vec<_>>()
+        );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("by the way"), "{plain}");
+        assert!(plain.contains("Q:"), "{plain}");
+        assert!(plain.contains("shared"), "{plain}");
+        assert!(plain.contains("side-note"), "{plain}");
+        assert!(
+            lines.iter().any(|line| line.contains("\x1b[")),
+            "side note panel should carry styling"
+        );
+    }
+
+    #[test]
+    fn btw_panel_lines_use_loading_fallback() {
+        let plain = btw_panel_lines("Still working?", None, 40)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("Still working"), "{plain}");
+        assert!(
+            plain.contains("thinking"),
+            "loading fallback should render: {plain}"
         );
     }
 }
