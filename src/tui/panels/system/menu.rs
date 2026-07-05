@@ -1,14 +1,38 @@
 //! `/` slash command menu + the shared overlay-list primitive.
 
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
-fn slash_menu_row(cmd: &str, desc: &str, width: usize, selected: bool) -> String {
-    let raw = pad_to(&truncate(&format!("  {cmd:<11} {desc}"), width), width);
-    if selected {
-        Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-    } else {
-        Style::new().fg(TN_GRAY).render(&raw)
-    }
+fn slash_menu_lines(
+    candidates: &[(String, String)],
+    selected: usize,
+    width: usize,
+    max_items: usize,
+) -> Vec<String> {
+    let items = candidates
+        .iter()
+        .map(|(cmd, desc)| {
+            MenuItem::new(cmd.clone())
+                .description(desc.clone())
+                .color(TN_GRAY)
+        })
+        .collect::<Vec<_>>();
+    let panel = MenuPanel::without_title()
+        .items(items)
+        .selected(selected)
+        .max_items(max_items)
+        .label_width(11)
+        .indent(0)
+        .marker(" ")
+        .text_color(TN_GRAY)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT);
+    let height = candidates.len().min(max_items).saturating_add(1);
+    panel
+        .view(width as u16, height)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn slash_menu_submit_text(cmd: &str) -> String {
@@ -130,29 +154,7 @@ impl App {
         // Cap the menu height (skills make the list long) and scroll a window so
         // the selection stays visible — Claude-Code style.
         let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 10);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        let mut menu: Vec<String> = (start..end)
-            .map(|i| {
-                let (cmd, desc) = &cands[i];
-                slash_menu_row(cmd, desc, width, i == sel)
-            })
-            .collect();
-        if total > max_rows {
-            // Scroll position footer: ↑ if more above, ↓ if more below.
-            let up = if start > 0 { "↑" } else { " " };
-            let down = if end < total { "↓" } else { " " };
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {up}{down} {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = slash_menu_lines(&cands, sel, width, max_rows);
         self.overlay_list(composed, &menu)
     }
 }
@@ -162,30 +164,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn slash_menu_row_truncates_long_descriptions_to_width() {
-        let row = slash_menu_row(
-            "/agent",
-            "pick an agent definition with an intentionally long explanation that must not overflow",
+    fn slash_menu_lines_truncate_long_descriptions_to_width() {
+        let rows = slash_menu_lines(
+            &[(
+                "/agent".to_string(),
+                "pick an agent definition with an intentionally long explanation that must not overflow"
+                    .to_string(),
+            )],
+            0,
             42,
-            false,
+            10,
         );
+        let row = &rows[0];
 
         assert!(
-            a3s_tui::style::visible_len(&row) <= 42,
+            a3s_tui::style::visible_len(row) <= 42,
             "row should stay bounded: {:?}",
-            a3s_tui::style::strip_ansi(&row)
+            a3s_tui::style::strip_ansi(row)
         );
-        assert!(a3s_tui::style::strip_ansi(&row).contains("/agent"));
+        assert!(a3s_tui::style::strip_ansi(row).contains("/agent"));
     }
 
     #[test]
     fn all_registered_slash_menu_rows_fit_narrow_width() {
         let width = 48;
-        for (cmd, desc) in SLASH_COMMANDS {
-            let row = slash_menu_row(cmd, desc, width, true);
+        let candidates = SLASH_COMMANDS
+            .iter()
+            .map(|(cmd, desc)| ((*cmd).to_string(), (*desc).to_string()))
+            .collect::<Vec<_>>();
+        let rows = slash_menu_lines(&candidates, 0, width, SLASH_COMMANDS.len());
+        for row in rows {
             assert!(
                 a3s_tui::style::visible_len(&row) <= width,
-                "{cmd} row should stay bounded: {:?}",
+                "slash menu row should stay bounded: {:?}",
                 a3s_tui::style::strip_ansi(&row)
             );
         }

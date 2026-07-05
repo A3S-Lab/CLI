@@ -2,6 +2,7 @@
 
 use super::super::*;
 use super::login::{claude_models, has_local_login, AuthProvider};
+use a3s_tui::components::{TabbedMenuItem, TabbedMenuPanel, TabbedMenuTab};
 
 /// A tab in the `/model` picker: config models, or a signed-in account's models.
 struct ModelTab {
@@ -32,8 +33,58 @@ const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = TN_CYAN;
 
-fn model_line(rendered: &str, width: usize) -> String {
-    pad_to(&truncate(rendered, width), width)
+fn model_menu_lines(
+    tabs: &[ModelTab],
+    active_tab: usize,
+    selected: usize,
+    current_model: Option<&str>,
+    width: usize,
+    max_items: usize,
+) -> Vec<String> {
+    if tabs.is_empty() {
+        return Vec::new();
+    }
+    let active_tab = active_tab.min(tabs.len() - 1);
+    let panel_tabs = tabs
+        .iter()
+        .map(|tab| {
+            let items = tab
+                .models
+                .iter()
+                .map(|model| {
+                    let prefix = if Some(model.as_str()) == current_model {
+                        "●"
+                    } else {
+                        " "
+                    };
+                    TabbedMenuItem::new(model.clone()).prefix(prefix)
+                })
+                .collect::<Vec<_>>();
+            TabbedMenuTab::new(tab.label, tab.color)
+                .items(items)
+                .empty_text("(no models)")
+        })
+        .collect::<Vec<_>>();
+    let active_items = tabs[active_tab].models.len();
+    let header_rows = 1 + usize::from(tabs.len() > 1) + 1;
+    let item_rows = active_items.max(1).min(max_items);
+    let height = header_rows + item_rows + 1;
+
+    TabbedMenuPanel::new(panel_tabs)
+        .title("Select model")
+        .hint("↑/↓ model · ←/→ account · Enter · Esc")
+        .active_tab(active_tab)
+        .selected(selected)
+        .max_items(max_items)
+        .indent(2)
+        .hint_color(TN_GRAY)
+        .text_color(TN_GRAY)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width as u16, height)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -558,60 +609,11 @@ impl App {
         }
         let t = self.model_tab.min(tabs.len() - 1);
         let width = self.width as usize;
-        let mut menu = vec![model_line(
-            &Style::new()
-                .fg(tabs[t].color)
-                .bold()
-                .render("  Select model — ↑/↓ · ←/→ account · Enter · Esc"),
-            width,
-        )];
-        // Tab strip (relay-style): each source in its brand colour, active boxed.
-        if tabs.len() > 1 {
-            let mut bar = String::from("  ");
-            for (i, tab) in tabs.iter().enumerate() {
-                let chip = format!(" {} ", tab.label);
-                bar.push_str(&if i == t {
-                    Style::new()
-                        .fg(Color::Black)
-                        .bg(tab.color)
-                        .bold()
-                        .render(&chip)
-                } else {
-                    Style::new().fg(tab.color).render(&chip)
-                });
-                bar.push(' ');
-            }
-            menu.push(model_line(&bar, width));
-        }
-        let models = &tabs[t].models;
-        let total = models.len();
         // Scroll a window around the selection so a pick past row 12 stays visible
         // and reachable (the list used to render a fixed first-12 only).
-        let sel = sel.min(total.saturating_sub(1));
         let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for (i, m) in models.iter().enumerate().take(end).skip(start) {
-            let cur = Some(m.as_str()) == self.model.as_deref();
-            let raw = model_line(&format!("  {} {m}", if cur { "●" } else { " " }), width);
-            menu.push(if i == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_GRAY).render(&raw)
-            });
-        }
-        if total > max_rows {
-            menu.push(model_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let sel = sel.min(tabs[t].models.len().saturating_sub(1));
+        let menu = model_menu_lines(&tabs, t, sel, self.model.as_deref(), width, max_rows);
         self.overlay_list(composed, &menu)
     }
 }
@@ -651,19 +653,31 @@ mod tests {
     }
 
     #[test]
-    fn model_lines_are_width_bounded_with_styles() {
-        let line = model_line(
-            &Style::new()
-                .fg(CODEX_COLOR)
-                .bold()
-                .render("  openai-compatible/provider/model-name-with-a-very-long-context-window"),
+    fn model_menu_lines_are_width_bounded_with_styles() {
+        let lines = model_menu_lines(
+            &[ModelTab {
+                label: "Codex",
+                color: CODEX_COLOR,
+                models: vec![
+                    "openai-compatible/provider/model-name-with-a-very-long-context-window".into(),
+                    "gpt-5-codex".into(),
+                ],
+                provider: Some(AuthProvider::Codex),
+                os_gateway: false,
+            }],
+            0,
+            0,
+            Some("openai-compatible/provider/model-name-with-a-very-long-context-window"),
             36,
+            3,
         );
 
-        assert!(
-            a3s_tui::style::visible_len(&line) <= 36,
-            "{}",
-            a3s_tui::style::strip_ansi(&line)
-        );
+        for line in lines {
+            assert!(
+                a3s_tui::style::visible_len(&line) <= 36,
+                "{}",
+                a3s_tui::style::strip_ansi(&line)
+            );
+        }
     }
 }
