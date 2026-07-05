@@ -2279,16 +2279,7 @@ impl Model for App {
                     match key.code {
                         KeyCode::Up => self.theme_panel = Some(sel.saturating_sub(1)),
                         KeyCode::Down => self.theme_panel = Some((sel + 1).min(THEMES.len() - 1)),
-                        KeyCode::Enter => {
-                            SYNTAX_THEME.store(sel, std::sync::atomic::Ordering::Relaxed);
-                            self.theme_panel = None;
-                            self.rebuild_viewport();
-                            self.push_line(
-                                &Style::new()
-                                    .fg(TN_GREEN)
-                                    .render(&format!("  ◆ code theme: {}", THEMES[sel].name)),
-                            );
-                        }
+                        KeyCode::Enter => self.apply_theme_selection(sel),
                         KeyCode::Esc => self.theme_panel = None,
                         _ => {}
                     }
@@ -2454,6 +2445,10 @@ impl Model for App {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
                 if self.model_menu.is_some() {
                     self.handle_model_mouse(&m);
+                    return None;
+                }
+                if self.theme_panel.is_some() {
+                    self.handle_theme_mouse(&m);
                     return None;
                 }
                 if self.help_open {

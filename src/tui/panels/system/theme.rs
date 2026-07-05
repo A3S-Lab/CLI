@@ -1,9 +1,16 @@
 //! `/theme` overlay: theme list + live syntax-highlight preview.
 
 use super::super::*;
-use a3s_tui::components::{PreviewItem, PreviewPanel};
+use a3s_tui::components::{PreviewItem, PreviewPanel, PreviewPanelMsg};
+use a3s_tui::event::MouseEvent;
 
-fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
+const THEME_OVERLAY_ROWS_BELOW: usize = 5;
+
+fn theme_panel_height() -> usize {
+    THEMES.len() + 8
+}
+
+fn theme_panel(selected: usize) -> PreviewPanel {
     let selected = selected.min(THEMES.len().saturating_sub(1));
     let items = THEMES
         .iter()
@@ -23,7 +30,7 @@ fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
         .collect::<Vec<_>>();
 
     PreviewPanel::new("Theme")
-        .subtitle("↑/↓ preview · Enter apply · Esc")
+        .subtitle("↑/↓ preview · Enter/click apply · Esc")
         .items(items)
         .selected(selected)
         .max_items(THEMES.len().max(1))
@@ -38,13 +45,70 @@ fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
         .divider_color(TN_GRAY)
         .preview_color(TN_FG)
         .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, THEMES.len() + 8)
+}
+
+fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
+    theme_panel(selected)
+        .view(width.min(u16::MAX as usize) as u16, theme_panel_height())
         .lines()
         .map(str::to_string)
         .collect()
 }
 
+fn theme_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(THEME_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
+}
+
 impl App {
+    pub(crate) fn apply_theme_selection(&mut self, selected: usize) {
+        let selected = selected.min(THEMES.len().saturating_sub(1));
+        SYNTAX_THEME.store(selected, std::sync::atomic::Ordering::Relaxed);
+        self.theme_panel = None;
+        self.rebuild_viewport();
+        self.push_line(
+            &Style::new()
+                .fg(TN_GREEN)
+                .render(&format!("  ◆ code theme: {}", THEMES[selected].name)),
+        );
+    }
+
+    pub(crate) fn handle_theme_mouse(&mut self, mouse: &MouseEvent) {
+        let Some(selected) = self.theme_panel else {
+            return;
+        };
+        let width = (self.width as usize).min(u16::MAX as usize);
+        let mut panel = theme_panel(selected);
+        let row_count = panel
+            .view(width as u16, theme_panel_height())
+            .lines()
+            .count();
+        if row_count == 0 {
+            return;
+        }
+        let y_offset = theme_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return;
+        }
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+
+        match panel.handle_mouse(mouse) {
+            Some(PreviewPanelMsg::Selected(index)) => self.apply_theme_selection(index),
+            Some(PreviewPanelMsg::Cancelled) => self.theme_panel = None,
+            None => {
+                let after = panel.selected_index();
+                if after != before {
+                    self.theme_panel = Some(after);
+                }
+            }
+        }
+    }
+
     /// `/theme` picker: a theme list + a live syntax-highlight preview.
     pub(crate) fn overlay_theme(&self, composed: String) -> String {
         let Some(sel) = self.theme_panel else {
@@ -83,5 +147,56 @@ mod tests {
             plain.iter().any(|line| line.contains("preview")),
             "{plain:?}"
         );
+    }
+
+    #[test]
+    fn theme_panel_mouse_wheel_updates_preview_selection() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let row_count = theme_panel_lines(0, 48).len();
+        let y_offset = theme_overlay_y_offset(24, row_count);
+        let mut panel = theme_panel(0);
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 2,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(
+            panel.selected_index(),
+            1.min(THEMES.len().saturating_sub(1))
+        );
+
+        let ignored = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: y_offset.saturating_sub(1),
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+        assert_eq!(ignored, None);
+    }
+
+    #[test]
+    fn theme_panel_click_selects_item_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        assert!(THEMES.len() > 1);
+        let row_count = theme_panel_lines(0, 48).len();
+        let y_offset = theme_overlay_y_offset(24, row_count);
+        let mut panel = theme_panel(0);
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: y_offset + 3,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(PreviewPanelMsg::Selected(1)));
     }
 }
