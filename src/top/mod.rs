@@ -3340,19 +3340,7 @@ impl TopApp {
         let Some(panel) = &self.column_panel else {
             return String::new();
         };
-        let width = self.width as usize;
-        let mut out = Vec::new();
-        out.push(Style::new().fg(ACCENT).bold().render(&pad_plain(
-            &format!(" columns · {}", panel.tab.label()),
-            width,
-        )));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
-        out.push(panel.select.view(self.width, self.visible_height()));
-        out.join("\n")
+        column_panel_lines(panel, self.width, self.visible_height()).join("\n")
     }
 
     fn logs_view(&self) -> String {
@@ -8672,6 +8660,37 @@ fn container_menu_lines(menu: &ContainerMenu, width: u16, height: usize) -> Vec<
     .collect()
 }
 
+fn column_panel_lines(panel: &ColumnPanel, width: u16, height: usize) -> Vec<String> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let items = panel
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(idx, choice)| MenuItem::new(choice.label).checked(panel.select.is_checked(idx)))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(format!("columns · {}", panel.tab.label()))
+        .items(items)
+        .selected(panel.select.cursor())
+        .max_items(height)
+        .show_scroll(true)
+        .number_shortcuts(true)
+        .indent(1)
+        .marker(">")
+        .title_color(ACCENT)
+        .text_color(Color::BrightWhite)
+        .muted_color(Color::BrightBlack)
+        .checked_color(Color::Green)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width, height.saturating_add(2))
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn sort_panel_lines(panel: &SortPanel, width: u16, height: usize) -> Vec<String> {
     let items = panel
         .choices
@@ -11242,18 +11261,28 @@ mod tests {
     }
 
     #[test]
-    fn column_panel_accepts_number_shortcuts() {
+    fn column_panel_uses_shared_menu_panel_and_accepts_number_shortcuts() {
         let mut app = TopApp::new(TopOptions {
             tab: Tab::Containers,
             ..TopOptions::default()
         });
+        app.width = 42;
 
         assert!(app.column_visible("containers.id"));
         app.open_column_panel();
-        let plain = a3s_tui::style::strip_ansi(&app.column_panel_view());
-        assert!(plain.contains("> 1 [x] Status"));
-        assert!(plain.contains("  2 [x] Name"));
-        assert!(plain.contains("  3 [x] CID"));
+        let rendered = app.column_panel_view();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        assert!(plain.contains("columns · Containers"), "{plain}");
+        assert!(plain.contains("> 1. [✓] Status"), "{plain}");
+        assert!(plain.contains("  2. [✓] Name"), "{plain}");
+        assert!(plain.contains("  3. [✓] CID"), "{plain}");
+        assert!(rendered.contains("\x1b["), "selected row should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 42),
+            "{plain}"
+        );
 
         app.handle_key(KeyEvent {
             code: KeyCode::Char('3'),
