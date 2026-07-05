@@ -1,6 +1,7 @@
 //! `/help` overlay: the full-screen usage guide.
 
 use super::super::*;
+use a3s_tui::components::{HelpPanel, HelpSection};
 
 const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     (
@@ -248,78 +249,91 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     ),
 ];
 
-fn help_row(width: usize, key: &str, desc: &str) -> String {
-    let key_width = 20.min(width.saturating_sub(6));
-    let desc_width = width.saturating_sub(4 + key_width + 2);
-    let key = pad_to(&truncate(key, key_width), key_width);
-    let desc = truncate(desc, desc_width);
-    format!(
-        "    {}  {}",
-        Style::new().fg(TN_FG).bold().render(&key),
-        Style::new().fg(TN_GRAY).render(&desc)
-    )
+fn help_panel() -> HelpPanel {
+    let mut slash_commands = HelpSection::new("Slash commands");
+    for (command, description) in SLASH_COMMANDS {
+        slash_commands.add_row(*command, *description);
+    }
+
+    let mut command_forms = HelpSection::new("Command forms");
+    for (command, description) in PARAMETER_HELP_ROWS {
+        command_forms.add_row(*command, *description);
+    }
+
+    HelpPanel::without_title()
+        .section(slash_commands)
+        .section(command_forms)
+        .section(
+            HelpSection::new("Input modes")
+                .row("! <cmd>", "run a shell command directly")
+                .row(
+                    "? <query>",
+                    "deep research with Runtime fan-out + RemoteUI evidence when signed in",
+                )
+                .row("@<path>", "attach a workspace file from the file picker")
+                .row("Ctrl+V", "attach a clipboard image to the next message"),
+        )
+        .section(
+            HelpSection::new("Keys")
+                .row("Enter", "send; while busy, the message is queued")
+                .row("Shift+Enter", "insert a newline in the input")
+                .row("Shift+Tab", "cycle run mode: default -> plan -> auto")
+                .row(
+                    "Up / Down",
+                    "recall input history; inside menus, move selection",
+                )
+                .row("PgUp / PgDn", "scroll the transcript or this help panel")
+                .row("Shift+End", "jump to the latest transcript output")
+                .row("drag", "select transcript text; auto-copies on release")
+                .row(
+                    "Esc",
+                    "interrupt the running turn; close panels where applicable",
+                )
+                .row("Ctrl+C x2", "quit"),
+        )
+        .section(
+            HelpSection::new("Panels")
+                .row(
+                    "/ide /config /kb",
+                    "full-screen file editors and knowledge-base browser",
+                )
+                .row(
+                    "/memory",
+                    "memory graph with entities, tiers, aliases, and forget candidates",
+                )
+                .row(
+                    "/model",
+                    "configured models plus signed-in Claude/Codex/OS gateway tabs",
+                )
+                .row(
+                    "/flow /agent /mcp",
+                    "team asset authoring with local dev and typed OS services",
+                )
+                .row(
+                    "/skill /okf /loop",
+                    "skill, OKF package, and engineered-loop authoring",
+                ),
+        )
+        .section(HelpSection::new("Resume").row("resume", "a3s code resume <id> after exit"))
+        .key_width(20)
+        .indent(4)
+        .gap(2)
+        .section_color(ACCENT)
+        .key_color(TN_FG)
+        .description_color(TN_GRAY)
+        .footer_color(TN_GRAY)
 }
 
 fn help_body_lines(width: usize) -> Vec<String> {
-    let head = |s: &str| Style::new().fg(ACCENT).bold().render(s);
-    let row = |k: &str, d: &str| help_row(width, k, d);
-    let mut lines: Vec<String> = vec![head("  Slash commands")];
-    lines.extend(SLASH_COMMANDS.iter().map(|(k, d)| row(k, d)));
-    lines.extend([String::new(), head("  Command forms")]);
-    lines.extend(PARAMETER_HELP_ROWS.iter().map(|(k, d)| row(k, d)));
-    lines.extend([
-        String::new(),
-        head("  Input modes"),
-        row("! <cmd>", "run a shell command directly"),
-        row(
-            "? <query>",
-            "deep research with Runtime fan-out + RemoteUI evidence when signed in",
-        ),
-        row("@<path>", "attach a workspace file from the file picker"),
-        row("Ctrl+V", "attach a clipboard image to the next message"),
-        String::new(),
-        head("  Keys"),
-        row("Enter", "send; while busy, the message is queued"),
-        row("Shift+Enter", "insert a newline in the input"),
-        row("Shift+Tab", "cycle run mode: default -> plan -> auto"),
-        row(
-            "Up / Down",
-            "recall input history; inside menus, move selection",
-        ),
-        row("PgUp / PgDn", "scroll the transcript or this help panel"),
-        row("Shift+End", "jump to the latest transcript output"),
-        row("drag", "select transcript text; auto-copies on release"),
-        row(
-            "Esc",
-            "interrupt the running turn; close panels where applicable",
-        ),
-        row("Ctrl+C x2", "quit"),
-        String::new(),
-        head("  Panels"),
-        row(
-            "/ide /config /kb",
-            "full-screen file editors and knowledge-base browser",
-        ),
-        row(
-            "/memory",
-            "memory graph with entities, tiers, aliases, and forget candidates",
-        ),
-        row(
-            "/model",
-            "configured models plus signed-in Claude/Codex/OS gateway tabs",
-        ),
-        row(
-            "/flow /agent /mcp",
-            "team asset authoring with local dev and typed OS services",
-        ),
-        row(
-            "/skill /okf /loop",
-            "skill, OKF package, and engineered-loop authoring",
-        ),
-        String::new(),
-        row("resume", "a3s code resume <id> after exit"),
-    ]);
-    lines
+    if width == 0 {
+        return Vec::new();
+    }
+
+    help_panel()
+        .view(width.min(u16::MAX as usize) as u16, usize::MAX)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
