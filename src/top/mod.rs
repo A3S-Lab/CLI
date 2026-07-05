@@ -2758,27 +2758,24 @@ impl TopApp {
         let activity = self.agent_activity_for_process(row);
         let mut out = Vec::new();
 
-        out.push(Style::new().fg(color).bold().render(&pad_plain(
-            &format!(" agent view {} · pid {}", agent.label(), row.pid),
-            width,
-        )));
-        out.push(Style::new().fg(Color::BrightBlack).render(&pad_plain(
-            &format!(
-                " ppid {} · elapsed {} · children {} · subtree cpu {:.1}% mem {:.1}% · risk {} · cwd {}",
-                row.ppid,
-                row.elapsed,
-                usage.descendants,
-                usage.cpu_pct,
-                usage.mem_pct,
-                row.risk.label(),
-                display_workspace(row.cwd.as_deref())
-            ),
-            width,
-        )));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
+        out.extend(
+            SectionHeader::new(format!("agent view {} · pid {}", agent.label(), row.pid))
+                .metadata(format!(
+                    "ppid {} · elapsed {} · children {} · subtree cpu {:.1}% mem {:.1}% · risk {} · cwd {}",
+                    row.ppid,
+                    row.elapsed,
+                    usage.descendants,
+                    usage.cpu_pct,
+                    usage.mem_pct,
+                    row.risk.label(),
+                    display_workspace(row.cwd.as_deref())
+                ))
+                .title_color(color)
+                .metadata_color(Color::BrightBlack)
+                .separator_color(Color::BrightBlack)
+                .view(self.width, 3)
+                .lines()
+                .map(ToString::to_string),
         );
         out.push(
             Meter::new(usage.cpu_pct as f64)
@@ -14035,6 +14032,7 @@ mod tests {
             tab: Tab::Agents,
             ..TopOptions::default()
         });
+        app.width = 96;
         app.snapshot.processes = vec![ProcessRow {
             cpu_pct: 33.0,
             mem_pct: 12.0,
@@ -14054,9 +14052,12 @@ mod tests {
         }];
         app.focused_agent_pid = Some(42);
 
-        let plain = a3s_tui::style::strip_ansi(&app.table());
+        let rendered = app.table();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("agent view codex"));
+        assert!(plain.contains("pid 42"));
+        assert!(plain.contains("ppid 1"));
         assert!(plain.contains("activity events 1"));
         assert!(plain.contains("TIME"));
         assert!(plain.contains("KIND"));
@@ -14068,6 +14069,13 @@ mod tests {
         assert!(plain.contains("git status"));
         assert!(plain.contains("command codex exec task"));
         assert!(!plain.contains("AGENT"));
+        assert!(rendered.contains("\x1b["), "agent focus should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 96),
+            "{plain}"
+        );
     }
 
     #[test]
