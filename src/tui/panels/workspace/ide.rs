@@ -5,6 +5,7 @@
 
 use super::super::*;
 use super::spf;
+use a3s_tui::components::CursorLine;
 
 impl App {
     /// Handle a key while the `/ide` panel is open. Returns true if consumed.
@@ -1065,14 +1066,10 @@ impl IdeFile {
 /// Plain — no syntax colour — so the inverse cursor cell is unambiguous on the
 /// active line.
 fn render_cursor_line(window: &str, cursor_col: usize) -> String {
-    let before = slice_cols(window, 0, cursor_col);
-    let at = slice_cols(window, cursor_col, cursor_col + 1);
-    let at = if at.is_empty() { " ".to_string() } else { at };
-    let after = slice_cols(window, cursor_col + 1, usize::MAX);
-    format!(
-        "{before}{}{after}",
-        Style::new().fg(Color::Black).bg(TN_FG).render(&at)
-    )
+    CursorLine::new(window)
+        .cursor_col(cursor_col)
+        .cursor_style(Style::new().fg(Color::Black).bg(TN_FG))
+        .view()
 }
 
 #[cfg(test)]
@@ -1244,12 +1241,15 @@ mod vim_tests {
     }
 
     #[test]
-    fn render_cursor_line_marks_the_active_column() {
+    fn render_cursor_line_uses_shared_cursor_line() {
         let out = render_cursor_line("hello", 1);
         assert!(out.starts_with('h')); // text before the cursor is plain
         assert!(out.contains('\u{1b}')); // the cursor cell is styled (inverse)
                                          // cursor past end-of-line still renders a block (a styled space).
         assert!(render_cursor_line("hi", 5).contains('\u{1b}'));
+        let wide = render_cursor_line("你好", 1);
+        assert_eq!(a3s_tui::style::strip_ansi(&wide), "你好");
+        assert!(wide.contains("你"));
     }
 
     #[test]
