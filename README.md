@@ -116,14 +116,14 @@ SPF/IDE file metadata, compaction progress, the live activity shimmer, effort
 overlay, and footer status rows use shared `a3s-tui` components such as
 `MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`,
 `ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`, `OutputBlock`,
-`ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
+`Checklist`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
 `ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and
 `ModeLine`. Reusable menu scrolling, selection, tool status truncation,
 transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, live reasoning wrapping, completed output tail previews,
-compaction progress bars, connector rows, diff wrapping, framed panels,
-breadcrumbs, detail-row layout, activity shimmer, and width-bounding fixes are
-exercised directly by `a3s code`.
+task status summaries, compaction progress bars, connector rows, diff wrapping,
+framed panels, breadcrumbs, detail-row layout, activity shimmer, and
+width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD

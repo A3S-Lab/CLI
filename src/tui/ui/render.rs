@@ -2,7 +2,8 @@
 
 use super::*;
 use a3s_tui::components::{
-    ConnectorBlock, ConnectorRow, DiffView, OutputBlock, OutputStatus, ToolStatusLine,
+    Checklist, ChecklistItem, ChecklistStatus, ConnectorBlock, ConnectorRow, DiffView, OutputBlock,
+    OutputStatus, ToolStatusLine,
 };
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
@@ -129,21 +130,34 @@ fn render_single_task_summary(
     let status = if success { "completed" } else { "failed" };
     let output_bytes = meta.get("output_bytes").and_then(|v| v.as_u64());
     let artifact = meta.get("artifact_uri").and_then(|v| v.as_str());
-    let mut rows = vec![format!(
-        "Task {status} · {agent}{}",
-        task_id_suffix(task_id)
+    let mut rows = vec![TaskSummaryRow::header(
+        format!("Task {status} · {agent}{}", task_id_suffix(task_id)),
+        success,
     )];
     if let Some(excerpt) = task_child_excerpt(output) {
-        rows.extend(excerpt.lines().map(str::to_string));
+        rows.extend(
+            excerpt
+                .lines()
+                .map(|line| TaskSummaryRow::child(line, success)),
+        );
     } else if output_bytes == Some(0) {
-        rows.push("no child text output; using plan/status for synthesis".to_string());
+        rows.push(TaskSummaryRow::child(
+            "no child text output; using plan/status for synthesis",
+            success,
+        ));
     } else {
-        rows.push("child output stored in task artifact".to_string());
+        rows.push(TaskSummaryRow::child(
+            "child output stored in task artifact",
+            success,
+        ));
     }
     if let Some(uri) = artifact {
-        rows.push(format!("artifact: {}", truncate(uri, 96)));
+        rows.push(TaskSummaryRow::child(
+            format!("artifact: {}", truncate(uri, 96)),
+            success,
+        ));
     }
-    Some(render_task_rows(&rows, success, width))
+    Some(render_task_rows(&rows, width))
 }
 
 fn render_parallel_task_summary(
@@ -159,13 +173,15 @@ fn render_parallel_task_summary(
         .iter()
         .filter(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(ok))
         .count();
-    let mut rows = vec![format!("{done}/{} agents done", results.len())];
+    let mut rows = vec![TaskSummaryRow::header(
+        format!("{done}/{} agents done", results.len()),
+        ok,
+    )];
     for result in results.iter().take(4) {
         let success = result
             .get("success")
             .and_then(|v| v.as_bool())
             .unwrap_or(ok);
-        let mark = if success { "✓" } else { "✗" };
         let agent = result
             .get("agent")
             .and_then(|v| v.as_str())
@@ -180,33 +196,84 @@ fn render_parallel_task_summary(
         } else {
             "output stored in artifact".to_string()
         };
-        rows.push(format!(
-            "{mark} {agent}{} · {detail}",
-            task_id_suffix(task_id)
+        rows.push(TaskSummaryRow::result(
+            format!("{agent}{} · {detail}", task_id_suffix(task_id)),
+            success,
         ));
     }
     let more = results.len().saturating_sub(4);
     if more > 0 {
-        rows.push(format!("+{more} more agent result(s)"));
+        rows.push(TaskSummaryRow::child(
+            format!("+{more} more agent result(s)"),
+            ok,
+        ));
     }
-    Some(render_task_rows(&rows, ok, width))
+    Some(render_task_rows(&rows, width))
 }
 
-fn render_task_rows(rows: &[String], ok: bool, width: usize) -> String {
-    let body_color = if ok { TN_GRAY } else { TN_RED };
-    let block = ConnectorBlock::new()
-        .margin(PAD)
-        .connector_indent(2)
-        .connector_gap(2)
-        .connector_color(TN_GRAY)
-        .text_color(body_color)
-        .show_omitted_count(false)
-        .rows(
-            rows.iter()
-                .map(|row| ConnectorRow::new(row.clone()))
-                .collect(),
-        )
-        .view(width.min(u16::MAX as usize) as u16);
+#[derive(Debug, Clone)]
+struct TaskSummaryRow {
+    text: String,
+    status: ChecklistStatus,
+    glyph: char,
+    glyph_color: Color,
+    text_color: Color,
+}
+
+impl TaskSummaryRow {
+    fn header(text: impl Into<String>, ok: bool) -> Self {
+        Self::status(text, ok)
+    }
+
+    fn result(text: impl Into<String>, ok: bool) -> Self {
+        Self::status(text, ok)
+    }
+
+    fn child(text: impl Into<String>, ok: bool) -> Self {
+        Self {
+            text: text.into(),
+            status: ChecklistStatus::Pending,
+            glyph: '·',
+            glyph_color: TN_GRAY,
+            text_color: if ok { TN_GRAY } else { TN_RED },
+        }
+    }
+
+    fn status(text: impl Into<String>, ok: bool) -> Self {
+        Self {
+            text: text.into(),
+            status: if ok {
+                ChecklistStatus::Done
+            } else {
+                ChecklistStatus::Error
+            },
+            glyph: if ok { '✓' } else { '✗' },
+            glyph_color: if ok { TN_GREEN } else { TN_RED },
+            text_color: if ok { TN_GRAY } else { TN_RED },
+        }
+    }
+}
+
+fn render_task_rows(rows: &[TaskSummaryRow], width: usize) -> String {
+    let items = rows
+        .iter()
+        .map(|row| {
+            ChecklistItem::new(row.text.clone())
+                .status(row.status)
+                .glyph(row.glyph)
+                .glyph_color(row.glyph_color)
+                .text_color(row.text_color)
+        })
+        .collect();
+    let block = Checklist::new(items)
+        .indent(PAD + 2)
+        .connector(true)
+        .pending_color(TN_GRAY)
+        .done_color(TN_GREEN)
+        .error_color(TN_RED)
+        .text_color(TN_GRAY)
+        .strikethrough_done(false)
+        .view(width.min(u16::MAX as usize) as u16, rows.len());
 
     if block.is_empty() {
         String::new()
@@ -864,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn task_summary_uses_shared_connector_block() {
+    fn task_summary_uses_shared_checklist() {
         let meta = serde_json::json!({
             "agent": "review",
             "task_id": "task-with-a-long-id-that-still-fits",
@@ -878,20 +945,64 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("    ⎿  Task failed")),
+                .any(|line| line.starts_with("    ⎿  ✗ Task failed")),
             "{plain}"
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.starts_with("       no child text output")),
+                .any(|line| line.starts_with("       · no child text output")),
             "{plain}"
         );
         assert!(
+            rendered.contains(&format!("\x1b[{}m✗", TN_RED.fg_ansi())),
+            "failed task summary should use checklist error glyph color: {rendered:?}"
+        );
+        assert!(
             rendered.contains(&format!("\x1b[{}mTask failed", TN_RED.fg_ansi())),
-            "failed task summary should use the connector block text color: {rendered:?}"
+            "failed task summary should use checklist error text color: {rendered:?}"
         );
         assert_visible_lines_bounded(&rendered, 44);
+    }
+
+    #[test]
+    fn parallel_task_summary_marks_each_result_with_checklist_status() {
+        let meta = serde_json::json!({
+            "results": [
+                {
+                    "agent": "plan",
+                    "task_id": "task-ok",
+                    "success": true,
+                    "output_bytes": 42,
+                    "output": "Task completed\nOutput:\nready"
+                },
+                {
+                    "agent": "review",
+                    "task_id": "task-fail",
+                    "success": false,
+                    "output_bytes": 0,
+                    "output": "Task failed\nOutput:\n"
+                }
+            ]
+        });
+        let rendered = render_tool_end("parallel_task", 0, "", Some(&meta), None, 58);
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("    ⎿  ✓ 1/2 agents done"), "{plain}");
+        assert!(plain.contains("       ✓ plan · task-ok · ready"), "{plain}");
+        assert!(
+            plain.contains("       ✗ review · task-fail · no child text output"),
+            "{plain}"
+        );
+        assert!(
+            rendered.contains(&format!("\x1b[{}m✓", TN_GREEN.fg_ansi())),
+            "successful task rows should use checklist success glyphs: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&format!("\x1b[{}m✗", TN_RED.fg_ansi())),
+            "failed task rows should use checklist error glyphs: {rendered:?}"
+        );
+        assert_visible_lines_bounded(&rendered, 58);
     }
 
     #[test]
