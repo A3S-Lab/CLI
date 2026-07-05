@@ -7,6 +7,7 @@
 
 use super::super::os_progressive;
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 const SKILL_MANIFEST_PATH: &str = ".a3s/skill.asset.json";
 const SKILL_RUNTIME_BINDING_PATH: &str = ".a3s/skill.runtime-binding.json";
@@ -1174,11 +1175,44 @@ fn skill_picker_hint(width: usize) -> String {
     truncate("  ↑/↓ select · Enter local skill dev · Esc cancel", width)
 }
 
-fn skill_picker_row(skill: &SkillAsset, width: usize) -> String {
-    pad_to(
-        &truncate(&format!("  {} · {}", skill.rel, skill.description), width),
-        width,
-    )
+fn skill_picker_lines(
+    skills: &[SkillAsset],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let total = skills.len();
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let selected = selected.min(total.saturating_sub(1));
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = skills
+        .iter()
+        .map(|skill| MenuItem::new(skill.rel.clone()).description(skill.description.clone()))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(skill_picker_header(total, root, width).trim_start())
+        .subtitle(skill_picker_hint(width).trim_start())
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -1297,37 +1331,13 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = panel.skills.len();
-        let mut menu = vec![
-            pad_to(
-                &Style::new().fg(ACCENT).bold().render(&skill_picker_header(
-                    total,
-                    &panel.root,
-                    width,
-                )),
-                width,
-            ),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&skill_picker_hint(width)),
-                width,
-            ),
-        ];
-        let sel = panel.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for i in start..end {
-            let raw = skill_picker_row(&panel.skills[i], width);
-            menu.push(if i == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
+        let menu = skill_picker_lines(
+            &panel.skills,
+            panel.sel,
+            &panel.root,
+            width,
+            self.height as usize,
+        );
         self.overlay_list(composed, &menu)
     }
 }
@@ -1406,6 +1416,77 @@ mod tests {
             );
         }
         assert!(parse_skill_subcommand("make a skill").is_none());
+    }
+
+    #[test]
+    fn skill_picker_lines_use_bounded_shared_menu_rows() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/skills/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let skills = vec![
+            SkillAsset {
+                rel: "nested/very-long-skill-name-that-would-overflow-the-panel/SKILL.md".into(),
+                path: root
+                    .join("nested/very-long-skill-name-that-would-overflow-the-panel/SKILL.md"),
+                name: "long-skill".into(),
+                description: "A long skill description that should be trimmed cleanly".into(),
+            },
+            SkillAsset {
+                rel: "ops-triage/SKILL.md".into(),
+                path: root.join("ops-triage/SKILL.md"),
+                name: "ops-triage".into(),
+                description: "Triage incidents".into(),
+            },
+        ];
+        let lines = skill_picker_lines(&skills, 0, &root, 40, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("skill"), "{plain}");
+        assert!(plain.contains("select a skill asset"), "{plain}");
+        assert!(plain.contains("very-long-skill"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn skill_picker_lines_scroll_selected_skill_into_view() {
+        let root = std::path::PathBuf::from("/tmp/skills");
+        let skills = (0..16)
+            .map(|index| SkillAsset {
+                rel: format!("skill-{index}/SKILL.md"),
+                path: root.join(format!("skill-{index}/SKILL.md")),
+                name: format!("skill-{index}"),
+                description: format!("Skill asset {index}"),
+            })
+            .collect::<Vec<_>>();
+        let plain = skill_picker_lines(&skills, 14, &root, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("skill-14/SKILL.md"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn skill_picker_header_and_hint_fit_fixed_width() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/skills/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let header = skill_picker_header(9, &root, 40);
+        let hint = skill_picker_hint(40);
+        assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
+        assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
     }
 
     #[test]
