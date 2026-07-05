@@ -7,6 +7,7 @@
 //! survives OS API shape drift.
 
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -980,11 +981,13 @@ impl App {
             total: rows.len(),
             hint,
         };
-        self.render_resource_panel(
-            &spec,
-            |idx, selected, width| asset_list_row(rows[idx], selected, width),
-            |width| asset_detail(rows.get(panel.sel).copied(), width),
-        )
+        let items = rows
+            .iter()
+            .map(|row| asset_list_item(row))
+            .collect::<Vec<_>>();
+        self.render_resource_panel(&spec, items, |width| {
+            asset_detail(rows.get(panel.sel).copied(), width)
+        })
     }
 
     pub(crate) fn render_runtime_activity(&self, panel: &RuntimeActivityPanel) -> String {
@@ -1015,21 +1018,22 @@ impl App {
             total: rows.len(),
             hint: runtime_activity_hint(),
         };
-        self.render_resource_panel(
-            &spec,
-            |idx, selected, width| activity_list_row(rows[idx], selected, width),
-            |width| activity_detail(rows.get(panel.sel).copied(), width),
-        )
+        let items = rows
+            .iter()
+            .map(|row| activity_list_item(row))
+            .collect::<Vec<_>>();
+        self.render_resource_panel(&spec, items, |width| {
+            activity_detail(rows.get(panel.sel).copied(), width)
+        })
     }
 
-    fn render_resource_panel<Row, Detail>(
+    fn render_resource_panel<Detail>(
         &self,
         spec: &ResourcePanelRender<'_>,
-        row: Row,
+        items: Vec<MenuItem>,
         detail: Detail,
     ) -> String
     where
-        Row: Fn(usize, bool, usize) -> String,
         Detail: Fn(usize) -> Vec<String>,
     {
         let width = self.width as usize;
@@ -1087,16 +1091,17 @@ impl App {
         }
         .min(spec.total.saturating_sub(1));
         let detail_lines = detail(right_w);
+        let left_lines = resource_menu_lines(items, sel, start, left_w, body);
         for i in 0..body {
-            let idx = start + i;
-            let left = if idx < spec.total {
-                row(idx, idx == sel, left_w)
-            } else if spec.total == 0 && i == 0 {
+            let left = if spec.total == 0 && i == 0 {
                 Style::new()
                     .fg(TN_GRAY)
                     .render(&resource_line("  no rows match", left_w))
             } else {
-                " ".repeat(left_w)
+                left_lines
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| " ".repeat(left_w))
             };
             let right = detail_lines.get(i).cloned().unwrap_or_default();
             out.push(format!("{left}{sep}{}", resource_line(&right, right_w)));
@@ -1113,38 +1118,50 @@ impl App {
     }
 }
 
-fn asset_list_row(row: &AssetRow, selected: bool, width: usize) -> String {
-    let raw = resource_line(
-        &format!(
-            "  {:<13} {:<11} {}",
-            truncate(&row.category, 13),
-            truncate(&row.status, 11),
-            truncate(&row.name, width.saturating_sub(30))
-        ),
-        width,
-    );
-    if selected {
-        Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-    } else {
-        Style::new().fg(TN_FG).render(&raw)
+fn resource_menu_lines(
+    items: Vec<MenuItem>,
+    selected: usize,
+    scroll: usize,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 || height == 0 {
+        return Vec::new();
     }
+
+    MenuPanel::without_title()
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(height)
+        .show_scroll(true)
+        .indent(1)
+        .marker("▸")
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, height)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
-fn activity_list_row(row: &RuntimeActivityRow, selected: bool, width: usize) -> String {
-    let raw = resource_line(
-        &format!(
-            "  {:<12} {:<11} {}",
-            truncate(&row.kind, 12),
-            truncate(&row.status, 11),
-            truncate(&row.name, width.saturating_sub(29))
-        ),
-        width,
-    );
-    if selected {
-        Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-    } else {
-        Style::new().fg(TN_FG).render(&raw)
-    }
+fn asset_list_item(row: &AssetRow) -> MenuItem {
+    MenuItem::new(format!(
+        "{} {}",
+        truncate(&row.category, 13),
+        truncate(&row.status, 11)
+    ))
+    .description(row.name.clone())
+}
+
+fn activity_list_item(row: &RuntimeActivityRow) -> MenuItem {
+    MenuItem::new(format!(
+        "{} {}",
+        truncate(&row.kind, 12),
+        truncate(&row.status, 11)
+    ))
+    .description(row.name.clone())
 }
 
 fn detail_line(label: &str, value: &str, width: usize) -> String {
@@ -1296,6 +1313,77 @@ mod tests {
             "{}",
             a3s_tui::style::strip_ansi(&line)
         );
+    }
+
+    #[test]
+    fn resource_menu_lines_use_shared_menu_rows_and_bound_width() {
+        let items = vec![
+            asset_list_item(&AssetRow {
+                id: "asset-1".into(),
+                name: "very-long-asset-name-that-would-overflow-the-resource-list-panel".into(),
+                category: "knowledge".into(),
+                kind: "tool".into(),
+                status: "published".into(),
+                visibility: "private".into(),
+                owner: "roy".into(),
+                updated: String::new(),
+                access_url: None,
+            }),
+            asset_list_item(&AssetRow {
+                id: "asset-2".into(),
+                name: "ops-agent".into(),
+                category: "agent".into(),
+                kind: "tool".into(),
+                status: "draft".into(),
+                visibility: "private".into(),
+                owner: "roy".into(),
+                updated: String::new(),
+                access_url: None,
+            }),
+        ];
+        let lines = resource_menu_lines(items, 0, 0, 36, 4);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("knowledge"), "{plain}");
+        assert!(plain.contains("very-long-a"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 36),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn resource_menu_lines_scroll_selected_row_into_view() {
+        let items = (0..16)
+            .map(|index| {
+                activity_list_item(&RuntimeActivityRow {
+                    id: format!("svc-{index}"),
+                    name: format!("runtime-{index}"),
+                    asset_category: "mcp".into(),
+                    kind: "service".into(),
+                    status: "running".into(),
+                    image: "img:v1".into(),
+                    access_url: None,
+                    updated: String::new(),
+                    source: "runtime".into(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let plain = resource_menu_lines(items, 14, 0, 40, 6)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("runtime-14"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
     }
 
     #[test]
