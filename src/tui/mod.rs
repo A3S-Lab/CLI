@@ -2448,6 +2448,9 @@ impl Model for App {
                     self.handle_plugins_mouse(&m);
                     return None;
                 }
+                if self.slash_menu_open() {
+                    return self.handle_slash_mouse(&m);
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),

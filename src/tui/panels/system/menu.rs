@@ -2,7 +2,10 @@
 
 use super::super::*;
 use a3s_tui::components::TextOverlay;
-use a3s_tui::components::{MenuItem, MenuPanel};
+use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
+use a3s_tui::event::MouseEvent;
+
+const SLASH_OVERLAY_ROWS_BELOW: usize = 5;
 
 fn slash_menu_lines(
     candidates: &[(String, String)],
@@ -10,6 +13,25 @@ fn slash_menu_lines(
     width: usize,
     max_items: usize,
 ) -> Vec<String> {
+    let Some((panel, height)) = slash_menu_panel(candidates, selected, max_items) else {
+        return Vec::new();
+    };
+
+    panel
+        .view(width.min(u16::MAX as usize) as u16, height)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn slash_menu_panel(
+    candidates: &[(String, String)],
+    selected: usize,
+    max_items: usize,
+) -> Option<(MenuPanel, usize)> {
+    if candidates.is_empty() {
+        return None;
+    }
     let items = candidates
         .iter()
         .map(|(cmd, desc)| {
@@ -29,11 +51,7 @@ fn slash_menu_lines(
         .muted_color(TN_GRAY)
         .selected_colors(Color::BrightWhite, ACCENT);
     let height = candidates.len().min(max_items).saturating_add(1);
-    panel
-        .view(width as u16, height)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    Some((panel, height))
 }
 
 fn slash_menu_submit_text(cmd: &str) -> String {
@@ -56,6 +74,13 @@ fn overlay_menu_rows(composed: &str, menu: &[String], width: usize) -> String {
         .above_bottom(5)
         .width(width)
         .apply(composed)
+}
+
+fn slash_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(SLASH_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 impl App {
@@ -133,6 +158,60 @@ impl App {
                 Some(None)
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn handle_slash_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        if !self.slash_menu_open() {
+            return None;
+        }
+        let cands = self.slash_candidates_all(&self.textarea.value());
+        if cands.is_empty() {
+            return None;
+        }
+        let total = cands.len();
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return None;
+        }
+        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 10);
+        let selected = self.slash_sel.min(total - 1);
+        let Some((mut panel, panel_height)) = slash_menu_panel(&cands, selected, max_rows) else {
+            return None;
+        };
+        let row_count = panel.view(width as u16, panel_height).lines().count();
+        if row_count == 0 {
+            return None;
+        }
+        let y_offset = slash_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return None;
+        }
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+
+        match panel.handle_mouse(mouse) {
+            Some(MenuPanelMsg::Selected(index)) | Some(MenuPanelMsg::Toggled(index)) => {
+                let index = index.min(total - 1);
+                let cmd = cands[index].0.clone();
+                self.slash_sel = 0;
+                self.textarea.clear();
+                self.on_submit(slash_menu_submit_text(&cmd))
+            }
+            Some(MenuPanelMsg::Cancelled) => {
+                self.textarea.clear();
+                self.slash_sel = 0;
+                None
+            }
+            None => {
+                let after = panel.selected_index().min(total - 1);
+                if after != before {
+                    self.slash_sel = after;
+                }
+                None
+            }
         }
     }
 
@@ -245,5 +324,58 @@ mod tests {
             slash_menu_submit_text("/inspect-surface"),
             "Use your `inspect-surface` skill."
         );
+    }
+
+    #[test]
+    fn slash_menu_mouse_wheel_moves_selection_at_overlay_offset() {
+        use a3s_tui::event::MouseEventKind;
+
+        let candidates = SLASH_COMMANDS
+            .iter()
+            .take(4)
+            .map(|(cmd, desc)| ((*cmd).to_string(), (*desc).to_string()))
+            .collect::<Vec<_>>();
+        let width = 48;
+        let max_rows = 4;
+        let row_count = slash_menu_lines(&candidates, 0, width, max_rows).len();
+        let y_offset = slash_overlay_y_offset(18, row_count);
+        let (mut panel, _) = slash_menu_panel(&candidates, 0, max_rows).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn slash_menu_click_selects_visible_row_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let candidates = SLASH_COMMANDS
+            .iter()
+            .take(4)
+            .map(|(cmd, desc)| ((*cmd).to_string(), (*desc).to_string()))
+            .collect::<Vec<_>>();
+        let width = 48;
+        let max_rows = 4;
+        let row_count = slash_menu_lines(&candidates, 0, width, max_rows).len();
+        let y_offset = slash_overlay_y_offset(18, row_count);
+        let (mut panel, _) = slash_menu_panel(&candidates, 0, max_rows).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + 1,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
     }
 }
