@@ -1,6 +1,7 @@
 //! Pinned plan/TODO + bottom task tracker + subagent rows, plus relayout.
 
 use super::super::*;
+use a3s_tui::components::{Checklist, ChecklistItem, ChecklistStatus};
 
 impl App {
     /// a3s-lane task detail lines for the very bottom: the running task plus
@@ -88,36 +89,7 @@ impl App {
             return Vec::new();
         }
         let width = self.width as usize;
-        let cap = width.saturating_sub(10);
-        let mut lines = Vec::new();
-        for (i, (_, text, glyph, color)) in self.plan.iter().take(8).enumerate() {
-            // Map the status glyph to a checkbox; done tasks get struck through,
-            // in-progress is orange (glyph + text).
-            let (boxc, bcolor, done, inprog) = match glyph {
-                '✔' => ('✔', TN_GRAY, true, false),
-                '▶' => ('◼', TN_ORANGE, false, true),
-                '✗' => ('✗', TN_RED, false, false),
-                _ => ('◻', TN_GRAY, false, false),
-            };
-            let text_style = if done {
-                Style::new().fg(*color).strikethrough()
-            } else if inprog {
-                Style::new().fg(TN_ORANGE)
-            } else {
-                Style::new().fg(*color)
-            };
-            // ⎿ on the first row; align the rest under the checkbox.
-            let conn = if i == 0 { "⎿  " } else { "   " };
-            lines.push(pad_to(
-                &format!(
-                    "  {conn}{} {}",
-                    Style::new().fg(bcolor).render(&boxc.to_string()),
-                    text_style.render(&truncate(text, cap)),
-                ),
-                width,
-            ));
-        }
-        lines
+        plan_checklist_lines(&self.plan, width)
     }
 
     /// Bottom tracker for parallel subagents (Claude-style): a durable summary
@@ -199,6 +171,48 @@ impl App {
     }
 }
 
+fn plan_checklist_lines(plan: &[(String, String, char, Color)], width: usize) -> Vec<String> {
+    if width == 0 || plan.is_empty() {
+        return Vec::new();
+    }
+
+    let items = plan
+        .iter()
+        .take(8)
+        .map(|(_, text, glyph, color)| plan_checklist_item(text, *glyph, *color))
+        .collect::<Vec<_>>();
+
+    Checklist::new(items)
+        .indent(2)
+        .connector(true)
+        .pending_color(TN_GRAY)
+        .active_color(TN_ORANGE)
+        .done_color(TN_GRAY)
+        .error_color(TN_RED)
+        .text_color(TN_GRAY)
+        .view(width.min(u16::MAX as usize) as u16, 8)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn plan_checklist_item(text: &str, glyph: char, color: Color) -> ChecklistItem {
+    match glyph {
+        '✔' => ChecklistItem::new(text)
+            .status(ChecklistStatus::Done)
+            .color(color),
+        '▶' => ChecklistItem::new(text)
+            .status(ChecklistStatus::Active)
+            .color(TN_ORANGE),
+        '✗' => ChecklistItem::new(text)
+            .status(ChecklistStatus::Error)
+            .color(color),
+        _ => ChecklistItem::new(text)
+            .status(ChecklistStatus::Pending)
+            .color(color),
+    }
+}
+
 fn workflow_slug(text: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
@@ -221,5 +235,44 @@ fn workflow_slug(text: &str) -> String {
         "parallel-agents".to_string()
     } else {
         slug
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_checklist_lines_use_shared_component_and_fit_width() {
+        let plan = vec![
+            (
+                "1".to_string(),
+                "collect enough evidence for a fairly long task".to_string(),
+                '□',
+                TN_GRAY,
+            ),
+            ("2".to_string(), "implement".to_string(), '▶', TN_YELLOW),
+            ("3".to_string(), "verify".to_string(), '✔', TN_GRAY),
+            ("4".to_string(), "fix failure".to_string(), '✗', TN_RED),
+        ];
+        let lines = plan_checklist_lines(&plan, 30);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 4);
+        assert!(plain.contains("⎿  ◻ collect"), "{plain}");
+        assert!(plain.contains("◼ implement"), "{plain}");
+        assert!(plain.contains("✔ verify"), "{plain}");
+        assert!(plain.contains("✗ fix failure"), "{plain}");
+        assert!(lines.iter().any(|line| line.contains("\x1b[9;")));
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 30),
+            "{plain}"
+        );
     }
 }
