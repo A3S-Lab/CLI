@@ -25,7 +25,6 @@ pub(crate) fn render_tool_end(
     }
     let ok = exit_code == 0;
     let header = render_tool_header(name, ok, args, width);
-    let margin = " ".repeat(PAD);
 
     // For a successful file read on a known language, show the highlighted file
     // content under the action (keeps the nice read preview).
@@ -63,43 +62,27 @@ pub(crate) fn render_tool_end(
         return header;
     }
     let body_color = if ok { TN_GRAY } else { TN_RED };
-    let conn = Style::new().fg(TN_GRAY).render("⎿");
-    let textw = width.saturating_sub(PAD + 7).max(20);
-    let line_at = |i: usize, line: &str| -> String {
-        let shown = truncate(line, textw);
-        let row = if i == 0 {
-            format!(
-                "{margin}  {conn}  {}",
-                Style::new().fg(body_color).render(&shown)
-            )
-        } else {
-            format!(
-                "{margin}     {}",
-                Style::new().fg(body_color).render(&shown)
-            )
-        };
-        format!("\n{}", a3s_tui::style::truncate_visible(&row, width))
-    };
-    let mut out = header;
-    let start = lines.len().saturating_sub(TAIL);
-    if start > 0 {
-        let marker = format!(
-            "{margin}  {conn}  {}",
-            Style::new()
-                .fg(TN_GRAY)
-                .render(&format!("… +{start} earlier lines"))
-        );
-        out.push('\n');
-        out.push_str(&a3s_tui::style::truncate_visible(&marker, width));
-        for line in lines.iter().skip(start) {
-            out.push_str(&line_at(1, line));
-        }
+    let block = ConnectorBlock::new()
+        .margin(PAD)
+        .connector_indent(2)
+        .connector_gap(2)
+        .connector_color(TN_GRAY)
+        .text_color(body_color)
+        .omitted_color(TN_GRAY)
+        .max_rows(TAIL)
+        .rows(
+            lines
+                .into_iter()
+                .map(|line| ConnectorRow::new(line.to_string()))
+                .collect(),
+        )
+        .view(width.min(u16::MAX as usize) as u16);
+
+    if block.is_empty() {
+        header
     } else {
-        for (i, line) in lines.iter().enumerate() {
-            out.push_str(&line_at(i, line));
-        }
+        format!("{header}\n{block}")
     }
-    out
 }
 
 fn render_task_tool_summary(
@@ -972,6 +955,36 @@ mod tests {
 
         assert!(plain.contains("Ran npm run"));
         assert!(plain.contains("… +1 earlier lines"));
+        assert_visible_lines_bounded(&rendered, 48);
+    }
+
+    #[test]
+    fn completed_tool_output_uses_shared_connector_block() {
+        let rendered = render_tool_end(
+            "bash",
+            1,
+            "first\nsecond\nthird\nfourth\nfifth\nsixth with a long tail that should be clipped",
+            None,
+            Some(&serde_json::json!({"command": "npm test"})),
+            48,
+        );
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        let lines = plain.lines().collect::<Vec<_>>();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("    ⎿  … +1 earlier lines")),
+            "{plain}"
+        );
+        assert!(
+            lines.iter().any(|line| line.starts_with("       second")),
+            "{plain}"
+        );
+        assert!(
+            rendered.contains(&format!("\x1b[{}msecond", TN_RED.fg_ansi())),
+            "failed tool tail should use connector block text color: {rendered:?}"
+        );
         assert_visible_lines_bounded(&rendered, 48);
     }
 

@@ -61,8 +61,8 @@ tool logs are updated by stable event ids and queried by panels instead of
 coupling every panel to the streaming protocol.
 
 The command palette, asset selectors, `/model` account picker, detail panels,
-completed task summaries, SPF/IDE file metadata, effort overlay, and footer
-status rows use shared `a3s-tui` components such as `MenuPanel`,
+completed tool output and task summaries, SPF/IDE file metadata, effort overlay,
+and footer status rows use shared `a3s-tui` components such as `MenuPanel`,
 `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`, `ConnectorBlock`,
 `PanelFrame`, `Breadcrumb`, `LevelSlider`, `ShimmerText`, `SessionStatus`, and
 `ModeLine`. Reusable menu scrolling, selection, connector rows, framed panels,
