@@ -116,6 +116,20 @@ pub(crate) fn input_prompt_line(
     line.view()
 }
 
+pub(crate) fn thinking_block(text: &str, width: usize) -> String {
+    let text = text.trim();
+    if text.is_empty() || width == 0 {
+        return String::new();
+    }
+
+    a3s_tui::components::WrappedPrefixBlock::new(text)
+        .margin(PAD)
+        .width(width)
+        .prefixes("💭 ", "   ")
+        .style(Style::new().fg(TN_GRAY).italic())
+        .view()
+}
+
 /// Greedy word-wrap of plain (unstyled) text to `width` display columns, with
 /// blank lines dropped so a preview stays single-spaced. Used for the reasoning
 /// ("thinking") block so it lays out like other messages instead of being one
@@ -256,8 +270,8 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        gutter, input_gradient_rule, input_prompt_line, input_rule, input_status_rule, truncate,
-        user_bubble, wrap_words,
+        gutter, input_gradient_rule, input_prompt_line, input_rule, input_status_rule,
+        thinking_block, truncate, user_bubble, wrap_words,
     };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
 
@@ -416,5 +430,34 @@ mod tests {
         assert_eq!(visible_len(&rendered), 18);
         assert!(plain.starts_with("  ━"));
         assert!(rendered.contains("\x1b[1;38;2;"));
+    }
+
+    #[test]
+    fn thinking_block_uses_shared_wrapped_prefix_block() {
+        let rendered = thinking_block("alpha beta gamma delta", 16);
+        let plain = strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
+
+        assert!(rows[0].starts_with("  💭 alpha"));
+        assert!(rows.iter().skip(1).all(|row| row.starts_with("     ")));
+        assert!(rendered.lines().all(|line| visible_len(line) == 16));
+        assert!(rendered.contains("\x1b[3;38;2;143;143;143m💭 alpha"));
+    }
+
+    #[test]
+    fn thinking_block_keeps_empty_input_empty() {
+        assert_eq!(thinking_block("   ", 40), "");
+        assert_eq!(thinking_block("thinking", 0), "");
+    }
+
+    #[test]
+    fn thinking_block_wraps_wide_unicode_by_display_width() {
+        let rendered = thinking_block("中文测试内容", 13);
+        let plain = strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
+
+        assert!(rows[0].starts_with("  💭 中文测试"));
+        assert!(rows[1].starts_with("     内容"));
+        assert!(rendered.lines().all(|line| visible_len(line) == 13));
     }
 }

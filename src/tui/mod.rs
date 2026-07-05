@@ -5481,26 +5481,8 @@ impl App {
         }
         self.last_paint = Some(Instant::now());
         let mut blocks: Vec<String> = self.messages.clone();
-        if !self.thinking.trim().is_empty() {
-            // Lay out reasoning like every other message: pre-wrap to the content
-            // width and put the margin + "💭" OUTSIDE the dim style, one styled
-            // line at a time. The old `Style::render(&indent(…))` shoved the whole
-            // paragraph in as one line whose leading spaces sat *inside* the ANSI
-            // escape, so the viewport re-wrapped it to the screen edge (margins
-            // didn't line up) with uneven spacing. "💭 " is 3 display columns;
-            // continuation lines indent to match.
-            let dim = Style::new().fg(TN_GRAY).italic();
-            let margin = " ".repeat(PAD);
-            let avail = (self.width as usize).saturating_sub(PAD + 3).max(8);
-            let body = wrap_words(self.thinking.trim(), avail)
-                .iter()
-                .enumerate()
-                .map(|(i, line)| {
-                    let lead = if i == 0 { "💭 " } else { "   " };
-                    format!("{margin}{}", dim.render(&format!("{lead}{line}")))
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+        let body = thinking_block(&self.thinking, self.width as usize);
+        if !body.is_empty() {
             blocks.push(body);
         }
         let rendered = self.streaming.view();
