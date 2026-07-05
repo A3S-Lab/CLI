@@ -7,7 +7,7 @@
 //! string would split ANSI codes). `frame` only pads (ANSI-safe) and borders.
 
 use super::super::*;
-use a3s_tui::components::Breadcrumb;
+use a3s_tui::components::{Breadcrumb, PanelFrame};
 
 /// Split the screen for the tree | editor layout. Returns
 /// `(tree_panel_width, right_panel_width)` — both are TOTAL widths including
@@ -57,37 +57,15 @@ pub(crate) fn frame(
     focused: bool,
     mut rows: Vec<String>,
 ) -> Vec<String> {
-    let iw = w.saturating_sub(2);
-    let bc = if focused { ACCENT } else { TN_GRAY };
-    let b = |s: &str| Style::new().fg(bc).render(s);
-    let mut t = truncate(title, iw.saturating_sub(4));
-    while a3s_tui::style::visible_len(&t) > iw.saturating_sub(4) {
-        t.pop(); // VS16 emoji in a breadcrumb must not widen the border
-    }
-    let tlen = a3s_tui::style::visible_len(&t);
-    let styled_t = if focused {
-        Style::new().fg(ACCENT).bold().render(&t)
-    } else {
-        Style::new().fg(TN_FG).render(&t)
-    };
-    let fill = iw.saturating_sub(tlen + 3);
-    let mut out = Vec::with_capacity(h);
-    out.push(format!(
-        "{}{styled_t}{}{}",
-        b("╭─ "),
-        b(&format!(" {}", "─".repeat(fill))),
-        b("╮")
-    ));
-    let body = h.saturating_sub(2);
-    rows.truncate(body);
-    while rows.len() < body {
-        rows.push(String::new());
-    }
-    for r in rows {
-        out.push(format!("{}{}{}", b("│"), pad_to(&r, iw), b("│")));
-    }
-    out.push(format!("{}{}{}", b("╰"), b(&"─".repeat(iw)), b("╯")));
-    out
+    rows.truncate(h.saturating_sub(2));
+    PanelFrame::new(title)
+        .rows(rows)
+        .focused(focused)
+        .border_color(TN_GRAY)
+        .focused_border_color(ACCENT)
+        .title_color(TN_FG)
+        .focused_title_color(ACCENT)
+        .lines(w.min(u16::MAX as usize) as u16, h)
 }
 
 /// Join two panels side by side (rows are already exact-width).
