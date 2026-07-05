@@ -3137,15 +3137,7 @@ impl Model for App {
         let spacer = if self.viewport.at_bottom() {
             String::new()
         } else {
-            let label = truncate(
-                &Style::new()
-                    .fg(Color::BrightWhite)
-                    .bg(ACCENT)
-                    .render(" ↓ more below · Shift+End to jump to latest "),
-                width,
-            );
-            let pad = width.saturating_sub(a3s_tui::style::visible_len(&label)) / 2;
-            format!("{}{}", " ".repeat(pad), label)
+            jump_to_latest_hint(width)
         };
         let tasks = self.task_lines();
         let task_block = tasks.join("\n");
@@ -3286,6 +3278,19 @@ fn render_mode_status_line(mode: Mode, width: usize) -> String {
         .mode_color(mode.color())
         .hint_color(TN_GRAY)
         .view(width.min(u16::MAX as usize) as u16)
+}
+
+fn jump_to_latest_hint(width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let label = InlineAction::new("more below · Shift+End to jump to latest")
+        .icon("↓")
+        .colors(Color::BrightWhite, ACCENT)
+        .view_with_width(width.min(u16::MAX as usize) as u16);
+    let pad = width.saturating_sub(a3s_tui::style::visible_len(&label)) / 2;
+    format!("{}{}", " ".repeat(pad), label)
 }
 
 impl App {
@@ -6554,6 +6559,18 @@ mod tests {
         assert!(mode_plain.starts_with("  ⏵⏵ auto mode on"), "{mode_plain}");
         assert!(mode_plain.contains("/help"), "{mode_plain}");
         assert!(mode.contains("\x1b["), "mode line should be styled");
+    }
+
+    #[test]
+    fn jump_to_latest_hint_uses_shared_inline_action() {
+        let hint = jump_to_latest_hint(48);
+        let plain = a3s_tui::style::strip_ansi(&hint);
+
+        assert_eq!(a3s_tui::style::visible_len(&hint), 48);
+        assert!(plain.contains("↓ more below"), "{plain}");
+        assert!(plain.contains("Shift+End"), "{plain}");
+        assert!(hint.contains("\x1b["), "hint should be styled");
+        assert_eq!(jump_to_latest_hint(0), "");
     }
 
     #[test]

@@ -173,8 +173,9 @@ live activity shimmer, effort overlay, and footer status rows use shared
 `ConnectorBlock`, `DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`,
 `Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `WrappedPrefixBlock`,
 `SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, approval
-choices, RemoteUI action links, tool status truncation, transcript gutters and
-input bubbles, prompt continuation alignment, input border labels, shared
+choices, RemoteUI and jump-to-latest action links, tool status truncation,
+transcript gutters and input bubbles, prompt continuation alignment, input
+border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
