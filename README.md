@@ -169,15 +169,15 @@ live activity shimmer, effort overlay, and footer status rows use shared
 `a3s-tui` components such as
 `MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InlineAction`, `Alert`,
-`TextOverlay`,
+`TextOverlay`, `Toast`,
 `InputBorder`, `PromptLine`, `OutputBlock`, `Badge`, `Checklist`, `CursorLine`,
 `ConnectorBlock`, `DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`,
 `Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `WrappedPrefixBlock`,
 `SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, approval
 choices, RemoteUI and jump-to-latest action links, tool status truncation,
 shared alert rows for OS login/configuration warnings, overlay composition for
-menus and prompts, transcript gutters and input bubbles, prompt continuation
-alignment, input
+menus and prompts, IDE flash footer notifications, transcript gutters and input
+bubbles, prompt continuation alignment, input
 border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress

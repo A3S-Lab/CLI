@@ -29,8 +29,8 @@ use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
     Alert, AlertKind, ChoicePrompt, InlineAction, ModeLine, Scrollbar, SessionStatus,
-    SessionStatusChip, Spinner, Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus,
-    ToolLogView, Viewport,
+    SessionStatusChip, Spinner, Textarea, Toast, ToastKind, ToolLogRecord as TuiToolLogRecord,
+    ToolLogStatus, ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -321,6 +321,16 @@ fn os_required_alert(cmd: &str, os_configured: bool) -> String {
         "  {}",
         Alert::new(AlertKind::Warning, body).color(TN_YELLOW).view()
     )
+}
+
+fn ide_flash_line(kind: ToastKind, message: impl Into<String>) -> String {
+    let color = match kind {
+        ToastKind::Info => TN_CYAN,
+        ToastKind::Success => TN_GREEN,
+        ToastKind::Warning => TN_YELLOW,
+        ToastKind::Error => TN_RED,
+    };
+    Toast::new(kind, message).color(color).view()
 }
 
 /// Glyph + colour for a plan task's status.
@@ -5778,7 +5788,7 @@ impl App {
             true,
         ));
         ide.focus_editor = true;
-        ide.flash = Some("read-only".to_string());
+        ide.flash = Some(ide_flash_line(ToastKind::Warning, "read-only"));
         self.ide = Some(ide);
     }
 
@@ -8250,6 +8260,14 @@ mod tests {
             a3s_tui::style::strip_ansi(&rendered),
             "  ⚠ /agent run needs OS — sign in with /login first"
         );
+        assert!(rendered.contains("\x1b[38;2;245;166;35m"));
+    }
+
+    #[test]
+    fn ide_flash_line_uses_shared_toast_component() {
+        let rendered = ide_flash_line(ToastKind::Warning, "read-only");
+
+        assert_eq!(a3s_tui::style::strip_ansi(&rendered), "⚠ read-only");
         assert!(rendered.contains("\x1b[38;2;245;166;35m"));
     }
 

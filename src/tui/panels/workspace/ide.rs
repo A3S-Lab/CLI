@@ -60,7 +60,7 @@ impl App {
                     let msg = {
                         let f = ide.file.as_mut().unwrap();
                         if f.image || f.readonly {
-                            "(read-only)".to_string()
+                            ide_flash_line(ToastKind::Warning, "read-only")
                         } else {
                             let content = format!("{}\n", f.lines.join("\n"));
                             match std::fs::write(&f.path, content) {
@@ -71,9 +71,11 @@ impl App {
                                         &workspace,
                                         &f.path,
                                     );
-                                    "✔ saved".to_string()
+                                    ide_flash_line(ToastKind::Success, "saved")
                                 }
-                                Err(e) => format!("✗ save failed: {e}"),
+                                Err(e) => {
+                                    ide_flash_line(ToastKind::Error, format!("save failed: {e}"))
+                                }
                             }
                         }
                     };
@@ -177,13 +179,24 @@ impl App {
                                 ide.file = None;
                                 ide.focus_editor = false;
                             }
-                            ide.flash = Some(format!("✔ deleted {name}"));
+                            ide.flash = Some(ide_flash_line(
+                                ToastKind::Success,
+                                format!("deleted {name}"),
+                            ));
                         }
-                        Err(e) => ide.flash = Some(format!("✗ delete failed: {e}")),
+                        Err(e) => {
+                            ide.flash = Some(ide_flash_line(
+                                ToastKind::Error,
+                                format!("delete failed: {e}"),
+                            ))
+                        }
                     }
                 } else {
                     ide.armed_delete = Some(path);
-                    ide.flash = Some(format!("⚠ x again deletes {name}"));
+                    ide.flash = Some(ide_flash_line(
+                        ToastKind::Warning,
+                        format!("x again deletes {name}"),
+                    ));
                 }
             }
             _ => {}
@@ -391,15 +404,15 @@ impl App {
             .map(|p| spf::file_meta_breadcrumb_line(p, meta_lines, meta_inner))
             .unwrap_or_else(|| Style::new().fg(TN_GRAY).render(&spf::fit(" —", meta_inner)));
         let meta = spf::frame("metadata", meta_w, 3, false, vec![meta_line]);
-        let keys = spf::frame(
-            "keys",
-            keys_w,
-            3,
-            false,
-            vec![Style::new()
+        let keys_inner = keys_w.saturating_sub(2);
+        let keys_line = if ide.flash.is_some() {
+            a3s_tui::style::fit_visible(&format!(" {hint}"), keys_inner)
+        } else {
+            Style::new()
                 .fg(TN_GRAY)
-                .render(&spf::fit(&format!(" {hint}"), keys_w.saturating_sub(2)))],
-        );
+                .render(&spf::fit(&format!(" {hint}"), keys_inner))
+        };
+        let keys = spf::frame("keys", keys_w, 3, false, vec![keys_line]);
         out.extend(spf::hjoin(&meta, &keys));
 
         out.truncate(h);
