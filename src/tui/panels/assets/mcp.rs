@@ -7,6 +7,7 @@
 
 use super::super::os_progressive;
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 const MCP_MANIFEST_PATH: &str = ".a3s/mcp.asset.json";
 const MCP_SERVER_CONFIG_PATH: &str = ".a3s/mcp.server.json";
@@ -1691,14 +1692,44 @@ fn mcp_picker_hint(width: usize) -> String {
     truncate("  ↑/↓ select · Enter local MCP dev · Esc cancel", width)
 }
 
-fn mcp_picker_row(project: &McpProject, width: usize) -> String {
-    pad_to(
-        &truncate(
-            &format!("  {} · {}", project.rel, project.description),
-            width,
-        ),
-        width,
-    )
+fn mcp_picker_lines(
+    projects: &[McpProject],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let total = projects.len();
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let selected = selected.min(total.saturating_sub(1));
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = projects
+        .iter()
+        .map(|project| MenuItem::new(project.rel.clone()).description(project.description.clone()))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(mcp_picker_header(total, root, width).trim_start())
+        .subtitle(mcp_picker_hint(width).trim_start())
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Directive for `/mcp <description>`: create a local MCP server asset.
@@ -1887,41 +1918,7 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = p.projects.len();
-        let mut menu = vec![
-            pad_to(
-                &Style::new()
-                    .fg(ACCENT)
-                    .bold()
-                    .render(&mcp_picker_header(total, &p.root, width)),
-                width,
-            ),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&mcp_picker_hint(width)),
-                width,
-            ),
-        ];
-        let sel = p.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for i in start..end {
-            let raw = mcp_picker_row(&p.projects[i], width);
-            let row = if i == sel {
-                Style::new()
-                    .fg(Color::BrightWhite)
-                    .bg(ACCENT)
-                    .bold()
-                    .render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            };
-            menu.push(row);
-        }
+        let menu = mcp_picker_lines(&p.projects, p.sel, &p.root, width, self.height as usize);
         self.overlay_list(composed, &menu)
     }
 }
@@ -2076,6 +2073,76 @@ mod tests {
         assert_eq!(projects[0].description, "Calculator tools");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn mcp_picker_lines_use_bounded_shared_menu_rows() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/mcps/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let projects = vec![
+            McpProject {
+                rel: "nested/very-long-mcp-server-name-that-would-overflow-the-panel".into(),
+                path: root.join("nested/very-long-mcp-server-name-that-would-overflow-the-panel"),
+                name: "long-mcp".into(),
+                description: "A long MCP server description that should be trimmed cleanly".into(),
+            },
+            McpProject {
+                rel: "weather-tools".into(),
+                path: root.join("weather-tools"),
+                name: "weather-tools".into(),
+                description: "Weather tools".into(),
+            },
+        ];
+        let lines = mcp_picker_lines(&projects, 0, &root, 40, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("mcp"), "{plain}");
+        assert!(plain.contains("select a server asset"), "{plain}");
+        assert!(plain.contains("very-long-mcp-server"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn mcp_picker_lines_scroll_selected_project_into_view() {
+        let root = std::path::PathBuf::from("/tmp/mcps");
+        let projects = (0..16)
+            .map(|index| McpProject {
+                rel: format!("mcp-{index}"),
+                path: root.join(format!("mcp-{index}")),
+                name: format!("mcp-{index}"),
+                description: format!("MCP server {index}"),
+            })
+            .collect::<Vec<_>>();
+        let plain = mcp_picker_lines(&projects, 14, &root, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("mcp-14"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn mcp_picker_header_and_hint_fit_fixed_width() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/mcps/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let header = mcp_picker_header(9, &root, 40);
+        let hint = mcp_picker_hint(40);
+        assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
+        assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
     }
 
     #[test]
