@@ -11,6 +11,7 @@
 
 use super::super::os_progressive;
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 const AGENT_MANIFEST_PATH: &str = ".a3s/agent.asset.json";
 const AGENT_CONFIG_PATH: &str = ".a3s/agent.config.json";
@@ -393,8 +394,44 @@ fn agent_picker_hint(width: usize) -> String {
     truncate("  ↑/↓ select · Enter develop locally · Esc cancel", width)
 }
 
-fn agent_picker_row(name: &str, width: usize) -> String {
-    pad_to(&truncate(&format!("  {name}"), width), width)
+fn agent_picker_lines(
+    agents: &[AgentFile],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let total = agents.len();
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let selected = selected.min(total.saturating_sub(1));
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = agents
+        .iter()
+        .map(|agent| MenuItem::new(agent.rel.clone()))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(agent_picker_header(total, root, width).trim_start())
+        .subtitle(agent_picker_hint(width).trim_start())
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Directive for `/agent <description>`: create a local Markdown agent definition.
@@ -2841,44 +2878,7 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = p.agents.len();
-        let mut menu = vec![
-            pad_to(
-                &Style::new()
-                    .fg(ACCENT)
-                    .bold()
-                    .render(&agent_picker_header(total, &p.root, width)),
-                width,
-            ),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&agent_picker_hint(width)),
-                width,
-            ),
-        ];
-        let sel = p.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for (row, agent) in p.agents.iter().enumerate().take(end).skip(start) {
-            let raw = agent_picker_row(&agent.rel, width);
-            menu.push(if row == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
-        if total > max_rows {
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = agent_picker_lines(&p.agents, p.sel, &p.root, width, self.height as usize);
         self.overlay_list(composed, &menu)
     }
 }
@@ -2937,20 +2937,68 @@ Be precise.
     }
 
     #[test]
-    fn agent_picker_rows_fit_fixed_width() {
+    fn agent_picker_lines_use_bounded_shared_menu_rows() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/agents/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let agents = vec![
+            AgentFile {
+                rel: "nested/very-long-agent-file-name-that-would-overflow-the-panel.md".into(),
+                path: root
+                    .join("nested/very-long-agent-file-name-that-would-overflow-the-panel.md"),
+            },
+            AgentFile {
+                rel: "reviewer.md".into(),
+                path: root.join("reviewer.md"),
+            },
+        ];
+        let lines = agent_picker_lines(&agents, 0, &root, 40, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("agent"), "{plain}");
+        assert!(plain.contains("select a definition"), "{plain}");
+        assert!(plain.contains("very-long-agent-file"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn agent_picker_lines_scroll_selected_agent_into_view() {
+        let root = std::path::PathBuf::from("/tmp/agents");
+        let agents = (0..16)
+            .map(|index| AgentFile {
+                rel: format!("agent-{index}.md"),
+                path: root.join(format!("agent-{index}.md")),
+            })
+            .collect::<Vec<_>>();
+        let plain = agent_picker_lines(&agents, 14, &root, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("agent-14.md"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn agent_picker_header_and_hint_fit_fixed_width() {
         let root = std::path::PathBuf::from(
             "/Users/example/.a3s/agents/a/path/that/is/far/too/long/for/a/picker/header",
         );
         let header = agent_picker_header(9, &root, 40);
         let hint = agent_picker_hint(40);
-        let row = agent_picker_row(
-            "nested/very-long-agent-file-name-that-would-overflow-the-panel.md",
-            40,
-        );
         assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
         assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
-        assert_eq!(a3s_tui::style::visible_len(&row), 40);
-        assert!(row.contains('…'), "{row}");
     }
 
     #[test]
