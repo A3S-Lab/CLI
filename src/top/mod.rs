@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    CellAlign, Confirm, DataColumn, DataRow, DataTable, MenuItem, MenuPanel, Meter, MetricTrend,
-    MultiSelect, MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree,
-    TreeNode,
+    CellAlign, Confirm, DataColumn, DataRow, DataTable, LogView, LogViewState, MenuItem, MenuPanel,
+    Meter, MetricTrend, MultiSelect, MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar,
+    TabSegment, Tabs, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3347,14 +3347,12 @@ impl TopApp {
         let Some(log) = &self.log else {
             return String::new();
         };
-        let width = self.width as usize;
-        let mut out = Vec::new();
         let state = if log.loading {
-            "loading"
+            LogViewState::Loading
         } else if log.refreshing {
-            "refreshing"
+            LogViewState::Refreshing
         } else {
-            "tail 200"
+            LogViewState::Ready
         };
         let timestamps = if log.timestamps {
             "timestamps:on"
@@ -3366,42 +3364,28 @@ impl TopApp {
         } else {
             "follow:off"
         };
-        out.push(Style::new().fg(CYAN).bold().render(&pad_plain(
-            &format!(
-                " logs {} ({}) · {state} · {timestamps} · {follow}",
-                log.container_name,
-                short_id(&log.container_id)
-            ),
-            width,
-        )));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
 
-        let height = self.log_visible_height();
-        let lines = log.text.lines().collect::<Vec<_>>();
-        if log.loading {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .italic()
-                    .render(" loading container logs..."),
-            );
-        } else if lines.is_empty() {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .italic()
-                    .render(" no logs returned for this container"),
-            );
-        } else {
-            for line in lines.iter().skip(log.scroll).take(height) {
-                out.push(pad_plain(line.trim_end_matches('\r'), width));
-            }
+        let mut view = LogView::new(format!(
+            "logs {} ({})",
+            log.container_name,
+            short_id(&log.container_id)
+        ))
+        .text(&log.text)
+        .scroll(log.scroll)
+        .state(state)
+        .loading_text("loading container logs...")
+        .empty_text("no logs returned for this container")
+        .title_color(CYAN)
+        .metadata_color(Color::BrightBlack)
+        .text_color(Color::BrightWhite)
+        .muted_color(Color::BrightBlack)
+        .separator_color(Color::BrightBlack);
+        if state == LogViewState::Ready {
+            view = view.metadata("tail 200");
         }
-        out.join("\n")
+        view = view.metadata(timestamps).metadata(follow);
+
+        view.view(self.width, self.log_visible_height().saturating_add(2))
     }
 
     fn container_menu_view(&self) -> String {
@@ -13962,6 +13946,45 @@ mod tests {
             })
             .is_some());
         assert!(app.log.as_ref().unwrap().refreshing);
+    }
+
+    #[test]
+    fn logs_view_uses_shared_log_view_and_fits_width() {
+        let mut app = TopApp::new(TopOptions::default());
+        app.width = 64;
+        app.height = 10;
+        app.log = Some(LogPanel {
+            connector: ContainerConnector::Docker,
+            container_id: "abcdef".into(),
+            container_name: "app".into(),
+            text: numbered_lines(6),
+            scroll: 2,
+            timestamps: true,
+            loading: false,
+            refreshing: false,
+            follow: false,
+        });
+
+        let rendered = app.logs_view();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        assert!(plain.contains("logs app (abcdef)"), "{plain}");
+        assert!(plain.contains("tail 200"), "{plain}");
+        assert!(plain.contains("timestamps:on"), "{plain}");
+        assert!(plain.contains("follow:off"), "{plain}");
+        assert!(plain.contains("line-2"), "{plain}");
+        assert!(!plain.contains("line-0"), "{plain}");
+        assert!(rendered.contains("\x1b["), "log view should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 64),
+            "{plain}"
+        );
+
+        app.log.as_mut().unwrap().loading = true;
+        let loading = a3s_tui::style::strip_ansi(&app.logs_view());
+        assert!(loading.contains("loading container logs"), "{loading}");
+        assert!(!loading.contains("line-2"), "{loading}");
     }
 
     #[test]
