@@ -2292,13 +2292,7 @@ impl Model for App {
                         KeyCode::Up => self.plugins_panel = Some(sel.saturating_sub(1)),
                         KeyCode::Down => self.plugins_panel = Some((sel + 1).min(last)),
                         KeyCode::Char(' ') => {
-                            if let Some((name, _)) = self.skills.get(sel.min(last)) {
-                                let name = name.clone();
-                                if !self.disabled_skills.remove(&name) {
-                                    self.disabled_skills.insert(name);
-                                }
-                                save_disabled_skills(&self.disabled_skills);
-                            }
+                            self.toggle_plugin_skill(sel.min(last));
                         }
                         KeyCode::Esc => self.plugins_panel = None,
                         _ => {}
@@ -2453,6 +2447,10 @@ impl Model for App {
                 }
                 if self.file_menu_open() {
                     self.handle_file_mouse(&m);
+                    return None;
+                }
+                if self.plugins_panel.is_some() {
+                    self.handle_plugins_mouse(&m);
                     return None;
                 }
                 if self.help_open {

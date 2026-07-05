@@ -267,11 +267,12 @@ records, RemoteUI links, and retained tool logs are updated by stable event ids
 and queried by panels instead of coupling every panel to the streaming protocol.
 
 The command palette, asset selectors, approval overlay, `/model` account picker,
-detail panels, tool status lines, transcript gutters and user bubbles, input
-prompt chrome, live reasoning, live and completed tool output, pinned plan rows,
-task summaries, file-edit diffs, SPF/IDE file metadata, `/loop` details,
-compaction progress, the live activity shimmer, effort overlay, `/top` header
-and process table, and footer status rows use shared `a3s-tui` components such as
+`/plugin` skill toggles, detail panels, tool status lines, transcript gutters
+and user bubbles, input prompt chrome, live reasoning, live and completed tool
+output, pinned plan rows, task summaries, file-edit diffs, SPF/IDE file
+metadata, `/loop` details, compaction progress, the live activity shimmer,
+effort overlay, `/top` header and process table, and footer status rows use
+shared `a3s-tui` components such as
 `MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `ActivityBlock`,
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InlineAction`, `Alert`,
@@ -283,7 +284,8 @@ and process table, and footer status rows use shared `a3s-tui` components such a
 `SessionStatus`, `ModeLine`, and the `Meter` context fill rendered inside the
 footer status row. Reusable menu scrolling, selection, `/model` account tab
 mouse switching, `/theme` wheel preview and click-to-apply, `@` file picker
-wheel browsing and click-to-insert, approval choices, RemoteUI and
+wheel browsing and click-to-insert, `/plugin` wheel browsing and
+click-to-toggle, approval choices, RemoteUI and
 jump-to-latest action links, tool status truncation, shared alert rows for OS
 login/configuration warnings, overlay composition for menus and prompts, IDE
 flash footer notifications, live tool activity/output tails, `/top` status
@@ -295,8 +297,8 @@ previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/theme` preview
-hit-testing, `@` file picker hit-testing, and width-bounding fixes are exercised
-directly by `a3s code`.
+hit-testing, `@` file picker hit-testing, `/plugin` overlay hit-testing, and
+width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -434,7 +436,7 @@ These commands are available outside the asset-specific flows:
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` | Branch the current transcript into a new session id. |
 | `/auto` | Switch the session into auto-approve mode. |
-| `/plugin` / `/reload` | Manage and hot-reload skills/plugins. |
+| `/plugin` / `/reload` | Manage and hot-reload skills/plugins, including wheel browsing and click-to-toggle skill state in the TUI. |
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
 
