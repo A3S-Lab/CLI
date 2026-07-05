@@ -28,11 +28,11 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    Alert, AlertKind, ChoicePrompt, InlineAction, ModeLine, Scrollbar, SessionStatus,
-    SessionStatusChip, Spinner, Textarea, Toast, ToastKind, ToolLogRecord as TuiToolLogRecord,
-    ToolLogStatus, ToolLogView, Viewport,
+    Alert, AlertKind, ChoicePrompt, ChoicePromptMsg, InlineAction, ModeLine, Scrollbar,
+    SessionStatus, SessionStatusChip, Spinner, Textarea, Toast, ToastKind,
+    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
 };
-use a3s_tui::event::KeyEvent;
+use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
 use a3s_tui::style::{Color, Style};
@@ -2428,6 +2428,9 @@ impl Model for App {
 
             Msg::Term(Event::Mouse(m)) => {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
+                if self.state == State::Awaiting {
+                    return self.handle_approval_mouse(&m);
+                }
                 if self.model_menu.is_some() {
                     self.handle_model_mouse(&m);
                     return None;
@@ -5952,6 +5955,44 @@ impl App {
         }
     }
 
+    fn handle_approval_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        if self.state != State::Awaiting {
+            return None;
+        }
+        let Some((_, label)) = &self.pending_tool else {
+            return None;
+        };
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return None;
+        }
+        let mut prompt = approval_prompt(label, self.approval_sel);
+        let row_count = prompt.lines(width as u16, APPROVAL_PANEL_HEIGHT).len();
+        if row_count == 0 {
+            return None;
+        }
+        let y_offset = approval_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return None;
+        }
+        prompt.set_y_offset(y_offset);
+        let before = prompt.selected_index();
+
+        match prompt.handle_mouse(mouse) {
+            Some(ChoicePromptMsg::Selected(index)) => Some(cmd::msg(self.apply_approval(index))),
+            Some(ChoicePromptMsg::Cancelled) => Some(cmd::msg(self.apply_approval(2))),
+            None => {
+                let after = prompt.selected_index().min(2);
+                if after != before {
+                    self.approval_sel = after;
+                }
+                None
+            }
+        }
+    }
+
     fn apply_approval(&mut self, choice: usize) -> Msg {
         match choice {
             0 => Msg::ModalConfirm(0), // yes, once
@@ -5977,6 +6018,13 @@ impl App {
 }
 
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
+    approval_prompt(label, selected).lines(width as u16, APPROVAL_PANEL_HEIGHT)
+}
+
+const APPROVAL_OVERLAY_ROWS_BELOW: usize = 5;
+const APPROVAL_PANEL_HEIGHT: usize = 5;
+
+fn approval_prompt(label: &str, selected: usize) -> ChoicePrompt {
     ChoicePrompt::approval(format!("⏵ Allow {label}?"))
         .selected(selected)
         .indent(2)
@@ -5987,7 +6035,13 @@ fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String
         .danger_color(TN_RED)
         .selected_colors(Color::BrightWhite, ACCENT)
         .hint("Enter select · ↑/↓ · 1–3 · Esc")
-        .lines(width as u16, 5)
+}
+
+fn approval_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(APPROVAL_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 /// Headless probe of the same `session.stream()` / `AgentEvent` path the TUI
@@ -6691,6 +6745,47 @@ mod tests {
             "{plain:?}"
         );
         assert!(lines[2].contains("\x1b["), "selected row is styled");
+    }
+
+    #[test]
+    fn approval_prompt_mouse_wheel_moves_selection_at_overlay_offset() {
+        use a3s_tui::event::{MouseEvent, MouseEventKind};
+
+        let width = 42;
+        let lines = approval_menu_lines("Bash(cargo test)", 0, width);
+        let y_offset = approval_overlay_y_offset(18, lines.len());
+        let mut prompt = approval_prompt("Bash(cargo test)", 0);
+        prompt.set_y_offset(y_offset);
+
+        let msg = prompt.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 1,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(prompt.selected_index(), 1);
+    }
+
+    #[test]
+    fn approval_prompt_click_selects_choice_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEvent, MouseEventKind};
+
+        let width = 42;
+        let lines = approval_menu_lines("Bash(cargo test)", 0, width);
+        let y_offset = approval_overlay_y_offset(18, lines.len());
+        let mut prompt = approval_prompt("Bash(cargo test)", 0);
+        prompt.set_y_offset(y_offset);
+
+        let msg = prompt.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + 2,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(ChoicePromptMsg::Selected(1)));
     }
 
     #[test]

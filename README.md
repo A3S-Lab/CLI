@@ -167,7 +167,7 @@ session in that workspace. `/fork` copies the current transcript into a new
 session id while keeping the original, and `/clear` starts a fresh conversation.
 
 The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
-prompt through an approval overlay; `a` or `/auto` approves later tool calls for
+prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
 the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
 auto-approves read-only discovery tools but still asks before writes. Tool
 timeouts and confirmation timeouts are tracked separately so a human approval
@@ -314,10 +314,11 @@ shared `a3s-tui` components such as
 `Scrollbar`, `Sparkline`, `KeyValue`, `DataTable`, `WrappedPrefixBlock`,
 `SessionStatus`, `ModeLine`, and the `Meter` context fill rendered inside the
 footer status row. Reusable menu scrolling, selection, slash command wheel
-browsing and click-to-run, `/model` account tab mouse switching, `/effort`
-wheel/click adjustment, `/theme` wheel preview and click-to-apply, `@` file
-picker wheel browsing and click-to-insert, `/plugin` wheel browsing and
-click-to-toggle, approval choices, RemoteUI and
+browsing and click-to-run, approval overlay wheel browsing and click-to-approve
+or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
+`/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
+click-to-insert, `/plugin` wheel browsing and click-to-toggle, approval choices,
+RemoteUI and
 jump-to-latest action links, tool status truncation, shared alert rows for OS
 login/configuration warnings, overlay composition for menus and prompts, IDE
 flash footer notifications, live tool activity/output tails, `/top` status
@@ -329,9 +330,9 @@ previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
-hit-testing, slash command palette hit-testing, `/theme` preview hit-testing,
-`@` file picker hit-testing, `/plugin` overlay hit-testing, and width-bounding
-fixes are exercised directly by `a3s code`.
+hit-testing, slash command palette hit-testing, approval overlay hit-testing,
+`/theme` preview hit-testing, `@` file picker hit-testing, `/plugin` overlay
+hit-testing, and width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
