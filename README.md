@@ -136,8 +136,9 @@ transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared display-width wrapping for live reasoning and detail text,
 completed output tail previews,
 pinned plan checklists, task status summaries, compaction progress bars,
-connector rows, diff wrapping, framed panels, breadcrumbs, detail-row layout,
-activity shimmer, and width-bounding fixes are exercised directly by `a3s code`.
+pinned memory importance bars, connector rows, diff wrapping, framed panels,
+breadcrumbs, detail-row layout, activity shimmer, and width-bounding fixes are
+exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD

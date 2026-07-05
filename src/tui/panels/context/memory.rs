@@ -6,7 +6,7 @@
 
 use super::super::*;
 use a3s_tui::components::{
-    Badge, DetailPanel, DetailRow, Paragraph, Timeline, TimelineItem, TimelineRow,
+    Badge, DetailPanel, DetailRow, Paragraph, Progress, Timeline, TimelineItem, TimelineRow,
 };
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
@@ -38,10 +38,17 @@ fn forget_mark(signal: ForgetSignal) -> &'static str {
     }
 }
 
-/// Importance as a 5-cell bar, e.g. `▰▰▰▰▱`.
-fn imp_bar(importance: f32) -> String {
-    let filled = (importance.clamp(0.0, 1.0) * 5.0).round() as usize;
-    format!("{}{}", "▰".repeat(filled), "▱".repeat(5 - filled))
+fn importance_bar(importance: f32, color: Color) -> String {
+    // Keep 5-cell rounding aligned with the former f32 bar math.
+    Progress::new()
+        .value(f64::from(importance.clamp(0.0, 1.0)) + 1e-7)
+        .width(5)
+        .filled_char('▰')
+        .empty_char('▱')
+        .filled_color(color)
+        .empty_color(TN_GRAY)
+        .show_percentage(false)
+        .view()
 }
 
 fn memory_line(rendered: &str, width: usize) -> String {
@@ -68,12 +75,15 @@ fn memory_detail_metadata_lines(
     let header = format!(
         "{} {}",
         Badge::new(ty).color(color).view(),
-        Style::new().fg(TN_GRAY).render(&format!(
-            "{} importance {:.2} · {}",
-            imp_bar(e.importance),
-            e.importance,
-            rel_time(e.timestamp, now)
-        ))
+        format!(
+            "{} {}",
+            importance_bar(e.importance, color),
+            Style::new().fg(TN_GRAY).render(&format!(
+                "importance {:.2} · {}",
+                e.importance,
+                rel_time(e.timestamp, now)
+            ))
+        )
     );
     let mut lines = vec![a3s_tui::style::fit_visible(&header, width)];
     let mut panel = DetailPanel::without_title()
@@ -641,6 +651,7 @@ mod tests {
             .join("\n");
 
         assert!(plain.contains("[semantic]"), "{plain}");
+        assert!(plain.contains("▰▰▰▰▱ importance"), "{plain}");
         assert!(plain.contains("tags"), "{plain}");
         assert!(plain.contains("lifecycle"), "{plain}");
         assert!(plain.contains("long-term"), "{plain}");
@@ -658,6 +669,24 @@ mod tests {
                 .all(|line| a3s_tui::style::visible_len(line) <= 42),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn importance_bar_uses_shared_progress() {
+        let rendered = importance_bar(0.7, TN_CYAN);
+        let expected = Progress::new()
+            .value(0.7)
+            .width(5)
+            .filled_char('▰')
+            .empty_char('▱')
+            .filled_color(TN_CYAN)
+            .empty_color(TN_GRAY)
+            .show_percentage(false)
+            .view();
+
+        assert_eq!(rendered, expected);
+        assert_eq!(a3s_tui::style::strip_ansi(&rendered), "▰▰▰▰▱");
+        assert_eq!(a3s_tui::style::visible_len(&rendered), 5);
     }
 
     #[test]
