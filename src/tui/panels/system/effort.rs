@@ -1,9 +1,54 @@
 //! `/effort` overlay: the effort slider (incl. the ultracode flourish).
 
 use super::super::*;
+use a3s_tui::components::{LevelSlider, SliderLevel};
 
-fn effort_line(text: &str, width: usize) -> String {
-    pad_to(&truncate(text, width), width)
+fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let level_colors = [
+        TN_GRAY,
+        TN_CYAN,
+        ACCENT,
+        TN_YELLOW,
+        GRADIENT_SHIP_START,
+        TN_PURPLE,
+    ];
+    let levels = EFFORT_LEVELS
+        .iter()
+        .enumerate()
+        .map(|(index, profile)| {
+            let description = if index == ULTRACODE {
+                "ultracode: plans, then fans independent work out to parallel subagents."
+            } else {
+                "higher effort = deeper reasoning + stricter verification + longer tool budget (slower)."
+            };
+            SliderLevel::new(profile.label)
+                .description(description)
+                .color(level_colors[index.min(level_colors.len() - 1)])
+        })
+        .collect::<Vec<_>>();
+
+    LevelSlider::new(levels)
+        .title("Effort")
+        .range_labels("Faster", "Smarter")
+        .selected(selected)
+        .separator_after(ULTRACODE.saturating_sub(1))
+        .margin(4)
+        .marker('▲')
+        .separator_char('┆')
+        .pointer("▸")
+        .title_color(ACCENT)
+        .selected_color(ACCENT)
+        .track_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .hint("←/→ adjust · Enter confirm · Esc cancel")
+        .view(width.min(u16::MAX as usize) as u16)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -56,79 +101,7 @@ impl App {
             ];
             return self.overlay_list(composed, &menu);
         }
-        let n = EFFORT_LEVELS.len();
-        let track_w = width.saturating_sub(8).max(8);
-        let posf = |i: usize| {
-            if n > 1 {
-                i * (track_w - 1) / (n - 1)
-            } else {
-                0
-            }
-        };
-        let pos = posf(sel);
-        // Track with a ▲ at the selected level and a ┆ divider before ultracode.
-        let mut track: Vec<char> = "─".repeat(track_w).chars().collect();
-        let div = (posf(ULTRACODE - 1) + posf(ULTRACODE)) / 2;
-        if div < track.len() {
-            track[div] = '┆';
-        }
-        if pos < track.len() {
-            track[pos] = '▲';
-        }
-        let track: String = track.iter().collect();
-        // Level names centred under their tick with sparse brand accents.
-        let level_colors = [
-            TN_GRAY,
-            TN_CYAN,
-            ACCENT,
-            TN_YELLOW,
-            GRADIENT_SHIP_START,
-            TN_PURPLE,
-        ];
-        let mut labels = String::new();
-        let mut vis = 0usize;
-        for (i, profile) in EFFORT_LEVELS.iter().enumerate() {
-            let name = profile.label;
-            let nw = name.chars().count();
-            let start = posf(i).saturating_sub(nw / 2);
-            while vis < start {
-                labels.push(' ');
-                vis += 1;
-            }
-            let c = level_colors[i.min(level_colors.len() - 1)];
-            let st = if i == sel {
-                Style::new().fg(c).bold()
-            } else {
-                Style::new().fg(c)
-            };
-            labels.push_str(&st.render(name));
-            vis += nw;
-        }
-        let faster_smarter = format!("Faster{}Smarter", " ".repeat(track_w.saturating_sub(13)));
-        let desc = if sel == ULTRACODE {
-            "ultracode: plans, then fans independent work out to parallel subagents."
-        } else {
-            "higher effort = deeper reasoning + stricter verification + longer tool budget (slower)."
-        };
-        let dim = |s: &str| Style::new().fg(TN_GRAY).render(s);
-        let menu = vec![
-            effort_line(&Style::new().fg(ACCENT).bold().render("  Effort"), width),
-            effort_line(&format!("    {}", dim(&faster_smarter)), width),
-            effort_line(
-                &format!("    {}", Style::new().fg(TN_FG).render(&track)),
-                width,
-            ),
-            effort_line(&format!("    {labels}"), width),
-            effort_line(
-                &Style::new()
-                    .fg(ACCENT)
-                    .bold()
-                    .render(&format!("    ▸ {}", EFFORT_LEVELS[sel].label)),
-                width,
-            ),
-            effort_line(&format!("    {}", dim(desc)), width),
-            effort_line(&dim("  ←/→ adjust · Enter confirm · Esc cancel"), width),
-        ];
+        let menu = effort_slider_lines(sel, width);
         self.overlay_list(composed, &menu)
     }
 }
@@ -138,25 +111,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn effort_lines_are_width_bounded() {
-        let line = effort_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render("  ←/→ adjust · Enter confirm · Esc cancel"),
-            30,
-        );
+    fn effort_slider_lines_are_width_bounded() {
+        let lines = effort_slider_lines(ULTRACODE, 30);
 
         assert!(
-            a3s_tui::style::visible_len(&line) <= 30,
-            "effort hint should fit: {:?}",
-            a3s_tui::style::strip_ansi(&line)
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 30),
+            "{:?}",
+            lines
+                .iter()
+                .map(|line| a3s_tui::style::strip_ansi(line))
+                .collect::<Vec<_>>()
         );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(plain.contains("Effort"), "{plain}");
+        assert!(plain.contains("Faster"), "{plain}");
+        assert!(plain.contains("Smarter"), "{plain}");
+        assert!(plain.contains('▲'), "{plain}");
+        assert!(plain.contains('┆'), "{plain}");
+        assert!(plain.contains("▸ ultracode"), "{plain}");
     }
 
     #[test]
-    fn effort_track_does_not_force_minimum_wider_than_viewport() {
-        let width = 30usize;
-        let track_w = width.saturating_sub(8).max(8);
-        assert!(track_w + 4 <= width, "track plus indent should fit");
+    fn effort_slider_clamps_selected_index() {
+        let plain = effort_slider_lines(usize::MAX, 48)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("▸ ultracode"), "{plain}");
     }
 }
