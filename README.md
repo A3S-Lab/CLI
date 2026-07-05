@@ -321,8 +321,9 @@ click-to-insert, `/agent` picker wheel browsing and click-to-develop,
 `/mcp` picker wheel browsing and click-to-develop, `/skill` picker wheel
 browsing and click-to-develop, `/okf` picker wheel browsing and click-to-develop,
 `/flow` picker wheel browsing and click-to-open, `/plugin` wheel browsing and
-click-to-toggle, approval choices, RemoteUI and jump-to-latest action links, tool
-status truncation, shared alert rows for OS login/configuration warnings, overlay
+click-to-toggle, `/top` process table wheel browsing and click row selection,
+approval choices, RemoteUI and jump-to-latest action links, tool status
+truncation, shared alert rows for OS login/configuration warnings, overlay
 composition for menus and prompts, IDE flash footer notifications, live tool
 activity/output tails, `/top` status header actions and CPU/MEM trend sparklines,
 `/loop` key-value summaries, `/kb` delete confirmations, transcript gutters and
@@ -335,8 +336,8 @@ detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
 `/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
 hit-testing, `/mcp` picker hit-testing, `/skill` picker hit-testing, `/flow`
-picker hit-testing, `/plugin` overlay hit-testing, and width-bounding fixes are
-exercised directly by `a3s code`.
+picker hit-testing, `/plugin` overlay hit-testing, `/top` process table
+hit-testing, and width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -470,7 +471,7 @@ These commands are available outside the asset-specific flows:
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/view` | Reopen the latest captured OS RemoteUI ViewLink. |
 | `/output` | Inspect retained tool calls for the current session. |
-| `/top` | Inspect local agent process activity. |
+| `/top` | Inspect local agent process activity with keyboard, wheel, or click row selection. |
 | `/ide` | Open the workspace file browser and editor. |
 | `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
 | `/ctx <query>` | Search past ctx-indexed sessions. |

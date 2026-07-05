@@ -3,7 +3,10 @@
 //! drills into a coding agent's process subtree.
 
 use super::super::*;
-use a3s_tui::components::StatusBar;
+use a3s_tui::components::{DataTableMsg, StatusBar};
+use a3s_tui::event::MouseEvent;
+
+use crate::top::process_data_table;
 
 fn top_panel_line(rendered: &str, width: usize) -> String {
     pad_to(&truncate(rendered, width), width)
@@ -103,6 +106,46 @@ impl App {
         out.truncate(h);
 
         out.join("\n")
+    }
+
+    pub(crate) fn handle_top_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        let rows = self.top_rows();
+        let total = rows.len();
+        if total == 0 || self.width == 0 || self.height == 0 {
+            return None;
+        }
+
+        let hidden = HashSet::new();
+        let history = |pid: u32| self.top_history.values(pid);
+        let table_height = (self.height as usize).saturating_sub(1).max(1);
+        let mut table = process_data_table(
+            &rows,
+            &ProcessTableView {
+                selected: self.top_sel.min(total - 1),
+                scroll: self.top_scroll,
+                width: self.width,
+                height: table_height,
+                hidden: &hidden,
+                history: Some(&history),
+            },
+        );
+        table.set_y_offset(1);
+        let before = table.selected_index().unwrap_or(0).min(total - 1);
+
+        match table.handle_mouse(mouse, table_height) {
+            Some(DataTableMsg::Selected(index)) => {
+                self.top_sel = index.min(total - 1);
+                self.top_scroll = table.scroll_offset();
+            }
+            None => {
+                let after = table.selected_index().unwrap_or(before).min(total - 1);
+                if after != before {
+                    self.top_sel = after;
+                    self.top_scroll = table.scroll_offset();
+                }
+            }
+        }
+        None
     }
 }
 
@@ -265,6 +308,78 @@ mod tests {
             plain.chars().any(|ch| matches!(ch, '▁'..='█')),
             "expected sparkline bar glyphs: {plain}"
         );
+    }
+
+    #[test]
+    fn top_process_table_mouse_wheel_moves_selection() {
+        use a3s_tui::event::MouseEventKind;
+
+        let rows = (0..4)
+            .map(|index| row(100 + index, 1, &format!("process-{index}")))
+            .collect::<Vec<_>>();
+        let hidden = HashSet::new();
+        let mut table = process_data_table(
+            &rows,
+            &ProcessTableView {
+                selected: 0,
+                scroll: 0,
+                width: 80,
+                height: 5,
+                hidden: &hidden,
+                history: None,
+            },
+        );
+        table.set_y_offset(1);
+
+        let msg = table.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 3,
+                modifiers: a3s_tui::KeyModifiers::NONE,
+            },
+            5,
+        );
+
+        assert_eq!(msg, None);
+        assert_eq!(table.selected_index(), Some(1));
+        assert_eq!(table.scroll_offset(), 0);
+    }
+
+    #[test]
+    fn top_process_table_click_selects_visible_body_row() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let rows = (0..5)
+            .map(|index| row(200 + index, 1, &format!("process-{index}")))
+            .collect::<Vec<_>>();
+        let hidden = HashSet::new();
+        let mut table = process_data_table(
+            &rows,
+            &ProcessTableView {
+                selected: 2,
+                scroll: 2,
+                width: 80,
+                height: 4,
+                hidden: &hidden,
+                history: None,
+            },
+        );
+        table.set_y_offset(1);
+
+        let msg = table.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 0,
+                row: 4,
+                modifiers: a3s_tui::KeyModifiers::NONE,
+            },
+            4,
+        );
+
+        assert_eq!(msg, Some(DataTableMsg::Selected(3)));
+        assert_eq!(table.selected_index(), Some(3));
+        assert_eq!(table.scroll_offset(), 2);
     }
 }
 

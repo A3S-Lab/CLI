@@ -31,7 +31,7 @@ mod view;
 pub(crate) use collect::{collect_processes, AgentKind, ProcessRow, Risk};
 #[cfg(test)]
 use collect::{detect_agent, parse_lsof_cwd, parse_process_line, process_risk};
-pub(crate) use view::{render_process_table, ProcessTableView};
+pub(crate) use view::{process_data_table, render_process_table, ProcessTableView};
 
 const ACCENT: Color = Color::Rgb(122, 162, 247);
 const GREEN: Color = Color::Rgb(158, 206, 106);

@@ -42,9 +42,9 @@ fn sparkline(values: &[f32], color: Color) -> String {
         .view()
 }
 
-/// Render the host process table. Agent rows wear their brand colour; other
+/// Build the host process table. Agent rows wear their brand colour; other
 /// rows are coloured by risk. The selected row is highlighted by the table.
-pub(crate) fn render_process_table(rows: &[ProcessRow], view: &ProcessTableView) -> String {
+pub(crate) fn process_data_table(rows: &[ProcessRow], view: &ProcessTableView) -> DataTable {
     let h = view.hidden;
     let columns = vec![
         configured(
@@ -109,5 +109,12 @@ pub(crate) fn render_process_table(rows: &[ProcessRow], view: &ProcessTableView)
         ];
         table.add_row(DataRow::new(cells).fg(color));
     }
+
+    table
+}
+
+/// Render the host process table.
+pub(crate) fn render_process_table(rows: &[ProcessRow], view: &ProcessTableView) -> String {
+    let table = process_data_table(rows, view);
     table.view(view.width, view.height)
 }
