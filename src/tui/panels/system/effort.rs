@@ -1,7 +1,7 @@
 //! `/effort` overlay: the effort slider (incl. the ultracode flourish).
 
 use super::super::*;
-use a3s_tui::components::{LevelSlider, SliderLevel};
+use a3s_tui::components::{LevelSlider, ShimmerText, SliderLevel};
 
 fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
     if width == 0 {
@@ -51,6 +51,55 @@ fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
         .collect()
 }
 
+fn ultracode_animation_lines(frame: usize, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let wave_width = width.saturating_sub(8).max(1).min(width);
+    let wave: String = (0..wave_width)
+        .map(|i| {
+            Style::new()
+                .fg(BRAND_GRADIENT[(i + frame) % BRAND_GRADIENT.len()])
+                .bold()
+                .render("━")
+        })
+        .collect();
+    let title = ShimmerText::new("⚡  U L T R A C O D E  ⚡")
+        .phase(frame)
+        .colors(GRADIENT_SHIP_START, TN_FG)
+        .spread(4.0)
+        .speed_divisor(1)
+        .cycle_gap(6)
+        .view();
+    let status = Style::new()
+        .fg(TN_GRAY)
+        .render("planning a dynamic workflow · dispatching parallel subagents");
+
+    vec![
+        String::new(),
+        center_visible_line(&wave, width),
+        String::new(),
+        center_visible_line(&title, width),
+        String::new(),
+        center_visible_line(&status, width),
+        String::new(),
+        center_visible_line(&wave, width),
+    ]
+}
+
+fn center_visible_line(rendered: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let visible = a3s_tui::style::visible_len(rendered);
+    if visible >= width {
+        return a3s_tui::style::fit_visible(rendered, width);
+    }
+    let pad = (width - visible) / 2;
+    a3s_tui::style::fit_visible(&format!("{}{rendered}", " ".repeat(pad)), width)
+}
+
 impl App {
     pub(crate) fn overlay_effort(&self, composed: String) -> String {
         let Some(sel) = self.effort_panel else {
@@ -59,46 +108,7 @@ impl App {
         let width = self.width as usize;
         // Ultracode confirm flourish: a compact brand-gradient burst.
         if self.effort_anim.is_some() {
-            let f = self.gradient_frame;
-            let title = "⚡  U L T R A C O D E  ⚡";
-            let colored: String = title
-                .chars()
-                .enumerate()
-                .map(|(i, ch)| {
-                    Style::new()
-                        .fg(BRAND_GRADIENT[(i + f) % BRAND_GRADIENT.len()])
-                        .bold()
-                        .render(&ch.to_string())
-                })
-                .collect();
-            let barw = width.saturating_sub(8).max(8);
-            let wave: String = (0..barw)
-                .map(|i| {
-                    Style::new()
-                        .fg(BRAND_GRADIENT[(i + f) % BRAND_GRADIENT.len()])
-                        .bold()
-                        .render("━")
-                })
-                .collect();
-            let center = |s: &str, vis: usize| {
-                let pad = width.saturating_sub(vis) / 2;
-                format!("{}{s}", " ".repeat(pad))
-            };
-            let menu = vec![
-                String::new(),
-                format!("    {wave}"),
-                String::new(),
-                center(&colored, title.chars().count()),
-                String::new(),
-                center(
-                    &Style::new()
-                        .fg(TN_GRAY)
-                        .render("planning a dynamic workflow · dispatching parallel subagents"),
-                    61,
-                ),
-                String::new(),
-                format!("    {wave}"),
-            ];
+            let menu = ultracode_animation_lines(self.gradient_frame, width);
             return self.overlay_list(composed, &menu);
         }
         let menu = effort_slider_lines(sel, width);
@@ -146,5 +156,26 @@ mod tests {
             .join("\n");
 
         assert!(plain.contains("▸ ultracode"), "{plain}");
+    }
+
+    #[test]
+    fn ultracode_animation_uses_shared_shimmer_and_fits_width() {
+        let lines = ultracode_animation_lines(3, 32);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 8);
+        assert!(plain.contains("U L T R A C O D E"), "{plain}");
+        assert!(plain.contains("planning a dynamic"), "{plain}");
+        assert!(lines.iter().any(|line| line.contains("\x1b[")));
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 32),
+            "{plain}"
+        );
     }
 }
