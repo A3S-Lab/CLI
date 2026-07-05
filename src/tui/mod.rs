@@ -28,7 +28,7 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    ChoicePrompt, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
+    ChoicePrompt, InlineAction, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
     ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
@@ -995,17 +995,12 @@ fn osc52_copy(text: &str) -> String {
 const VIEW_BUTTON_MARKER: &str = "Open view";
 
 fn remote_view_button(detail: &str) -> String {
-    let button = Style::new()
-        .fg(Color::BrightWhite)
-        .bg(ACCENT)
-        .bold()
-        .render(&format!(" ↗ {VIEW_BUTTON_MARKER} "));
-    let detail = detail.trim();
-    if detail.is_empty() {
-        button
-    } else {
-        format!("{button} {}", Style::new().fg(TN_GRAY).render(detail))
-    }
+    InlineAction::new(VIEW_BUTTON_MARKER)
+        .icon("↗")
+        .colors(Color::BrightWhite, ACCENT)
+        .detail_color(TN_GRAY)
+        .detail(detail)
+        .view()
 }
 
 /// Put `text` on the system clipboard: OSC 52 (portable, survives SSH on
