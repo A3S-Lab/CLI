@@ -61,6 +61,30 @@ surface.
 | OS and RemoteUI | `/login` enables OS capabilities. `/view` reopens the latest RemoteUI ViewLink captured from shaped OS progressive responses (`.view` or `viewUrl`), using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, and `/fork` branches a new session from the current transcript. |
 
+### Effort Profiles
+
+`/effort` is not just a UI label. It rebuilds the active session with a larger
+reasoning budget, larger tool-round budget, longer auto-continuation allowance,
+and stronger model-agnostic rigor guidance. Anthropic models receive the
+thinking budget directly; GPT, GLM, OS Gateway, and account-backed models use
+the same profile through prompt guidance, tool-round limits, and continuation
+limits.
+
+| Level | Thinking budget | Tool rounds | Continuations | Intended behavior |
+| --- | ---: | ---: | ---: | --- |
+| `low` | 1,024 | 120 | 2 | Fast, minimal changes with narrow verification. |
+| `medium` | 4,096 | 200 | 3 | Balanced default behavior without extra depth steering. |
+| `high` | 8,192 | 300 | 4 | More deliberate planning, relevant tests, and self-review. |
+| `xhigh` | 16,384 | 400 | 6 | Compare alternatives, probe edge cases, and verify thoroughly. |
+| `max` | 32,768 | 500 | 8 | Maximum rigor for correctness, adversarial checks, and completeness. |
+| `ultracode` | 32,768 | 600 | 8 | Message-gated dynamic workflow mode: trivial turns stay direct; complex turns may use `dynamic_workflow`, A3S Flow replay, host-side `parallel_task`, and signed-in `runtime`. |
+
+All effort levels keep local `task` and `parallel_task` available, with
+`max_parallel_tasks` set to 8 for the TUI session. `ultracode` adds
+`PlanningMode::Auto`, goal tracking, and dynamic-workflow guidance, but it still
+lets the pre-analysis gate decide whether a turn actually needs planning or
+fan-out.
+
 ### Dynamic Workflows
 
 There are two workflow concepts, intentionally kept separate:
