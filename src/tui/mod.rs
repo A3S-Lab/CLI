@@ -28,8 +28,8 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    ChoicePrompt, InlineAction, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
-    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
+    ChoicePrompt, InlineAction, ModeLine, Scrollbar, SessionStatus, SessionStatusChip, Spinner,
+    Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -944,38 +944,17 @@ fn deep_research_goal(query: &str) -> String {
     format!("Deep research — deliver a comprehensive, well-cited report answering: {query}")
 }
 
-/// Append a one-column vertical scrollbar to the right of the viewport's visible
-/// rows. The viewport is sized to `inner_width` (= screen width − 1, see
-/// `relayout`) so the bar — a `│` track with an `█` thumb sized and positioned
-/// from the scroll state — never clips content. The gutter stays blank when
+/// Append the shared one-column vertical scrollbar to the viewport's visible
+/// rows. The viewport is sized to `inner_width` (= screen width - 1, see
+/// `relayout`) so the bar never clips content, and the gutter stays blank when
 /// nothing overflows the window.
 fn append_scrollbar(view: &str, inner_width: usize, total: usize, scroll_percent: u8) -> String {
-    let rows: Vec<&str> = view.split('\n').collect();
-    let h = rows.len();
-    let overflow = total > h && h > 0;
-    // Thumb length proportional to the visible fraction; positioned by percent.
-    let thumb_len = if overflow { (h * h / total).max(1) } else { 0 };
-    let thumb_start = if overflow {
-        (h - thumb_len) * scroll_percent as usize / 100
-    } else {
-        0
-    };
-    let track = Style::new().fg(TN_GRAY);
-    let thumb = Style::new().fg(ACCENT);
-    rows.iter()
-        .enumerate()
-        .map(|(i, row)| {
-            let bar = if !overflow {
-                " ".to_string()
-            } else if i >= thumb_start && i < thumb_start + thumb_len {
-                thumb.render("█")
-            } else {
-                track.render("│")
-            };
-            format!("{}{}", pad_to(row, inner_width), bar)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let visible = view.split('\n').count();
+    Scrollbar::from_scroll_percent(total, visible, scroll_percent)
+        .track_color(TN_GRAY)
+        .thumb_color(ACCENT)
+        .hide_when_not_overflowing(true)
+        .append_to_view(view, inner_width)
 }
 
 /// The OSC 52 escape that asks the terminal to set the system clipboard to
