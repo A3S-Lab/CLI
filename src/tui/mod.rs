@@ -2466,6 +2466,9 @@ impl Model for App {
                 if self.skill_picker.is_some() {
                     return self.handle_skill_mouse(&m);
                 }
+                if self.okf_picker.is_some() {
+                    return self.handle_okf_package_mouse(&m);
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),

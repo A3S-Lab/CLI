@@ -319,14 +319,14 @@ or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
 click-to-insert, `/agent` picker wheel browsing and click-to-develop,
 `/mcp` picker wheel browsing and click-to-develop, `/skill` picker wheel
-browsing and click-to-develop, `/flow` picker wheel browsing and click-to-open,
-`/plugin` wheel browsing and click-to-toggle, approval choices, RemoteUI and
-jump-to-latest action links, tool status truncation, shared alert rows for OS
-login/configuration warnings, overlay composition for menus and prompts, IDE
-flash footer notifications, live tool activity/output tails, `/top` status
-header actions and CPU/MEM trend sparklines, `/loop` key-value summaries, `/kb`
-delete confirmations, transcript gutters and input bubbles, prompt continuation
-alignment, input border labels, shared
+browsing and click-to-develop, `/okf` picker wheel browsing and click-to-develop,
+`/flow` picker wheel browsing and click-to-open, `/plugin` wheel browsing and
+click-to-toggle, approval choices, RemoteUI and jump-to-latest action links, tool
+status truncation, shared alert rows for OS login/configuration warnings, overlay
+composition for menus and prompts, IDE flash footer notifications, live tool
+activity/output tails, `/top` status header actions and CPU/MEM trend sparklines,
+`/loop` key-value summaries, `/kb` delete confirmations, transcript gutters and
+input bubbles, prompt continuation alignment, input border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
@@ -535,7 +535,7 @@ These commands are available outside the asset-specific flows:
 | `/skill open` / `/skill status` | Inspect the OS skill asset or runtime-binding status without mutating the asset; open prefers progressive Function as a Service ViewLinks when available. |
 | `/kb` | Open the local personal knowledge base for notes, imports, search, and vault browsing. |
 | `/kb add/import/search/vault` | Capture a note, preview/import files or folders, search local knowledge sources, or browse the local `.a3s/kb` vault. |
-| `/okf` | Select a local OKF knowledge package from `.a3s/okf` and enter local package-development mode. The TUI shows the active package; press Esc or run `/okf off` to return to normal mode. |
+| `/okf` | Select a local OKF knowledge package from `.a3s/okf` with keyboard, wheel, or click, then enter local package-development mode. The TUI shows the active package; press Esc or run `/okf off` to return to normal mode. |
 | `/okf <description>` | Draft a local OKF package prototype with sources, wiki concepts, eval notes, and OS knowledge asset metadata. |
 | `/okf clone <git-url>` | Clone an existing OKF package source into `.a3s/okf`, then use `/okf` to select it. |
 | `/okf list [query]` | Browse OS knowledge package assets through the asset-scoped list panel. |
