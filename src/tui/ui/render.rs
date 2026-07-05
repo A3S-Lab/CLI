@@ -1,7 +1,7 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
-use a3s_tui::components::{ConnectorBlock, ConnectorRow};
+use a3s_tui::components::{ConnectorBlock, ConnectorRow, DiffView};
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -542,138 +542,21 @@ fn summarize_tasks(tasks: &[serde_json::Value], worker: Option<&str>) -> Option<
     Some(format!("{} tasks{worker}: {head}{tail}", descs.len()))
 }
 
-/// Render a unified-ish line diff (changed lines only) with +/- coloring.
-/// Split a plain string into visible-width-bounded segments (char-based wrap).
-fn wrap_plain(s: &str, w: usize) -> Vec<String> {
-    if w == 0 || s.is_empty() {
-        return vec![s.to_string()];
-    }
-    s.chars()
-        .collect::<Vec<_>>()
-        .chunks(w)
-        .map(|c| c.iter().collect())
-        .collect()
-}
-
 /// IDE-style unified diff: `└ path (+a -d)` header, then hunks with context
 /// lines (dim, no marker), `-`/`+` changes, `⋮` between hunks, and long lines
 /// wrapped with the code indented under a blank gutter.
 pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -> String {
-    use similar::{ChangeTag, TextDiff};
-    const MAX_LINES: usize = 200;
+    const MAX_DIFF_ROWS: usize = 200;
 
-    let diff = TextDiff::from_lines(before, after);
-    let (mut adds, mut dels) = (0usize, 0usize);
-    for c in diff.iter_all_changes() {
-        match c.tag() {
-            ChangeTag::Insert => adds += 1,
-            ChangeTag::Delete => dels += 1,
-            ChangeTag::Equal => {}
-        }
-    }
-    let nw = before
-        .lines()
-        .count()
-        .max(after.lines().count())
-        .max(1)
-        .to_string()
-        .len()
-        .max(3);
-    let code_col = 4 + nw + 3; // "    " + lineno + " " + marker + " "
-    let code_w = width.saturating_sub(code_col).max(16);
-    let cont_pad = " ".repeat(code_col);
-
-    let mut lines: Vec<String> = Vec::new();
-    let mut truncated = false;
-    for (gi, group) in diff.grouped_ops(3).iter().enumerate() {
-        if gi > 0 {
-            let row = Style::new()
-                .fg(TN_GRAY)
-                .render(&format!("    {} ⋮", " ".repeat(nw)));
-            lines.push(a3s_tui::style::truncate_visible(&row, width));
-        }
-        for op in group {
-            for change in diff.iter_changes(op) {
-                if lines.len() >= MAX_LINES {
-                    truncated = true;
-                    break;
-                }
-                let raw = change.value();
-                let raw = raw.strip_suffix('\n').unwrap_or(raw);
-                // Deleted lines get a red wash, inserted lines use the active
-                // blue wash from the DESIGN.md palette. Context lines stay dim.
-                // Plain high-contrast text, not syntax-highlight: syntax colors
-                // clash on a colored background.
-                let (no, marker, line_bg, line_fg) = match change.tag() {
-                    ChangeTag::Delete => (
-                        change.old_index().map(|i| i + 1).unwrap_or(0),
-                        '-',
-                        Some(Color::Rgb(82, 30, 34)),
-                        Color::Rgb(255, 215, 215),
-                    ),
-                    ChangeTag::Insert => (
-                        change.new_index().map(|i| i + 1).unwrap_or(0),
-                        '+',
-                        Some(SURFACE_SELECTED),
-                        Color::Rgb(211, 229, 255),
-                    ),
-                    ChangeTag::Equal => (
-                        change.old_index().map(|i| i + 1).unwrap_or(0),
-                        ' ',
-                        None,
-                        TN_GRAY,
-                    ),
-                };
-                for (si, seg) in wrap_plain(raw, code_w).iter().enumerate() {
-                    let content = if si == 0 {
-                        format!("    {no:>width$} {marker} {seg}", width = nw)
-                    } else {
-                        format!("{cont_pad}{seg}")
-                    };
-                    let line = match line_bg {
-                        // Changed line: fill the full row width with the bg color.
-                        Some(bg) => Style::new()
-                            .fg(line_fg)
-                            .bg(bg)
-                            .render(&pad_to(&content, width)),
-                        // Context line: dim foreground, no background.
-                        None => Style::new().fg(line_fg).render(&content),
-                    };
-                    lines.push(a3s_tui::style::truncate_visible(&line, width));
-                }
-            }
-            if truncated {
-                break;
-            }
-        }
-        if truncated {
-            break;
-        }
-    }
-    if truncated {
-        let row = Style::new().fg(TN_GRAY).render("    … (diff truncated)");
-        lines.push(a3s_tui::style::truncate_visible(&row, width));
-    }
-    let edit_prefix = format!(
-        "  {} {} ",
-        Style::new().fg(TN_GREEN).bold().render("•"),
-        Style::new().render("Edited"),
-    );
-    let counts = Style::new()
-        .fg(TN_GRAY)
-        .render(&format!("(+{adds} -{dels})"));
-    let path_width = width
-        .saturating_sub(
-            a3s_tui::style::visible_len(&edit_prefix) + a3s_tui::style::visible_len(&counts) + 1,
-        )
-        .max(8);
-    let header = format!("{}{} {}", edit_prefix, truncate(path, path_width), counts);
-    let mut out = a3s_tui::style::truncate_visible(&header, width);
-    if !lines.is_empty() {
-        out.push('\n');
-        out.push_str(&lines.join("\n"));
-    }
-    out
+    DiffView::from_texts(path, before, after)
+        .header_color(TN_GREEN)
+        .context_color(TN_GRAY)
+        .separator_color(TN_GRAY)
+        .insert_color(Color::Rgb(211, 229, 255))
+        .delete_color(Color::Rgb(255, 215, 215))
+        .changed_backgrounds(Some(SURFACE_SELECTED), Some(Color::Rgb(82, 30, 34)))
+        .max_lines(MAX_DIFF_ROWS)
+        .view(width.min(u16::MAX as usize) as u16, MAX_DIFF_ROWS + 2)
 }
 
 #[cfg(test)]
@@ -1060,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_rendering_bounds_long_paths_and_lines() {
+    fn diff_rendering_uses_shared_diff_view_and_bounds_rows() {
         let before = "let old_value = \"a very long old value that should wrap instead of escaping the viewport\";\nkeep();\n";
         let after = "let new_value = \"a very long new value that should wrap instead of escaping the viewport\";\nkeep();\n";
         let rendered = render_diff(
@@ -1073,6 +956,10 @@ mod tests {
 
         assert!(plain.contains("Edited"));
         assert!(plain.contains("+1") && plain.contains("-1"));
+        assert!(
+            rendered.contains(&TN_GREEN.fg_ansi()),
+            "diff header should use the shared DiffView header color: {rendered:?}"
+        );
         assert_visible_lines_bounded(&rendered, 48);
     }
 
