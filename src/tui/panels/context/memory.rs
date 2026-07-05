@@ -5,7 +5,7 @@
 //! metadata, graph neighborhood, aliases, relations, and full content.
 
 use super::super::*;
-use a3s_tui::components::{Timeline, TimelineItem, TimelineRow};
+use a3s_tui::components::{DetailPanel, DetailRow, Timeline, TimelineItem, TimelineRow};
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
 
@@ -44,6 +44,124 @@ fn imp_bar(importance: f32) -> String {
 
 fn memory_line(rendered: &str, width: usize) -> String {
     pad_to(&truncate(rendered, width), width)
+}
+
+fn memory_detail_metadata_lines(
+    e: &MemEntry,
+    detail: &MemDetail,
+    graph: &MemoryGraph,
+    now: chrono::DateTime<chrono::Utc>,
+    width: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let (_, color) = mem_type_style(&e.memory_type);
+    let ty = if e.memory_type.is_empty() {
+        "memory"
+    } else {
+        &e.memory_type
+    };
+    let mut panel = DetailPanel::without_title()
+        .show_separator(false)
+        .indent(0)
+        .label_width(15)
+        .label_color(TN_GRAY)
+        .value_color(TN_GRAY)
+        .muted_color(TN_GRAY)
+        .unlimited_rows()
+        .row(
+            DetailRow::text(format!(
+                "● {ty}   {} importance {:.2} · {}",
+                imp_bar(e.importance),
+                e.importance,
+                rel_time(e.timestamp, now)
+            ))
+            .color(color)
+            .bold(),
+        );
+
+    if !e.tags.is_empty() {
+        panel = panel.row(DetailRow::pair("tags", e.tags.join(", ")).color(TN_CYAN));
+    }
+
+    if let Some(facet) = graph.by_memory.get(&e.id) {
+        let lifecycle = lifecycle_labels(facet);
+        if !lifecycle.is_empty() {
+            let color = if facet.conflicts { TN_RED } else { TN_GREEN };
+            panel = panel.row(DetailRow::pair("lifecycle", lifecycle.join(" · ")).color(color));
+        }
+    }
+
+    if let Some(event) = graph.event_for_memory(&e.id) {
+        panel = panel
+            .pair(
+                "event",
+                format!(
+                    "{} · {} · {} · {} entities",
+                    event.label,
+                    event.source,
+                    event.timestamp.format("%Y-%m-%d %H:%M"),
+                    event.entity_ids.len()
+                ),
+            )
+            .pair(
+                "event retention",
+                format!(
+                    "{} · {:.2} · {}",
+                    event.tier.label(),
+                    event.retention_score,
+                    event.forget.label()
+                ),
+            );
+    }
+
+    if let Some(facet) = graph.by_memory.get(&e.id) {
+        panel = panel.row(
+            DetailRow::pair(
+                "tier",
+                format!(
+                    "{} · retention {:.2} · {}",
+                    facet.tier.label(),
+                    facet.retention_score,
+                    facet.forget.label()
+                ),
+            )
+            .color(tier_style(facet.tier)),
+        );
+        let entities = graph.entity_labels(&facet.entity_ids, 8);
+        if !entities.is_empty() {
+            panel = panel.row(DetailRow::pair("entities", entities.join(", ")).color(TN_CYAN));
+        }
+        let aliases = graph.alias_labels(&facet.entity_ids, 6);
+        if !aliases.is_empty() {
+            panel = panel.pair("aliases", aliases.join(", "));
+        }
+        let relations = graph.relation_labels(&facet.relation_ids, 6);
+        if !relations.is_empty() {
+            panel = panel.pair("relations", relations.join(" · "));
+        }
+    }
+
+    let created = e.timestamp.format("%Y-%m-%d %H:%M").to_string();
+    let accessed = match detail.last_accessed {
+        Some(la) => format!(" · last {}", la.format("%Y-%m-%d %H:%M")),
+        None => String::new(),
+    };
+    panel = panel.pair(
+        "created",
+        format!("{created} · {}× accessed{accessed}", detail.access_count),
+    );
+    for (k, v) in &detail.metadata {
+        panel = panel.pair(k.clone(), v.clone());
+    }
+
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel.rows().len())
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -262,106 +380,7 @@ impl App {
         let Some(e) = m.entries.get(m.sel) else {
             return lines;
         };
-        let (_, color) = mem_type_style(&e.memory_type);
-        let ty = if e.memory_type.is_empty() {
-            "memory"
-        } else {
-            &e.memory_type
-        };
-        lines.push(format!(
-            "{}   {} {}",
-            Style::new().fg(color).bold().render(&format!("● {ty}")),
-            Style::new().fg(color).render(&imp_bar(e.importance)),
-            Style::new().fg(TN_GRAY).render(&format!(
-                "importance {:.2}  ·  {}",
-                e.importance,
-                rel_time(e.timestamp, now)
-            )),
-        ));
-        if !e.tags.is_empty() {
-            lines.push(
-                Style::new()
-                    .fg(TN_CYAN)
-                    .render(&format!("tags: {}", e.tags.join(", "))),
-            );
-        }
-        if let Some(facet) = m.graph.by_memory.get(&e.id) {
-            let lifecycle = lifecycle_labels(facet);
-            if !lifecycle.is_empty() {
-                let color = if facet.conflicts { TN_RED } else { TN_GREEN };
-                lines.push(
-                    Style::new()
-                        .fg(color)
-                        .render(&format!("lifecycle: {}", lifecycle.join(" · "))),
-                );
-            }
-        }
-        if let Some(event) = m.graph.event_for_memory(&e.id) {
-            lines.push(Style::new().fg(TN_GRAY).render(&format!(
-                "event: {} · {} · {} · {} entities",
-                event.label,
-                event.source,
-                event.timestamp.format("%Y-%m-%d %H:%M"),
-                event.entity_ids.len()
-            )));
-            lines.push(Style::new().fg(TN_GRAY).render(&format!(
-                "event retention: {} · {:.2} · {}",
-                event.tier.label(),
-                event.retention_score,
-                event.forget.label()
-            )));
-        }
-        if let Some(facet) = m.graph.by_memory.get(&e.id) {
-            lines.push(format!(
-                "{} {}",
-                Style::new()
-                    .fg(tier_style(facet.tier))
-                    .bold()
-                    .render(&format!("tier: {}", facet.tier.label())),
-                Style::new().fg(TN_GRAY).render(&format!(
-                    "· retention {:.2} · {}",
-                    facet.retention_score,
-                    facet.forget.label()
-                )),
-            ));
-            let entities = m.graph.entity_labels(&facet.entity_ids, 8);
-            if !entities.is_empty() {
-                lines.push(
-                    Style::new()
-                        .fg(TN_CYAN)
-                        .render(&format!("entities: {}", entities.join(", "))),
-                );
-            }
-            let aliases = m.graph.alias_labels(&facet.entity_ids, 6);
-            if !aliases.is_empty() {
-                lines.push(
-                    Style::new()
-                        .fg(TN_GRAY)
-                        .render(&format!("aliases: {}", aliases.join(", "))),
-                );
-            }
-            let relations = m.graph.relation_labels(&facet.relation_ids, 6);
-            if !relations.is_empty() {
-                lines.push(
-                    Style::new()
-                        .fg(TN_GRAY)
-                        .render(&format!("relations: {}", relations.join(" · "))),
-                );
-            }
-        }
-        let created = e.timestamp.format("%Y-%m-%d %H:%M").to_string();
-        let accessed = match m.detail.last_accessed {
-            Some(la) => format!(" · last {}", la.format("%Y-%m-%d %H:%M")),
-            None => String::new(),
-        };
-        lines.push(Style::new().fg(TN_GRAY).render(&format!(
-            "created {created} · {}× accessed{accessed}",
-            m.detail.access_count
-        )));
-        for (k, v) in &m.detail.metadata {
-            let v = truncate(v, w.saturating_sub(k.len() + 2));
-            lines.push(Style::new().fg(TN_GRAY).render(&format!("{k}: {v}")));
-        }
+        lines.extend(memory_detail_metadata_lines(e, &m.detail, &m.graph, now, w));
         lines.push(Style::new().fg(TN_GRAY).render(&"─".repeat(w.min(48))));
         // Prefer the full original-case content; fall back to the index preview.
         let content = if m.detail.content.is_empty() {
@@ -570,6 +589,58 @@ mod tests {
             lines
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn memory_detail_metadata_lines_use_shared_detail_panel_and_fit_width() {
+        let now = test_ts("2026-06-30T12:00:00Z");
+        let mut entry = test_entry(
+            "m1",
+            "remember terminal layout",
+            "semantic",
+            "2026-06-30T11:58:00Z",
+        );
+        entry.tags = vec!["tui".into(), "layout".into()];
+        let mut detail = MemDetail {
+            access_count: 3,
+            last_accessed: Some(test_ts("2026-06-30T11:59:00Z")),
+            ..MemDetail::default()
+        };
+        detail
+            .metadata
+            .insert("ctx_event_id".into(), "event-1234567890".into());
+        let mut graph = MemoryGraph::default();
+        graph.by_memory.insert(
+            "m1".to_string(),
+            MemoryGraphFacet {
+                tier: MemoryTier::Long,
+                forget: ForgetSignal::Protected,
+                retention_score: 0.92,
+                llm_extracted: true,
+                consolidated: true,
+                ..MemoryGraphFacet::default()
+            },
+        );
+
+        let lines = memory_detail_metadata_lines(&entry, &detail, &graph, now, 42);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("● semantic"), "{plain}");
+        assert!(plain.contains("tags"), "{plain}");
+        assert!(plain.contains("lifecycle"), "{plain}");
+        assert!(plain.contains("long-term"), "{plain}");
+        assert!(plain.contains("ctx_event_id"), "{plain}");
+        assert!(lines.iter().any(|line| line.contains("\x1b[")));
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 42),
             "{plain}"
         );
     }
