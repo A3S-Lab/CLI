@@ -3,6 +3,7 @@
 
 use super::super::*;
 use super::agent::{self, AgentDevSession};
+use a3s_tui::components::{DetailPanel, DetailRow, SectionHeader};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_PATTERN: &str = "daily-triage";
@@ -29,6 +30,121 @@ fn loop_columns(width: usize) -> (usize, usize) {
     };
     let right = width.saturating_sub(left + 1);
     (left, right)
+}
+
+fn loop_header_lines(has_loops: bool, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut header = SectionHeader::new("loop engineering")
+        .show_separator(false)
+        .indent(2)
+        .title_color(TN_CYAN)
+        .metadata_color(TN_GRAY)
+        .muted_color(TN_GRAY)
+        .metadata("Enter/r run · a audit · l logs · p runtime · i init · Esc");
+    if !has_loops {
+        header = header.muted("no loops · press i or run /loop init daily-triage");
+    }
+
+    header
+        .view(
+            width.min(u16::MAX as usize) as u16,
+            if has_loops { 2 } else { 3 },
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn loop_detail_lines(selected: Option<&LoopSummary>, note: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut lines: Vec<String> = DetailPanel::without_title()
+        .show_separator(false)
+        .indent(2)
+        .muted_color(TN_GRAY)
+        .row(DetailRow::muted(note))
+        .view(width.min(u16::MAX as usize) as u16, 1)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.push(String::new());
+
+    if let Some(summary) = selected {
+        let runtime = if summary.spec.os_runtime {
+            "Runtime + RemoteUI enabled"
+        } else {
+            "disabled"
+        };
+        let detail = DetailPanel::new(summary.spec.id.clone())
+            .show_separator(false)
+            .indent(2)
+            .title_color(TN_FG)
+            .label_color(TN_GRAY)
+            .value_color(TN_GRAY)
+            .label_width(8)
+            .unlimited_rows()
+            .pair("pattern", summary.spec.pattern.clone())
+            .pair(
+                "level",
+                format!("{} · cadence: {}", summary.spec.level, summary.spec.cadence),
+            )
+            .pair(
+                "score",
+                format!("{} · {}", summary.audit.score, summary.audit.level),
+            )
+            .pair("OS", runtime)
+            .pair("goal", summary.spec.goal.clone())
+            .pair("dir", summary.spec.dir.display().to_string());
+        lines.extend(
+            detail
+                .view(width.min(u16::MAX as usize) as u16, 7)
+                .lines()
+                .map(str::to_string),
+        );
+        lines.push(String::new());
+
+        let mut missing = DetailPanel::new("Missing")
+            .show_separator(false)
+            .indent(2)
+            .title_color(TN_YELLOW)
+            .value_color(TN_YELLOW)
+            .muted_color(TN_GREEN)
+            .unlimited_rows();
+        if summary.audit.missing.is_empty() {
+            missing = missing.row(DetailRow::muted("none"));
+        } else {
+            for item in summary.audit.missing.iter().take(6) {
+                missing = missing.row(DetailRow::text(format!("- {item}")).color(TN_YELLOW));
+            }
+        }
+        let missing_height = summary.audit.missing.len().min(6).saturating_add(1).max(2);
+        lines.extend(
+            missing
+                .view(width.min(u16::MAX as usize) as u16, missing_height)
+                .lines()
+                .map(str::to_string),
+        );
+    } else {
+        lines.extend(
+            DetailPanel::without_title()
+                .show_separator(false)
+                .indent(2)
+                .muted_color(TN_GRAY)
+                .row(DetailRow::muted(
+                    "/loop init daily-triage creates the first loop",
+                ))
+                .view(width.min(u16::MAX as usize) as u16, 1)
+                .lines()
+                .map(str::to_string),
+        );
+    }
+
+    lines
 }
 const BUDGET_FILE: &str = "budget.toml";
 
@@ -1120,25 +1236,8 @@ impl App {
         let h = self.height as usize;
         let (left_w, right_w) = loop_columns(width);
         let mut left = Vec::new();
-        let mut right = Vec::new();
-        left.push(loop_line(
-            &Style::new().fg(TN_CYAN).bold().render("  loop engineering"),
-            left_w,
-        ));
-        left.push(loop_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render("  Enter/r run · a audit · l logs · p runtime · i init · Esc"),
-            left_w,
-        ));
-        if panel.loops.is_empty() {
-            left.push(loop_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  no loops · press i or run /loop init daily-triage"),
-                left_w,
-            ));
-        } else {
+        left.extend(loop_header_lines(!panel.loops.is_empty(), left_w));
+        if !panel.loops.is_empty() {
             for (idx, item) in panel.loops.iter().enumerate() {
                 let mark = if idx == panel.sel { ">" } else { " " };
                 let row = format!(
@@ -1160,75 +1259,7 @@ impl App {
             left.push(" ".repeat(left_w));
         }
         let selected = panel.loops.get(panel.sel);
-        right.push(loop_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render(&format!("  {}", panel.note)),
-            right_w,
-        ));
-        right.push(String::new());
-        if let Some(summary) = selected {
-            right.push(loop_line(
-                &Style::new()
-                    .fg(TN_FG)
-                    .bold()
-                    .render(&format!("  {}", summary.spec.id)),
-                right_w,
-            ));
-            for line in [
-                format!("pattern: {}", summary.spec.pattern),
-                format!(
-                    "level: {} · cadence: {}",
-                    summary.spec.level, summary.spec.cadence
-                ),
-                format!("score: {} · {}", summary.audit.score, summary.audit.level),
-                format!(
-                    "OS: {}",
-                    if summary.spec.os_runtime {
-                        "Runtime + RemoteUI enabled"
-                    } else {
-                        "disabled"
-                    }
-                ),
-                format!("goal: {}", summary.spec.goal),
-                format!("dir: {}", summary.spec.dir.display()),
-            ] {
-                right.push(loop_line(
-                    &Style::new()
-                        .fg(TN_GRAY)
-                        .render(&format!("  {}", truncate(&line, right_w.saturating_sub(2)))),
-                    right_w,
-                ));
-            }
-            right.push(String::new());
-            right.push(loop_line(
-                &Style::new().fg(TN_YELLOW).bold().render("  Missing"),
-                right_w,
-            ));
-            if summary.audit.missing.is_empty() {
-                right.push(loop_line(
-                    &Style::new().fg(TN_GREEN).render("  none"),
-                    right_w,
-                ));
-            } else {
-                for item in summary.audit.missing.iter().take(6) {
-                    right.push(loop_line(
-                        &Style::new().fg(TN_YELLOW).render(&format!(
-                            "  - {}",
-                            truncate(item, right_w.saturating_sub(4))
-                        )),
-                        right_w,
-                    ));
-                }
-            }
-        } else {
-            right.push(loop_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  /loop init daily-triage creates the first loop"),
-                right_w,
-            ));
-        }
+        let mut right = loop_detail_lines(selected, &panel.note, right_w);
         while right.len() < h {
             right.push(" ".repeat(right_w));
         }
@@ -1301,6 +1332,79 @@ mod tests {
             "{}",
             a3s_tui::style::strip_ansi(&line)
         );
+    }
+
+    #[test]
+    fn loop_header_lines_use_shared_section_header_and_fit_width() {
+        let lines = loop_header_lines(false, 34);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 3);
+        assert!(plain.contains("loop engineering"), "{plain}");
+        assert!(plain.contains("no loops"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 34),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn loop_detail_lines_use_shared_detail_panel_and_fit_width() {
+        let root = temp_root("detail-lines");
+        let summary = LoopSummary {
+            spec: LoopSpec {
+                id: "daily-triage".into(),
+                pattern: "daily-triage".into(),
+                goal: "Inspect workspace state, tests, and risks before reporting".into(),
+                level: "L1".into(),
+                cadence: "1d".into(),
+                os_runtime: true,
+                worktree: true,
+                maker_agent: "triage".into(),
+                checker_agent: "verifier".into(),
+                budget_tokens_per_day: 120_000,
+                max_iterations_per_run: 1,
+                denylist: vec![".env*".into()],
+                connectors: vec!["os-runtime".into()],
+                dir: root.join(".a3s/loops/daily-triage"),
+            },
+            audit: LoopAudit {
+                score: 72,
+                level: "L1-ready".into(),
+                passed: vec![],
+                missing: vec![
+                    "budget.toml is missing a daily cap".into(),
+                    "os_runtime connector has not been verified".into(),
+                ],
+                warnings: vec![],
+            },
+            last_run: "never".into(),
+        };
+
+        let lines = loop_detail_lines(Some(&summary), "ready", 38);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("daily-triage"), "{plain}");
+        assert!(plain.contains("pattern"), "{plain}");
+        assert!(plain.contains("Missing"), "{plain}");
+        assert!(plain.contains("- budget.toml"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 38),
+            "{plain}"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
