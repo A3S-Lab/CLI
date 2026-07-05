@@ -1,25 +1,31 @@
 //! `@` file picker: an IDE-style collapsible tree (folders expand on demand).
 
 use super::super::*;
-use a3s_tui::components::{TreePicker, TreePickerItem};
+use a3s_tui::components::{TreePicker, TreePickerItem, TreePickerMsg};
+use a3s_tui::event::MouseEvent;
 
-fn file_menu_lines<F>(
+const FILE_MENU_OVERLAY_ROWS_BELOW: usize = 5;
+
+fn file_menu_max_items(height: usize) -> usize {
+    height.saturating_sub(9).clamp(4, 12)
+}
+
+fn file_menu_panel<F>(
     nodes: &[(String, usize, bool)],
     selected: usize,
-    width: usize,
     height: usize,
     dir_is_open: F,
-) -> Vec<String>
+) -> Option<(TreePicker, usize)>
 where
     F: Fn(&str) -> bool,
 {
     let total = nodes.len();
-    if total == 0 || width == 0 {
-        return Vec::new();
+    if total == 0 {
+        return None;
     }
 
     let selected = selected.min(total - 1);
-    let max_items = height.saturating_sub(9).clamp(4, 12);
+    let max_items = file_menu_max_items(height);
     let scroll = selected.saturating_add(1).saturating_sub(max_items);
     let items = nodes
         .iter()
@@ -36,7 +42,7 @@ where
         })
         .collect::<Vec<_>>();
 
-    TreePicker::new("@ file · ↑/↓ · →/← folder · Enter · Esc")
+    let panel = TreePicker::new("@ file · ↑/↓ · →/← folder · Enter · Esc")
         .items(items)
         .selected(selected)
         .scroll(scroll)
@@ -49,11 +55,39 @@ where
         .branch_color(TN_CYAN)
         .leaf_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, max_items + 2)
+        .selected_colors(Color::BrightWhite, ACCENT);
+    Some((panel, max_items + 2))
+}
+
+fn file_menu_lines<F>(
+    nodes: &[(String, usize, bool)],
+    selected: usize,
+    width: usize,
+    height: usize,
+    dir_is_open: F,
+) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    if width == 0 {
+        return Vec::new();
+    }
+    let Some((panel, panel_height)) = file_menu_panel(nodes, selected, height, dir_is_open) else {
+        return Vec::new();
+    };
+
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel_height)
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+fn file_menu_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(FILE_MENU_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 impl App {
@@ -152,15 +186,9 @@ impl App {
             }
             KeyCode::Enter | KeyCode::Tab => {
                 if is_dir {
-                    // Toggle the folder open/closed instead of inserting.
-                    if !self.at_expanded.remove(&path) {
-                        self.at_expanded.insert(path);
-                    }
-                } else if let Some(at) = self.textarea.value().rfind('@') {
-                    let val = self.textarea.value();
-                    self.touch_workspace_file(&path);
-                    self.textarea.set_value(&format!("{}@{path} ", &val[..at]));
-                    self.file_sel = 0;
+                    self.toggle_file_picker_dir(&path);
+                } else {
+                    self.insert_file_reference(&path);
                 }
                 Some(None)
             }
@@ -174,6 +202,108 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    pub(crate) fn handle_file_mouse(&mut self, mouse: &MouseEvent) {
+        if !self.file_menu_open() {
+            return;
+        }
+        let nodes = self.at_nodes();
+        let total = nodes.len();
+        if total == 0 {
+            return;
+        }
+        let selected = self.file_sel.min(total - 1);
+        let height = self.height as usize;
+        let width = (self.width as usize).min(u16::MAX as usize);
+        let Some((mut panel, panel_height)) =
+            file_menu_panel(&nodes, selected, height, |path| self.dir_is_open(path))
+        else {
+            return;
+        };
+        let row_count = panel.view(width as u16, panel_height).lines().count();
+        if row_count == 0 {
+            return;
+        }
+        let y_offset = file_menu_overlay_y_offset(height, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return;
+        }
+
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+        match panel.handle_mouse(mouse) {
+            Some(TreePickerMsg::Selected(index)) | Some(TreePickerMsg::Toggled(index)) => {
+                self.activate_file_picker_node(&nodes, index);
+            }
+            Some(TreePickerMsg::Opened(index)) => {
+                self.set_file_picker_dir_open(&nodes, index, true);
+            }
+            Some(TreePickerMsg::Closed(index)) => {
+                self.set_file_picker_dir_open(&nodes, index, false);
+            }
+            Some(TreePickerMsg::Cancelled) => self.clear_file_picker_query(),
+            None => {
+                let after = panel.selected_index().min(total - 1);
+                if after != before {
+                    self.file_sel = after;
+                }
+            }
+        }
+    }
+
+    fn activate_file_picker_node(&mut self, nodes: &[(String, usize, bool)], index: usize) {
+        let Some((path, _, is_dir)) = nodes.get(index).cloned() else {
+            return;
+        };
+        self.file_sel = index.min(nodes.len().saturating_sub(1));
+        if is_dir {
+            self.toggle_file_picker_dir(&path);
+        } else {
+            self.insert_file_reference(&path);
+        }
+    }
+
+    fn set_file_picker_dir_open(
+        &mut self,
+        nodes: &[(String, usize, bool)],
+        index: usize,
+        open: bool,
+    ) {
+        let Some((path, _, true)) = nodes.get(index) else {
+            return;
+        };
+        self.file_sel = index.min(nodes.len().saturating_sub(1));
+        if open {
+            self.at_expanded.insert(path.clone());
+        } else {
+            self.at_expanded.remove(path);
+        }
+    }
+
+    fn toggle_file_picker_dir(&mut self, path: &str) {
+        if !self.at_expanded.remove(path) {
+            self.at_expanded.insert(path.to_string());
+        }
+    }
+
+    fn insert_file_reference(&mut self, path: &str) {
+        let val = self.textarea.value().to_string();
+        if let Some(at) = val.rfind('@') {
+            self.touch_workspace_file(path);
+            self.textarea.set_value(&format!("{}@{path} ", &val[..at]));
+            self.file_sel = 0;
+        }
+    }
+
+    fn clear_file_picker_query(&mut self) {
+        let val = self.textarea.value().to_string();
+        if let Some(at) = val.rfind('@') {
+            self.textarea.set_value(&val[..at]);
+        }
+        self.file_sel = 0;
     }
 
     /// Overlay the `@` file tree just above the input box.
@@ -246,5 +376,59 @@ mod tests {
 
         assert!(plain.contains("file-14.rs"), "{plain}");
         assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn file_menu_panel_handles_mouse_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let nodes = vec![
+            ("src".to_string(), 0, true),
+            ("src/main.rs".to_string(), 1, false),
+        ];
+        let row_count = file_menu_lines(&nodes, 0, 40, 20, |_| true).len();
+        let y_offset = file_menu_overlay_y_offset(20, row_count);
+        let (mut panel, _) = file_menu_panel(&nodes, 0, 20, |_| true).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let branch = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: y_offset + 1,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+        assert_eq!(branch, Some(TreePickerMsg::Toggled(0)));
+
+        let file = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 4,
+            row: y_offset + 2,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+        assert_eq!(file, Some(TreePickerMsg::Selected(1)));
+    }
+
+    #[test]
+    fn file_menu_panel_mouse_wheel_moves_selection() {
+        use a3s_tui::event::MouseEventKind;
+
+        let nodes = vec![
+            ("README.md".to_string(), 0, false),
+            ("src/main.rs".to_string(), 0, false),
+        ];
+        let row_count = file_menu_lines(&nodes, 0, 40, 20, |_| false).len();
+        let y_offset = file_menu_overlay_y_offset(20, row_count);
+        let (mut panel, _) = file_menu_panel(&nodes, 0, 20, |_| false).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 1,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(panel.selected_index(), 1);
     }
 }

@@ -2451,6 +2451,10 @@ impl Model for App {
                     self.handle_theme_mouse(&m);
                     return None;
                 }
+                if self.file_menu_open() {
+                    self.handle_file_mouse(&m);
+                    return None;
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),

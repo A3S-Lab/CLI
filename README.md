@@ -90,7 +90,7 @@ progress, plans, memory events, and final summaries arrive as structured
 | Surface | What you see and control |
 | --- | --- |
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies transcript text on release. |
-| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the picker, or paste an image with `Ctrl+V`. |
+| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, or paste an image with `Ctrl+V`. |
 | Slash menu | Press `/` or type a slash command to open a command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
 | Approvals | Mutating tools pause in a confirmation overlay with arguments and result context. Default mode prompts, plan mode auto-approves read-only discovery, and auto mode approves later tool calls in the session. |
 | Footer | The footer shows model/provider, effort, mode, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
@@ -278,11 +278,12 @@ and process table, and footer status rows use shared `a3s-tui` components such a
 `TextOverlay`, `Toast`,
 `InputBorder`, `PromptLine`, `OutputBlock`, `Badge`, `Checklist`, `CursorLine`,
 `DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`, `Confirm`,
-`Paragraph`, `PreviewPanel`, `ShimmerText`, `LevelSlider`, `Scrollbar`,
-`Sparkline`, `KeyValue`, `DataTable`, `WrappedPrefixBlock`, `SessionStatus`,
-`ModeLine`, and the `Meter` context fill rendered inside the footer status row.
-Reusable menu scrolling, selection, `/model` account tab mouse switching,
-`/theme` wheel preview and click-to-apply, approval choices, RemoteUI and
+`Paragraph`, `PreviewPanel`, `TreePicker`, `ShimmerText`, `LevelSlider`,
+`Scrollbar`, `Sparkline`, `KeyValue`, `DataTable`, `WrappedPrefixBlock`,
+`SessionStatus`, `ModeLine`, and the `Meter` context fill rendered inside the
+footer status row. Reusable menu scrolling, selection, `/model` account tab
+mouse switching, `/theme` wheel preview and click-to-apply, `@` file picker
+wheel browsing and click-to-insert, approval choices, RemoteUI and
 jump-to-latest action links, tool status truncation, shared alert rows for OS
 login/configuration warnings, overlay composition for menus and prompts, IDE
 flash footer notifications, live tool activity/output tails, `/top` status
@@ -294,7 +295,8 @@ previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/theme` preview
-hit-testing, and width-bounding fixes are exercised directly by `a3s code`.
+hit-testing, `@` file picker hit-testing, and width-bounding fixes are exercised
+directly by `a3s code`.
 
 ```mermaid
 flowchart TD
