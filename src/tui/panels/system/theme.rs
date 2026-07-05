@@ -1,40 +1,14 @@
 //! `/theme` overlay: theme list + live syntax-highlight preview.
 
 use super::super::*;
-use a3s_tui::components::{MenuItem, MenuPanel};
-
-fn theme_line(rendered: &str, width: usize) -> String {
-    pad_to(&truncate(rendered, width), width)
-}
+use a3s_tui::components::{PreviewItem, PreviewPanel};
 
 fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
     let selected = selected.min(THEMES.len().saturating_sub(1));
     let items = THEMES
         .iter()
-        .map(|theme| MenuItem::new(theme.name))
+        .map(|theme| PreviewItem::new(theme.name))
         .collect::<Vec<_>>();
-    let mut menu = MenuPanel::new("Theme")
-        .subtitle("↑/↓ preview · Enter apply · Esc")
-        .items(items)
-        .selected(selected)
-        .max_items(THEMES.len().max(1))
-        .show_scroll(false)
-        .indent(2)
-        .marker("▸")
-        .title_color(ACCENT)
-        .subtitle_color(TN_GRAY)
-        .text_color(TN_GRAY)
-        .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width as u16, THEMES.len() + 2)
-        .lines()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
-    menu.push(theme_line(
-        &Style::new().fg(TN_GRAY).render("  ── preview ──"),
-        width,
-    ));
     let theme = &THEMES[selected];
     let sample = [
         "// syntax preview",
@@ -43,13 +17,31 @@ fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
         "    format!(\"sum: {}\", total)",
         "}",
     ];
-    for line in sample {
-        menu.push(theme_line(
-            &format!("    {}", highlight_with(line, "rust", theme)),
-            width,
-        ));
-    }
-    menu
+    let preview = sample
+        .into_iter()
+        .map(|line| highlight_with(line, "rust", theme))
+        .collect::<Vec<_>>();
+
+    PreviewPanel::new("Theme")
+        .subtitle("↑/↓ preview · Enter apply · Esc")
+        .items(items)
+        .selected(selected)
+        .max_items(THEMES.len().max(1))
+        .preview_title("preview")
+        .preview_lines(preview)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_GRAY)
+        .muted_color(TN_GRAY)
+        .divider_color(TN_GRAY)
+        .preview_color(TN_FG)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, THEMES.len() + 8)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
