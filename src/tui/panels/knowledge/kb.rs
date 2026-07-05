@@ -6,7 +6,7 @@
 //! `.a3s/okf` and are managed by the sibling `/okf` module.
 
 use super::super::*;
-use a3s_tui::components::{DetailPanel, DetailRow};
+use a3s_tui::components::{divider_line_with, DetailPanel, DetailRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KbLocalCommand {
@@ -300,7 +300,10 @@ impl App {
                 )),
                 width,
             ),
-            kb_line(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
+            kb_line(
+                &divider_line_with(width.min(u16::MAX as usize) as u16, "─", TN_GRAY),
+                width,
+            ),
         ];
 
         if let Some(note) = &kb.note {

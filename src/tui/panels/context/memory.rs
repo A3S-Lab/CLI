@@ -6,7 +6,8 @@
 
 use super::super::*;
 use a3s_tui::components::{
-    Badge, DetailPanel, DetailRow, Paragraph, Progress, Timeline, TimelineItem, TimelineRow,
+    divider_line_with, Badge, DetailPanel, DetailRow, Paragraph, Progress, Timeline, TimelineItem,
+    TimelineRow,
 };
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
@@ -335,7 +336,10 @@ impl App {
         );
         let mut out = vec![
             memory_line(&header, width),
-            memory_line(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
+            memory_line(
+                &divider_line_with(width.min(u16::MAX as usize) as u16, "─", TN_GRAY),
+                width,
+            ),
         ];
         let body = h.saturating_sub(3);
 
@@ -396,7 +400,7 @@ impl App {
             return lines;
         };
         lines.extend(memory_detail_metadata_lines(e, &m.detail, &m.graph, now, w));
-        lines.push(Style::new().fg(TN_GRAY).render(&"─".repeat(w.min(48))));
+        lines.push(divider_line_with(w.min(48) as u16, "─", TN_GRAY));
         // Prefer the full original-case content; fall back to the index preview.
         let content = if m.detail.content.is_empty() {
             e.content_lower.as_str()

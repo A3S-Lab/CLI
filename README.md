@@ -170,7 +170,7 @@ live activity shimmer, effort overlay, and footer status rows use shared
 `MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InlineAction`,
 `InputBorder`, `PromptLine`, `OutputBlock`, `Badge`, `Checklist`, `CursorLine`,
-`ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
+`ConnectorBlock`, `DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`,
 `Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `WrappedPrefixBlock`,
 `SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, approval
 choices, RemoteUI action links, tool status truncation, transcript gutters and
@@ -178,8 +178,9 @@ input bubbles, prompt continuation alignment, input border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
-connector rows, diff wrapping, framed panels, breadcrumbs, detail-row layout,
-activity shimmer, and width-bounding fixes are exercised directly by `a3s code`.
+panel dividers, connector rows, diff wrapping, framed panels, breadcrumbs,
+detail-row layout, activity shimmer, and width-bounding fixes are exercised
+directly by `a3s code`.
 
 ```mermaid
 flowchart TD

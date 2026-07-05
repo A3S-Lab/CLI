@@ -7,7 +7,7 @@
 //! survives OS API shape drift.
 
 use super::super::*;
-use a3s_tui::components::{DetailPanel, DetailRow, MenuItem, MenuPanel};
+use a3s_tui::components::{divider_line_with, DetailPanel, DetailRow, MenuItem, MenuPanel};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1078,7 +1078,10 @@ impl App {
                     .render(&format!("  {}", spec.note)),
                 width,
             ),
-            resource_line(&Style::new().fg(TN_GRAY).render(&"─".repeat(width)), width),
+            resource_line(
+                &divider_line_with(width.min(u16::MAX as usize) as u16, "─", TN_GRAY),
+                width,
+            ),
         ];
         let body = h.saturating_sub(5);
         let sel = spec.sel.min(spec.total.saturating_sub(1));
