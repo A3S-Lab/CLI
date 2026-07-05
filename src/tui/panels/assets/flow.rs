@@ -15,6 +15,7 @@
 use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 /// Canonical, first-probed path where the designer loads/saves a workflow
 /// inside the asset source workspace.
@@ -648,8 +649,44 @@ fn flow_picker_hint(width: usize) -> String {
     )
 }
 
-fn flow_picker_row(name: &str, width: usize) -> String {
-    pad_to(&truncate(&format!("  {name}"), width), width)
+fn flow_picker_lines(
+    flows: &[String],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let total = flows.len();
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let selected = selected.min(total.saturating_sub(1));
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = flows
+        .iter()
+        .map(|name| MenuItem::new(name.clone()))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(flow_picker_header(total, root, width).trim_start())
+        .subtitle(flow_picker_hint(width).trim_start())
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Directive for `/flow <description>`: orchestrate a BASIC DAG in the
@@ -1342,44 +1379,7 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = p.flows.len();
-        let mut menu = vec![
-            pad_to(
-                &Style::new()
-                    .fg(ACCENT)
-                    .bold()
-                    .render(&flow_picker_header(total, &p.root, width)),
-                width,
-            ),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&flow_picker_hint(width)),
-                width,
-            ),
-        ];
-        let sel = p.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for (row, name) in p.flows.iter().enumerate().take(end).skip(start) {
-            let raw = flow_picker_row(name, width);
-            menu.push(if row == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
-        if total > max_rows {
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = flow_picker_lines(&p.flows, p.sel, &p.root, width, self.height as usize);
         self.overlay_list(composed, &menu)
     }
 }
@@ -1827,20 +1827,58 @@ mod tests {
     }
 
     #[test]
-    fn flow_picker_rows_fit_fixed_width() {
+    fn flow_picker_lines_use_bounded_shared_menu_rows() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/flows/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let flows = vec![
+            "very-long-workflow-file-name-that-would-overflow-the-panel.json".to_string(),
+            "daily-news.json".to_string(),
+        ];
+        let lines = flow_picker_lines(&flows, 0, &root, 40, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("flow"), "{plain}");
+        assert!(plain.contains("select a DAG"), "{plain}");
+        assert!(plain.contains("workflow-file-name"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn flow_picker_lines_scroll_selected_flow_into_view() {
+        let root = std::path::PathBuf::from("/tmp/flows");
+        let flows = (0..16)
+            .map(|index| format!("flow-{index}.json"))
+            .collect::<Vec<_>>();
+        let plain = flow_picker_lines(&flows, 14, &root, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("flow-14.json"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn flow_picker_header_and_hint_fit_fixed_width() {
         let root = std::path::PathBuf::from(
             "/Users/example/.a3s/flows/a/path/that/is/far/too/long/for/a/picker/header",
         );
         let header = flow_picker_header(9, &root, 40);
         let hint = flow_picker_hint(40);
-        let row = flow_picker_row(
-            "very-long-workflow-file-name-that-would-overflow-the-panel.json",
-            40,
-        );
         assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
         assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
-        assert_eq!(a3s_tui::style::visible_len(&row), 40);
-        assert!(row.contains('…'), "{row}");
     }
 
     #[test]
