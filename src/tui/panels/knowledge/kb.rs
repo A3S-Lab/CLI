@@ -6,6 +6,7 @@
 //! `.a3s/okf` and are managed by the sibling `/okf` module.
 
 use super::super::*;
+use a3s_tui::components::DetailPanel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KbLocalCommand {
@@ -354,42 +355,7 @@ impl App {
         out: &mut Vec<String>,
         width: usize,
     ) {
-        out.push(kb_line(
-            &Style::new().fg(TN_YELLOW).bold().render("  Import preview"),
-            width,
-        ));
-        out.push(kb_line(
-            &format!(
-                "  {} · {}",
-                Style::new()
-                    .fg(TN_FG)
-                    .render(import_kind_label(preview.kind)),
-                Style::new().fg(TN_GRAY).render(&truncate(
-                    &preview.path.display().to_string(),
-                    width.saturating_sub(12)
-                ))
-            ),
-            width,
-        ));
-        let mut meta = format!(
-            "{} text file(s) · {} · {} skipped",
-            preview.addable,
-            fmt_bytes(preview.bytes),
-            preview.skipped
-        );
-        if preview.capped {
-            meta.push_str(" · capped");
-        }
-        out.push(kb_line(
-            &Style::new().fg(TN_GRAY).render(&format!("  {meta}")),
-            width,
-        ));
-        out.push(kb_line(
-            &Style::new()
-                .fg(TN_CYAN)
-                .render("  Enter confirm import · Esc cancel"),
-            width,
-        ));
+        out.extend(kb_import_preview_lines(preview, width));
     }
 
     fn render_kb_search(
@@ -489,6 +455,41 @@ impl App {
     }
 }
 
+fn kb_import_preview_lines(preview: &kbutil::ImportPreview, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut meta = format!(
+        "{} text file(s) · {} · {} skipped",
+        preview.addable,
+        fmt_bytes(preview.bytes),
+        preview.skipped
+    );
+    if preview.capped {
+        meta.push_str(" · capped");
+    }
+
+    DetailPanel::new("Import preview")
+        .show_separator(false)
+        .indent(2)
+        .title_color(TN_YELLOW)
+        .value_color(TN_GRAY)
+        .action_color(TN_CYAN)
+        .muted_color(TN_GRAY)
+        .text(format!(
+            "{} · {}",
+            import_kind_label(preview.kind),
+            preview.path.display()
+        ))
+        .text(meta)
+        .action("Enter confirm import · Esc cancel")
+        .view(width.min(u16::MAX as usize) as u16, 4)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -533,6 +534,41 @@ mod tests {
         assert_eq!(fmt_bytes(512), "512 B");
         assert_eq!(fmt_bytes(2048), "2.0 KiB");
         assert_eq!(fmt_bytes(2_097_152), "2.0 MiB");
+    }
+
+    #[test]
+    fn kb_import_preview_lines_use_shared_detail_panel_and_fit_width() {
+        let preview = kbutil::ImportPreview {
+            arg: "docs".to_string(),
+            path: std::path::PathBuf::from(
+                "/Users/roylin/code/a3s/docs/very/long/path/that/must/truncate",
+            ),
+            kind: kbutil::ImportKind::Folder,
+            addable: 12,
+            skipped: 3,
+            capped: true,
+            bytes: 4096,
+        };
+        let lines = kb_import_preview_lines(&preview, 64);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 4);
+        assert!(plain.contains("Import preview"), "{plain}");
+        assert!(plain.contains("folder"), "{plain}");
+        assert!(plain.contains("12 text file"), "{plain}");
+        assert!(plain.contains("4.0 KiB"), "{plain}");
+        assert!(plain.contains("capped"), "{plain}");
+        assert!(plain.contains("Enter confirm import"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 64),
+            "{plain}"
+        );
     }
 
     #[test]
