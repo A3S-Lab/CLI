@@ -3,6 +3,7 @@
 //! agent should fix.
 
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 /// One issue reported by an asset review turn. Every field is lenient — one
 /// model hiccup in one of 40 issues must not discard the whole report.
@@ -135,6 +136,58 @@ fn review_menu_hint(width: usize) -> String {
         "  ↑/↓ move · Space check · a all · Enter fix checked · Esc close",
         width,
     )
+}
+
+fn review_menu_lines(review: &ReviewState, width: usize, height: usize) -> Vec<String> {
+    let total = review.issues.len();
+    if total == 0 || width == 0 {
+        return Vec::new();
+    }
+
+    let checked = review.checked.iter().filter(|checked| **checked).count();
+    let selected = review.sel.min(total - 1);
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let label_width = width.saturating_sub(22).clamp(14, 42);
+    let items = review
+        .issues
+        .iter()
+        .enumerate()
+        .map(|(index, issue)| {
+            let line = issue
+                .line
+                .map(|line| format!(":{line}"))
+                .unwrap_or_default();
+            MenuItem::new(format!("{} {}{}", issue.severity, issue.file, line))
+                .description(issue.title.clone())
+                .checked(review.checked.get(index).copied().unwrap_or(false))
+                .color(severity_color(&issue.severity))
+        })
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(format!(
+        "⚑ code review — {checked}/{total} checked · {}",
+        review.asset_dir
+    ))
+    .subtitle(review_menu_hint(width).trim_start())
+    .items(items)
+    .selected(selected)
+    .scroll(scroll)
+    .max_items(max_items)
+    .label_width(label_width)
+    .show_scroll(total > max_items)
+    .indent(2)
+    .marker("▸")
+    .title_color(TN_PURPLE)
+    .subtitle_color(TN_GRAY)
+    .text_color(TN_FG)
+    .muted_color(TN_GRAY)
+    .checked_color(TN_GREEN)
+    .selected_colors(Color::BrightWhite, TN_PURPLE)
+    .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+    .lines()
+    .map(str::to_string)
+    .collect()
 }
 
 fn review_state(asset_dir: String, issues: Vec<ReviewIssue>) -> Option<ReviewState> {
@@ -285,66 +338,7 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = r.issues.len();
-        let checked = r.checked.iter().filter(|c| **c).count();
-        // Truncate the composed header, not just the asset path — the fixed
-        // prefix alone is ~34 columns, so budgeting only the path overflows
-        // narrow terminals.
-        let header = truncate(
-            &format!(
-                "  ⚑ code review — {checked}/{total} checked · {}",
-                r.asset_dir
-            ),
-            width.saturating_sub(2),
-        );
-        let mut menu = vec![
-            pad_to(&Style::new().fg(TN_PURPLE).bold().render(&header), width),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&review_menu_hint(width)),
-                width,
-            ),
-        ];
-        // Scroll a window around the selection so long review lists stay usable.
-        let sel = r.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for (row, issue) in r.issues.iter().enumerate().take(end).skip(start) {
-            let mark = if r.checked[row] { "[x]" } else { "[ ]" };
-            let line = issue.line.map(|l| format!(":{l}")).unwrap_or_default();
-            let raw = pad_to(
-                &truncate(
-                    &format!(
-                        "  {mark} {:<8} {}{} — {}",
-                        issue.severity, issue.file, line, issue.title
-                    ),
-                    width.saturating_sub(2),
-                ),
-                width,
-            );
-            menu.push(if row == sel {
-                Style::new()
-                    .fg(Color::BrightWhite)
-                    .bg(TN_PURPLE)
-                    .render(&raw)
-            } else {
-                Style::new()
-                    .fg(severity_color(&issue.severity))
-                    .render(&raw)
-            });
-        }
-        if total > max_rows {
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = review_menu_lines(r, width, self.height as usize);
         self.overlay_list(composed, &menu)
     }
 }
@@ -469,6 +463,75 @@ mod tests {
         let hint = review_menu_hint(36);
         assert!(a3s_tui::style::visible_len(&hint) <= 36, "{hint}");
         assert!(hint.contains('…'), "{hint}");
+    }
+
+    #[test]
+    fn review_menu_lines_use_bounded_checked_menu_rows() {
+        let state = ReviewState {
+            asset_dir: "/tmp/agent".into(),
+            issues: vec![
+                ReviewIssue {
+                    severity: "high".into(),
+                    file: "src/lib.rs".into(),
+                    line: Some(7),
+                    title: "long issue title that should stay inside the overlay".into(),
+                    detail: String::new(),
+                },
+                ReviewIssue {
+                    severity: "low".into(),
+                    file: "README.md".into(),
+                    line: None,
+                    title: "doc issue".into(),
+                    detail: String::new(),
+                },
+            ],
+            checked: vec![true, false],
+            sel: 0,
+        };
+        let lines = review_menu_lines(&state, 44, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("code review"), "{plain}");
+        assert!(plain.contains("1/2 checked"), "{plain}");
+        assert!(plain.contains("[✓] high src/lib.rs:7"), "{plain}");
+        assert!(plain.contains("README.md"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 44),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn review_menu_lines_scroll_selected_issue_into_view() {
+        let issues = (0..16)
+            .map(|index| ReviewIssue {
+                severity: "medium".into(),
+                file: format!("src/{index}.rs"),
+                line: Some(index),
+                title: format!("issue {index}"),
+                detail: String::new(),
+            })
+            .collect::<Vec<_>>();
+        let state = ReviewState {
+            asset_dir: "/tmp/agent".into(),
+            checked: vec![false; issues.len()],
+            issues,
+            sel: 14,
+        };
+        let plain = review_menu_lines(&state, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("src/14.rs:14"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
     }
 
     #[test]
