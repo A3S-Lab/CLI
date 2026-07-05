@@ -397,33 +397,25 @@ pub(crate) fn render_live_tool_output(output: &str, width: usize) -> Option<Stri
     }
 
     const TAIL: usize = 12;
-    let margin = " ".repeat(PAD + 2);
-    let bar = Style::new().fg(TN_GRAY).render("│");
-    let textw = width.saturating_sub(PAD + 6).max(20);
-    let start = lines.len().saturating_sub(TAIL);
-    let mut rows = Vec::new();
+    let block = ConnectorBlock::new()
+        .margin(PAD)
+        .connector_indent(2)
+        .connector_gap(1)
+        .connector("│")
+        .repeat_connector(true)
+        .connector_color(TN_GRAY)
+        .text_color(TN_GRAY)
+        .omitted_color(TN_GRAY)
+        .max_rows(TAIL)
+        .rows(
+            lines
+                .into_iter()
+                .map(|line| ConnectorRow::new(line.trim_end_matches('\r').to_string()))
+                .collect(),
+        )
+        .view(width.min(u16::MAX as usize) as u16);
 
-    if start > 0 {
-        let row = format!(
-            "{margin}{bar} {}",
-            Style::new()
-                .fg(TN_GRAY)
-                .render(&format!("… +{start} earlier lines"))
-        );
-        rows.push(a3s_tui::style::truncate_visible(&row, width));
-    }
-
-    for line in lines.iter().skip(start) {
-        let shown = if line.trim().is_empty() {
-            String::new()
-        } else {
-            truncate(line, textw)
-        };
-        let row = format!("{margin}{bar} {}", Style::new().fg(TN_GRAY).render(&shown));
-        rows.push(a3s_tui::style::truncate_visible(&row, width));
-    }
-
-    Some(rows.join("\n"))
+    (!block.is_empty()).then_some(block)
 }
 
 /// Extract a one-line summary of a tool's primary argument.
@@ -601,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_output_tails_and_bounds_lines() {
+    fn live_tool_output_uses_shared_connector_block_and_bounds_lines() {
         let output = (0..16)
             .map(|i| {
                 if i == 15 {
@@ -620,6 +612,7 @@ mod tests {
         assert!(!plain.contains("line-0"));
         assert!(plain.contains("line-4"));
         for line in plain.lines() {
+            assert!(line.starts_with("    │"), "{plain}");
             assert!(
                 line.chars().count() <= 44,
                 "live output line should be bounded: {line:?}"
