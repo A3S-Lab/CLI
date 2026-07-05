@@ -2,8 +2,8 @@
 
 use super::*;
 use a3s_tui::components::{
-    Checklist, ChecklistItem, ChecklistStatus, ConnectorBlock, ConnectorRow, DiffView, OutputBlock,
-    OutputStatus, ToolStatusLine,
+    ActivityBlock, Checklist, ChecklistItem, ChecklistStatus, DiffView, OutputBlock, OutputStatus,
+    ToolStatusLine,
 };
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
@@ -430,58 +430,49 @@ fn render_tool_header(
     line.view(width.min(u16::MAX as usize) as u16)
 }
 
-pub(crate) fn render_live_tool_status(
+pub(crate) fn render_live_tool_activity(
     name: &str,
     args: Option<&serde_json::Value>,
+    output: &str,
     width: usize,
     active: bool,
 ) -> String {
-    let mut line = ToolStatusLine::new(tool_running_verb(name))
+    let mut block = ActivityBlock::new(tool_running_verb(name))
         .margin(PAD)
-        .marker_color(if active { ACCENT } else { TN_GRAY })
+        .width(width)
+        .marker_colors(if active { ACCENT } else { TN_GRAY }, TN_GRAY)
         .detail_color(TN_GRAY)
-        .suffix("…")
-        .suffix_color(TN_GRAY)
-        .label_bold(false);
+        .output_color(TN_GRAY)
+        .connector_color(TN_GRAY)
+        .max_output_lines(13);
     let arg = args
         .and_then(|args| arg_summary_for_tool(name, args))
         .unwrap_or_default();
     if !arg.is_empty() {
-        line = if matches!(name, "bash" | "shell" | "run" | "exec") {
-            line.styled_detail(highlight_shell(&arg))
+        block = if matches!(name, "bash" | "shell" | "run" | "exec") {
+            block.styled_detail(highlight_shell(&arg))
         } else {
-            line.detail(arg)
+            block.detail(arg)
         };
     }
-    line.view(width.min(u16::MAX as usize) as u16)
-}
 
-pub(crate) fn render_live_tool_output(output: &str, width: usize) -> Option<String> {
-    let lines: Vec<&str> = output.lines().collect();
-    if lines.iter().all(|line| line.trim().is_empty()) {
-        return None;
+    let output_lines: Vec<&str> = output.lines().collect();
+    if output_lines.iter().any(|line| !line.trim().is_empty()) {
+        let earlier = output_lines.len().saturating_sub(12);
+        let mut lines = Vec::new();
+        if earlier > 0 {
+            lines.push(format!("… +{earlier} earlier lines"));
+        }
+        lines.extend(
+            output_lines
+                .iter()
+                .skip(earlier)
+                .map(|line| (*line).to_string()),
+        );
+        block = block.lines(lines);
     }
 
-    const TAIL: usize = 12;
-    let block = ConnectorBlock::new()
-        .margin(PAD)
-        .connector_indent(2)
-        .connector_gap(1)
-        .connector("│")
-        .repeat_connector(true)
-        .connector_color(TN_GRAY)
-        .text_color(TN_GRAY)
-        .omitted_color(TN_GRAY)
-        .max_rows(TAIL)
-        .rows(
-            lines
-                .into_iter()
-                .map(|line| ConnectorRow::new(line.trim_end_matches('\r').to_string()))
-                .collect(),
-        )
-        .view(width.min(u16::MAX as usize) as u16);
-
-    (!block.is_empty()).then_some(block)
+    block.view()
 }
 
 /// Extract a one-line summary of a tool's primary argument.
@@ -642,52 +633,29 @@ mod tests {
     }
 
     #[test]
-    fn live_tool_status_is_bounded_and_uses_active_accent() {
+    fn live_tool_activity_uses_shared_activity_block_for_status_and_output() {
         let args = serde_json::json!({
-            "command": "cargo test extremely-long-filter-name-that-should-not-expand-the-layout -- --nocapture"
+            "command": "cargo test very-long-filter-name -- --nocapture"
         });
-        let rendered = render_live_tool_status("bash", Some(&args), 48, true);
-        let plain = a3s_tui::style::strip_ansi(&rendered);
-
-        assert!(rendered.contains("\x1b["));
-        assert!(plain.contains("Running cargo test"));
-        assert!(plain.ends_with('…'));
-        assert!(
-            plain.chars().count() <= 48,
-            "line should stay inside the viewport: {plain:?}"
-        );
-    }
-
-    #[test]
-    fn live_tool_output_uses_shared_connector_block_and_bounds_lines() {
         let output = (0..16)
-            .map(|i| {
-                if i == 15 {
-                    "final-line-with-a-very-long-payload-that-should-be-truncated".to_string()
-                } else {
-                    format!("line-{i}")
-                }
-            })
+            .map(|i| format!("line-{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-
-        let rendered = render_live_tool_output(&output, 44).expect("non-empty output renders");
+        let rendered = render_live_tool_activity("bash", Some(&args), &output, 48, true);
         let plain = a3s_tui::style::strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(plain.contains("… +4 earlier lines"));
+        assert!(plain.contains("Running cargo test"), "{plain}");
+        assert!(plain.contains("… +4 earlier lines"), "{plain}");
         assert!(!plain.contains("line-0"));
         assert!(plain.contains("line-4"));
-        for line in plain.lines() {
-            assert!(line.starts_with("    │"), "{plain}");
-            assert!(
-                line.chars().count() <= 44,
-                "live output line should be bounded: {line:?}"
-            );
-        }
+        assert!(rows[1].starts_with("    │"), "{plain}");
+        assert_visible_lines_bounded(&rendered, 48);
+        assert!(rendered.contains("\x1b["));
     }
 
     #[test]
-    fn running_tool_matrix_has_bounded_design_status() {
+    fn running_tool_matrix_has_bounded_design_activity() {
         let width = 54;
         let cases = [
             (
@@ -768,11 +736,11 @@ mod tests {
         ];
 
         for (tool, args, expected) in cases {
-            let rendered = render_live_tool_status(tool, Some(&args), width, true);
+            let rendered = render_live_tool_activity(tool, Some(&args), "", width, true);
             let plain = a3s_tui::style::strip_ansi(&rendered);
             assert!(plain.contains(expected), "{tool} got:\n{plain}");
             assert!(
-                plain.ends_with('…'),
+                plain.trim_end().ends_with('…'),
                 "{tool} should show running suffix: {plain}"
             );
             assert_visible_lines_bounded(&rendered, width);

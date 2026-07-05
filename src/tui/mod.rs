@@ -5837,18 +5837,13 @@ impl App {
         // Currently-executing tool: "• Running <cmd>…" with a blinking bullet.
         if let Some(tool) = self.runtime.live_tool() {
             let on = self.blink_tick % 8 < 4; // ~320ms on / 320ms off
-            blocks.push(render_live_tool_status(
+            blocks.push(render_live_tool_activity(
                 &tool.name,
                 tool.args().as_ref(),
+                tool.output(),
                 self.width as usize,
                 on,
             ));
-        }
-        // Live stdout of the running tool — tail prefixed with "│" like Codex.
-        if let Some(tool) = self.runtime.live_tool() {
-            if let Some(body) = render_live_tool_output(tool.output(), self.width as usize) {
-                blocks.push(body);
-            }
         }
         // Same "\n…\n" framing as rebuild_viewport so the transcript doesn't
         // jump a line when streaming starts/ends.
