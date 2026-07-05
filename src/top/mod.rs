@@ -13,8 +13,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
     CellAlign, Confirm, DataColumn, DataRow, DataTable, LogView, LogViewState, MenuItem, MenuPanel,
-    Meter, MetricTrend, MultiSelect, MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar,
-    TabSegment, Tabs, Tree, TreeNode,
+    Meter, MetricTrend, MultiSelect, MultiSelectMsg, SectionHeader, Select, SelectMsg, Sparkline,
+    StatusBar, TabSegment, Tabs, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -2670,47 +2670,37 @@ impl TopApp {
         let row = self.focused_session_row();
         let risk = row.as_ref().map(|row| row.risk).unwrap_or(Risk::Low);
         let mut out = Vec::new();
-        out.push(Style::new().fg(risk.color()).bold().render(&pad_plain(
-            &format!(" session view {} · {}", focus.source, focus.session),
-            width,
-        )));
+        let mut header =
+            SectionHeader::new(format!("session view {} · {}", focus.source, focus.session))
+                .title_color(risk.color())
+                .metadata_color(Color::BrightBlack)
+                .muted_color(Color::BrightBlack)
+                .separator_color(Color::BrightBlack);
         if let Some(row) = &row {
-            out.push(Style::new().fg(Color::BrightBlack).render(&pad_plain(
-                &format!(
-                    " task {} · cwd {} · events {} · tools {} · sec {} · files {} · net {} · llm {} · tokens {} · model {} · provider {} · latency {} · ttft {} · wire {} / {} · high {} · risk {}",
-                    row.task,
-                    row.workspace,
-                    row.events,
-                    row.tools,
-                    row.security,
-                    row.files,
-                    row.egress,
-                    row.llm,
-                    format_count(row.total_tokens),
-                    display_model(&row.model),
-                    display_provider(&row.provider),
-                    format_avg_ms(row.latency_ms, row.latency_samples),
-                    format_avg_ms(row.ttft_ms, row.ttft_samples),
-                    format_bytes(row.req_bytes),
-                    format_bytes(row.resp_bytes),
-                    row.high_risk,
-                    row.risk.label()
-                ),
-                width,
-            )));
+            header = header.metadata(format!(
+                "task {} · cwd {} · events {} · tools {} · sec {} · files {} · net {} · llm {} · tokens {} · model {} · provider {} · latency {} · ttft {} · wire {} / {} · high {} · risk {}",
+                row.task,
+                row.workspace,
+                row.events,
+                row.tools,
+                row.security,
+                row.files,
+                row.egress,
+                row.llm,
+                format_count(row.total_tokens),
+                display_model(&row.model),
+                display_provider(&row.provider),
+                format_avg_ms(row.latency_ms, row.latency_samples),
+                format_avg_ms(row.ttft_ms, row.ttft_samples),
+                format_bytes(row.req_bytes),
+                format_bytes(row.resp_bytes),
+                row.high_risk,
+                row.risk.label()
+            ));
         } else {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .italic()
-                    .render(&pad_plain(" focused session has no events", width)),
-            );
+            header = header.muted("focused session has no events");
         }
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
+        out.extend(header.view(self.width, 3).lines().map(ToString::to_string));
 
         let mut table = DataTable::new(vec![
             DataColumn::new("TIME").width(9),
@@ -13026,6 +13016,7 @@ mod tests {
             tab: Tab::Sessions,
             ..TopOptions::default()
         });
+        app.width = 72;
         app.snapshot.events = vec![
             event_row(
                 "codex",
@@ -13057,13 +13048,22 @@ mod tests {
             session: "sess-a".into(),
         });
 
-        let plain = a3s_tui::style::strip_ansi(&app.table());
+        let rendered = app.table();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("session view codex"));
         assert!(plain.contains("sess-a"));
+        assert!(plain.contains("task task-a"), "{plain}");
         assert!(plain.contains("git status"));
         assert!(!plain.contains("npm test"));
         assert!(!plain.contains("README.md"));
+        assert!(rendered.contains("\x1b["), "session focus should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 72),
+            "{plain}"
+        );
     }
 
     #[test]
