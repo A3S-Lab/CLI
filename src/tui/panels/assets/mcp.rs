@@ -7,13 +7,15 @@
 
 use super::super::os_progressive;
 use super::super::*;
-use a3s_tui::components::{MenuItem, MenuPanel};
+use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
+use a3s_tui::event::MouseEvent;
 
 const MCP_MANIFEST_PATH: &str = ".a3s/mcp.asset.json";
 const MCP_SERVER_CONFIG_PATH: &str = ".a3s/mcp.server.json";
 const MCP_RUNTIME_BINDING_PATH: &str = ".a3s/mcp.runtime-binding.json";
 const MAX_MCP_SOURCE_FILES: usize = 200;
 const MAX_MCP_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const MCP_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
 pub(crate) struct McpProject {
@@ -1702,8 +1704,29 @@ fn mcp_picker_lines(
     if width == 0 {
         return Vec::new();
     }
+    let Some((panel, panel_height)) = mcp_picker_panel(projects, selected, root, width, height)
+    else {
+        return Vec::new();
+    };
 
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel_height)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn mcp_picker_panel(
+    projects: &[McpProject],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Option<(MenuPanel, usize)> {
     let total = projects.len();
+    if total == 0 {
+        return None;
+    }
     let max_items = height.saturating_sub(8).clamp(3, 12);
     let selected = selected.min(total.saturating_sub(1));
     let scroll = selected.saturating_add(1).saturating_sub(max_items);
@@ -1712,7 +1735,7 @@ fn mcp_picker_lines(
         .map(|project| MenuItem::new(project.rel.clone()).description(project.description.clone()))
         .collect::<Vec<_>>();
 
-    MenuPanel::new(mcp_picker_header(total, root, width).trim_start())
+    let panel = MenuPanel::new(mcp_picker_header(total, root, width).trim_start())
         .subtitle(mcp_picker_hint(width).trim_start())
         .items(items)
         .selected(selected)
@@ -1725,11 +1748,15 @@ fn mcp_picker_lines(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
-        .lines()
-        .map(str::to_string)
-        .collect()
+        .selected_colors(Color::BrightWhite, ACCENT);
+    Some((panel, max_items + 3))
+}
+
+fn mcp_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(MCP_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 /// Directive for `/mcp <description>`: create a local MCP server asset.
@@ -1884,30 +1911,97 @@ impl App {
             }
             KeyCode::Enter => {
                 let panel = self.mcp_picker.take()?;
-                let picked = panel.projects.get(panel.sel.min(last))?.clone();
-                self.agent_dev = None;
-                self.skill_dev = None;
-                self.okf_dev = None;
-                self.mcp_dev = Some(McpDevSession {
-                    name: picked.name.clone(),
-                    description: picked.description.clone(),
-                    rel: picked.rel.clone(),
-                    path: picked.path.clone(),
-                    root: panel.root,
-                });
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "◆ mcp dev: {} ({}) · Esc or /mcp off returns to normal mode",
-                        picked.name, picked.rel
-                    ),
-                ));
-                self.relayout();
-                if let Some(pending) = self.pending_mcp_subcommand.take() {
-                    return self.execute_mcp_subcommand(pending);
-                }
+                let selected = panel.sel.min(last);
+                return self.activate_mcp_panel_selection(panel, selected);
             }
             _ => {}
+        }
+        None
+    }
+
+    pub(crate) fn handle_mcp_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        let Some(panel_state) = self.mcp_picker.as_ref() else {
+            return None;
+        };
+        let total = panel_state.projects.len();
+        if total == 0 {
+            return None;
+        }
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return None;
+        }
+        let selected = panel_state.sel.min(total - 1);
+        let Some((mut panel, panel_height)) = mcp_picker_panel(
+            &panel_state.projects,
+            selected,
+            &panel_state.root,
+            width,
+            self.height as usize,
+        ) else {
+            return None;
+        };
+        let row_count = panel.view(width as u16, panel_height).lines().count();
+        if row_count == 0 {
+            return None;
+        }
+        let y_offset = mcp_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return None;
+        }
+        panel.set_y_offset(y_offset);
+        let before = panel.selected_index();
+
+        match panel.handle_mouse(mouse) {
+            Some(MenuPanelMsg::Selected(index)) | Some(MenuPanelMsg::Toggled(index)) => {
+                let panel_state = self.mcp_picker.take()?;
+                self.activate_mcp_panel_selection(panel_state, index.min(total - 1))
+            }
+            Some(MenuPanelMsg::Cancelled) => {
+                cancel_pending_picker(&mut self.mcp_picker, &mut self.pending_mcp_subcommand);
+                None
+            }
+            None => {
+                let after = panel.selected_index().min(total - 1);
+                if after != before {
+                    if let Some(open) = self.mcp_picker.as_mut() {
+                        open.sel = after;
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn activate_mcp_panel_selection(
+        &mut self,
+        panel: McpPanel,
+        selected: usize,
+    ) -> Option<Cmd<Msg>> {
+        let last = panel.projects.len().saturating_sub(1);
+        let picked = panel.projects.get(selected.min(last))?.clone();
+        self.agent_dev = None;
+        self.skill_dev = None;
+        self.okf_dev = None;
+        self.mcp_dev = Some(McpDevSession {
+            name: picked.name.clone(),
+            description: picked.description.clone(),
+            rel: picked.rel.clone(),
+            path: picked.path.clone(),
+            root: panel.root,
+        });
+        self.push_line(&gutter(
+            TN_CYAN,
+            &format!(
+                "◆ mcp dev: {} ({}) · Esc or /mcp off returns to normal mode",
+                picked.name, picked.rel
+            ),
+        ));
+        self.relayout();
+        if let Some(pending) = self.pending_mcp_subcommand.take() {
+            return self.execute_mcp_subcommand(pending);
         }
         None
     }
@@ -2143,6 +2237,67 @@ mod tests {
         let hint = mcp_picker_hint(40);
         assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
         assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
+    }
+
+    #[test]
+    fn mcp_picker_mouse_wheel_moves_selection_at_overlay_offset() {
+        use a3s_tui::event::MouseEventKind;
+
+        let root = std::path::PathBuf::from("/tmp/mcps");
+        let projects = (0..4)
+            .map(|index| McpProject {
+                rel: format!("mcp-{index}"),
+                path: root.join(format!("mcp-{index}")),
+                name: format!("mcp-{index}"),
+                description: format!("MCP server {index}"),
+            })
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = mcp_picker_lines(&projects, 0, &root, width, height).len();
+        let y_offset = mcp_overlay_y_offset(height, row_count);
+        let (mut panel, _) = mcp_picker_panel(&projects, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 2,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, None);
+        assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn mcp_picker_click_selects_visible_row_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let root = std::path::PathBuf::from("/tmp/mcps");
+        let projects = (0..4)
+            .map(|index| McpProject {
+                rel: format!("mcp-{index}"),
+                path: root.join(format!("mcp-{index}")),
+                name: format!("mcp-{index}"),
+                description: format!("MCP server {index}"),
+            })
+            .collect::<Vec<_>>();
+        let width = 48;
+        let height = 18;
+        let row_count = mcp_picker_lines(&projects, 0, &root, width, height).len();
+        let y_offset = mcp_overlay_y_offset(height, row_count);
+        let (mut panel, _) = mcp_picker_panel(&projects, 0, &root, width, height).expect("panel");
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + 3,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
     }
 
     #[test]

@@ -318,13 +318,14 @@ browsing and click-to-run, approval overlay wheel browsing and click-to-approve
 or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
 click-to-insert, `/agent` picker wheel browsing and click-to-develop,
-`/plugin` wheel browsing and click-to-toggle, approval choices, RemoteUI and
-jump-to-latest action links, tool status truncation, shared alert rows for OS
-login/configuration warnings, overlay composition for menus and prompts, IDE
-flash footer notifications, live tool activity/output tails, `/top` status
-header actions and CPU/MEM trend sparklines, `/loop` key-value summaries, `/kb`
-delete confirmations, transcript gutters and input bubbles, prompt continuation
-alignment, input border labels, shared
+`/mcp` picker wheel browsing and click-to-develop, `/plugin` wheel browsing and
+click-to-toggle, approval choices, RemoteUI and jump-to-latest action links, tool
+status truncation, shared alert rows for OS login/configuration warnings,
+overlay composition for menus and prompts, IDE flash footer notifications, live
+tool activity/output tails, `/top` status header actions and CPU/MEM trend
+sparklines, `/loop` key-value summaries, `/kb` delete confirmations, transcript
+gutters and input bubbles, prompt continuation alignment, input border labels,
+shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
@@ -332,8 +333,8 @@ panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
 `/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
-hit-testing, `/plugin` overlay hit-testing, and width-bounding fixes are
-exercised directly by `a3s code`.
+hit-testing, `/mcp` picker hit-testing, `/plugin` overlay hit-testing, and
+width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -502,7 +503,7 @@ These commands are available outside the asset-specific flows:
 | `/agent deploy` | Publish or update the active local agent as an application asset, sync agent config, read the latest asset source revision, trigger the OS application-agent build, and launch it into the selected/default Runtime namespace when package and namespace metadata are available. Otherwise the OS asset view opens for the missing input. |
 | `/agent open [agentic\|application\|tool]` / `/agent logs [agentic\|application\|tool]` | Observe the existing OS asset or Runtime log view for the active local agent without creating or uploading it; progressive ViewLinks are preferred when available. |
 | `/agent status [agentic\|application\|tool]` | Check whether the active local agent has a matching OS asset, valid config/runtime binding, and service-specific binding without creating, uploading, running, or deploying anything. |
-| `/mcp` | Select a local MCP server asset from `mcp_dir` and enter local MCP-development mode. The TUI shows the active MCP asset; press Esc or run `/mcp off` to return to normal mode. |
+| `/mcp` | Select a local MCP server asset from `mcp_dir` with keyboard, wheel, or click, then enter local MCP-development mode. The TUI shows the active MCP asset; press Esc or run `/mcp off` to return to normal mode. |
 | `/mcp <description>` | Draft a local MCP server asset with metadata prepared for OS Function as a Service. |
 | `/mcp clone <git-url>` | Clone an existing MCP asset source into `mcp_dir`, then use `/mcp` to select it. |
 | `/mcp list [query]` | Browse OS MCP assets through the asset-scoped list panel. |

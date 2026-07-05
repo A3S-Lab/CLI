@@ -2457,6 +2457,9 @@ impl Model for App {
                 if self.agent_picker.is_some() {
                     return self.handle_agent_mouse(&m);
                 }
+                if self.mcp_picker.is_some() {
+                    return self.handle_mcp_mouse(&m);
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),
