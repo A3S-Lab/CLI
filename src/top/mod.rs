@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    CellAlign, Confirm, DataColumn, DataRow, DataTable, HelpPanel, HelpSection, LogView,
-    LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
+    divider_line, CellAlign, Confirm, DataColumn, DataRow, DataTable, HelpPanel, HelpSection,
+    LogView, LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
     SectionHeader, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
@@ -2793,11 +2793,7 @@ impl TopApp {
                 .view(),
         );
         out.push(self.focus_trend_line("MEM trend", &history.mem, metric_color(usage.mem_pct)));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
+        out.push(divider_line(self.width));
         out.push(pad_plain(
             &format!(
                 " activity events {} · sessions {} · tools {} · sec {} · files {} · net {} · llm {} · tokens {} · model {} · provider {} · latency {} · ttft {} · wire {} / {} · high {}",
@@ -2822,11 +2818,7 @@ impl TopApp {
         let height = self.visible_height() + 2;
         let recent_events = self.recent_agent_events_for_process(row);
         if !recent_events.is_empty() {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-            );
+            out.push(divider_line(self.width));
             let event_height = recent_events.len().saturating_add(2).min(5);
             out.extend(
                 self.agent_events_table(&recent_events, event_height)
@@ -2841,11 +2833,7 @@ impl TopApp {
             let reserve_tree = self.process_tree(row.pid).map_or(0, |_| 4);
             let session_height = remaining.saturating_sub(1 + reserve_tree).min(7);
             if session_height >= 3 {
-                out.push(
-                    Style::new()
-                        .fg(Color::BrightBlack)
-                        .render(&"─".repeat(width)),
-                );
+                out.push(divider_line(self.width));
                 let sessions = agent_session_rows(self, row);
                 out.extend(
                     self.agent_sessions_table(&sessions, session_height)
@@ -2857,11 +2845,7 @@ impl TopApp {
 
         let remaining = height.saturating_sub(out.len());
         if remaining > 3 {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-            );
+            out.push(divider_line(self.width));
             if let Some(tree) = self.process_tree(row.pid) {
                 let tree = Tree::new(tree)
                     .branch_color(color)
@@ -3131,11 +3115,7 @@ impl TopApp {
             &history.block_io_bytes,
             ORANGE,
         ));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
+        out.push(divider_line(self.width));
         out.extend(
             self.container_resource_table(row, 9)
                 .lines()
@@ -3145,11 +3125,7 @@ impl TopApp {
         let height = self.visible_height() + 2;
         let remaining = height.saturating_sub(out.len());
         if remaining > 6 {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-            );
+            out.push(divider_line(self.width));
             let inspect_height = remaining.saturating_sub(1).min(8);
             out.extend(
                 self.container_inspect_table(row, inspect_height)
@@ -3160,11 +3136,7 @@ impl TopApp {
 
         let remaining = height.saturating_sub(out.len());
         if remaining > 4 {
-            out.push(
-                Style::new()
-                    .fg(Color::BrightBlack)
-                    .render(&"─".repeat(width)),
-            );
+            out.push(divider_line(self.width));
             out.extend(
                 self.container_processes_table(row, remaining.saturating_sub(1))
                     .lines()
