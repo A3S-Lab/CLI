@@ -184,6 +184,7 @@ fn plan_checklist_lines(plan: &[(String, String, char, Color)], width: usize) ->
         .done_color(TN_GRAY)
         .error_color(TN_RED)
         .text_color(TN_GRAY)
+        .strikethrough_done(false)
         .view(width.min(u16::MAX as usize) as u16, 8)
         .lines()
         .map(str::to_string)
@@ -191,19 +192,24 @@ fn plan_checklist_lines(plan: &[(String, String, char, Color)], width: usize) ->
 }
 
 fn plan_checklist_item(text: &str, glyph: char, color: Color) -> ChecklistItem {
+    let text_color = if glyph == '✗' { TN_RED } else { TN_GRAY };
     match glyph {
         '✔' => ChecklistItem::new(text)
             .status(ChecklistStatus::Done)
-            .color(color),
+            .glyph_color(color)
+            .text_color(text_color),
         '▶' => ChecklistItem::new(text)
             .status(ChecklistStatus::Active)
-            .color(TN_ORANGE),
+            .glyph_color(TN_ORANGE)
+            .text_color(text_color),
         '✗' => ChecklistItem::new(text)
             .status(ChecklistStatus::Error)
-            .color(color),
+            .glyph_color(color)
+            .text_color(text_color),
         _ => ChecklistItem::new(text)
             .status(ChecklistStatus::Pending)
-            .color(color),
+            .glyph_color(color)
+            .text_color(text_color),
     }
 }
 
@@ -325,7 +331,22 @@ mod tests {
         assert!(plain.contains("◼ implement"), "{plain}");
         assert!(plain.contains("✔ verify"), "{plain}");
         assert!(plain.contains("✗ fix failure"), "{plain}");
-        assert!(lines.iter().any(|line| line.contains("\x1b[9;")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("\x1b[{}m◼", TN_ORANGE.fg_ansi()))),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(&format!("\x1b[{}mimplement", TN_GRAY.fg_ansi()))),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("\x1b[9;")),
+            "pinned plan rows should keep completed text readable: {lines:?}"
+        );
         assert!(
             lines
                 .iter()
