@@ -1,6 +1,7 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
+use a3s_tui::components::{ConnectorBlock, ConnectorRow};
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -195,28 +196,26 @@ fn render_parallel_task_summary(
 }
 
 fn render_task_rows(rows: &[String], ok: bool, width: usize) -> String {
-    let margin = " ".repeat(PAD);
-    let conn = Style::new().fg(TN_GRAY).render("⎿");
     let body_color = if ok { TN_GRAY } else { TN_RED };
-    let textw = width.saturating_sub(PAD + 7).max(20);
-    let mut out = String::new();
-    for (i, row) in rows.iter().enumerate() {
-        let shown = truncate(row, textw);
-        let row = if i == 0 {
-            format!(
-                "{margin}  {conn}  {}",
-                Style::new().fg(body_color).render(&shown)
-            )
-        } else {
-            format!(
-                "{margin}     {}",
-                Style::new().fg(body_color).render(&shown)
-            )
-        };
-        out.push('\n');
-        out.push_str(&a3s_tui::style::truncate_visible(&row, width));
+    let block = ConnectorBlock::new()
+        .margin(PAD)
+        .connector_indent(2)
+        .connector_gap(2)
+        .connector_color(TN_GRAY)
+        .text_color(body_color)
+        .show_omitted_count(false)
+        .rows(
+            rows.iter()
+                .map(|row| ConnectorRow::new(row.clone()))
+                .collect(),
+        )
+        .view(width.min(u16::MAX as usize) as u16);
+
+    if block.is_empty() {
+        String::new()
+    } else {
+        format!("\n{block}")
     }
-    out
 }
 
 fn task_child_excerpt(formatted: &str) -> Option<String> {
@@ -974,6 +973,37 @@ mod tests {
         assert!(plain.contains("Ran npm run"));
         assert!(plain.contains("… +1 earlier lines"));
         assert_visible_lines_bounded(&rendered, 48);
+    }
+
+    #[test]
+    fn task_summary_uses_shared_connector_block() {
+        let meta = serde_json::json!({
+            "agent": "review",
+            "task_id": "task-with-a-long-id-that-still-fits",
+            "success": false,
+            "output_bytes": 0
+        });
+        let rendered = render_tool_end("task", 1, "Task failed\nOutput:\n", Some(&meta), None, 44);
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+        let lines = plain.lines().collect::<Vec<_>>();
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("    ⎿  Task failed")),
+            "{plain}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("       no child text output")),
+            "{plain}"
+        );
+        assert!(
+            rendered.contains(&format!("\x1b[{}mTask failed", TN_RED.fg_ansi())),
+            "failed task summary should use the connector block text color: {rendered:?}"
+        );
+        assert_visible_lines_bounded(&rendered, 44);
     }
 
     #[test]

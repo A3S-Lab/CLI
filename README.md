@@ -61,12 +61,13 @@ tool logs are updated by stable event ids and queried by panels instead of
 coupling every panel to the streaming protocol.
 
 The command palette, asset selectors, `/model` account picker, detail panels,
-SPF/IDE file metadata, effort overlay, and footer status rows use shared
-`a3s-tui` components such as `MenuPanel`, `TabbedMenuPanel`, `DetailPanel`,
-`Timeline`, `SectionHeader`, `PanelFrame`, `Breadcrumb`, `LevelSlider`,
-`ShimmerText`, `SessionStatus`, and `ModeLine`. Reusable menu scrolling,
-selection, framed panels, breadcrumbs, detail-row layout, shimmer, and
-width-bounding fixes are therefore exercised directly by `a3s code`.
+completed task summaries, SPF/IDE file metadata, effort overlay, and footer
+status rows use shared `a3s-tui` components such as `MenuPanel`,
+`TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`, `ConnectorBlock`,
+`PanelFrame`, `Breadcrumb`, `LevelSlider`, `ShimmerText`, `SessionStatus`, and
+`ModeLine`. Reusable menu scrolling, selection, connector rows, framed panels,
+breadcrumbs, detail-row layout, shimmer, and width-bounding fixes are therefore
+exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
