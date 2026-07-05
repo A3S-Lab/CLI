@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
     CellAlign, Confirm, DataColumn, DataRow, DataTable, Meter, MetricTrend, MultiSelect,
-    MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, Tree, TreeNode,
+    MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -2046,34 +2046,27 @@ impl TopApp {
     }
 
     fn tabs(&self) -> String {
-        let mut parts = Vec::new();
         let mut tabs = Tab::PRIMARY.to_vec();
         if !tabs.contains(&self.tab) {
             tabs.push(self.tab);
         }
-        for tab in tabs {
-            let label = format!(" {} ", tab.label());
-            if tab == self.tab {
-                parts.push(
-                    Style::new()
-                        .fg(Color::Black)
-                        .bg(ACCENT)
-                        .bold()
-                        .render(&label),
-                );
-            } else {
-                parts.push(Style::new().fg(Color::BrightBlack).render(&label));
-            }
-        }
-        let mut line = parts.join(" ");
+        let active = tabs.iter().position(|tab| *tab == self.tab).unwrap_or(0);
+        let labels = tabs.iter().map(|tab| tab.label()).collect::<Vec<_>>();
+        let mut panel = Tabs::new(labels)
+            .active_colors(Color::Black, ACCENT)
+            .inactive_color(Color::BrightBlack)
+            .suffix_color(Color::BrightBlack)
+            .gap(1);
+        panel.set_active(active);
+
         let filter = if self.editing_filter {
-            format!(" /{}_", self.filter)
+            format!("/{}_", self.filter)
         } else if self.filter.is_empty() {
-            " / filter".to_string()
+            "/ filter".to_string()
         } else {
-            format!(" /{}", self.filter)
+            format!("/{}", self.filter)
         };
-        line.push_str(&Style::new().fg(Color::BrightBlack).render(&filter));
+        panel = panel.segment(TabSegment::new(filter));
         if let Some(id) = &self.focused_container {
             let label = self
                 .snapshot
@@ -2082,11 +2075,8 @@ impl TopApp {
                 .find(|c| c.id == *id || short_id(&c.id) == id)
                 .map(|c| c.name.as_str())
                 .unwrap_or(id);
-            line.push_str(
-                &Style::new()
-                    .fg(CYAN)
-                    .render(&format!("  focus:{}", truncate(label, 20))),
-            );
+            panel = panel
+                .segment(TabSegment::new(format!("focus:{}", truncate(label, 20))).color(CYAN));
         }
         if let Some(pid) = self.focused_agent_pid {
             let label = self
@@ -2096,20 +2086,19 @@ impl TopApp {
                 .find(|p| p.pid == pid)
                 .and_then(|p| p.agent.map(|agent| agent.label()))
                 .unwrap_or("agent");
-            line.push_str(
-                &Style::new()
-                    .fg(ACCENT)
-                    .render(&format!("  agent:{label}/{pid}")),
-            );
+            panel = panel.segment(TabSegment::new(format!("agent:{label}/{pid}")).color(ACCENT));
         }
         if let Some(focus) = &self.focused_session {
-            line.push_str(&Style::new().fg(ORANGE).render(&format!(
-                "  session:{}/{}",
-                focus.source,
-                truncate(&focus.session, 18)
-            )));
+            panel = panel.segment(
+                TabSegment::new(format!(
+                    "session:{}/{}",
+                    focus.source,
+                    truncate(&focus.session, 18)
+                ))
+                .color(ORANGE),
+            );
         }
-        pad_line(&line, self.width as usize)
+        panel.view(self.width)
     }
 
     fn table(&self) -> String {
@@ -11434,6 +11423,52 @@ mod tests {
             modifiers: KeyModifiers::empty(),
         });
         assert_eq!(app.tab, Tab::Agents);
+    }
+
+    #[test]
+    fn tabs_use_shared_component_for_filter_and_focus_suffixes() {
+        let mut app = TopApp::new(TopOptions {
+            tab: Tab::Containers,
+            ..TopOptions::default()
+        });
+        app.width = 72;
+        app.filter = "api".into();
+        app.focused_container = Some("abcdef123456".into());
+        app.snapshot.containers = vec![container_row(
+            "abcdef123456",
+            "very-long-api-container-name",
+            "Up",
+            Some(1.0),
+            Some(2.0),
+        )];
+
+        let rendered = app.tabs();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("Agents"), "{plain}");
+        assert!(plain.contains("Containers"), "{plain}");
+        assert!(plain.contains("/api"), "{plain}");
+        assert!(plain.contains("focus:very-long-api-cont"), "{plain}");
+        assert!(rendered.contains("\x1b["), "active tab should be styled");
+        assert_eq!(a3s_tui::style::visible_len(&rendered), 72);
+    }
+
+    #[test]
+    fn tabs_append_non_primary_active_tab_and_fit_width() {
+        let mut app = TopApp::new(TopOptions {
+            tab: Tab::Events,
+            ..TopOptions::default()
+        });
+        app.width = 36;
+        app.filter = "security".into();
+
+        let rendered = app.tabs();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("Agents"), "{plain}");
+        assert!(plain.contains("Containers"), "{plain}");
+        assert!(plain.contains("Events"), "{plain}");
+        assert!(a3s_tui::style::visible_len(&rendered) <= 36, "{plain}");
     }
 
     #[test]
