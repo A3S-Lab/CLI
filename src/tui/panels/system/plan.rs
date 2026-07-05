@@ -1,7 +1,7 @@
 //! Pinned plan/TODO + bottom task tracker + subagent rows, plus relayout.
 
 use super::super::*;
-use a3s_tui::components::{Checklist, ChecklistItem, ChecklistStatus};
+use a3s_tui::components::{Checklist, ChecklistItem, ChecklistStatus, QueuedTask, TaskQueue};
 
 impl App {
     /// a3s-lane task detail lines for the very bottom: the running task plus
@@ -16,33 +16,21 @@ impl App {
         if self.queue.is_empty() {
             return Vec::new();
         }
-        let width = self.width as usize;
-        let cap = width.saturating_sub(8);
-        let mut lines = vec![pad_to(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render(&format!("  ─ tasks · ✓ {} done ────────", self.completed)),
-            width,
-        )];
-        if let Some(t) = running {
-            lines.push(pad_to(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render(&format!("  ⏳ {}", truncate(t, cap))),
-                width,
-            ));
-        }
-        let mut q: Vec<&Queued> = self.queue.iter().collect();
-        q.sort_by_key(|x| (x.prio, x.seq));
-        for item in q.iter().take(6) {
-            lines.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  ▱ {}", truncate(&item.text, cap))),
-                width,
-            ));
-        }
-        lines
+        let queued = self
+            .queue
+            .iter()
+            .map(|item| {
+                QueuedTask::new(item.text.clone())
+                    .priority(i32::from(item.prio))
+                    .sequence(item.seq)
+            })
+            .collect::<Vec<_>>();
+        task_queue_lines(
+            self.completed,
+            running.map(String::as_str),
+            queued,
+            self.width as usize,
+        )
     }
 
     /// Visible transcript rows = the viewport height, mirroring the layout chrome
@@ -171,6 +159,34 @@ impl App {
     }
 }
 
+fn task_queue_lines(
+    completed: usize,
+    running: Option<&str>,
+    queued: Vec<QueuedTask>,
+    width: usize,
+) -> Vec<String> {
+    if width == 0 || queued.is_empty() {
+        return Vec::new();
+    }
+
+    let mut queue = TaskQueue::new()
+        .completed(completed)
+        .queued_tasks(queued)
+        .margin(2)
+        .header_color(TN_GRAY)
+        .running_color(TN_YELLOW)
+        .queued_color(TN_GRAY);
+    if let Some(running) = running {
+        queue = queue.running(running);
+    }
+
+    queue
+        .view(width.min(u16::MAX as usize) as u16)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn plan_checklist_lines(plan: &[(String, String, char, Color)], width: usize) -> Vec<String> {
     if width == 0 || plan.is_empty() {
         return Vec::new();
@@ -241,6 +257,35 @@ fn workflow_slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_queue_lines_use_shared_component_and_sort_queue() {
+        let lines = task_queue_lines(
+            3,
+            Some("running a deliberately long job that must fit"),
+            vec![
+                QueuedTask::new("later queued job").priority(4).sequence(2),
+                QueuedTask::new("first queued job").priority(1).sequence(9),
+            ],
+            34,
+        );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 4);
+        assert!(plain[0].contains("tasks · ✓ 3 done"), "{plain:?}");
+        assert!(plain[1].contains("⏳ running"), "{plain:?}");
+        assert!(plain[2].contains("▱ first queued job"), "{plain:?}");
+        assert!(plain[3].contains("▱ later queued job"), "{plain:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 34),
+            "{plain:?}"
+        );
+    }
 
     #[test]
     fn plan_checklist_lines_use_shared_component_and_fit_width() {
