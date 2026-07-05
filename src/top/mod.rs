@@ -2031,18 +2031,13 @@ impl TopApp {
                 .map(|t| format!("refreshed {:.1}s ago", t.elapsed().as_secs_f32()))
                 .unwrap_or_else(|| "loading".to_string())
         };
-        let line = format!(
-            "{}{}{}",
-            title,
-            " ".repeat((self.width as usize).saturating_sub(title.len() + right.len())),
-            right
-        );
-        Style::new()
+        StatusBar::new()
+            .left(title)
+            .right(right)
             .fg(Color::BrightWhite)
             .bg(Color::Rgb(35, 40, 60))
-            .bold()
-            .width(self.width)
-            .render(&line)
+            .bold(true)
+            .view(self.width)
     }
 
     fn tabs(&self) -> String {
@@ -12034,6 +12029,27 @@ mod tests {
         let plain = a3s_tui::style::strip_ansi(&app.header());
 
         assert!(plain.contains("boxes:4 run:1 pause:1 exit:1 dead:1"));
+    }
+
+    #[test]
+    fn header_uses_shared_status_bar_and_preserves_right_status() {
+        let mut app = TopApp::new(TopOptions::default());
+        app.width = 44;
+        app.paused = true;
+        app.snapshot.containers = vec![
+            container_row("run", "run", "Up 2 minutes", Some(1.0), Some(1.0)),
+            container_row("pause", "pause", "Up 4 minutes (Paused)", None, None),
+            container_row("exit", "exit", "Exited (0) 1 hour ago", None, None),
+        ];
+        app.snapshot.processes = vec![process_row(42, 1, "codex")];
+
+        let rendered = app.header();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.starts_with(" a3s top"), "{plain}");
+        assert!(plain.ends_with("paused"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert_eq!(a3s_tui::style::visible_len(&rendered), 44);
     }
 
     #[test]
