@@ -2452,6 +2452,10 @@ impl Model for App {
 
             Msg::Term(Event::Mouse(m)) => {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
+                if self.model_menu.is_some() {
+                    self.handle_model_mouse(&m);
+                    return None;
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),

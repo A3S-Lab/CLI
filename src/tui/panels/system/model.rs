@@ -2,7 +2,8 @@
 
 use super::super::*;
 use super::login::{claude_models, has_local_login, AuthProvider};
-use a3s_tui::components::{TabbedMenuItem, TabbedMenuPanel, TabbedMenuTab};
+use a3s_tui::components::{TabbedMenuItem, TabbedMenuPanel, TabbedMenuPanelMsg, TabbedMenuTab};
+use a3s_tui::event::MouseEvent;
 
 /// A tab in the `/model` picker: config models, or a signed-in account's models.
 struct ModelTab {
@@ -33,18 +34,32 @@ const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = TN_CYAN;
 
-fn model_menu_lines(
+fn model_menu_max_rows(height: usize) -> usize {
+    height.saturating_sub(8).clamp(3, 12)
+}
+
+fn model_menu_height(tabs: &[ModelTab], active_tab: usize, max_items: usize) -> usize {
+    if tabs.is_empty() {
+        return 0;
+    }
+    let active_tab = active_tab.min(tabs.len() - 1);
+    let active_items = tabs[active_tab].models.len();
+    let header_rows = 1 + usize::from(tabs.len() > 1) + 1;
+    let item_rows = active_items.max(1).min(max_items);
+    header_rows + item_rows + 1
+}
+
+fn model_menu_panel(
     tabs: &[ModelTab],
     active_tab: usize,
     selected: usize,
     current_model: Option<&str>,
-    width: usize,
     max_items: usize,
-) -> Vec<String> {
+) -> TabbedMenuPanel {
+    let active_tab = active_tab.min(tabs.len().saturating_sub(1));
     if tabs.is_empty() {
-        return Vec::new();
+        return TabbedMenuPanel::new(Vec::new());
     }
-    let active_tab = active_tab.min(tabs.len() - 1);
     let panel_tabs = tabs
         .iter()
         .map(|tab| {
@@ -65,10 +80,6 @@ fn model_menu_lines(
                 .empty_text("(no models)")
         })
         .collect::<Vec<_>>();
-    let active_items = tabs[active_tab].models.len();
-    let header_rows = 1 + usize::from(tabs.len() > 1) + 1;
-    let item_rows = active_items.max(1).min(max_items);
-    let height = header_rows + item_rows + 1;
 
     TabbedMenuPanel::new(panel_tabs)
         .title("Select model")
@@ -81,10 +92,32 @@ fn model_menu_lines(
         .text_color(TN_GRAY)
         .muted_color(TN_GRAY)
         .selected_colors(Color::BrightWhite, ACCENT)
-        .view(width as u16, height)
+}
+
+fn model_menu_lines(
+    tabs: &[ModelTab],
+    active_tab: usize,
+    selected: usize,
+    current_model: Option<&str>,
+    width: usize,
+    max_items: usize,
+) -> Vec<String> {
+    if tabs.is_empty() {
+        return Vec::new();
+    }
+    let height = model_menu_height(tabs, active_tab, max_items);
+    model_menu_panel(tabs, active_tab, selected, current_model, max_items)
+        .view(width.min(u16::MAX as usize) as u16, height)
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+fn model_menu_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(5)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 impl App {
@@ -184,33 +217,7 @@ impl App {
                 Some(None)
             }
             KeyCode::Enter => {
-                let model = tabs[t].models.get(sel.min(last)).cloned();
-                let provider = tabs[t].provider;
-                let os_gateway = tabs[t].os_gateway;
-                self.model_menu = None;
-                if os_gateway {
-                    if let Some(model) = model {
-                        self.use_os_gateway(&model);
-                    }
-                    return Some(None);
-                }
-                match provider {
-                    None => {
-                        if let Some(model) = model {
-                            self.switch_model(&model);
-                        }
-                    }
-                    Some(AuthProvider::Claude) => {
-                        if let Some(model) = model {
-                            self.sign_in_claude(&model);
-                        }
-                    }
-                    Some(AuthProvider::Codex) => {
-                        if let Some(model) = model {
-                            self.sign_in_codex(&model);
-                        }
-                    }
-                }
+                self.activate_model_menu_item(&tabs[t], sel.min(last));
                 Some(None)
             }
             KeyCode::Esc => {
@@ -218,6 +225,69 @@ impl App {
                 Some(None)
             }
             _ => None,
+        }
+    }
+
+    pub(crate) fn handle_model_mouse(&mut self, mouse: &MouseEvent) {
+        let Some(sel) = self.model_menu else {
+            return;
+        };
+        let tabs = self.model_tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        let active_tab = self.model_tab.min(tabs.len() - 1);
+        let max_rows = model_menu_max_rows(self.height as usize);
+        let selected = sel.min(tabs[active_tab].models.len().saturating_sub(1));
+        let width = (self.width as usize).min(u16::MAX as usize);
+        let height = model_menu_height(&tabs, active_tab, max_rows);
+        let mut panel =
+            model_menu_panel(&tabs, active_tab, selected, self.model.as_deref(), max_rows);
+        let row_count = panel.view(width as u16, height).lines().count();
+        if row_count == 0 {
+            return;
+        }
+        panel.set_y_offset(model_menu_overlay_y_offset(self.height as usize, row_count));
+
+        match panel.handle_mouse(mouse) {
+            Some(TabbedMenuPanelMsg::TabChanged(tab)) => {
+                self.model_tab = tab.min(tabs.len() - 1);
+                self.model_menu = Some(0);
+            }
+            Some(TabbedMenuPanelMsg::Selected { tab, item }) => {
+                if let Some(tab) = tabs.get(tab) {
+                    self.activate_model_menu_item(tab, item);
+                }
+            }
+            Some(TabbedMenuPanelMsg::Cancelled) | None => {}
+        }
+    }
+
+    fn activate_model_menu_item(&mut self, tab: &ModelTab, item: usize) {
+        let model = tab.models.get(item).cloned();
+        self.model_menu = None;
+        if tab.os_gateway {
+            if let Some(model) = model {
+                self.use_os_gateway(&model);
+            }
+            return;
+        }
+        match tab.provider {
+            None => {
+                if let Some(model) = model {
+                    self.switch_model(&model);
+                }
+            }
+            Some(AuthProvider::Claude) => {
+                if let Some(model) = model {
+                    self.sign_in_claude(&model);
+                }
+            }
+            Some(AuthProvider::Codex) => {
+                if let Some(model) = model {
+                    self.sign_in_codex(&model);
+                }
+            }
         }
     }
 
@@ -611,7 +681,7 @@ impl App {
         let width = self.width as usize;
         // Scroll a window around the selection so a pick past row 12 stays visible
         // and reachable (the list used to render a fixed first-12 only).
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
+        let max_rows = model_menu_max_rows(self.height as usize);
         let sel = sel.min(tabs[t].models.len().saturating_sub(1));
         let menu = model_menu_lines(&tabs, t, sel, self.model.as_deref(), width, max_rows);
         self.overlay_list(composed, &menu)
@@ -679,5 +749,41 @@ mod tests {
                 a3s_tui::style::strip_ansi(&line)
             );
         }
+    }
+
+    #[test]
+    fn model_menu_panel_handles_tab_mouse_with_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let tabs = vec![
+            ModelTab {
+                label: "a3s-code",
+                color: A3S_COLOR,
+                models: vec!["openai/gpt-5".into()],
+                provider: None,
+                os_gateway: false,
+            },
+            ModelTab {
+                label: "Claude Code",
+                color: CLAUDE_COLOR,
+                models: vec!["claude-sonnet-4".into()],
+                provider: Some(AuthProvider::Claude),
+                os_gateway: false,
+            },
+        ];
+        let max_rows = model_menu_max_rows(24);
+        let row_count = model_menu_lines(&tabs, 0, 0, None, 48, max_rows).len();
+        let y_offset = model_menu_overlay_y_offset(24, row_count);
+        let mut panel = model_menu_panel(&tabs, 0, 0, None, max_rows);
+        panel.set_y_offset(y_offset);
+
+        let msg = panel.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 15,
+            row: y_offset + 1,
+            modifiers: a3s_tui::KeyModifiers::NONE,
+        });
+
+        assert_eq!(msg, Some(TabbedMenuPanelMsg::TabChanged(1)));
     }
 }
