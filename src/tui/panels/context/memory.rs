@@ -5,7 +5,7 @@
 //! metadata, graph neighborhood, aliases, relations, and full content.
 
 use super::super::*;
-use a3s_tui::components::{DetailPanel, DetailRow, Timeline, TimelineItem, TimelineRow};
+use a3s_tui::components::{DetailPanel, DetailRow, Paragraph, Timeline, TimelineItem, TimelineRow};
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
 
@@ -388,20 +388,24 @@ impl App {
         } else {
             m.detail.content.as_str()
         };
-        for raw in content.lines() {
-            if raw.is_empty() {
-                lines.push(String::new());
-            } else {
-                for wl in wrap_words(raw, w.max(8)) {
-                    lines.push(Style::new().fg(TN_FG).render(&wl));
-                }
-            }
-        }
+        lines.extend(memory_detail_content_rows(content, w));
         lines
             .into_iter()
             .map(|line| memory_line(&line, w))
             .collect()
     }
+}
+
+fn memory_detail_content_rows(content: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    for raw in content.lines() {
+        if raw.is_empty() {
+            lines.push(String::new());
+        } else {
+            lines.extend(Paragraph::new(raw).width(width.max(8)).color(TN_FG).lines());
+        }
+    }
+    lines
 }
 
 fn memory_timeline_lines(
@@ -642,6 +646,30 @@ mod tests {
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 42),
             "{plain}"
+        );
+    }
+
+    #[test]
+    fn memory_detail_content_rows_use_shared_paragraph() {
+        let rows = memory_detail_content_rows("alpha beta gamma\n\n中文测试内容 with suffix", 12);
+        let plain = rows
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+
+        assert!(plain.contains(&String::new()), "{plain:?}");
+        assert!(plain.iter().any(|line| line.contains("alpha")), "{plain:?}");
+        assert!(plain.iter().any(|line| line.contains("中文")), "{plain:?}");
+        assert!(
+            rows.iter()
+                .filter(|line| !line.is_empty())
+                .all(|line| line.contains(&TN_FG.fg_ansi())),
+            "{rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 12),
+            "{plain:?}"
         );
     }
 

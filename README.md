@@ -118,7 +118,7 @@ components such as
 `MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`,
 `ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`, `OutputBlock`,
 `Checklist`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
-`ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and
+`Paragraph`, `ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and
 `ModeLine`. Reusable menu scrolling, selection, tool status truncation,
 transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared display-width wrapping for live reasoning and detail text,
