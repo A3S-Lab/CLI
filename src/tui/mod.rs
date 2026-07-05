@@ -25,7 +25,7 @@ use a3s_code_core::{Agent, AgentEvent, AgentSession, SessionOptions, SystemPromp
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
-use a3s_tui::components::{Spinner, Textarea, Viewport};
+use a3s_tui::components::{MenuItem, MenuPanel, Spinner, Textarea, Viewport};
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
@@ -5606,31 +5606,33 @@ impl App {
         let Some((_, label)) = &self.pending_tool else {
             return composed;
         };
-        let width = self.width as usize;
-        let opts = ["Yes", "Yes, and don't ask again", "No"];
-        let approval_line = |line: &str| pad_to(&truncate(line, width), width);
-        let mut menu = vec![approval_line(
-            &Style::new()
-                .fg(TN_YELLOW)
-                .bold()
-                .render(&format!("  ⏵ Allow {label}?")),
-        )];
-        for (i, o) in opts.iter().enumerate() {
-            let marker = if i == self.approval_sel { "❯" } else { " " };
-            let raw = approval_line(&format!("  {marker} {}. {o}", i + 1));
-            menu.push(if i == self.approval_sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
-        menu.push(approval_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render("  Enter select · ↑/↓ · 1–3 · Esc"),
-        ));
+        let menu = approval_menu_lines(label, self.approval_sel, self.width as usize);
         self.overlay_list(composed, &menu)
     }
+}
+
+fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
+    MenuPanel::new(format!("⏵ Allow {label}?"))
+        .items(vec![
+            MenuItem::new("Yes"),
+            MenuItem::new("Yes, and don't ask again"),
+            MenuItem::new("No"),
+        ])
+        .selected(selected)
+        .max_items(3)
+        .show_scroll(false)
+        .number_shortcuts(true)
+        .indent(2)
+        .marker("❯")
+        .title_color(TN_YELLOW)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .footer("Enter select · ↑/↓ · 1–3 · Esc")
+        .view(width as u16, 5)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Headless probe of the same `session.stream()` / `AgentEvent` path the TUI
@@ -6258,6 +6260,33 @@ mod tests {
             dbg.contains(&format!("tool_timeout_ms: Some({TOOL_EXEC_TIMEOUT_MS})")),
             "{dbg}"
         );
+    }
+
+    #[test]
+    fn approval_menu_uses_bounded_shared_panel() {
+        let lines = approval_menu_lines(
+            "Bash(cargo test very-long-filter-name-that-should-not-overflow)",
+            1,
+            42,
+        );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+
+        assert_eq!(plain.len(), 5);
+        assert!(plain[0].contains("Allow"), "{plain:?}");
+        assert!(plain[1].contains("1. Yes"), "{plain:?}");
+        assert!(plain[2].contains("2. Yes, and"), "{plain:?}");
+        assert!(plain[3].contains("3. No"), "{plain:?}");
+        assert!(plain[4].contains("Enter select"), "{plain:?}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 42),
+            "{plain:?}"
+        );
+        assert!(lines[2].contains("\x1b["), "selected row is styled");
     }
 
     #[test]
