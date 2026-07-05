@@ -317,8 +317,8 @@ footer status row. Reusable menu scrolling, selection, slash command wheel
 browsing and click-to-run, approval overlay wheel browsing and click-to-approve
 or deny, `/model` account tab mouse switching, `/effort` wheel/click adjustment,
 `/theme` wheel preview and click-to-apply, `@` file picker wheel browsing and
-click-to-insert, `/plugin` wheel browsing and click-to-toggle, approval choices,
-RemoteUI and
+click-to-insert, `/agent` picker wheel browsing and click-to-develop,
+`/plugin` wheel browsing and click-to-toggle, approval choices, RemoteUI and
 jump-to-latest action links, tool status truncation, shared alert rows for OS
 login/configuration warnings, overlay composition for menus and prompts, IDE
 flash footer notifications, live tool activity/output tails, `/top` status
@@ -331,8 +331,9 @@ bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
 detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
 hit-testing, slash command palette hit-testing, approval overlay hit-testing,
-`/theme` preview hit-testing, `@` file picker hit-testing, `/plugin` overlay
-hit-testing, and width-bounding fixes are exercised directly by `a3s code`.
+`/theme` preview hit-testing, `@` file picker hit-testing, `/agent` picker
+hit-testing, `/plugin` overlay hit-testing, and width-bounding fixes are
+exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -488,7 +489,7 @@ These commands are available outside the asset-specific flows:
 
 | Command | What it does |
 | --- | --- |
-| `/agent` | Select a local agent definition from `agent_dir` and enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped development goal and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
+| `/agent` | Select a local agent definition from `agent_dir` with keyboard, wheel, or click, then enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped development goal and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
 | `/agent <description>` | Draft a Markdown agent definition with YAML frontmatter under `agent_dir`, then use `/agent` to iterate on it. |
 | `/agent clone <git-url>` | Clone an existing agent asset source into `agent_dir`, then use `/agent` to select it. |
 | `/agent list [query]` | Browse OS agent assets through the asset-scoped list panel. |

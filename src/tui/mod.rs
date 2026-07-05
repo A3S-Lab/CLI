@@ -2454,6 +2454,9 @@ impl Model for App {
                 if self.slash_menu_open() {
                     return self.handle_slash_mouse(&m);
                 }
+                if self.agent_picker.is_some() {
+                    return self.handle_agent_mouse(&m);
+                }
                 if self.help_open {
                     match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_help_by(-3),
