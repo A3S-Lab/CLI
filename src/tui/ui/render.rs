@@ -2,15 +2,6 @@
 
 use super::*;
 
-/// Compact token count: `50700` → `50.7k`.
-pub(crate) fn fmt_tokens(n: u64) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
 /// diff; everything else shows a status line + a few lines of output.

@@ -1,7 +1,9 @@
 //! Pinned plan/TODO + bottom task tracker + subagent rows, plus relayout.
 
 use super::super::*;
-use a3s_tui::components::{Checklist, ChecklistItem, ChecklistStatus, QueuedTask, TaskQueue};
+use a3s_tui::components::{
+    Checklist, ChecklistItem, ChecklistStatus, QueuedTask, SubagentRow, SubagentTracker, TaskQueue,
+};
 
 impl App {
     /// a3s-lane task detail lines for the very bottom: the running task plus
@@ -88,75 +90,51 @@ impl App {
             return Vec::new();
         }
         let width = self.width as usize;
-        let now = Instant::now();
-        let total = subagents.len();
-        let done = subagents.iter().filter(|s| s.done).count();
-        let tokens = subagents.iter().map(|s| s.tokens).sum::<u64>();
-        let started = subagents.iter().map(|s| s.started).min().unwrap_or(now);
-        let ended = if done == total {
-            subagents
-                .iter()
-                .filter_map(|s| s.ended)
-                .max()
-                .unwrap_or(now)
-        } else {
-            now
-        };
-        let elapsed = ended.saturating_duration_since(started);
-        let status = if done == total {
-            format!("{done}/{total} agents done")
-        } else {
-            format!(
-                "{} running · {done}/{total} done",
-                total.saturating_sub(done)
-            )
-        };
-        let right = if tokens > 0 {
-            format!(
-                "{status} · {} · ↓ {} tokens",
-                fmt_elapsed(elapsed),
-                fmt_tokens(tokens)
-            )
-        } else {
-            format!("{status} · {}", fmt_elapsed(elapsed))
-        };
         let task = self
             .running_task
             .as_deref()
             .unwrap_or("parallel agents")
             .trim();
-        let slug = workflow_slug(task);
-        let rlen = a3s_tui::style::visible_len(&right);
-        let maxleft = width.saturating_sub(rlen + 3).max(8);
-        let left = truncate(&format!("  ◯ {slug}  {task}"), maxleft);
-        let pad = width.saturating_sub(a3s_tui::style::visible_len(&left) + rlen + 1);
-        let mut out = vec![format!(
-            "{}{}{}",
-            Style::new().fg(ACCENT).bold().render(&left),
-            " ".repeat(pad),
-            Style::new().fg(TN_GRAY).render(&right),
-        )];
-
-        for s in subagents.iter().filter(|s| !s.done).take(4) {
-            let el = fmt_elapsed(s.started.elapsed());
-            let right = if s.tokens > 0 {
-                format!("{el} · ↓ {} tokens", fmt_tokens(s.tokens))
-            } else {
-                el
-            };
-            let rlen = a3s_tui::style::visible_len(&right);
-            let maxleft = width.saturating_sub(rlen + 3).max(8);
-            let left = truncate(&format!("     ◯ {}  {}", s.agent, s.description), maxleft);
-            let pad = width.saturating_sub(a3s_tui::style::visible_len(&left) + rlen + 1);
-            out.push(format!(
-                "{}{}{}",
-                Style::new().fg(TN_PURPLE).render(&left),
-                " ".repeat(pad),
-                Style::new().fg(TN_GRAY).render(&right),
-            ));
-        }
-        out
+        let rows = subagents
+            .into_iter()
+            .map(|s| {
+                let elapsed = s
+                    .ended
+                    .unwrap_or_else(Instant::now)
+                    .saturating_duration_since(s.started);
+                let mut row = SubagentRow::new(s.agent.clone(), s.description.clone())
+                    .elapsed(fmt_elapsed(elapsed))
+                    .tokens(s.tokens);
+                if s.done {
+                    row = row.done(s.success.unwrap_or(true));
+                }
+                row
+            })
+            .collect::<Vec<_>>();
+        subagent_tracker_lines(task, rows, width)
     }
+}
+
+fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> Vec<String> {
+    if width == 0 || rows.is_empty() {
+        return Vec::new();
+    }
+
+    SubagentTracker::new(task)
+        .slug(workflow_slug(task))
+        .rows(rows)
+        .max_running_rows(4)
+        .margin(2)
+        .child_indent(5)
+        .marker("◯")
+        .accent_color(ACCENT)
+        .active_color(TN_PURPLE)
+        .muted_color(TN_GRAY)
+        .error_color(TN_RED)
+        .view(width.min(u16::MAX as usize) as u16)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn task_queue_lines(
@@ -257,6 +235,41 @@ fn workflow_slug(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_tracker_lines_use_shared_component_and_fit_width() {
+        let lines = subagent_tracker_lines(
+            "Extract reusable terminal components",
+            vec![
+                SubagentRow::new("planner", "map panels")
+                    .done(true)
+                    .elapsed("0.8s")
+                    .tokens(900),
+                SubagentRow::new("coder", "build tracker")
+                    .elapsed("1.4s")
+                    .tokens(1_500),
+            ],
+            72,
+        );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 2);
+        assert!(plain.contains("extract-reusable-term"), "{plain}");
+        assert!(plain.contains("1 running · 1/2 done"), "{plain}");
+        assert!(plain.contains("↓ 2.4k tokens"), "{plain}");
+        assert!(plain.contains("coder  build tracker"), "{plain}");
+        assert!(!plain.contains("planner  map panels"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 72),
+            "{plain}"
+        );
+    }
 
     #[test]
     fn task_queue_lines_use_shared_component_and_sort_queue() {
