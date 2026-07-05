@@ -12,8 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    CellAlign, DataColumn, DataRow, DataTable, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
-    Select, SelectMsg, Sparkline, StatusBar, Tree, TreeNode,
+    CellAlign, Confirm, DataColumn, DataRow, DataTable, Meter, MetricTrend, MultiSelect,
+    MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3841,32 +3841,12 @@ impl TopApp {
             Action::UnpauseContainer(_, _, name) => ("Unpause container?", name.clone()),
             Action::RemoveContainer(_, _, name) => ("Remove container?", name.clone()),
         };
-        let width = self.width as usize;
-        let inner = 58.min(width.saturating_sub(4)).max(24);
-        let line = "─".repeat(inner);
-        let target = truncate(&target, inner.saturating_sub(4));
-        let rows = [
-            format!("┌{line}┐"),
-            format!("│{}│", center(title, inner)),
-            format!("│{}│", center("", inner)),
-            format!("│{}│", center(&target, inner)),
-            format!(
-                "│{}│",
-                center("[ y / Enter ] confirm     [ n / Esc ] cancel", inner)
-            ),
-            format!("└{line}┘"),
-        ];
-        let styled = rows
-            .iter()
-            .map(|r| Style::new().fg(Color::BrightWhite).bg(RED).bold().render(r))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let pad = width.saturating_sub(inner + 2) / 2;
-        styled
-            .lines()
-            .map(|line| format!("{}{}", " ".repeat(pad), line))
-            .collect::<Vec<_>>()
-            .join("\n")
+        Confirm::new(target)
+            .title(title)
+            .with_labels("y", "n")
+            .max_width(58)
+            .colors(Color::BrightWhite, Some(RED))
+            .box_view(self.width)
     }
 }
 
@@ -10536,20 +10516,6 @@ fn invert_screen(screen: &str) -> String {
     )
 }
 
-fn center(s: &str, width: usize) -> String {
-    let len = s.chars().count();
-    if len >= width {
-        return truncate(s, width);
-    }
-    let left = (width - len) / 2;
-    format!(
-        "{}{}{}",
-        " ".repeat(left),
-        s,
-        " ".repeat(width - len - left)
-    )
-}
-
 fn format_event_pid(pid: Option<u32>) -> String {
     pid.map(|pid| pid.to_string())
         .unwrap_or_else(|| "-".to_string())
@@ -11261,6 +11227,30 @@ mod tests {
         assert!(plain.contains("restore compact columns"));
         assert!(plain.contains("s / r"));
         assert!(plain.contains("clear filter"));
+    }
+
+    #[test]
+    fn confirm_view_uses_shared_confirm_and_fits_narrow_width() {
+        let mut app = TopApp::new(TopOptions::default());
+        app.width = 36;
+        app.confirm = Some(Action::RemoveContainer(
+            ContainerConnector::Docker,
+            "container-1".into(),
+            "very-long-container-name-that-needs-wrapping".into(),
+        ));
+
+        let rendered = app.confirm_view();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("Remove container?"), "{plain}");
+        assert!(plain.contains("very-long-container"), "{plain}");
+        assert!(plain.contains("[ y / Enter ] confirm"), "{plain}");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 36),
+            "{plain}"
+        );
     }
 
     #[test]
