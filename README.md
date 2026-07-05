@@ -60,6 +60,11 @@ kept as a small ECS-style projection: tool runs, subagent runs, and retained
 tool logs are updated by stable event ids and queried by panels instead of
 coupling every panel to the streaming protocol.
 
+The command palette and `/model` account picker use the shared
+`a3s-tui` `MenuPanel` and `TabbedMenuPanel` components, so reusable menu
+scrolling, selection, and width-bounding fixes are exercised directly by
+`a3s code`.
+
 ```mermaid
 flowchart TD
     user["Terminal user"] --> cli["a3s CLI<br/>a3s code"]
