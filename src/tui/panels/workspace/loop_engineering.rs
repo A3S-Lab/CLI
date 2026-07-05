@@ -3,7 +3,7 @@
 
 use super::super::*;
 use super::agent::{self, AgentDevSession};
-use a3s_tui::components::{DetailPanel, DetailRow, SectionHeader};
+use a3s_tui::components::{DetailPanel, DetailRow, KeyValue, SectionHeader};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_PATTERN: &str = "daily-triage";
@@ -80,14 +80,24 @@ fn loop_detail_lines(selected: Option<&LoopSummary>, note: &str, width: usize) -
         } else {
             "disabled"
         };
-        let detail = DetailPanel::new(summary.spec.id.clone())
-            .show_separator(false)
+        let render_width = width.min(u16::MAX as usize) as u16;
+        lines.extend(
+            SectionHeader::new(summary.spec.id.clone())
+                .show_separator(false)
+                .indent(2)
+                .title_color(TN_FG)
+                .metadata_color(TN_GRAY)
+                .muted_color(TN_GRAY)
+                .view(render_width, 1)
+                .lines()
+                .map(str::to_string),
+        );
+        let detail = KeyValue::new()
             .indent(2)
-            .title_color(TN_FG)
-            .label_color(TN_GRAY)
+            .key_width(8)
+            .separator(" ")
+            .key_color(TN_GRAY)
             .value_color(TN_GRAY)
-            .label_width(8)
-            .unlimited_rows()
             .pair("pattern", summary.spec.pattern.clone())
             .pair(
                 "level",
@@ -100,12 +110,7 @@ fn loop_detail_lines(selected: Option<&LoopSummary>, note: &str, width: usize) -
             .pair("OS", runtime)
             .pair("goal", summary.spec.goal.clone())
             .pair("dir", summary.spec.dir.display().to_string());
-        lines.extend(
-            detail
-                .view(width.min(u16::MAX as usize) as u16, 7)
-                .lines()
-                .map(str::to_string),
-        );
+        lines.extend(detail.lines(render_width));
         lines.push(String::new());
 
         let mut missing = DetailPanel::new("Missing")
@@ -1355,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn loop_detail_lines_use_shared_detail_panel_and_fit_width() {
+    fn loop_detail_lines_use_shared_key_value_and_fit_width() {
         let root = temp_root("detail-lines");
         let summary = LoopSummary {
             spec: LoopSpec {
