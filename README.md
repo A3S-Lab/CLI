@@ -46,6 +46,8 @@ surface.
 Use this README as the TUI capability guide:
 
 - [Capability Overview](#capability-overview) maps the major product surfaces.
+- [Startup, Sessions, And Safety](#startup-sessions-and-safety) covers launch,
+  resume, confirmation, and smoke validation.
 - [Effort Profiles](#effort-profiles) explains how `/effort` changes reasoning,
   tool rounds, continuations, and `ultracode`.
 - [Dynamic Workflows](#dynamic-workflows) separates `DynamicWorkflowRuntime`
@@ -72,6 +74,44 @@ Use this README as the TUI capability guide:
 | Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent definition. |
 | OS and RemoteUI | `/login` enables OS capabilities. `/view` reopens the latest RemoteUI ViewLink captured from shaped OS progressive responses (`.view` or `viewUrl`), using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, and `/fork` branches a new session from the current transcript. |
+
+### Startup, Sessions, And Safety
+
+Launch the TUI from the repository or workspace the agent should inspect:
+
+```sh
+a3s code
+a3s code resume <session-id>
+a3s code resume
+```
+
+Config discovery checks `A3S_CONFIG_FILE`, then `.a3s/config.acl` while walking
+upward from the current directory, then `~/.a3s/config.acl`. If none exists, the
+first launch writes a starter `~/.a3s/config.acl` and opens it in the built-in
+editor. Project-local config can set model/provider choices, OS endpoint,
+`flow_dir`, `agent_dir`, `mcp_dir`, `skill_dir`, storage, memory, delegation,
+and asset paths.
+
+Sessions auto-save under `<workspace>/.a3s/tui-sessions`. Exiting prints the
+exact resume command; `a3s code resume` without an id resumes the newest saved
+session in that workspace. `/fork` copies the current transcript into a new
+session id while keeping the original, and `/clear` starts a fresh conversation.
+
+The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
+prompt through an approval overlay; `a` or `/auto` approves later tool calls for
+the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
+auto-approves read-only discovery tools but still asks before writes. Tool
+timeouts and confirmation timeouts are tracked separately so a human approval
+pause does not consume the command runtime budget.
+
+All local filesystem work stays under the active workspace services and A3S Code
+permission policy. OS operations require `/login`; before login the TUI can
+still author local assets, run local subagents, use local memory, and execute
+DynamicWorkflowRuntime, but the OS `runtime` tool, RemoteUI ViewLinks, asset
+publishing, and OS service activity panels are unavailable.
+
+For CI or release probes, set `A3S_CODE_TUI_SMOKE=1` to exercise the same
+`AgentSession::stream()` integration without taking over the terminal.
 
 ### Effort Profiles
 
