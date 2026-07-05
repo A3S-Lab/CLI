@@ -1,6 +1,60 @@
 //! `@` file picker: an IDE-style collapsible tree (folders expand on demand).
 
 use super::super::*;
+use a3s_tui::components::{TreePicker, TreePickerItem};
+
+fn file_menu_lines<F>(
+    nodes: &[(String, usize, bool)],
+    selected: usize,
+    width: usize,
+    height: usize,
+    dir_is_open: F,
+) -> Vec<String>
+where
+    F: Fn(&str) -> bool,
+{
+    let total = nodes.len();
+    if total == 0 || width == 0 {
+        return Vec::new();
+    }
+
+    let selected = selected.min(total - 1);
+    let max_items = height.saturating_sub(9).clamp(4, 12);
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = nodes
+        .iter()
+        .map(|(path, depth, is_dir)| {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            if *is_dir {
+                TreePickerItem::branch(format!("{name}/"))
+                    .depth(*depth)
+                    .open(dir_is_open(path))
+                    .color(TN_CYAN)
+            } else {
+                TreePickerItem::leaf(name).depth(*depth).color(TN_FG)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    TreePicker::new("@ file · ↑/↓ · →/← folder · Enter · Esc")
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .depth_indent(2)
+        .markers("▾", "▸", " ")
+        .title_color(ACCENT)
+        .branch_color(TN_CYAN)
+        .leaf_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 2)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
 
 impl App {
     /// The `@<query>` after the last `@` in the input (no whitespace), if any.
@@ -134,48 +188,63 @@ impl App {
         }
         let sel = self.file_sel.min(total - 1);
         let width = self.width as usize;
-        let max_rows = (self.height as usize).saturating_sub(9).clamp(4, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-
-        let mut menu = vec![pad_to(
-            &Style::new()
-                .fg(ACCENT)
-                .bold()
-                .render("  @ file · ↑/↓ · →/← folder · Enter · Esc"),
-            width,
-        )];
-        for (i, (path, depth, is_dir)) in nodes.iter().enumerate().take(end).skip(start) {
-            let name = path.rsplit('/').next().unwrap_or(path);
-            let indent = "  ".repeat(*depth);
-            let raw = if *is_dir {
-                let arrow = if self.dir_is_open(path) { "▾" } else { "▸" };
-                pad_to(&format!("  {indent}{arrow} {name}/"), width)
-            } else {
-                pad_to(&format!("  {indent}  {name}"), width)
-            };
-            menu.push(if i == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else if *is_dir {
-                Style::new().fg(TN_CYAN).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
-        if total > max_rows {
-            let up = if start > 0 { "↑" } else { " " };
-            let down = if end < total { "↓" } else { " " };
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {up}{down} {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = file_menu_lines(&nodes, sel, width, self.height as usize, |path| {
+            self.dir_is_open(path)
+        });
         self.overlay_list(composed, &menu)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn file_menu_lines_use_bounded_tree_picker_rows() {
+        let nodes = vec![
+            ("src".to_string(), 0, true),
+            ("src/tui".to_string(), 1, true),
+            ("src/tui/mod.rs".to_string(), 2, false),
+            ("README.md".to_string(), 0, false),
+        ];
+        let open = HashSet::from(["src".to_string()]);
+        let lines = file_menu_lines(&nodes, 2, 32, 20, |path| open.contains(path));
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("@ file"), "{plain}");
+        assert!(plain.contains("▾ src/"), "{plain}");
+        assert!(plain.contains("▸ tui/"), "{plain}");
+        assert!(plain.contains("mod.rs"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 32),
+            "{plain}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("\x1b[")),
+            "tree picker rows should carry styling"
+        );
+    }
+
+    #[test]
+    fn file_menu_lines_scrolls_selected_item_into_view() {
+        let nodes = (0..16)
+            .map(|idx| (format!("file-{idx}.rs"), 0, false))
+            .collect::<Vec<_>>();
+        let lines = file_menu_lines(&nodes, 14, 36, 16, |_| false);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("file-14.rs"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
     }
 }
