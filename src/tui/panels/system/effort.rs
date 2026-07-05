@@ -1,13 +1,12 @@
 //! `/effort` overlay: the effort slider (incl. the ultracode flourish).
 
 use super::super::*;
-use a3s_tui::components::{LevelSlider, ShimmerText, SliderLevel};
+use a3s_tui::components::{LevelSlider, LevelSliderMsg, ShimmerText, SliderLevel};
+use a3s_tui::event::MouseEvent;
 
-fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
+const EFFORT_OVERLAY_ROWS_BELOW: usize = 5;
 
+fn effort_slider(selected: usize) -> LevelSlider {
     let level_colors = [
         TN_GRAY,
         TN_CYAN,
@@ -44,11 +43,26 @@ fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
         .selected_color(ACCENT)
         .track_color(TN_FG)
         .muted_color(TN_GRAY)
-        .hint("←/→ adjust · Enter confirm · Esc cancel")
+        .hint("←/→ or wheel/click adjust · Enter confirm · Esc cancel")
+}
+
+fn effort_slider_lines(selected: usize, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    effort_slider(selected)
         .view(width.min(u16::MAX as usize) as u16)
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+fn effort_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+    screen_height
+        .saturating_sub(EFFORT_OVERLAY_ROWS_BELOW)
+        .saturating_sub(row_count)
+        .min(u16::MAX as usize) as u16
 }
 
 fn ultracode_animation_lines(frame: usize, width: usize) -> Vec<String> {
@@ -101,6 +115,60 @@ fn center_visible_line(rendered: &str, width: usize) -> String {
 }
 
 impl App {
+    pub(crate) fn confirm_effort_selection(&mut self, selected: usize) {
+        let selected = selected.min(EFFORT_LEVELS.len().saturating_sub(1));
+        self.effort = selected;
+        if selected == ULTRACODE {
+            // Play a flourish in the panel, then close + apply
+            // (handled on the banner tick).
+            self.effort_anim = Some(Instant::now());
+            self.gradient_frame = 0;
+        } else {
+            self.effort_panel = None;
+            self.apply_effort();
+        }
+    }
+
+    pub(crate) fn handle_effort_mouse(&mut self, mouse: &MouseEvent) {
+        let Some(selected) = self.effort_panel else {
+            return;
+        };
+        if self.effort_anim.is_some() {
+            return;
+        }
+        let width = (self.width as usize).min(u16::MAX as usize);
+        if width == 0 {
+            return;
+        }
+        let mut slider = effort_slider(selected);
+        let row_count = slider.view(width as u16).lines().count();
+        if row_count == 0 {
+            return;
+        }
+        let y_offset = effort_overlay_y_offset(self.height as usize, row_count);
+        let row = mouse.row as usize;
+        let start = y_offset as usize;
+        if row < start || row >= start.saturating_add(row_count) {
+            return;
+        }
+        slider.set_y_offset(y_offset);
+        let before = slider.selected_value();
+
+        match slider.handle_mouse(mouse, width as u16) {
+            Some(LevelSliderMsg::Selected(index)) => {
+                self.effort_panel = Some(index.min(EFFORT_LEVELS.len().saturating_sub(1)));
+            }
+            None => {
+                let after = slider
+                    .selected_value()
+                    .min(EFFORT_LEVELS.len().saturating_sub(1));
+                if after != before {
+                    self.effort_panel = Some(after);
+                }
+            }
+        }
+    }
+
     pub(crate) fn overlay_effort(&self, composed: String) -> String {
         let Some(sel) = self.effort_panel else {
             return composed;
@@ -156,6 +224,57 @@ mod tests {
             .join("\n");
 
         assert!(plain.contains("▸ ultracode"), "{plain}");
+    }
+
+    #[test]
+    fn effort_slider_mouse_wheel_moves_selection() {
+        use a3s_tui::event::MouseEventKind;
+
+        let width = 48;
+        let row_count = effort_slider_lines(0, width).len();
+        let y_offset = effort_overlay_y_offset(24, row_count);
+        let mut slider = effort_slider(0);
+        slider.set_y_offset(y_offset);
+
+        let msg = slider.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: y_offset + 2,
+                modifiers: a3s_tui::KeyModifiers::NONE,
+            },
+            width as u16,
+        );
+
+        assert_eq!(msg, None);
+        assert_eq!(
+            slider.selected_value(),
+            1.min(EFFORT_LEVELS.len().saturating_sub(1))
+        );
+    }
+
+    #[test]
+    fn effort_slider_click_selects_level_at_overlay_offset() {
+        use a3s_tui::event::{MouseButton, MouseEventKind};
+
+        let width = 48;
+        let row_count = effort_slider_lines(0, width).len();
+        let y_offset = effort_overlay_y_offset(24, row_count);
+        let mut slider = effort_slider(0);
+        slider.set_y_offset(y_offset);
+
+        let msg = slider.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 21,
+                row: y_offset + 2,
+                modifiers: a3s_tui::KeyModifiers::NONE,
+            },
+            width as u16,
+        );
+
+        assert_eq!(msg, Some(LevelSliderMsg::Selected(2)));
+        assert_eq!(slider.selected_value(), 2);
     }
 
     #[test]

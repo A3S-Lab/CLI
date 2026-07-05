@@ -283,9 +283,9 @@ shared `a3s-tui` components such as
 `Scrollbar`, `Sparkline`, `KeyValue`, `DataTable`, `WrappedPrefixBlock`,
 `SessionStatus`, `ModeLine`, and the `Meter` context fill rendered inside the
 footer status row. Reusable menu scrolling, selection, `/model` account tab
-mouse switching, `/theme` wheel preview and click-to-apply, `@` file picker
-wheel browsing and click-to-insert, `/plugin` wheel browsing and
-click-to-toggle, approval choices, RemoteUI and
+mouse switching, `/effort` wheel/click adjustment, `/theme` wheel preview and
+click-to-apply, `@` file picker wheel browsing and click-to-insert, `/plugin`
+wheel browsing and click-to-toggle, approval choices, RemoteUI and
 jump-to-latest action links, tool status truncation, shared alert rows for OS
 login/configuration warnings, overlay composition for menus and prompts, IDE
 flash footer notifications, live tool activity/output tails, `/top` status
@@ -296,9 +296,10 @@ display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
 bars, pinned memory importance bars, transcript scrollbars, IDE cursor rows,
 panel dividers, activity output tails, diff wrapping, framed panels, breadcrumbs,
-detail-row layout, activity shimmer, `/model` tab hit-testing, `/theme` preview
-hit-testing, `@` file picker hit-testing, `/plugin` overlay hit-testing, and
-width-bounding fixes are exercised directly by `a3s code`.
+detail-row layout, activity shimmer, `/model` tab hit-testing, `/effort` slider
+hit-testing, `/theme` preview hit-testing, `@` file picker hit-testing,
+`/plugin` overlay hit-testing, and width-bounding fixes are exercised directly
+by `a3s code`.
 
 ```mermaid
 flowchart TD
@@ -415,7 +416,7 @@ These commands are available outside the asset-specific flows:
 | --- | --- |
 | `/help` | Open the full command guide with slash commands, command forms, input modes, keys, panels, and resume help. |
 | `/model` | Switch among configured ACL models, OS gateway models, and signed-in account-backed model tabs when available. |
-| `/effort` | Change the active effort profile from `low` to `ultracode`, rebuilding the session with the matching budgets and prompt guidance. |
+| `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
 | `/theme` | Cycle syntax highlighting themes. |

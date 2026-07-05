@@ -2255,16 +2255,7 @@ impl Model for App {
                             self.effort_panel = Some((sel + 1).min(EFFORT_LEVELS.len() - 1))
                         }
                         KeyCode::Enter => {
-                            self.effort = sel;
-                            if sel == ULTRACODE {
-                                // Play a flourish in the panel, then close + apply
-                                // (handled on the banner tick).
-                                self.effort_anim = Some(Instant::now());
-                                self.gradient_frame = 0;
-                            } else {
-                                self.effort_panel = None;
-                                self.apply_effort();
-                            }
+                            self.confirm_effort_selection(sel);
                         }
                         KeyCode::Esc => {
                             self.effort_panel = None;
@@ -2439,6 +2430,10 @@ impl Model for App {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
                 if self.model_menu.is_some() {
                     self.handle_model_mouse(&m);
+                    return None;
+                }
+                if self.effort_panel.is_some() {
+                    self.handle_effort_mouse(&m);
                     return None;
                 }
                 if self.theme_panel.is_some() {
