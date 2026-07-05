@@ -1186,6 +1186,8 @@ struct Ide {
     kb_root: Option<std::path::PathBuf>,
     /// A path armed for deletion — the next `x` on the same selection deletes.
     armed_delete: Option<std::path::PathBuf>,
+    /// Selected action in the `/kb` delete confirmation row (`true` = delete).
+    delete_confirm_yes: bool,
 }
 
 impl Ide {
@@ -1202,6 +1204,7 @@ impl Ide {
             preview: None,
             kb_root: None,
             armed_delete: None,
+            delete_confirm_yes: true,
         }
     }
 }

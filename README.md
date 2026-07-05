@@ -68,7 +68,7 @@ Use this README as the TUI capability guide:
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
 | Deep research | Prefix a prompt with `?` to start DeepResearch. The TUI first gathers evidence through `DynamicWorkflowRuntime`; when signed in it tries OS `runtime`, falls back to local host-side `parallel_task` when needed, then asks the model to synthesize a cited report and RemoteUI/local artifacts. |
 | Context and memory | The status bar tracks context fill and auto-compaction. `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
-| Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, and browsing. `/okf` manages shareable OKF knowledge-package assets under `.a3s/okf` and publishes them to the OS Knowledge service when signed in. |
+| Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under `.a3s/okf` and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
 | Runtime activity | `/top` focuses local coding-agent process activity, including CPU/MEM trend sparklines in the shared process table. Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. |
 | Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent definition. |
@@ -172,14 +172,15 @@ and process table, and footer status rows use shared `a3s-tui` components such a
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InlineAction`, `Alert`,
 `TextOverlay`, `Toast`,
 `InputBorder`, `PromptLine`, `OutputBlock`, `Badge`, `Checklist`, `CursorLine`,
-`DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`,
+`DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`, `Confirm`,
 `Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `Sparkline`, `KeyValue`,
 `DataTable`, `WrappedPrefixBlock`, `SessionStatus`, and `ModeLine`. Reusable
 menu scrolling, selection, approval choices, RemoteUI and jump-to-latest action
 links, tool status truncation, shared alert rows for OS login/configuration
 warnings, overlay composition for menus and prompts, IDE flash footer
 notifications, live tool activity/output tails, `/top` status header actions
-and CPU/MEM trend sparklines, `/loop` key-value summaries, transcript gutters and input bubbles, prompt continuation alignment, input
+and CPU/MEM trend sparklines, `/loop` key-value summaries, `/kb` delete
+confirmations, transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress

@@ -5,7 +5,7 @@
 
 use super::super::*;
 use super::spf;
-use a3s_tui::components::CursorLine;
+use a3s_tui::components::{Confirm, ConfirmMsg, CursorLine};
 
 impl App {
     /// Handle a key while the `/ide` panel is open. Returns true if consumed.
@@ -17,6 +17,10 @@ impl App {
         // Normal mode and stays in the editor; in Normal it leaves the editor back
         // to the tree; from the tree it closes the panel.
         if key.code == KeyCode::Esc {
+            if let Some(ide) = self.ide.as_mut().filter(|i| i.armed_delete.is_some()) {
+                cancel_kb_delete_confirm(ide);
+                return true;
+            }
             if let Some(f) = self
                 .ide
                 .as_mut()
@@ -47,6 +51,9 @@ impl App {
         let workspace_manifest = self.workspace_manifest.clone();
         let workspace = self.cwd.clone();
         let ide = self.ide.as_mut().unwrap();
+        if ide.armed_delete.is_some() && ide.kb_root.is_some() {
+            return handle_kb_delete_confirm_key(ide, key);
+        }
         // Rows inside the main panels: screen minus the metadata/keys footer
         // (3) and the panel borders (2). Must match `render_ide`.
         let body = h.saturating_sub(5);
@@ -151,52 +158,16 @@ impl App {
                     ide.focus_editor = true;
                 }
             }
-            // `/kb` browser only: `x` arms, a second `x` on the same entry
-            // deletes it — hard-bounded to paths inside the vault root.
+            // `/kb` browser only: `x` opens a shared Confirm row for deletion.
             KeyCode::Char('x') if ide.kb_root.is_some() && !ide.entries.is_empty() => {
                 let sel = ide.sel.min(ide.entries.len() - 1);
-                let (path, name) = {
-                    let e = &ide.entries[sel];
-                    (e.path.clone(), e.name.clone())
-                };
+                let path = ide.entries[sel].path.clone();
                 if ide.armed_delete.as_deref() == Some(path.as_path()) {
-                    ide.armed_delete = None;
-                    let root = ide.kb_root.clone().unwrap();
-                    match spf::delete_within(&root, &path) {
-                        Ok(()) => {
-                            // Remove the entry row (and, for a dir, its visible
-                            // subtree) surgically — a full rescan collapsed the
-                            // tree and left `sel` pointing at an unrelated entry.
-                            let depth = ide.entries[sel].depth;
-                            let mut j = sel + 1;
-                            while j < ide.entries.len() && ide.entries[j].depth > depth {
-                                j += 1;
-                            }
-                            ide.entries.drain(sel..j);
-                            ide.sel = sel.min(ide.entries.len().saturating_sub(1));
-                            ide.preview = None;
-                            if ide.file.as_ref().is_some_and(|f| f.path.starts_with(&path)) {
-                                ide.file = None;
-                                ide.focus_editor = false;
-                            }
-                            ide.flash = Some(ide_flash_line(
-                                ToastKind::Success,
-                                format!("deleted {name}"),
-                            ));
-                        }
-                        Err(e) => {
-                            ide.flash = Some(ide_flash_line(
-                                ToastKind::Error,
-                                format!("delete failed: {e}"),
-                            ))
-                        }
-                    }
+                    delete_selected_kb_entry(ide);
                 } else {
                     ide.armed_delete = Some(path);
-                    ide.flash = Some(ide_flash_line(
-                        ToastKind::Warning,
-                        format!("x again deletes {name}"),
-                    ));
+                    ide.delete_confirm_yes = true;
+                    ide.flash = None;
                 }
             }
             _ => {}
@@ -405,7 +376,9 @@ impl App {
             .unwrap_or_else(|| Style::new().fg(TN_GRAY).render(&spf::fit(" —", meta_inner)));
         let meta = spf::frame("metadata", meta_w, 3, false, vec![meta_line]);
         let keys_inner = keys_w.saturating_sub(2);
-        let keys_line = if ide.flash.is_some() {
+        let keys_line = if let Some(line) = kb_delete_confirm_line(ide, keys_inner) {
+            line
+        } else if ide.flash.is_some() {
             a3s_tui::style::fit_visible(&format!(" {hint}"), keys_inner)
         } else {
             Style::new()
@@ -421,6 +394,109 @@ impl App {
         }
         out.join("\n")
     }
+}
+
+fn selected_kb_delete_target(ide: &Ide) -> Option<(usize, std::path::PathBuf, String)> {
+    if ide.kb_root.is_none() || ide.entries.is_empty() {
+        return None;
+    }
+    let sel = ide.sel.min(ide.entries.len().saturating_sub(1));
+    let entry = ide.entries.get(sel)?;
+    Some((sel, entry.path.clone(), entry.name.clone()))
+}
+
+fn kb_delete_confirm_line(ide: &Ide, width: usize) -> Option<String> {
+    let (_, path, name) = selected_kb_delete_target(ide)?;
+    if ide.armed_delete.as_deref() != Some(path.as_path()) {
+        return None;
+    }
+
+    Some(
+        Confirm::new(format!("Delete {name}?"))
+            .with_labels("Delete", "Cancel")
+            .hint("Enter/y delete | n/Esc cancel")
+            .selected(ide.delete_confirm_yes)
+            .danger()
+            .line(width.min(u16::MAX as usize) as u16),
+    )
+}
+
+fn handle_kb_delete_confirm_key(ide: &mut Ide, key: &KeyEvent) -> bool {
+    let Some((_, path, name)) = selected_kb_delete_target(ide) else {
+        cancel_kb_delete_confirm(ide);
+        return true;
+    };
+    if ide.armed_delete.as_deref() != Some(path.as_path()) {
+        cancel_kb_delete_confirm(ide);
+        return true;
+    }
+
+    if matches!(key.code, KeyCode::Char('x')) {
+        delete_selected_kb_entry(ide);
+        return true;
+    }
+
+    let mut confirm = Confirm::new(format!("Delete {name}?"))
+        .with_labels("Delete", "Cancel")
+        .selected(ide.delete_confirm_yes)
+        .danger();
+    match confirm.handle_key(key) {
+        Some(ConfirmMsg::Confirmed) => delete_selected_kb_entry(ide),
+        Some(ConfirmMsg::Cancelled) => cancel_kb_delete_confirm(ide),
+        None => ide.delete_confirm_yes = confirm.selected_yes(),
+    }
+    true
+}
+
+fn delete_selected_kb_entry(ide: &mut Ide) {
+    let Some((sel, path, name)) = selected_kb_delete_target(ide) else {
+        cancel_kb_delete_confirm(ide);
+        return;
+    };
+    if ide.armed_delete.as_deref() != Some(path.as_path()) {
+        cancel_kb_delete_confirm(ide);
+        return;
+    }
+
+    ide.armed_delete = None;
+    ide.delete_confirm_yes = true;
+    let Some(root) = ide.kb_root.clone() else {
+        return;
+    };
+    match spf::delete_within(&root, &path) {
+        Ok(()) => {
+            // Remove the entry row and visible subtree surgically; a full rescan
+            // would collapse the tree and move the selection.
+            let depth = ide.entries[sel].depth;
+            let mut j = sel + 1;
+            while j < ide.entries.len() && ide.entries[j].depth > depth {
+                j += 1;
+            }
+            ide.entries.drain(sel..j);
+            ide.sel = sel.min(ide.entries.len().saturating_sub(1));
+            ide.preview = None;
+            if ide.file.as_ref().is_some_and(|f| f.path.starts_with(&path)) {
+                ide.file = None;
+                ide.focus_editor = false;
+            }
+            ide.flash = Some(ide_flash_line(
+                ToastKind::Success,
+                format!("deleted {name}"),
+            ));
+        }
+        Err(e) => {
+            ide.flash = Some(ide_flash_line(
+                ToastKind::Error,
+                format!("delete failed: {e}"),
+            ))
+        }
+    }
+}
+
+fn cancel_kb_delete_confirm(ide: &mut Ide) {
+    ide.armed_delete = None;
+    ide.delete_confirm_yes = true;
+    ide.flash = None;
 }
 
 /// (Re)load the superfile-style hover preview for the tree selection. Cached
@@ -1111,6 +1187,42 @@ mod vim_tests {
             modifiers: KeyModifiers::NONE,
         }
     }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-ide-{name}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn kb_ide_with_file(root: &std::path::Path, name: &str) -> (Ide, std::path::PathBuf) {
+        let path = root.join(name);
+        std::fs::write(&path, "note").unwrap();
+        let mut ide = Ide::browse(
+            vec![IdeEntry {
+                path: path.clone(),
+                name: name.to_string(),
+                depth: 0,
+                is_dir: false,
+                expanded: false,
+            }],
+            "knowledge base",
+        );
+        ide.kb_root = Some(root.to_path_buf());
+        ide.armed_delete = Some(path.clone());
+        (ide, path)
+    }
+
     /// Feed a sequence of plain Char keys (covers multi-key ops like dd/gg/dw).
     fn feed(f: &mut IdeFile, s: &str) {
         for c in s.chars() {
@@ -1263,6 +1375,62 @@ mod vim_tests {
         let wide = render_cursor_line("你好", 1);
         assert_eq!(a3s_tui::style::strip_ansi(&wide), "你好");
         assert!(wide.contains("你"));
+    }
+
+    #[test]
+    fn kb_delete_confirm_line_uses_shared_confirm() {
+        let root = temp_root("confirm-line");
+        let (ide, _) = kb_ide_with_file(&root, "note.md");
+        let line = kb_delete_confirm_line(&ide, 80).expect("confirm line");
+        let plain = a3s_tui::style::strip_ansi(&line);
+
+        assert_eq!(a3s_tui::style::visible_len(&line), 80);
+        assert!(plain.contains("Delete"), "{plain}");
+        assert!(plain.contains("note.md"), "{plain}");
+        assert!(plain.contains("Enter/y"), "{plain}");
+        assert!(line.contains("\x1b["), "Confirm line should be styled");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb_delete_confirm_can_toggle_to_cancel() {
+        let root = temp_root("confirm-cancel");
+        let (mut ide, path) = kb_ide_with_file(&root, "note.md");
+
+        assert!(handle_kb_delete_confirm_key(&mut ide, &key(KeyCode::Right)));
+        assert!(!ide.delete_confirm_yes);
+        assert!(handle_kb_delete_confirm_key(&mut ide, &key(KeyCode::Enter)));
+
+        assert!(path.exists());
+        assert!(ide.armed_delete.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb_delete_confirm_y_deletes_selected_entry() {
+        let root = temp_root("confirm-delete");
+        let (mut ide, path) = kb_ide_with_file(&root, "note.md");
+
+        assert!(handle_kb_delete_confirm_key(&mut ide, &k('y')));
+
+        assert!(!path.exists());
+        assert!(ide.entries.is_empty());
+        assert!(ide.armed_delete.is_none());
+        let flash = ide.flash.as_deref().unwrap_or_default();
+        assert!(a3s_tui::style::strip_ansi(flash).contains("deleted note.md"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn kb_delete_confirm_preserves_x_again_delete() {
+        let root = temp_root("confirm-x");
+        let (mut ide, path) = kb_ide_with_file(&root, "note.md");
+
+        assert!(handle_kb_delete_confirm_key(&mut ide, &k('x')));
+
+        assert!(!path.exists());
+        assert!(ide.entries.is_empty());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
