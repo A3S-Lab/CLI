@@ -1,7 +1,7 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
-use a3s_tui::components::{ConnectorBlock, ConnectorRow, DiffView};
+use a3s_tui::components::{ConnectorBlock, ConnectorRow, DiffView, ToolStatusLine};
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -330,31 +330,23 @@ fn render_tool_header(
     args: Option<&serde_json::Value>,
     width: usize,
 ) -> String {
-    let margin = " ".repeat(PAD);
-    let dot = Style::new()
-        .fg(if ok { TN_GREEN } else { TN_RED })
-        .bold()
-        .render("•");
-    let verb = Style::new().bold().render(tool_verb(name));
-    let base = format!("{margin}{dot} {verb}");
+    let mut line = ToolStatusLine::new(tool_verb(name))
+        .margin(PAD)
+        .marker_color(if ok { TN_GREEN } else { TN_RED })
+        .detail_color(TN_GRAY)
+        .label_bold(true);
     let arg = args
         .and_then(|args| arg_summary_for_tool(name, args))
         .unwrap_or_default();
-    if arg.is_empty() {
-        return a3s_tui::style::truncate_visible(&base, width);
-    }
 
-    let arg_width = width
-        .saturating_sub(a3s_tui::style::visible_len(&base) + 1)
-        .max(8);
-    let arg = truncate(&arg, arg_width);
-    let arg_styled = if matches!(name, "bash" | "shell" | "run" | "exec") {
-        highlight_shell(&arg)
-    } else {
-        Style::new().fg(TN_GRAY).render(&arg)
-    };
-    let header = format!("{base} {arg_styled}");
-    a3s_tui::style::truncate_visible(&header, width)
+    if !arg.is_empty() {
+        line = if matches!(name, "bash" | "shell" | "run" | "exec") {
+            line.styled_detail(highlight_shell(&arg))
+        } else {
+            line.detail(arg)
+        };
+    }
+    line.view(width.min(u16::MAX as usize) as u16)
 }
 
 pub(crate) fn render_live_tool_status(
@@ -363,31 +355,24 @@ pub(crate) fn render_live_tool_status(
     width: usize,
     active: bool,
 ) -> String {
-    let margin = " ".repeat(PAD);
-    let dot = Style::new()
-        .fg(if active { ACCENT } else { TN_GRAY })
-        .bold()
-        .render("•");
-    let verb = tool_running_verb(name);
-    let suffix = Style::new().fg(TN_GRAY).render("…");
-    let base = format!("{margin}{dot} {verb}");
+    let mut line = ToolStatusLine::new(tool_running_verb(name))
+        .margin(PAD)
+        .marker_color(if active { ACCENT } else { TN_GRAY })
+        .detail_color(TN_GRAY)
+        .suffix("…")
+        .suffix_color(TN_GRAY)
+        .label_bold(false);
     let arg = args
         .and_then(|args| arg_summary_for_tool(name, args))
         .unwrap_or_default();
-    if arg.is_empty() {
-        return a3s_tui::style::truncate_visible(&format!("{base}{suffix}"), width);
+    if !arg.is_empty() {
+        line = if matches!(name, "bash" | "shell" | "run" | "exec") {
+            line.styled_detail(highlight_shell(&arg))
+        } else {
+            line.detail(arg)
+        };
     }
-
-    let arg_width = width
-        .saturating_sub(PAD + 1 + 1 + verb.chars().count() + 1 + 1)
-        .max(12);
-    let arg = truncate(&arg, arg_width);
-    let arg = if matches!(name, "bash" | "shell" | "run" | "exec") {
-        highlight_shell(&arg)
-    } else {
-        Style::new().fg(TN_GRAY).render(&arg)
-    };
-    a3s_tui::style::truncate_visible(&format!("{base} {arg}{suffix}"), width)
+    line.view(width.min(u16::MAX as usize) as u16)
 }
 
 pub(crate) fn render_live_tool_output(output: &str, width: usize) -> Option<String> {
