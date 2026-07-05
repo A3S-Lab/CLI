@@ -440,19 +440,28 @@ impl App {
         }
 
         out.push(String::new());
-        out.push(kb_line(
-            &Style::new().fg(TN_FG).bold().render("  Workflow"),
-            width,
-        ));
-        for line in [
-            "  add captures a note as Markdown",
-            "  import previews text files before copying",
-            "  search scans local personal knowledge sources",
-            "  vault keeps personal notes separate from shareable OKF packages",
-        ] {
-            out.push(kb_line(&Style::new().fg(TN_GRAY).render(line), width));
-        }
+        out.extend(kb_workflow_lines(width));
     }
+}
+
+fn kb_workflow_lines(width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    DetailPanel::new("Workflow")
+        .show_separator(false)
+        .indent(2)
+        .title_color(TN_FG)
+        .value_color(TN_GRAY)
+        .text("add captures a note as Markdown")
+        .text("import previews text files before copying")
+        .text("search scans local personal knowledge sources")
+        .text("vault keeps personal notes separate from shareable OKF packages")
+        .view(width.min(u16::MAX as usize) as u16, 5)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn kb_import_preview_lines(preview: &kbutil::ImportPreview, width: usize) -> Vec<String> {
@@ -567,6 +576,27 @@ mod tests {
             lines
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 64),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn kb_workflow_lines_use_shared_detail_panel_and_fit_width() {
+        let lines = kb_workflow_lines(40);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 5);
+        assert!(plain.contains("Workflow"), "{plain}");
+        assert!(plain.contains("add captures"), "{plain}");
+        assert!(plain.contains("search scans"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
             "{plain}"
         );
     }
