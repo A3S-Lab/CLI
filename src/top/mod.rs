@@ -3467,44 +3467,14 @@ impl TopApp {
         let Some(panel) = &self.sort_panel else {
             return String::new();
         };
-        let width = self.width as usize;
-        let out = [
-            Style::new()
-                .fg(CYAN)
-                .bold()
-                .render(&pad_plain(" sort by", width)),
-            Style::new().fg(Color::BrightBlack).render(&pad_plain(
-                " choose the primary ordering for the current top view",
-                width,
-            )),
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-            panel.select.view(self.width, self.visible_height()),
-        ];
-        out.join("\n")
+        sort_panel_lines(panel, self.width, self.visible_height()).join("\n")
     }
 
     fn connector_panel_view(&self) -> String {
         let Some(panel) = &self.connector_panel else {
             return String::new();
         };
-        let width = self.width as usize;
-        let out = [
-            Style::new()
-                .fg(CYAN)
-                .bold()
-                .render(&pad_plain(" container connector", width)),
-            Style::new().fg(Color::BrightBlack).render(&pad_plain(
-                " choose which runtime feeds the Containers tab",
-                width,
-            )),
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-            panel.select.view(self.width, self.visible_height()),
-        ];
-        out.join("\n")
+        connector_panel_lines(panel, self.width, self.visible_height()).join("\n")
     }
 
     fn events_table(&self, rows: Vec<EventRow>) -> String {
@@ -8702,6 +8672,87 @@ fn container_menu_lines(menu: &ContainerMenu, width: u16, height: usize) -> Vec<
     .collect()
 }
 
+fn sort_panel_lines(panel: &SortPanel, width: u16, height: usize) -> Vec<String> {
+    let items = panel
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(idx, sort_by)| MenuItem::new(numbered_label(idx, sort_choice_label(*sort_by))))
+        .collect::<Vec<_>>();
+    option_menu_lines(
+        "sort by",
+        "choose the primary ordering for the current top view",
+        items,
+        panel.select.selected_index(),
+        width,
+        height,
+    )
+}
+
+fn connector_panel_lines(panel: &ConnectorPanel, width: u16, height: usize) -> Vec<String> {
+    let items = panel
+        .choices
+        .iter()
+        .enumerate()
+        .map(|(idx, connector)| {
+            MenuItem::new(numbered_label(idx, connector_choice_label(*connector)))
+        })
+        .collect::<Vec<_>>();
+    option_menu_lines(
+        "container connector",
+        "choose which runtime feeds the Containers tab",
+        items,
+        panel.select.selected_index(),
+        width,
+        height,
+    )
+}
+
+fn option_menu_lines(
+    title: &str,
+    subtitle: &str,
+    items: Vec<MenuItem>,
+    selected: usize,
+    width: u16,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    MenuPanel::new(title)
+        .subtitle(subtitle)
+        .items(items)
+        .selected(selected)
+        .max_items(height)
+        .show_scroll(true)
+        .indent(1)
+        .marker(">")
+        .title_color(CYAN)
+        .subtitle_color(Color::BrightBlack)
+        .text_color(Color::BrightWhite)
+        .muted_color(Color::BrightBlack)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width, height.saturating_add(2))
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn numbered_label(index: usize, label: &str) -> String {
+    number_shortcut_label(index)
+        .map(|shortcut| format!("{shortcut} {label}"))
+        .unwrap_or_else(|| format!("  {label}"))
+}
+
+fn number_shortcut_label(index: usize) -> Option<char> {
+    match index {
+        0..=8 => Some((b'1' + index as u8) as char),
+        9 => Some('0'),
+        _ => None,
+    }
+}
+
 fn container_is_running(status: &str) -> bool {
     let lower = status.to_lowercase();
     lower.starts_with("up") || lower.contains("running") || lower.contains("paused")
@@ -12775,6 +12826,46 @@ mod tests {
 
         assert_eq!(app.sort_by, SortBy::Block);
         assert!(app.sort_panel.is_none());
+    }
+
+    #[test]
+    fn sort_and_connector_panels_use_shared_menu_panel_and_fit_width() {
+        let mut app = TopApp::new(TopOptions {
+            tab: Tab::Containers,
+            ..TopOptions::default()
+        });
+        app.width = 34;
+
+        app.open_sort_panel();
+        let sort_rendered = app.sort_panel_view();
+        let sort_plain = a3s_tui::style::strip_ansi(&sort_rendered);
+        assert!(sort_plain.contains("sort by"), "{sort_plain}");
+        assert!(sort_plain.contains("> 1 cpu"), "{sort_plain}");
+        assert!(
+            sort_rendered.contains("\x1b["),
+            "selected sort row should be styled"
+        );
+        assert!(
+            sort_rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 34),
+            "{sort_plain}"
+        );
+
+        app.open_connector_panel();
+        let connector_rendered = app.connector_panel_view();
+        let connector_plain = a3s_tui::style::strip_ansi(&connector_rendered);
+        assert!(
+            connector_plain.contains("container connector"),
+            "{connector_plain}"
+        );
+        assert!(connector_plain.contains("> 1 a3s-box"), "{connector_plain}");
+        assert!(
+            connector_rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 34),
+            "{connector_plain}"
+        );
     }
 
     #[test]
