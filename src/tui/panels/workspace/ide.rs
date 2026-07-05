@@ -384,20 +384,12 @@ impl App {
         };
         let meta_w = (width * 3) / 5;
         let keys_w = width.saturating_sub(meta_w);
+        let meta_inner = meta_w.saturating_sub(2);
         let meta_line = meta_path
             .as_deref()
-            .map(|p| spf::file_meta_line(p, meta_lines))
-            .unwrap_or_else(|| "—".to_string());
-        let meta = spf::frame(
-            "metadata",
-            meta_w,
-            3,
-            false,
-            vec![Style::new().fg(TN_FG).render(&spf::fit(
-                &format!(" {meta_line}"),
-                meta_w.saturating_sub(2),
-            ))],
-        );
+            .map(|p| spf::file_meta_breadcrumb_line(p, meta_lines, meta_inner))
+            .unwrap_or_else(|| Style::new().fg(TN_GRAY).render(&spf::fit(" —", meta_inner)));
+        let meta = spf::frame("metadata", meta_w, 3, false, vec![meta_line]);
         let keys = spf::frame(
             "keys",
             keys_w,

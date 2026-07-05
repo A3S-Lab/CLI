@@ -7,6 +7,7 @@
 //! string would split ANSI codes). `frame` only pads (ANSI-safe) and borders.
 
 use super::super::*;
+use a3s_tui::components::Breadcrumb;
 
 /// Split the screen for the tree | editor layout. Returns
 /// `(tree_panel_width, right_panel_width)` — both are TOTAL widths including
@@ -134,8 +135,25 @@ pub(crate) fn human_size(bytes: u64) -> String {
     }
 }
 
-/// `name · size · modified` for the metadata panel; graceful when stat fails.
-pub(crate) fn file_meta_line(path: &std::path::Path, loaded_lines: Option<usize>) -> String {
+pub(crate) fn file_meta_breadcrumb_line(
+    path: &std::path::Path,
+    loaded_lines: Option<usize>,
+    width: usize,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let rendered = Breadcrumb::new(file_meta_parts(path, loaded_lines))
+        .separator(" · ")
+        .active_color(TN_FG)
+        .inactive_color(TN_GRAY)
+        .separator_color(TN_GRAY)
+        .view(width.min(u16::MAX as usize) as u16);
+    a3s_tui::style::fit_visible(&format!(" {rendered}"), width)
+}
+
+fn file_meta_parts(path: &std::path::Path, loaded_lines: Option<usize>) -> Vec<String> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -158,7 +176,7 @@ pub(crate) fn file_meta_line(path: &std::path::Path, loaded_lines: Option<usize>
     if let Some(n) = loaded_lines {
         parts.push(format!("{n} lines"));
     }
-    parts.join(" · ")
+    parts
 }
 
 /// Delete `path` (file or dir), but only inside `root` — the guard that keeps
@@ -238,6 +256,24 @@ mod tests {
         assert_eq!(human_size(312), "312 B");
         assert_eq!(human_size(4300), "4.2 KB");
         assert_eq!(human_size(1_900_000), "1.8 MB");
+    }
+
+    #[test]
+    fn file_meta_breadcrumb_line_uses_shared_breadcrumb_and_fits_width() {
+        let root = std::env::temp_dir().join(format!("a3s-spf-meta-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("very-long-file-name-for-metadata.md");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+
+        let line = file_meta_breadcrumb_line(&file, Some(2), 96);
+        let plain = a3s_tui::style::strip_ansi(&line);
+
+        assert!(plain.contains("very-long"), "{plain}");
+        assert!(plain.contains('·'), "{plain}");
+        assert!(plain.contains("2 lines"), "{plain}");
+        assert!(line.contains("\x1b["));
+        assert!(a3s_tui::style::visible_len(&line) <= 96, "{}", plain);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
