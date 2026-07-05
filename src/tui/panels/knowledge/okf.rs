@@ -5,6 +5,7 @@
 
 use super::super::os_progressive;
 use super::super::*;
+use a3s_tui::components::{MenuItem, MenuPanel};
 
 const KNOWLEDGE_MANIFEST_PATH: &str = ".a3s/knowledge.asset.json";
 const KNOWLEDGE_RUNTIME_BINDING_PATH: &str = ".a3s/knowledge.runtime-binding.json";
@@ -1407,52 +1408,22 @@ impl App {
             return composed;
         };
         let width = self.width as usize;
-        let total = panel.packages.len();
-        let mut menu = vec![
-            pad_to(
-                &Style::new().fg(ACCENT).bold().render(&okf_picker_header(
-                    total,
-                    &panel.root,
-                    width,
-                )),
-                width,
-            ),
-            pad_to(
-                &Style::new().fg(TN_GRAY).render(&okf_picker_hint(width)),
-                width,
-            ),
-        ];
-        let sel = panel.sel.min(total.saturating_sub(1));
-        let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 12);
-        let start = if sel < max_rows {
-            0
-        } else {
-            sel + 1 - max_rows
-        };
-        let end = (start + max_rows).min(total);
-        for i in start..end {
-            let raw = okf_picker_row(&panel.packages[i], width);
-            menu.push(if i == sel {
-                Style::new().fg(Color::BrightWhite).bg(ACCENT).render(&raw)
-            } else {
-                Style::new().fg(TN_FG).render(&raw)
-            });
-        }
-        if total > max_rows {
-            menu.push(pad_to(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  {}/{total}", sel + 1)),
-                width,
-            ));
-        }
+        let menu = okf_picker_lines(
+            &panel.packages,
+            panel.sel,
+            &panel.root,
+            width,
+            self.height as usize,
+        );
         self.overlay_list(composed, &menu)
     }
 }
 
 fn okf_picker_header(total: usize, root: &std::path::Path, width: usize) -> String {
-    let root = truncate(&root.display().to_string(), width.saturating_sub(26));
-    format!("  /okf packages · {total} · {root}")
+    truncate(
+        &format!("  /okf packages · {total} · {}", root.display()),
+        width,
+    )
 }
 
 fn okf_picker_hint(width: usize) -> String {
@@ -1462,14 +1433,44 @@ fn okf_picker_hint(width: usize) -> String {
     )
 }
 
-fn okf_picker_row(package: &OkfPackageAsset, width: usize) -> String {
-    let left = (width / 2).clamp(18, 42);
-    let right = width.saturating_sub(left + 5);
-    format!(
-        "  {}  {}",
-        pad_to(&truncate(&package.name, left), left),
-        truncate(&package.description, right)
-    )
+fn okf_picker_lines(
+    packages: &[OkfPackageAsset],
+    selected: usize,
+    root: &std::path::Path,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let total = packages.len();
+    let max_items = height.saturating_sub(8).clamp(3, 12);
+    let selected = selected.min(total.saturating_sub(1));
+    let scroll = selected.saturating_add(1).saturating_sub(max_items);
+    let items = packages
+        .iter()
+        .map(|package| MenuItem::new(package.name.clone()).description(package.description.clone()))
+        .collect::<Vec<_>>();
+
+    MenuPanel::new(okf_picker_header(total, root, width).trim_start())
+        .subtitle(okf_picker_hint(width).trim_start())
+        .items(items)
+        .selected(selected)
+        .scroll(scroll)
+        .max_items(max_items)
+        .show_scroll(total > max_items)
+        .indent(2)
+        .marker("▸")
+        .title_color(ACCENT)
+        .subtitle_color(TN_GRAY)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .selected_colors(Color::BrightWhite, ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, max_items + 3)
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 impl App {
@@ -1670,6 +1671,76 @@ mod tests {
         assert_eq!(packages[0].description, "Operations runbook");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn okf_picker_lines_use_bounded_shared_menu_rows() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/okf/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let packages = vec![
+            OkfPackageAsset {
+                rel: "nested/very-long-okf-package-name-that-would-overflow-the-panel".into(),
+                path: root.join("nested/very-long-okf-package-name-that-would-overflow-the-panel"),
+                name: "very-long-okf-package-name-that-would-overflow-the-panel".into(),
+                description: "A long knowledge package description that should be trimmed cleanly"
+                    .into(),
+            },
+            OkfPackageAsset {
+                rel: "ops-runbook".into(),
+                path: root.join("ops-runbook"),
+                name: "ops-runbook".into(),
+                description: "Operations runbook".into(),
+            },
+        ];
+        let lines = okf_picker_lines(&packages, 0, &root, 40, 20);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("okf packages"), "{plain}");
+        assert!(plain.contains("very-long-okf"), "{plain}");
+        assert!(plain.contains('…'), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn okf_picker_lines_scroll_selected_package_into_view() {
+        let root = std::path::PathBuf::from("/tmp/okf");
+        let packages = (0..16)
+            .map(|index| OkfPackageAsset {
+                rel: format!("okf-{index}"),
+                path: root.join(format!("okf-{index}")),
+                name: format!("okf-{index}"),
+                description: format!("Knowledge package {index}"),
+            })
+            .collect::<Vec<_>>();
+        let plain = okf_picker_lines(&packages, 14, &root, 48, 16)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("okf-14"), "{plain}");
+        assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn okf_picker_header_and_hint_fit_fixed_width() {
+        let root = std::path::PathBuf::from(
+            "/Users/example/.a3s/okf/a/path/that/is/far/too/long/for/a/picker/header",
+        );
+        let header = okf_picker_header(9, &root, 40);
+        let hint = okf_picker_hint(40);
+        assert!(a3s_tui::style::visible_len(&header) <= 40, "{header}");
+        assert!(a3s_tui::style::visible_len(&hint) <= 40, "{hint}");
     }
 
     #[test]
