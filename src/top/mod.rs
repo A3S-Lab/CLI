@@ -3624,27 +3624,28 @@ impl TopApp {
             }
             Tab::Containers => {
                 if let Some(row) = self.current_container() {
-                    lines.push(Style::new().fg(CYAN).bold().render(&format!(
-                        " container {} ({})",
-                        row.name,
-                        short_id(&row.id)
-                    )));
-                    lines.push(format!(" image {}", row.image));
-                    lines.push(format!(" status {}", row.status));
-                    lines.push(format!(
-                        " cpu {} · mem {} · net {} · block {} · pids {} · ports {}",
-                        row.cpu_pct
-                            .map(|v| format!("{v:.1}%"))
-                            .unwrap_or_else(|| "-".to_string()),
-                        row.mem_usage,
-                        row.net_io,
-                        row.block_io,
-                        row.pids,
-                        display_ports(&row.ports)
-                    ));
-                    lines.push(
-                        " actions Enter menu · l logs · e shell · o focus · K stop".to_string(),
-                    );
+                    let panel =
+                        DetailPanel::new(format!("container {} ({})", row.name, short_id(&row.id)))
+                            .show_separator(false)
+                            .unlimited_rows()
+                            .title_color(CYAN)
+                            .value_color(Color::BrightWhite)
+                            .action_color(ACCENT)
+                            .text(format!("image {}", row.image))
+                            .text(format!("status {}", row.status))
+                            .text(format!(
+                                "cpu {} · mem {} · net {} · block {} · pids {} · ports {}",
+                                row.cpu_pct
+                                    .map(|v| format!("{v:.1}%"))
+                                    .unwrap_or_else(|| "-".to_string()),
+                                row.mem_usage,
+                                row.net_io,
+                                row.block_io,
+                                row.pids,
+                                display_ports(&row.ports)
+                            ))
+                            .action("Enter menu · l logs · e shell · o focus · K stop");
+                    lines.extend(panel.view(self.width, 5).lines().map(ToString::to_string));
                 }
             }
             Tab::Events => {
@@ -13422,6 +13423,41 @@ mod tests {
         });
 
         assert!(app.detail);
+    }
+
+    #[test]
+    fn container_detail_uses_shared_detail_panel_and_fits_width() {
+        let mut app = TopApp::new(TopOptions {
+            tab: Tab::Containers,
+            ..TopOptions::default()
+        });
+        app.width = 64;
+        app.detail = true;
+        let mut row = container_row("abcdef123456", "app", "Up 2 minutes", Some(1.0), Some(2.0));
+        row.ports = "0.0.0.0:3000->3000/tcp".into();
+        row.net_io = "1.00KiB / 2.00KiB".into();
+        row.block_io = "4.00KiB / 8.00KiB".into();
+        app.snapshot.containers = vec![row];
+
+        let rendered = app.details();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("container app (abcdef123456)"), "{plain}");
+        assert!(plain.contains("image img"), "{plain}");
+        assert!(plain.contains("status Up 2 minutes"), "{plain}");
+        assert!(plain.contains("cpu 1.0%"), "{plain}");
+        assert!(plain.contains("actions"), "{plain}");
+        assert!(plain.contains("Enter menu"), "{plain}");
+        assert!(
+            rendered.contains("\x1b["),
+            "container detail should be styled"
+        );
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 64),
+            "{plain}"
+        );
     }
 
     #[test]
