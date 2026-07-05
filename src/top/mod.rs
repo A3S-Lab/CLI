@@ -12,10 +12,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    divider_line, CellAlign, Confirm, DataColumn, DataRow, DataTable, HelpPanel, HelpSection,
-    LogView, LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
-    SectionHeader, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
-    WrappedPrefixBlock,
+    divider_line, CellAlign, Confirm, DataColumn, DataRow, DataTable, DetailPanel, HelpPanel,
+    HelpSection, LogView, LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect,
+    MultiSelectMsg, SectionHeader, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree,
+    TreeNode, WrappedPrefixBlock,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3469,11 +3469,7 @@ impl TopApp {
             return String::new();
         }
         let mut lines = Vec::new();
-        lines.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(self.width as usize)),
-        );
+        lines.push(divider_line(self.width));
         match self.tab {
             Tab::Agents if self.focused_agent_pid.is_none() => {
                 if let Some(group) = self.current_agent_group() {
@@ -3666,22 +3662,28 @@ impl TopApp {
     }
 
     fn push_event_detail(&self, row: &EventRow, lines: &mut Vec<String>) {
-        lines.push(Style::new().fg(row.risk.color()).bold().render(&format!(
-            " event {} · {} · risk {}",
+        let mut panel = DetailPanel::new(format!(
+            "event {} · {} · risk {}",
             row.source,
             row.kind,
             row.risk.label()
-        )));
-        lines.push(format!(" time {} · {}", row.ts, event_scope_label(row)));
-        lines.push(format!(
-            " source {} · session {} · task {}",
+        ))
+        .show_separator(false)
+        .unlimited_rows()
+        .title_color(row.risk.color())
+        .value_color(Color::BrightWhite)
+        .action_color(ACCENT);
+
+        panel = panel.text(format!("time {} · {}", row.ts, event_scope_label(row)));
+        panel = panel.text(format!(
+            "source {} · session {} · task {}",
             row.source,
             row.session.as_deref().unwrap_or("-"),
             row.task.as_deref().unwrap_or("-")
         ));
         if row.pid.is_some() || row.ppid.is_some() {
-            lines.push(format!(
-                " process pid {} · ppid {}",
+            panel = panel.text(format!(
+                "process pid {} · ppid {}",
                 row.pid
                     .map(|pid| pid.to_string())
                     .unwrap_or_else(|| "-".to_string()),
@@ -3690,18 +3692,19 @@ impl TopApp {
                     .unwrap_or_else(|| "-".to_string())
             ));
         }
-        lines.push(format!(" message {}", row.message));
+        panel = panel.text(format!("message {}", row.message));
         for (key, value) in row.details.iter().take(4) {
             let budget = (self.width as usize)
                 .saturating_sub(key.chars().count() + " detail  ".len())
                 .max(12);
-            lines.push(format!(" detail {key} {}", truncate(value, budget)));
+            panel = panel.text(format!("detail {key} {}", truncate(value, budget)));
         }
         if session_key_for_event(row).is_some() {
-            lines.push(" actions o session focus · / filter · ! risk · g kind".to_string());
+            panel = panel.action("o session focus · / filter · ! risk · g kind");
         } else {
-            lines.push(" actions / filter · ! risk · g kind".to_string());
+            panel = panel.action("/ filter · ! risk · g kind");
         }
+        lines.extend(panel.view(self.width, 9).lines().map(ToString::to_string));
     }
 
     fn confirm_view(&self) -> String {
