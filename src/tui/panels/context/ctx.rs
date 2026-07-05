@@ -6,6 +6,7 @@
 //! before re-investigating prior work.
 
 use super::super::*;
+use a3s_tui::components::{DetailPanel, DetailRow};
 
 /// One search hit the user can pull context from (`/ctx <n>`) or promote to a
 /// durable memory (`/ctx save <n>`).
@@ -182,6 +183,41 @@ pub(crate) fn ctx_context_block(hit_title: &str, window: &str) -> String {
     )
 }
 
+fn ctx_search_result_lines(hits: &[CtxHit], width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut panel = DetailPanel::without_title()
+        .show_separator(false)
+        .indent(0)
+        .label_width(3)
+        .label_color(TN_CYAN)
+        .value_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .unlimited_rows();
+    for (index, hit) in hits.iter().enumerate() {
+        panel = panel
+            .row(
+                DetailRow::pair(
+                    format!("{}.", index + 1),
+                    format!("{} · {} · {}", hit.provider, hit.time, hit.title),
+                )
+                .bold(),
+            )
+            .row(DetailRow::muted(format!("   {}", hit.snippet)));
+    }
+    panel = panel.row(DetailRow::muted(
+        "   ⧉ /ctx <n> attaches to next message · /ctx save <n> keeps as memory",
+    ));
+
+    panel
+        .view(width.min(u16::MAX as usize) as u16, panel.rows().len())
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 impl App {
     /// `/ctx <query>` → async `ctx search --json`; `/ctx <n>` → pull hit n's
     /// transcript window and attach it to the next message.
@@ -283,28 +319,7 @@ impl App {
                 // already passes `--limit 8`).
                 hits.truncate(8);
                 let w = (self.width as usize).saturating_sub(6);
-                let mut lines: Vec<String> = Vec::new();
-                for (i, h) in hits.iter().enumerate() {
-                    lines.push(format!(
-                        "{} {}",
-                        Style::new()
-                            .fg(TN_CYAN)
-                            .bold()
-                            .render(&format!("{}.", i + 1)),
-                        Style::new().fg(TN_FG).render(&truncate(
-                            &format!("{} · {} · {}", h.provider, h.time, h.title),
-                            w
-                        )),
-                    ));
-                    lines.push(
-                        Style::new()
-                            .fg(TN_GRAY)
-                            .render(&format!("   {}", truncate(&h.snippet, w))),
-                    );
-                }
-                lines.push(Style::new().fg(TN_GRAY).render(
-                    "   ⧉ /ctx <n> attaches to next message · /ctx save <n> keeps as memory",
-                ));
+                let lines = ctx_search_result_lines(&hits, w);
                 self.push_line(&lines.join("\n"));
                 self.ctx_hits = hits;
             }
@@ -435,6 +450,40 @@ mod tests {
             title: "fixed the migration".into(),
             snippet: "rolled back the cursor rename".into(),
         }
+    }
+
+    #[test]
+    fn ctx_search_result_lines_use_shared_detail_panel_and_fit_width() {
+        let hits = vec![
+            hit(),
+            CtxHit {
+                event_id: "ev-10".into(),
+                session_id: "ses-10".into(),
+                provider: "claude".into(),
+                time: "2026-06-23".into(),
+                title: "long session title that should be trimmed by the shared panel".into(),
+                snippet: "a long snippet about rerunning focused tests before pushing".into(),
+            },
+        ];
+
+        let lines = ctx_search_result_lines(&hits, 44);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 5);
+        assert!(plain.contains("1."), "{plain}");
+        assert!(plain.contains("codex"), "{plain}");
+        assert!(plain.contains("rolled back"), "{plain}");
+        assert!(plain.contains("/ctx <n>"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 44),
+            "{plain}"
+        );
     }
 
     #[test]
