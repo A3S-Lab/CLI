@@ -253,36 +253,15 @@ pub(crate) fn humanize(n: usize) -> String {
     }
 }
 
-/// Render `text` with a soft highlight gliding left→right (loading shimmer).
-/// Each glyph's colour is interpolated from the base accent up to a bright tint
-/// by its distance from the moving head, giving a gradient glow rather than a
-/// hard band. `phase` is divided down so the glide is slow and gentle.
+/// Render `text` with a soft highlight gliding left-to-right (loading shimmer).
 pub(crate) fn shimmer(text: &str, phase: usize) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    if n == 0 {
-        return String::new();
-    }
-    let span = (n + 12) as isize;
-    let head = (phase as isize / 3) % span; // sweep speed; +12 = pause between sweeps
-    let mut out = String::new();
-    for (i, &c) in chars.iter().enumerate() {
-        // Smooth falloff over ~5 glyphs either side of the head.
-        let d = (head - i as isize).abs() as f32;
-        let t = (1.0 - d / 5.0).clamp(0.0, 1.0);
-        let lerp = |a: f32, b: f32| (a + (b - a) * t) as u8;
-        // ACCENT (#0070f3) → link-soft tint (#d3e5ff).
-        let mut s = Style::new().fg(Color::Rgb(
-            lerp(0.0, 211.0),
-            lerp(112.0, 229.0),
-            lerp(243.0, 255.0),
-        ));
-        if t > 0.65 {
-            s = s.bold();
-        }
-        out.push_str(&s.render(&c.to_string()));
-    }
-    out
+    a3s_tui::components::ShimmerText::new(text)
+        .phase(phase)
+        .colors(ACCENT, Color::Rgb(211, 229, 255))
+        .spread(5.0)
+        .speed_divisor(3)
+        .cycle_gap(12)
+        .view()
 }
 
 /// Truncate to `max` DISPLAY COLUMNS (not chars) with an ellipsis. Callers pass
@@ -297,7 +276,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::{
         compact_progress_line, gutter, input_gradient_rule, input_prompt_line, input_rule,
-        input_status_rule, thinking_block, truncate, user_bubble, wrap_words,
+        input_status_rule, shimmer, thinking_block, truncate, user_bubble, wrap_words,
     };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
     use std::time::Duration;
@@ -513,5 +492,29 @@ mod tests {
         let rendered = compact_progress_line(Duration::from_secs(8), 18);
 
         assert_eq!(visible_len(&rendered), 18);
+    }
+
+    #[test]
+    fn shimmer_uses_shared_component_settings() {
+        let rendered = shimmer("Working…", 0);
+        let expected = a3s_tui::components::ShimmerText::new("Working…")
+            .phase(0)
+            .colors(Color::Rgb(0, 112, 243), Color::Rgb(211, 229, 255))
+            .spread(5.0)
+            .speed_divisor(3)
+            .cycle_gap(12)
+            .view();
+
+        assert_eq!(rendered, expected);
+        assert_eq!(strip_ansi(&rendered), "Working…");
+        assert!(rendered.contains("\x1b[1;38;2;211;229;255mW\x1b[0m"));
+    }
+
+    #[test]
+    fn shimmer_preserves_complex_glyph_display_width() {
+        let rendered = shimmer("工作e\u{301}", 0);
+
+        assert_eq!(strip_ansi(&rendered), "工作e\u{301}");
+        assert_eq!(visible_len(&rendered), 5);
     }
 }

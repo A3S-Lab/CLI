@@ -88,17 +88,18 @@ and queried by panels instead of coupling every panel to the streaming protocol.
 The command palette, asset selectors, `/model` account picker, detail panels,
 tool status lines, transcript gutters and user bubbles, input prompt chrome,
 live reasoning, live and completed tool output, task summaries, file-edit diffs,
-SPF/IDE file metadata, compaction progress, effort overlay, and footer status
-rows use shared `a3s-tui` components such as `MenuPanel`, `TabbedMenuPanel`,
-`DetailPanel`, `Timeline`, `SectionHeader`, `ToolStatusLine`, `GutterBlock`,
-`InputBorder`, `PromptLine`, `OutputBlock`, `ConnectorBlock`, `DiffView`,
-`PanelFrame`, `Breadcrumb`, `Progress`, `LevelSlider`, `ShimmerText`,
-`WrappedPrefixBlock`, `SessionStatus`, and `ModeLine`. Reusable menu scrolling,
-selection, tool status truncation, transcript gutters and input bubbles, prompt
-continuation alignment, input border labels, live reasoning wrapping,
-completed output tail previews, compaction progress bars, connector rows, diff
-wrapping, framed panels, breadcrumbs, detail-row layout, shimmer, and
-width-bounding fixes are exercised directly by `a3s code`.
+SPF/IDE file metadata, compaction progress, the live activity shimmer, effort
+overlay, and footer status rows use shared `a3s-tui` components such as
+`MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`,
+`ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`, `OutputBlock`,
+`ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `Progress`,
+`ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and
+`ModeLine`. Reusable menu scrolling, selection, tool status truncation,
+transcript gutters and input bubbles, prompt continuation alignment, input
+border labels, live reasoning wrapping, completed output tail previews,
+compaction progress bars, connector rows, diff wrapping, framed panels,
+breadcrumbs, detail-row layout, activity shimmer, and width-bounding fixes are
+exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
