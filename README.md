@@ -70,7 +70,7 @@ Use this README as the TUI capability guide:
 | Context and memory | The status bar tracks context fill and auto-compaction. `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, and browsing. `/okf` manages shareable OKF knowledge-package assets under `.a3s/okf` and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
-| Runtime activity | `/top` focuses local coding-agent process activity. Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. |
+| Runtime activity | `/top` focuses local coding-agent process activity, including CPU/MEM trend sparklines in the shared process table. Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. |
 | Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent definition. |
 | OS and RemoteUI | `/login` enables OS capabilities. `/view` reopens the latest RemoteUI ViewLink captured from shaped OS progressive responses (`.view` or `viewUrl`), using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, and `/fork` branches a new session from the current transcript. |
@@ -165,20 +165,21 @@ The command palette, asset selectors, approval overlay, `/model` account picker,
 detail panels, tool status lines, transcript gutters and user bubbles, input
 prompt chrome, live reasoning, live and completed tool output, pinned plan rows,
 task summaries, file-edit diffs, SPF/IDE file metadata, compaction progress, the
-live activity shimmer, effort overlay, `/top` header, and footer status rows use shared
-`a3s-tui` components such as
+live activity shimmer, effort overlay, `/top` header and process table, and
+footer status rows use shared `a3s-tui` components such as
 `MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `ActivityBlock`,
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InlineAction`, `Alert`,
 `TextOverlay`, `Toast`,
 `InputBorder`, `PromptLine`, `OutputBlock`, `Badge`, `Checklist`, `CursorLine`,
 `DiffView`, `Divider`, `PanelFrame`, `Breadcrumb`, `Progress`,
-`Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `WrappedPrefixBlock`,
-`SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, approval
-choices, RemoteUI and jump-to-latest action links, tool status truncation,
-shared alert rows for OS login/configuration warnings, overlay composition for
-menus and prompts, IDE flash footer notifications, live tool activity/output
-tails, `/top` status header actions, transcript gutters and input bubbles, prompt continuation alignment, input
+`Paragraph`, `ShimmerText`, `LevelSlider`, `Scrollbar`, `Sparkline`,
+`DataTable`, `WrappedPrefixBlock`, `SessionStatus`, and `ModeLine`. Reusable
+menu scrolling, selection, approval choices, RemoteUI and jump-to-latest action
+links, tool status truncation, shared alert rows for OS login/configuration
+warnings, overlay composition for menus and prompts, IDE flash footer
+notifications, live tool activity/output tails, `/top` status header actions
+and CPU/MEM trend sparklines, transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress

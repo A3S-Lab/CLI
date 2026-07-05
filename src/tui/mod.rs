@@ -9,7 +9,7 @@
 //! the update handler issues the next pump — feeding the async event stream into
 //! the synchronous TEA update loop one event at a time.
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -579,6 +579,64 @@ fn workflow_doc_for_tasks(
 /// CWD, and ordering (agents first, then CPU descending).
 async fn fetch_top() -> Vec<ProcessRow> {
     collect_processes().await.unwrap_or_default()
+}
+
+const TOP_HISTORY_LIMIT: usize = 32;
+
+#[derive(Debug, Default)]
+struct TopProcessHistory {
+    samples: HashMap<u32, TopMetricHistory>,
+}
+
+impl TopProcessHistory {
+    fn observe(&mut self, rows: &[ProcessRow]) {
+        let live = rows.iter().map(|row| row.pid).collect::<HashSet<_>>();
+        for row in rows {
+            self.samples
+                .entry(row.pid)
+                .or_default()
+                .push(row.cpu_pct, row.mem_pct);
+        }
+        self.samples.retain(|pid, _| live.contains(pid));
+    }
+
+    fn values(&self, pid: u32) -> (Vec<f32>, Vec<f32>) {
+        self.samples
+            .get(&pid)
+            .map(TopMetricHistory::values)
+            .unwrap_or_default()
+    }
+
+    fn clear(&mut self) {
+        self.samples.clear();
+    }
+}
+
+#[derive(Debug, Default)]
+struct TopMetricHistory {
+    cpu: VecDeque<f32>,
+    mem: VecDeque<f32>,
+}
+
+impl TopMetricHistory {
+    fn push(&mut self, cpu: f32, mem: f32) {
+        push_top_history_value(&mut self.cpu, cpu);
+        push_top_history_value(&mut self.mem, mem);
+    }
+
+    fn values(&self) -> (Vec<f32>, Vec<f32>) {
+        (
+            self.cpu.iter().copied().collect(),
+            self.mem.iter().copied().collect(),
+        )
+    }
+}
+
+fn push_top_history_value(values: &mut VecDeque<f32>, value: f32) {
+    values.push_back(value);
+    while values.len() > TOP_HISTORY_LIMIT {
+        values.pop_front();
+    }
 }
 
 /// One visible row of the `/ide` file tree (a flattened, expandable tree).
@@ -1945,6 +2003,7 @@ struct App {
     /// `/top` process panel: `Some(rows)` when open; `top_scroll` is the scroll
     /// offset and `top_sel` the highlighted (absolute) row index.
     top: Option<Vec<ProcessRow>>,
+    top_history: TopProcessHistory,
     top_scroll: usize,
     top_sel: usize,
     /// `/top` agent drill-down: `Some(pid)` focuses one coding agent's process
@@ -2137,6 +2196,7 @@ impl Model for App {
                                 self.top_scroll = 0;
                             } else {
                                 self.top = None;
+                                self.top_history.clear();
                             }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
@@ -2882,6 +2942,7 @@ impl Model for App {
 
             Msg::TopData(rows) => {
                 if self.top.is_some() {
+                    self.top_history.observe(&rows);
                     self.top = Some(rows);
                     return Some(cmd::tick(Duration::from_millis(1500), Msg::TopRefresh));
                 }
@@ -4595,6 +4656,7 @@ impl App {
             "/top" => {
                 self.textarea.clear();
                 self.top = Some(Vec::new());
+                self.top_history.clear();
                 self.top_scroll = 0;
                 self.top_sel = 0;
                 self.top_focus = None;
@@ -6370,6 +6432,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         running_task: None,
         plan: Vec::new(),
         top: None,
+        top_history: TopProcessHistory::default(),
         top_scroll: 0,
         top_sel: 0,
         top_focus: None,

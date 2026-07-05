@@ -79,9 +79,10 @@ impl App {
             }
             None => None,
         };
-        // Body via the shared renderer; the panel has no per-pid history, so the
-        // sparkline columns render blank (graceful degradation).
+        // Body via the shared renderer. The panel keeps a short per-pid history
+        // so the shared Sparkline columns show live CPU/MEM trends.
         let hidden = HashSet::new();
+        let history = |pid: u32| self.top_history.values(pid);
         let table = render_process_table(
             &rows,
             &ProcessTableView {
@@ -90,7 +91,7 @@ impl App {
                 width: self.width,
                 height: h.saturating_sub(1).max(1),
                 hidden: &hidden,
-                history: None,
+                history: Some(&history),
             },
         );
 
@@ -122,6 +123,14 @@ mod tests {
             agent: None,
             risk: crate::top::Risk::Low,
         }
+    }
+
+    fn row_with_usage(pid: u32, cpu_pct: f32, mem_pct: f32) -> ProcessRow {
+        let mut row = row(pid, 1, "a3s code");
+        row.cpu_pct = cpu_pct;
+        row.mem_pct = mem_pct;
+        row.agent = Some(AgentKind::A3sCode);
+        row
     }
 
     #[test]
@@ -202,6 +211,60 @@ mod tests {
             .map(|row| row.pid)
             .collect::<Vec<_>>();
         assert_eq!(pids, vec![30, 31, 32]);
+    }
+
+    #[test]
+    fn top_process_history_keeps_recent_samples_and_prunes_missing_pids() {
+        let mut history = TopProcessHistory::default();
+
+        for sample in 0..(TOP_HISTORY_LIMIT + 4) {
+            history.observe(&[
+                row_with_usage(42, sample as f32, (sample * 2) as f32),
+                row_with_usage(99, 1.0, 2.0),
+            ]);
+        }
+        history.observe(&[row_with_usage(42, 99.0, 88.0)]);
+
+        let (cpu, mem) = history.values(42);
+        assert_eq!(cpu.len(), TOP_HISTORY_LIMIT);
+        assert_eq!(mem.len(), TOP_HISTORY_LIMIT);
+        assert_eq!(cpu.last().copied(), Some(99.0));
+        assert_eq!(mem.last().copied(), Some(88.0));
+        assert!(history.values(99).0.is_empty());
+    }
+
+    #[test]
+    fn top_process_table_uses_history_for_sparkline_columns() {
+        let row = row_with_usage(42, 70.0, 30.0);
+        let mut history = TopProcessHistory::default();
+        history.observe(&[row_with_usage(42, 10.0, 5.0)]);
+        history.observe(std::slice::from_ref(&row));
+
+        let hidden = HashSet::new();
+        let lookup = |pid| history.values(pid);
+        let table = render_process_table(
+            &[row],
+            &ProcessTableView {
+                selected: 0,
+                scroll: 0,
+                width: 96,
+                height: 4,
+                hidden: &hidden,
+                history: Some(&lookup),
+            },
+        );
+        let plain = a3s_tui::style::strip_ansi(&table);
+
+        assert!(plain.contains("CPU"), "{plain}");
+        assert!(plain.contains("MEM"), "{plain}");
+        assert!(
+            !plain.contains("········"),
+            "history-fed sparklines should not use the empty placeholder: {plain}"
+        );
+        assert!(
+            plain.chars().any(|ch| matches!(ch, '▁'..='█')),
+            "expected sparkline bar glyphs: {plain}"
+        );
     }
 }
 
