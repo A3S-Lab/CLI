@@ -156,63 +156,10 @@ pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
     a3s_tui::style::fit_visible(&format!("{prefix}{progress}"), width)
 }
 
-/// Greedy word-wrap of plain (unstyled) text to `width` display columns, with
-/// blank lines dropped so a preview stays single-spaced. Used for the reasoning
-/// ("thinking") block so it lays out like other messages instead of being one
-/// giant line the viewport re-wraps badly. Input must be unstyled — width is
-/// counted in chars, which only holds without ANSI escapes.
+/// Greedy word-wrap of plain text to `width` display columns, with blank lines
+/// dropped so compact previews stay single-spaced.
 pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    // Widths are counted in DISPLAY COLUMNS, not chars — CJK runs (which
-    // `split_whitespace` keeps as one token) are 2 columns/char and would
-    // otherwise overflow when the hard-break took `width` chars.
-    use a3s_tui::style::visible_len as col;
-    if width == 0 {
-        return vec![text.to_string()];
-    }
-    let mut out = Vec::new();
-    for para in text.lines() {
-        if para.trim().is_empty() {
-            continue; // collapse blank lines — keep the preview compact
-        }
-        let mut line = String::new();
-        for word in para.split_whitespace() {
-            if line.is_empty() {
-                line.push_str(word);
-            } else if col(&line) + 1 + col(word) <= width {
-                line.push(' ');
-                line.push_str(word);
-            } else {
-                out.push(std::mem::take(&mut line));
-                line.push_str(word);
-            }
-            // Hard-break a token wider than the whole line, by column budget.
-            while col(&line) > width {
-                let mut head = String::new();
-                let mut w = 0usize;
-                for ch in line.chars() {
-                    let cw = col(&ch.to_string()).max(1);
-                    if w + cw > width {
-                        break;
-                    }
-                    w += cw;
-                    head.push(ch);
-                }
-                if head.is_empty() {
-                    break; // width too small for even one char — avoid a loop
-                }
-                let rest: String = line.chars().skip(head.chars().count()).collect();
-                out.push(head);
-                line = rest;
-            }
-        }
-        if !line.is_empty() {
-            out.push(line);
-        }
-    }
-    if out.is_empty() {
-        out.push(String::new());
-    }
-    out
+    a3s_tui::style::wrap_words_compact(text, width)
 }
 
 /// Byte offset of the char at index `char_idx` (for in-place string edits).
@@ -322,6 +269,16 @@ mod tests {
             );
         }
         assert_eq!(lines.concat(), "かなテストあ");
+    }
+
+    #[test]
+    fn wrap_words_uses_shared_compact_width_helper() {
+        let text = "alpha\n\n中文测试内容 beta";
+
+        assert_eq!(
+            wrap_words(text, 8),
+            a3s_tui::style::wrap_words_compact(text, 8)
+        );
     }
 
     #[test]
