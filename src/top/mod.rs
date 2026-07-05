@@ -3090,21 +3090,18 @@ impl TopApp {
         let mem_color = metric_color(mem);
         let mut out = Vec::new();
 
-        out.push(Style::new().fg(CYAN).bold().render(&pad_plain(
-            &format!(" single view {} ({})", row.name, short_id(&row.id)),
-            width,
-        )));
-        out.push(Style::new().fg(Color::BrightBlack).render(&pad_plain(
-            &format!(
-                " status {} · health {} · image {}",
-                row.status, row.inspect.health, row.image
-            ),
-            width,
-        )));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
+        out.extend(
+            SectionHeader::new(format!("single view {} ({})", row.name, short_id(&row.id)))
+                .metadata(format!(
+                    "status {} · health {} · image {}",
+                    row.status, row.inspect.health, row.image
+                ))
+                .title_color(CYAN)
+                .metadata_color(Color::BrightBlack)
+                .separator_color(Color::BrightBlack)
+                .view(self.width, 3)
+                .lines()
+                .map(ToString::to_string),
         );
         out.push(
             Meter::new(cpu as f64)
@@ -13542,6 +13539,7 @@ mod tests {
             ..TopOptions::default()
         });
         app.height = 42;
+        app.width = 96;
         let mut row = container_row("abcdef", "app", "Up 2 minutes", Some(42.0), Some(30.0));
         row.inspect = ContainerInspect {
             health: "healthy".into(),
@@ -13563,9 +13561,13 @@ mod tests {
         app.snapshot.containers = vec![row];
         app.focused_container = Some("abcdef".into());
 
-        let plain = a3s_tui::style::strip_ansi(&app.table());
+        let rendered = app.table();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("single view app"));
+        assert!(plain.contains("status Up 2 minutes"));
+        assert!(plain.contains("health healthy"));
+        assert!(plain.contains("image"));
         assert!(plain.contains("CPU"));
         assert!(plain.contains("MEM"));
         assert!(plain.contains("NET trend"));
@@ -13580,6 +13582,16 @@ mod tests {
         assert!(plain.contains("RESTART POLICY"));
         assert!(plain.contains("unless-stopped"));
         assert!(!plain.contains("CONTAINER"));
+        assert!(
+            rendered.contains("\x1b["),
+            "container focus should be styled"
+        );
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 96),
+            "{plain}"
+        );
     }
 
     #[test]
