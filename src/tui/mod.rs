@@ -28,7 +28,7 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    MenuItem, MenuPanel, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
+    ChoicePrompt, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
     ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
@@ -5920,27 +5920,17 @@ impl App {
 }
 
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
-    MenuPanel::new(format!("⏵ Allow {label}?"))
-        .items(vec![
-            MenuItem::new("Yes"),
-            MenuItem::new("Yes, and don't ask again"),
-            MenuItem::new("No"),
-        ])
+    ChoicePrompt::approval(format!("⏵ Allow {label}?"))
         .selected(selected)
-        .max_items(3)
-        .show_scroll(false)
-        .number_shortcuts(true)
         .indent(2)
         .marker("❯")
         .title_color(TN_YELLOW)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
+        .danger_color(TN_RED)
         .selected_colors(Color::BrightWhite, ACCENT)
-        .footer("Enter select · ↑/↓ · 1–3 · Esc")
-        .view(width as u16, 5)
-        .lines()
-        .map(str::to_string)
-        .collect()
+        .hint("Enter select · ↑/↓ · 1–3 · Esc")
+        .lines(width as u16, 5)
 }
 
 /// Headless probe of the same `session.stream()` / `AgentEvent` path the TUI
@@ -6607,7 +6597,7 @@ mod tests {
     }
 
     #[test]
-    fn approval_menu_uses_bounded_shared_panel() {
+    fn approval_menu_uses_shared_choice_prompt() {
         let lines = approval_menu_lines(
             "Bash(cargo test very-long-filter-name-that-should-not-overflow)",
             1,

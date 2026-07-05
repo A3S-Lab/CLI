@@ -121,24 +121,24 @@ kept as a small ECS-style projection: tool runs, subagent runs, Runtime activity
 records, RemoteUI links, and retained tool logs are updated by stable event ids
 and queried by panels instead of coupling every panel to the streaming protocol.
 
-The command palette, asset selectors, `/model` account picker, detail panels,
-tool status lines, transcript gutters and user bubbles, input prompt chrome,
-live reasoning, live and completed tool output, pinned plan rows, task
-summaries, file-edit diffs, SPF/IDE file metadata, compaction progress, the live
-activity shimmer, effort overlay, and footer status rows use shared `a3s-tui`
-components such as
-`MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`,
-`ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`, `OutputBlock`,
-`Badge`, `Checklist`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`,
-`Progress`, `Paragraph`, `ShimmerText`, `LevelSlider`, `WrappedPrefixBlock`,
-`SessionStatus`, and `ModeLine`. Reusable menu scrolling, selection, tool status truncation,
-transcript gutters and input bubbles, prompt continuation alignment, input
-border labels, shared display-width wrapping for live reasoning and detail text,
-completed output tail previews,
-pinned plan checklists, task status summaries, compaction progress bars,
-pinned memory importance bars, connector rows, diff wrapping, framed panels,
-breadcrumbs, detail-row layout, activity shimmer, and width-bounding fixes are
-exercised directly by `a3s code`.
+The command palette, asset selectors, approval overlay, `/model` account picker,
+detail panels, tool status lines, transcript gutters and user bubbles, input
+prompt chrome, live reasoning, live and completed tool output, pinned plan rows,
+task summaries, file-edit diffs, SPF/IDE file metadata, compaction progress, the
+live activity shimmer, effort overlay, and footer status rows use shared
+`a3s-tui` components such as
+`MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
+`SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`,
+`OutputBlock`, `Badge`, `Checklist`, `ConnectorBlock`, `DiffView`,
+`PanelFrame`, `Breadcrumb`, `Progress`, `Paragraph`, `ShimmerText`,
+`LevelSlider`, `WrappedPrefixBlock`, `SessionStatus`, and `ModeLine`. Reusable
+menu scrolling, selection, approval choices, tool status truncation, transcript
+gutters and input bubbles, prompt continuation alignment, input border labels,
+shared display-width wrapping for live reasoning and detail text, completed
+output tail previews, pinned plan checklists, task status summaries, compaction
+progress bars, pinned memory importance bars, connector rows, diff wrapping,
+framed panels, breadcrumbs, detail-row layout, activity shimmer, and
+width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
