@@ -15,6 +15,7 @@ use a3s_tui::components::{
     divider_line, CellAlign, Confirm, DataColumn, DataRow, DataTable, HelpPanel, HelpSection,
     LogView, LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
     SectionHeader, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
+    WrappedPrefixBlock,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -2794,9 +2795,9 @@ impl TopApp {
         );
         out.push(self.focus_trend_line("MEM trend", &history.mem, metric_color(usage.mem_pct)));
         out.push(divider_line(self.width));
-        out.push(pad_plain(
-            &format!(
-                " activity events {} · sessions {} · tools {} · sec {} · files {} · net {} · llm {} · tokens {} · model {} · provider {} · latency {} · ttft {} · wire {} / {} · high {}",
+        out.extend(
+            WrappedPrefixBlock::new(format!(
+                "activity events {} · sessions {} · tools {} · sec {} · files {} · net {} · llm {} · tokens {} · model {} · provider {} · latency {} · ttft {} · wire {} / {} · high {}",
                 activity.events,
                 activity.sessions,
                 activity.tools,
@@ -2812,9 +2813,14 @@ impl TopApp {
                 format_bytes(activity.req_bytes),
                 format_bytes(activity.resp_bytes),
                 activity.high_risk
-            ),
-            width,
-        ));
+            ))
+            .first_prefix(" ")
+            .continuation_prefix(" ")
+            .width(width)
+            .view()
+            .lines()
+            .map(ToString::to_string),
+        );
         let height = self.visible_height() + 2;
         let recent_events = self.recent_agent_events_for_process(row);
         if !recent_events.is_empty() {
@@ -2826,7 +2832,15 @@ impl TopApp {
                     .map(ToString::to_string),
             );
         }
-        out.push(pad_plain(&format!(" command {}", row.command), width));
+        out.extend(
+            WrappedPrefixBlock::new(format!("command {}", row.command))
+                .first_prefix(" ")
+                .continuation_prefix(" ")
+                .width(width)
+                .view()
+                .lines()
+                .map(ToString::to_string),
+        );
 
         let remaining = height.saturating_sub(out.len());
         if remaining > 7 {
