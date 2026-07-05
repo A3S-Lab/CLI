@@ -1,7 +1,9 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
-use a3s_tui::components::{ConnectorBlock, ConnectorRow, DiffView, ToolStatusLine};
+use a3s_tui::components::{
+    ConnectorBlock, ConnectorRow, DiffView, OutputBlock, OutputStatus, ToolStatusLine,
+};
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -24,11 +26,11 @@ pub(crate) fn render_tool_end(
         }
     }
     let ok = exit_code == 0;
-    let header = render_tool_header(name, ok, args, width);
 
     // For a successful file read on a known language, show the highlighted file
     // content under the action (keeps the nice read preview).
     if ok && matches!(name, "read" | "cat") {
+        let header = render_tool_header(name, ok, args, width);
         if let Some(lang) = args
             .and_then(|a| {
                 a.get("file_path")
@@ -49,40 +51,52 @@ pub(crate) fn render_tool_end(
     }
 
     if matches!(name, "task" | "parallel_task") {
+        let header = render_tool_header(name, ok, args, width);
         if let Some(summary) = render_task_tool_summary(name, output, meta, ok, width) {
             return format!("{header}{summary}");
         }
     }
 
-    // Show only the latest TAIL output lines under a "⎿" connector, with a
-    // "… +N earlier lines" marker when there's more (keeps a noisy build tight).
-    const TAIL: usize = 5;
-    let lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.is_empty() {
-        return header;
-    }
-    let body_color = if ok { TN_GRAY } else { TN_RED };
-    let block = ConnectorBlock::new()
-        .margin(PAD)
-        .connector_indent(2)
-        .connector_gap(2)
-        .connector_color(TN_GRAY)
-        .text_color(body_color)
-        .omitted_color(TN_GRAY)
-        .max_rows(TAIL)
-        .rows(
-            lines
-                .into_iter()
-                .map(|line| ConnectorRow::new(line.to_string()))
-                .collect(),
-        )
-        .view(width.min(u16::MAX as usize) as u16);
+    render_completed_tool_output_block(name, ok, output, args, width)
+}
 
-    if block.is_empty() {
-        header
-    } else {
-        format!("{header}\n{block}")
+fn render_completed_tool_output_block(
+    name: &str,
+    ok: bool,
+    output: &str,
+    args: Option<&serde_json::Value>,
+    width: usize,
+) -> String {
+    const TAIL: usize = 5;
+
+    let mut block = OutputBlock::new(tool_verb(name))
+        .indent(PAD)
+        .bullet("●")
+        .status(if ok {
+            OutputStatus::Success
+        } else {
+            OutputStatus::Error
+        })
+        .status_colors(TN_GREEN, TN_RED, ACCENT, TN_GRAY)
+        .title_color(TN_FG)
+        .detail_color(TN_GRAY)
+        .connector_color(TN_GRAY)
+        .body_color(if ok { TN_GRAY } else { TN_RED })
+        .max_body_lines(TAIL)
+        .text(output);
+
+    let arg = args
+        .and_then(|args| arg_summary_for_tool(name, args))
+        .unwrap_or_default();
+    if !arg.is_empty() {
+        block = if matches!(name, "bash" | "shell" | "run" | "exec") {
+            block.styled_detail(highlight_shell(&arg))
+        } else {
+            block.detail(arg)
+        };
     }
+
+    block.view(width.min(u16::MAX as usize) as u16)
 }
 
 fn render_task_tool_summary(
@@ -820,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn completed_tool_output_uses_shared_connector_block() {
+    fn completed_tool_output_uses_shared_output_block() {
         let rendered = render_tool_end(
             "bash",
             1,
@@ -844,7 +858,7 @@ mod tests {
         );
         assert!(
             rendered.contains(&format!("\x1b[{}msecond", TN_RED.fg_ansi())),
-            "failed tool tail should use connector block text color: {rendered:?}"
+            "failed tool tail should use output block text color: {rendered:?}"
         );
         assert_visible_lines_bounded(&rendered, 48);
     }

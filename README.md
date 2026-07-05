@@ -91,12 +91,13 @@ live and completed tool output, task summaries, file-edit diffs, SPF/IDE file
 metadata, effort overlay, and footer status rows use shared `a3s-tui`
 components such as `MenuPanel`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `SectionHeader`, `ToolStatusLine`, `GutterBlock`, `InputBorder`, `PromptLine`,
-`ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`, `LevelSlider`,
-`ShimmerText`, `SessionStatus`, and `ModeLine`. Reusable menu scrolling,
-selection, tool status truncation, transcript gutters and input bubbles, prompt
-continuation alignment, input border labels, connector rows, diff wrapping,
-framed panels, breadcrumbs, detail-row layout, shimmer, and width-bounding fixes
-are exercised directly by `a3s code`.
+`OutputBlock`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`,
+`LevelSlider`, `ShimmerText`, `SessionStatus`, and `ModeLine`. Reusable menu
+scrolling, selection, tool status truncation, transcript gutters and input
+bubbles, prompt continuation alignment, input border labels, completed output
+tail previews, connector rows, diff wrapping, framed panels, breadcrumbs,
+detail-row layout, shimmer, and width-bounding fixes are exercised directly by
+`a3s code`.
 
 ```mermaid
 flowchart TD
