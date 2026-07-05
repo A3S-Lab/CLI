@@ -12,33 +12,29 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
-/// Prefix a message block with a colored ● gutter on its first line and align
-/// the rest under the text.
 /// A user-input message rendered with a subtle background "bubble" so it stands
 /// out from agent output in the transcript.
 pub(crate) fn user_bubble(content: &str, width: usize) -> String {
-    let margin = " ".repeat(PAD);
-    let bg = SURFACE_SOFT;
-    // Full-width bar (minus the outer margins) with inner left/right padding.
-    let bar = width.saturating_sub(PAD * 2).max(8);
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            let inner = if i == 0 {
-                format!(" ● {line}")
-            } else {
-                format!("   {line}")
-            };
-            format!(
-                "{margin}{}",
-                Style::new().fg(TN_FG).bg(bg).render(&pad_to(&inner, bar))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    // Keep the historical shape: 2 columns outside the bubble and at least an
+    // 8-column colored body for very narrow terminals.
+    let bubble_width = width.saturating_sub(PAD).max(PAD + 8);
+    a3s_tui::components::GutterBlock::lines(lines)
+        .margin(PAD)
+        .marker(" ●")
+        .gap(" ")
+        .width(bubble_width)
+        .content_color(TN_FG)
+        .background_color(SURFACE_SOFT)
+        .view()
 }
 
+/// Prefix a message block with a colored ● gutter on its first line and align
+/// the rest under the text.
 pub(crate) fn gutter(color: Color, content: &str) -> String {
     let lines = content.lines().collect::<Vec<_>>();
     if lines.is_empty() {
@@ -190,8 +186,8 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gutter, truncate, wrap_words};
-    use a3s_tui::style::{strip_ansi, Color, Style};
+    use super::{gutter, truncate, user_bubble, wrap_words};
+    use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
 
     #[test]
     fn wraps_on_word_boundaries_without_splitting_words() {
@@ -271,5 +267,29 @@ mod tests {
     #[test]
     fn gutter_keeps_empty_input_empty() {
         assert_eq!(gutter(Color::Green, ""), "");
+    }
+
+    #[test]
+    fn user_bubble_uses_shared_gutter_block_shape() {
+        let rendered = user_bubble("hello\nworld", 20);
+        let plain = strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
+
+        assert_eq!(rows, vec!["   ● hello        ", "     world        "]);
+        assert!(rendered.contains("\x1b[38;2;237;237;237;48;2;31;31;31m"));
+        assert!(rendered.lines().all(|row| visible_len(row) == 18));
+    }
+
+    #[test]
+    fn user_bubble_keeps_empty_input_empty() {
+        assert_eq!(user_bubble("", 20), "");
+    }
+
+    #[test]
+    fn user_bubble_keeps_narrow_body_min_width() {
+        let rendered = user_bubble("hi", 6);
+
+        assert_eq!(strip_ansi(&rendered), "   ● hi   ");
+        assert_eq!(visible_len(&rendered), 10);
     }
 }

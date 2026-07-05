@@ -86,15 +86,15 @@ records, RemoteUI links, and retained tool logs are updated by stable event ids
 and queried by panels instead of coupling every panel to the streaming protocol.
 
 The command palette, asset selectors, `/model` account picker, detail panels,
-tool status lines, transcript gutters, live and completed tool output, task
-summaries, file-edit diffs, SPF/IDE file metadata, effort overlay, and footer
-status rows use shared `a3s-tui` components such as `MenuPanel`,
+tool status lines, transcript gutters and user bubbles, live and completed tool
+output, task summaries, file-edit diffs, SPF/IDE file metadata, effort overlay,
+and footer status rows use shared `a3s-tui` components such as `MenuPanel`,
 `TabbedMenuPanel`, `DetailPanel`, `Timeline`, `SectionHeader`, `ToolStatusLine`,
 `GutterBlock`, `ConnectorBlock`, `DiffView`, `PanelFrame`, `Breadcrumb`,
 `LevelSlider`, `ShimmerText`, `SessionStatus`, and `ModeLine`. Reusable menu
-scrolling, selection, tool status truncation, transcript gutters, connector
-rows, diff wrapping, framed panels, breadcrumbs, detail-row layout, shimmer, and
-width-bounding fixes are exercised directly by `a3s code`.
+scrolling, selection, tool status truncation, transcript gutters and input
+bubbles, connector rows, diff wrapping, framed panels, breadcrumbs, detail-row
+layout, shimmer, and width-bounding fixes are exercised directly by `a3s code`.
 
 ```mermaid
 flowchart TD
