@@ -3,33 +3,47 @@
 //! drills into a coding agent's process subtree.
 
 use super::super::*;
-use a3s_tui::components::SectionHeader;
+use a3s_tui::components::StatusBar;
 
 fn top_panel_line(rendered: &str, width: usize) -> String {
     pad_to(&truncate(rendered, width), width)
 }
 
-fn top_panel_header(title: &str, width: usize) -> String {
+fn top_panel_header(
+    processes: usize,
+    agents: usize,
+    focus: Option<(&str, u32)>,
+    width: usize,
+) -> String {
     if width == 0 {
         return String::new();
     }
 
-    SectionHeader::new(title)
-        .show_separator(false)
-        .indent(2)
-        .title_color(ACCENT)
-        .view(width.min(u16::MAX as usize) as u16, 1)
-}
-
-fn top_panel_title(processes: usize, agents: usize, focus: Option<(&str, u32)>) -> String {
-    match focus {
-        Some((label, pid)) => {
-            format!("/top ▸ {label} (pid {pid}) — {processes} activity rows · Esc back")
-        }
-        None => format!(
-            "/top — {processes} agent activity rows · {agents} agent(s) · Enter focus agent · Esc close"
+    let (left, center, right) = match focus {
+        Some((label, pid)) => (
+            format!("  /top ▸ {label} (pid {pid})"),
+            format!("{processes} activity rows"),
+            "Esc back".to_string(),
         ),
-    }
+        None => (
+            "  /top".to_string(),
+            format!("{processes} activity rows · {agents} agent(s)"),
+            if width < 40 {
+                "Esc close".to_string()
+            } else {
+                "Enter focus agent · Esc close".to_string()
+            },
+        ),
+    };
+
+    StatusBar::new()
+        .left(left)
+        .center(center)
+        .right(right)
+        .fg(ACCENT)
+        .no_bg()
+        .bold(true)
+        .view(width.min(u16::MAX as usize) as u16)
 }
 
 impl App {
@@ -53,7 +67,7 @@ impl App {
         let rows = self.top_rows();
         let agents = rows.iter().filter(|r| r.agent.is_some()).count();
 
-        let title = match self.top_focus {
+        let focus = match self.top_focus {
             Some(pid) => {
                 let label = self
                     .top
@@ -61,9 +75,9 @@ impl App {
                     .and_then(|all| all.iter().find(|r| r.pid == pid))
                     .and_then(|r| r.agent.map(|a| a.label()))
                     .unwrap_or("agent");
-                top_panel_title(rows.len(), agents, Some((label, pid)))
+                Some((label, pid))
             }
-            None => top_panel_title(rows.len(), agents, None),
+            None => None,
         };
         // Body via the shared renderer; the panel has no per-pid history, so the
         // sparkline columns render blank (graceful degradation).
@@ -80,7 +94,7 @@ impl App {
             },
         );
 
-        let mut out = vec![top_panel_header(&title, width)];
+        let mut out = vec![top_panel_header(rows.len(), agents, focus, width)];
         out.extend(table.lines().map(|line| top_panel_line(line, width)));
         while out.len() < h {
             out.push(String::new());
@@ -112,22 +126,31 @@ mod tests {
 
     #[test]
     fn top_panel_lines_are_width_bounded_with_styles() {
-        let line = top_panel_header("/top — many processes · Enter focus agent · Esc close", 28);
+        let line = top_panel_header(123, 4, None, 28);
+        let plain = a3s_tui::style::strip_ansi(&line);
 
-        assert!(
-            a3s_tui::style::visible_len(&line) <= 28,
-            "{}",
-            a3s_tui::style::strip_ansi(&line)
-        );
+        assert!(a3s_tui::style::visible_len(&line) <= 28, "{}", plain);
+        assert!(plain.ends_with("Esc close"), "{plain}");
+        assert!(line.contains("\x1b["), "status header should carry styling");
     }
 
     #[test]
-    fn top_panel_title_stays_observe_only() {
-        let title = top_panel_title(12, 2, None);
+    fn top_panel_header_stays_observe_only() {
+        let title = a3s_tui::style::strip_ansi(&top_panel_header(12, 2, None, 80));
 
         assert!(title.contains("Enter focus agent"), "{title}");
         assert!(!title.contains(&["ki", "ll"].join("")), "{title}");
         assert!(!title.contains("terminate"), "{title}");
+    }
+
+    #[test]
+    fn focused_top_panel_header_preserves_back_action() {
+        let header = top_panel_header(8, 1, Some(("a3s", 4242)), 32);
+        let plain = a3s_tui::style::strip_ansi(&header);
+
+        assert!(plain.contains("/top ▸ a3s"), "{plain}");
+        assert!(plain.ends_with("Esc back"), "{plain}");
+        assert_eq!(a3s_tui::style::visible_len(&header), 32);
     }
 
     #[test]

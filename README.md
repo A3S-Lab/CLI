@@ -165,7 +165,7 @@ The command palette, asset selectors, approval overlay, `/model` account picker,
 detail panels, tool status lines, transcript gutters and user bubbles, input
 prompt chrome, live reasoning, live and completed tool output, pinned plan rows,
 task summaries, file-edit diffs, SPF/IDE file metadata, compaction progress, the
-live activity shimmer, effort overlay, and footer status rows use shared
+live activity shimmer, effort overlay, `/top` header, and footer status rows use shared
 `a3s-tui` components such as
 `MenuPanel`, `ChoicePrompt`, `TabbedMenuPanel`, `DetailPanel`, `Timeline`,
 `ActivityBlock`,
@@ -178,7 +178,7 @@ live activity shimmer, effort overlay, and footer status rows use shared
 choices, RemoteUI and jump-to-latest action links, tool status truncation,
 shared alert rows for OS login/configuration warnings, overlay composition for
 menus and prompts, IDE flash footer notifications, live tool activity/output
-tails, transcript gutters and input bubbles, prompt continuation alignment, input
+tails, `/top` status header actions, transcript gutters and input bubbles, prompt continuation alignment, input
 border labels, shared
 display-width wrapping for live reasoning and detail text, completed output tail
 previews, pinned plan checklists, task status summaries, compaction progress
