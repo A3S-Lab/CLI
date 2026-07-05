@@ -7,7 +7,7 @@
 //! survives OS API shape drift.
 
 use super::super::*;
-use a3s_tui::components::{MenuItem, MenuPanel};
+use a3s_tui::components::{DetailPanel, DetailRow, MenuItem, MenuPanel};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1164,59 +1164,100 @@ fn activity_list_item(row: &RuntimeActivityRow) -> MenuItem {
     .description(row.name.clone())
 }
 
-fn detail_line(label: &str, value: &str, width: usize) -> String {
-    if value.is_empty() {
-        return String::new();
-    }
-    let label = format!("{label}: ");
-    let value = truncate(value, width.saturating_sub(label.len()));
-    format!(
-        "{}{}",
-        Style::new().fg(TN_GRAY).render(&label),
-        Style::new().fg(TN_FG).render(&value)
-    )
-}
-
 fn asset_detail(row: Option<&AssetRow>, width: usize) -> Vec<String> {
     let Some(row) = row else {
-        return vec![Style::new().fg(TN_GRAY).render("select an asset")];
+        return DetailPanel::without_title()
+            .show_separator(false)
+            .indent(0)
+            .muted_color(TN_GRAY)
+            .row(DetailRow::muted("select an asset"))
+            .view(width.min(u16::MAX as usize) as u16, 1)
+            .lines()
+            .map(str::to_string)
+            .collect();
     };
-    let mut lines = vec![Style::new()
-        .fg(TN_FG)
-        .bold()
-        .render(&truncate(&row.name, width))];
-    lines.push(detail_line("id", &row.id, width));
-    lines.push(detail_line("category", &row.category, width));
-    lines.push(detail_line("kind", &row.kind, width));
-    lines.push(detail_line("status", &row.status, width));
-    lines.push(detail_line("visibility", &row.visibility, width));
-    lines.push(detail_line("owner", &row.owner, width));
-    lines.push(detail_line("updated", &row.updated, width));
-    if let Some(url) = &row.access_url {
-        lines.push(detail_line("access", url, width));
+
+    let mut panel = DetailPanel::new(row.name.clone())
+        .show_separator(false)
+        .indent(0)
+        .title_color(TN_FG)
+        .label_color(TN_GRAY)
+        .value_color(TN_FG)
+        .label_width(10)
+        .unlimited_rows();
+    for (label, value) in [
+        ("id", row.id.as_str()),
+        ("category", row.category.as_str()),
+        ("kind", row.kind.as_str()),
+        ("status", row.status.as_str()),
+        ("visibility", row.visibility.as_str()),
+        ("owner", row.owner.as_str()),
+        ("updated", row.updated.as_str()),
+    ] {
+        if !value.is_empty() {
+            panel = panel.pair(label, value);
+        }
     }
-    lines.into_iter().filter(|line| !line.is_empty()).collect()
+    if let Some(url) = &row.access_url {
+        panel = panel.pair("access", url);
+    }
+
+    panel
+        .view(
+            width.min(u16::MAX as usize) as u16,
+            panel.rows().len().saturating_add(1),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn activity_detail(row: Option<&RuntimeActivityRow>, width: usize) -> Vec<String> {
     let Some(row) = row else {
-        return vec![Style::new().fg(TN_GRAY).render("select a runtime row")];
+        return DetailPanel::without_title()
+            .show_separator(false)
+            .indent(0)
+            .muted_color(TN_GRAY)
+            .row(DetailRow::muted("select a runtime row"))
+            .view(width.min(u16::MAX as usize) as u16, 1)
+            .lines()
+            .map(str::to_string)
+            .collect();
     };
-    let mut lines = vec![Style::new()
-        .fg(TN_FG)
-        .bold()
-        .render(&truncate(&row.name, width))];
-    lines.push(detail_line("id", &row.id, width));
-    lines.push(detail_line("asset", &row.asset_category, width));
-    lines.push(detail_line("kind", &row.kind, width));
-    lines.push(detail_line("status", &row.status, width));
-    lines.push(detail_line("image/ref", &row.image, width));
-    lines.push(detail_line("source", &row.source, width));
-    lines.push(detail_line("updated", &row.updated, width));
-    if let Some(url) = &row.access_url {
-        lines.push(detail_line("access", url, width));
+
+    let mut panel = DetailPanel::new(row.name.clone())
+        .show_separator(false)
+        .indent(0)
+        .title_color(TN_FG)
+        .label_color(TN_GRAY)
+        .value_color(TN_FG)
+        .label_width(10)
+        .unlimited_rows();
+    for (label, value) in [
+        ("id", row.id.as_str()),
+        ("asset", row.asset_category.as_str()),
+        ("kind", row.kind.as_str()),
+        ("status", row.status.as_str()),
+        ("image/ref", row.image.as_str()),
+        ("source", row.source.as_str()),
+        ("updated", row.updated.as_str()),
+    ] {
+        if !value.is_empty() {
+            panel = panel.pair(label, value);
+        }
     }
-    lines.into_iter().filter(|line| !line.is_empty()).collect()
+    if let Some(url) = &row.access_url {
+        panel = panel.pair("access", url);
+    }
+
+    panel
+        .view(
+            width.min(u16::MAX as usize) as u16,
+            panel.rows().len().saturating_add(1),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1384,6 +1425,79 @@ mod tests {
 
         assert!(plain.contains("runtime-14"), "{plain}");
         assert!(plain.contains("↑↓ 15/16"), "{plain}");
+    }
+
+    #[test]
+    fn asset_detail_uses_shared_detail_panel_and_bounds_width() {
+        let row = AssetRow {
+            id: "asset-1".into(),
+            name: "Payment Agent With A Very Long Display Name".into(),
+            category: "agent".into(),
+            kind: "tool".into(),
+            status: "published".into(),
+            visibility: "private".into(),
+            owner: "roy".into(),
+            updated: "2026-07-04T12:30:00Z".into(),
+            access_url: Some("https://os.example/assets/asset-1/launch".into()),
+        };
+
+        let lines = asset_detail(Some(&row), 36);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("Payment Agent"), "{plain}");
+        assert!(plain.contains("category"), "{plain}");
+        assert!(plain.contains("published"), "{plain}");
+        assert!(plain.contains("access"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 36),
+            "{plain}"
+        );
+
+        let empty = asset_detail(None, 24)
+            .into_iter()
+            .map(|line| a3s_tui::style::strip_ansi(&line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(empty.contains("select an asset"), "{empty}");
+    }
+
+    #[test]
+    fn activity_detail_uses_shared_detail_panel_and_bounds_width() {
+        let row = RuntimeActivityRow {
+            id: "svc-1".into(),
+            name: "Runtime Worker With A Very Long Display Name".into(),
+            asset_category: "workflow".into(),
+            kind: "service".into(),
+            status: "running".into(),
+            image: "registry.example/a3s/runtime-worker:2026-07-04".into(),
+            access_url: Some("https://runtime.example/services/svc-1".into()),
+            updated: "2026-07-04T12:31:00Z".into(),
+            source: "runtime".into(),
+        };
+
+        let lines = activity_detail(Some(&row), 38);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("Runtime Worker"), "{plain}");
+        assert!(plain.contains("workflow"), "{plain}");
+        assert!(plain.contains("image/ref"), "{plain}");
+        assert!(plain.contains("runtime"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 38),
+            "{plain}"
+        );
     }
 
     #[test]
