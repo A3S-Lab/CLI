@@ -12,8 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    CellAlign, Confirm, DataColumn, DataRow, DataTable, Meter, MetricTrend, MultiSelect,
-    MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
+    CellAlign, Confirm, DataColumn, DataRow, DataTable, MenuItem, MenuPanel, Meter, MetricTrend,
+    MultiSelect, MultiSelectMsg, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree,
+    TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3419,28 +3420,7 @@ impl TopApp {
         let Some(menu) = &self.container_menu else {
             return String::new();
         };
-        let width = self.width as usize;
-        let container = &menu.container;
-        let mut out = Vec::new();
-        out.push(Style::new().fg(CYAN).bold().render(&pad_plain(
-            &format!(
-                " container menu {} ({})",
-                container.name,
-                short_id(&container.id)
-            ),
-            width,
-        )));
-        out.push(Style::new().fg(Color::BrightBlack).render(&pad_plain(
-            &format!(" image {} · status {}", container.image, container.status),
-            width,
-        )));
-        out.push(
-            Style::new()
-                .fg(Color::BrightBlack)
-                .render(&"─".repeat(width)),
-        );
-        out.push(menu.select.view(self.width, self.visible_height()));
-        out.join("\n")
+        container_menu_lines(menu, self.width, self.visible_height()).join("\n")
     }
 
     fn help_view(&self) -> String {
@@ -8685,6 +8665,43 @@ fn container_action(container: ContainerRow, action: ContainerMenuAction) -> Act
     }
 }
 
+fn container_menu_lines(menu: &ContainerMenu, width: u16, height: usize) -> Vec<String> {
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    let container = &menu.container;
+    let items = menu
+        .items
+        .iter()
+        .map(|item| MenuItem::new(item.key.to_string()).description(item.label.clone()))
+        .collect::<Vec<_>>();
+    MenuPanel::new(format!(
+        "container menu {} ({})",
+        container.name,
+        short_id(&container.id)
+    ))
+    .subtitle(format!(
+        "image {} · status {}",
+        container.image, container.status
+    ))
+    .items(items)
+    .selected(menu.select.selected_index())
+    .max_items(height)
+    .show_scroll(true)
+    .indent(1)
+    .marker(">")
+    .title_color(CYAN)
+    .subtitle_color(Color::BrightBlack)
+    .text_color(Color::BrightWhite)
+    .muted_color(Color::BrightBlack)
+    .selected_colors(Color::BrightWhite, ACCENT)
+    .view(width, height.saturating_add(2))
+    .lines()
+    .map(str::to_string)
+    .collect()
+}
+
 fn container_is_running(status: &str) -> bool {
     let lower = status.to_lowercase();
     lower.starts_with("up") || lower.contains("running") || lower.contains("paused")
@@ -13337,6 +13354,39 @@ mod tests {
             app.confirm,
             Some(Action::RestartContainer(_, _, ref name)) if name.contains("app")
         ));
+    }
+
+    #[test]
+    fn container_menu_view_uses_shared_menu_panel_and_fits_width() {
+        let mut app = TopApp::new(TopOptions {
+            tab: Tab::Containers,
+            ..TopOptions::default()
+        });
+        app.width = 42;
+        app.height = 12;
+        app.snapshot.containers = vec![container_row(
+            "abcdef1234567890",
+            "very-long-container-name",
+            "Up 2 minutes",
+            Some(1.0),
+            Some(2.0),
+        )];
+
+        app.open_container_menu();
+        let rendered = app.container_menu_view();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
+
+        assert!(plain.contains("container menu"), "{plain}");
+        assert!(plain.contains("image"), "{plain}");
+        assert!(plain.contains("status"), "{plain}");
+        assert!(plain.contains("r  Restart container"), "{plain}");
+        assert!(rendered.contains("\x1b["), "selected row should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 42),
+            "{plain}"
+        );
     }
 
     #[test]
