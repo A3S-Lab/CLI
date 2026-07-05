@@ -28,8 +28,9 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    ChoicePrompt, InlineAction, ModeLine, Scrollbar, SessionStatus, SessionStatusChip, Spinner,
-    Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
+    Alert, AlertKind, ChoicePrompt, InlineAction, ModeLine, Scrollbar, SessionStatus,
+    SessionStatusChip, Spinner, Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus,
+    ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -310,6 +311,16 @@ fn os_required_message(cmd: &str, os_configured: bool) -> String {
     } else {
         format!("  {cmd} needs OS — configure `os = \"https://your-os-host\"` in config.acl, then /login")
     }
+}
+
+fn os_required_alert(cmd: &str, os_configured: bool) -> String {
+    let body = os_required_message(cmd, os_configured)
+        .trim_start()
+        .to_string();
+    format!(
+        "  {}",
+        Alert::new(AlertKind::Warning, body).color(TN_YELLOW).view()
+    )
 }
 
 /// Glyph + colour for a plan task's status.
@@ -4159,11 +4170,9 @@ impl App {
                     }
                     Ok(panels::flow::FlowSubcommand::Activity(query)) => {
                         if self.os_session.is_none() {
-                            self.push_line(&Style::new().fg(TN_YELLOW).render(
-                                &os_required_message(
-                                    "workflow runtime activity",
-                                    self.os_config.is_some(),
-                                ),
+                            self.push_line(&os_required_alert(
+                                "workflow runtime activity",
+                                self.os_config.is_some(),
                             ));
                         } else {
                             self.pending_flow_subcommand =
@@ -8231,6 +8240,17 @@ mod tests {
         let missing = os_required_message("/agent deploy", false);
         assert!(missing.contains("configure `os"));
         assert!(missing.contains("/login"));
+    }
+
+    #[test]
+    fn os_required_alert_uses_shared_warning_line() {
+        let rendered = os_required_alert("/agent run", true);
+
+        assert_eq!(
+            a3s_tui::style::strip_ansi(&rendered),
+            "  ⚠ /agent run needs OS — sign in with /login first"
+        );
+        assert!(rendered.contains("\x1b[38;2;245;166;35m"));
     }
 
     // ---- image preview (/ide + paste) ----

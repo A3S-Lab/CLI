@@ -600,11 +600,7 @@ fn edit_search(query: &mut String, key: &KeyEvent) -> bool {
 impl App {
     pub(crate) fn open_asset_list_panel(&mut self, query: String) -> Option<Cmd<Msg>> {
         let Some(session) = self.os_session.clone() else {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render(&os_required_message("asset list", self.os_config.is_some())),
-            );
+            self.push_line(&os_required_alert("asset list", self.os_config.is_some()));
             return None;
         };
         let (category, query) = asset_query_parts(&query);
@@ -628,10 +624,10 @@ impl App {
 
     pub(crate) fn open_runtime_activity_panel(&mut self, query: String) -> Option<Cmd<Msg>> {
         let Some(session) = self.os_session.clone() else {
-            self.push_line(&Style::new().fg(TN_YELLOW).render(&os_required_message(
+            self.push_line(&os_required_alert(
                 "runtime activity",
                 self.os_config.is_some(),
-            )));
+            ));
             return None;
         };
         let (category, query) = activity_query_parts(&query);
