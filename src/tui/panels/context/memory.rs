@@ -5,6 +5,7 @@
 //! metadata, graph neighborhood, aliases, relations, and full content.
 
 use super::super::*;
+use a3s_tui::components::{Timeline, TimelineItem, TimelineRow};
 
 const MEMORY_PANEL_SESSION_LIMIT: usize = 1_000;
 
@@ -225,64 +226,13 @@ impl App {
 
         let tw = (width / 3).clamp(26, 52);
         let sep = Style::new().fg(TN_GRAY).render(" │ ");
-        let prefix = 18; // " ● " + time(4) + " " + tier/forget + " " + badge(4) + "  "
-
-        // Left: timeline rows (day buckets + nodes); keep the selection visible.
-        let rows = timeline_rows(&m.entries, now);
-        let sel_row = rows
-            .iter()
-            .position(|r| matches!(r, TlRow::Node(i) if *i == m.sel))
-            .unwrap_or(0);
-        let start = sel_row.saturating_sub(body.saturating_sub(1));
+        let left_lines = memory_timeline_lines(&m.entries, &m.graph, m.sel, now, tw, body);
 
         // Right: the selected memory's detail, scrollable.
         let right_lines = self.memory_detail_lines(m, now, width.saturating_sub(tw + 4));
 
         for i in 0..body {
-            let left = match rows.get(start + i) {
-                Some(TlRow::Day(label)) => {
-                    let head = format!("  ── {label} ");
-                    let bar = "─".repeat(tw.saturating_sub(a3s_tui::style::visible_len(&head)));
-                    Style::new()
-                        .fg(TN_GRAY)
-                        .render(&memory_line(&format!("{head}{bar}"), tw))
-                }
-                Some(TlRow::Node(idx)) => {
-                    let e = &m.entries[*idx];
-                    let (badge, color) = mem_type_style(&e.memory_type);
-                    let facet = m.graph.by_memory.get(&e.id);
-                    let tier = facet.map(|f| f.tier).unwrap_or(MemoryTier::Short);
-                    let forget = facet.map(|f| f.forget).unwrap_or(ForgetSignal::Keep);
-                    let time = rel_time(e.timestamp, now);
-                    let preview = e.content_lower.lines().next().unwrap_or("");
-                    let preview = truncate(preview, tw.saturating_sub(prefix));
-                    if *idx == m.sel {
-                        let plain = format!(
-                            " ● {time:>4} {}{} {badge:<4}  {preview}",
-                            tier.badge(),
-                            forget_mark(forget)
-                        );
-                        Style::new()
-                            .fg(Color::Black)
-                            .bg(color)
-                            .render(&memory_line(&plain, tw))
-                    } else {
-                        // Truncate the plain preview first, then style segments, so
-                        // we never cut an escape sequence mid-byte.
-                        let rail = Style::new().fg(color).render(" ●");
-                        let t = Style::new().fg(TN_GRAY).render(&format!(" {time:>4}"));
-                        let tb = Style::new().fg(tier_style(tier)).render(&format!(
-                            " {}{}",
-                            tier.badge(),
-                            forget_mark(forget)
-                        ));
-                        let b = Style::new().fg(color).render(&format!(" {badge:<4}"));
-                        let pv = Style::new().fg(TN_FG).render(&format!("  {preview}"));
-                        memory_line(&format!("{rail}{t}{tb}{b}{pv}"), tw)
-                    }
-                }
-                None => " ".repeat(tw),
-            };
+            let left = left_lines.get(i).cloned().unwrap_or_else(|| " ".repeat(tw));
             let right = right_lines
                 .get(m.detail_scroll + i)
                 .cloned()
@@ -435,6 +385,59 @@ impl App {
     }
 }
 
+fn memory_timeline_lines(
+    entries: &[MemEntry],
+    graph: &MemoryGraph,
+    selected: usize,
+    now: chrono::DateTime<chrono::Utc>,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
+    if width == 0 || height == 0 || entries.is_empty() {
+        return Vec::new();
+    }
+
+    let rows = timeline_rows(entries, now)
+        .into_iter()
+        .filter_map(|row| match row {
+            TlRow::Day(label) => Some(TimelineRow::section(label)),
+            TlRow::Node(idx) => {
+                let entry = entries.get(idx)?;
+                let (badge, color) = mem_type_style(&entry.memory_type);
+                let facet = graph.by_memory.get(&entry.id);
+                let tier = facet.map(|f| f.tier).unwrap_or(MemoryTier::Short);
+                let forget = facet.map(|f| f.forget).unwrap_or(ForgetSignal::Keep);
+                let preview = entry.content_lower.lines().next().unwrap_or("");
+                Some(TimelineRow::item(
+                    TimelineItem::new(
+                        rel_time(entry.timestamp, now),
+                        format!("{}{} {badge}", tier.badge(), forget_mark(forget)),
+                        preview,
+                    )
+                    .color(color),
+                ))
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Timeline::new()
+        .rows(rows)
+        .selected_item(selected)
+        .margin(1)
+        .marker("●")
+        .time_width(4)
+        .badge_width(7)
+        .fill_height(true)
+        .selected_fg(Color::Black)
+        .section_color(TN_GRAY)
+        .time_color(TN_GRAY)
+        .preview_color(TN_FG)
+        .view(width.min(u16::MAX as usize) as u16, height)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
 fn lifecycle_labels(facet: &MemoryGraphFacet) -> Vec<&'static str> {
     let mut labels = Vec::new();
     if facet.llm_extracted {
@@ -505,6 +508,71 @@ async fn delete_memory_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_ts(raw: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    fn test_entry(id: &str, content: &str, ty: &str, raw_time: &str) -> MemEntry {
+        MemEntry {
+            id: id.to_string(),
+            content_lower: content.to_string(),
+            tags: Vec::new(),
+            importance: 0.7,
+            timestamp: test_ts(raw_time),
+            memory_type: ty.to_string(),
+        }
+    }
+
+    #[test]
+    fn memory_timeline_lines_use_shared_component_and_fit_width() {
+        let now = test_ts("2026-06-30T12:00:00Z");
+        let entries = vec![
+            test_entry(
+                "a",
+                "remember terminal layout",
+                "semantic",
+                "2026-06-30T11:58:00Z",
+            ),
+            test_entry(
+                "b",
+                "fix narrow tui overflow",
+                "procedural",
+                "2026-06-30T11:45:00Z",
+            ),
+        ];
+        let mut graph = MemoryGraph::default();
+        graph.by_memory.insert(
+            "b".to_string(),
+            MemoryGraphFacet {
+                tier: MemoryTier::Long,
+                forget: ForgetSignal::Candidate,
+                ..MemoryGraphFacet::default()
+            },
+        );
+
+        let lines = memory_timeline_lines(&entries, &graph, 1, now, 40, 4);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 4);
+        assert!(plain.contains("Today"), "{plain}");
+        assert!(plain.contains("sem"), "{plain}");
+        assert!(plain.contains("fix narrow tui"), "{plain}");
+        assert!(plain.contains("L! proc"), "{plain}");
+        assert!(lines.iter().any(|line| line.contains("\x1b[30;")));
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 40),
+            "{plain}"
+        );
+    }
 
     #[test]
     fn memory_lines_are_width_bounded_with_styles() {
