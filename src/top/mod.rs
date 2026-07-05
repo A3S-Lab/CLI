@@ -12,9 +12,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::{
-    CellAlign, Confirm, DataColumn, DataRow, DataTable, LogView, LogViewState, MenuItem, MenuPanel,
-    Meter, MetricTrend, MultiSelect, MultiSelectMsg, SectionHeader, Select, SelectMsg, Sparkline,
-    StatusBar, TabSegment, Tabs, Tree, TreeNode,
+    CellAlign, Confirm, DataColumn, DataRow, DataTable, HelpPanel, HelpSection, LogView,
+    LogViewState, MenuItem, MenuPanel, Meter, MetricTrend, MultiSelect, MultiSelectMsg,
+    SectionHeader, Select, SelectMsg, Sparkline, StatusBar, TabSegment, Tabs, Tree, TreeNode,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3406,17 +3406,19 @@ impl TopApp {
             ("Esc", "clear filter or close panel/focus"),
             ("q", "quit"),
         ];
-        let mut table = DataTable::new(vec![
-            DataColumn::new("KEY").width(18),
-            DataColumn::new("ACTION").min_width(24),
-        ])
-        .header_fg(Color::BrightBlack)
-        .separator_fg(Color::BrightBlack)
-        .empty("no help");
+        let mut section = HelpSection::new("Keys");
         for (key, action) in rows {
-            table.add_row(DataRow::new(vec![key, action]).fg(Color::BrightWhite));
+            section.add_row(key, action);
         }
-        table.view(self.width, self.visible_height() + 2)
+        HelpPanel::without_title()
+            .section(section)
+            .key_width(18)
+            .indent(0)
+            .gap(2)
+            .section_color(Color::BrightBlack)
+            .key_color(Color::BrightWhite)
+            .description_color(Color::BrightBlack)
+            .view(self.width, self.visible_height() + 2)
     }
 
     fn sort_panel_view(&self) -> String {
@@ -11268,14 +11270,24 @@ mod tests {
 
     #[test]
     fn help_view_mentions_compact_column_restore() {
-        let app = TopApp::new(TopOptions::default());
+        let mut app = TopApp::new(TopOptions::default());
+        app.width = 72;
 
-        let plain = a3s_tui::style::strip_ansi(&app.help_view());
+        let rendered = app.help_view();
+        let plain = a3s_tui::style::strip_ansi(&rendered);
 
+        assert!(plain.contains("Keys"));
         assert!(plain.contains("c then d"));
         assert!(plain.contains("restore compact columns"));
         assert!(plain.contains("s / r"));
         assert!(plain.contains("clear filter"));
+        assert!(rendered.contains("\x1b["), "help view should be styled");
+        assert!(
+            rendered
+                .lines()
+                .all(|line| a3s_tui::style::visible_len(line) <= 72),
+            "{plain}"
+        );
     }
 
     #[test]
