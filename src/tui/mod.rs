@@ -26,8 +26,8 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    MenuItem, MenuPanel, Spinner, Textarea, ToolLogRecord as TuiToolLogRecord, ToolLogStatus,
-    ToolLogView, Viewport,
+    MenuItem, MenuPanel, ModeLine, SessionStatus, SessionStatusChip, Spinner, Textarea,
+    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
 };
 use a3s_tui::event::KeyEvent;
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -2951,116 +2951,8 @@ impl Model for App {
         // Bottom status bar (Claude-style, two lines):
         //   dir git:(branch) <model> (<window> context) ctx:N%   [+ live chips]
         //   ⏵⏵ <mode> mode on (shift+tab to cycle) · …
-        let dim = |s: &str| Style::new().fg(TN_GRAY).render(s);
-        let dir = self.cwd.rsplit('/').next().unwrap_or(&self.cwd);
-        let mut line1 = format!("  {}", Style::new().fg(ACCENT).bold().render(dir));
-        if let Some(b) = &self.branch {
-            line1.push_str(&format!(
-                " {}{}{}",
-                dim("git:("),
-                Style::new().fg(TN_YELLOW).render(b),
-                dim(")")
-            ));
-        }
-        if let Some(m) = &self.model {
-            let name = m.rsplit('/').next().unwrap_or(m);
-            line1.push_str(&format!("  {}", Style::new().fg(TN_FG).render(name)));
-            if self.context_limit > 0 {
-                let win = if self.context_limit >= 1_000_000 {
-                    format!("{}M", self.context_limit / 1_000_000)
-                } else {
-                    format!("{}k", self.context_limit / 1000)
-                };
-                line1.push_str(&format!(" {}", dim(&format!("({win} context)"))));
-            }
-        }
-        if self.context_limit > 0 {
-            let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
-            // Color by fill so the approach to the ~85% auto-compact point is visible.
-            let c = if pct >= 85 {
-                TN_RED
-            } else if pct >= 70 {
-                TN_YELLOW
-            } else {
-                TN_GRAY
-            };
-            line1.push_str(&format!(
-                " {}",
-                Style::new().fg(c).render(&format!("ctx:{pct}%"))
-            ));
-        } else if self.output_tokens > 0 {
-            line1.push_str(&format!(" {}", dim(&format!("{} tok", self.output_tokens))));
-        }
-        // Live chips, only when active.
-        if self.goal.is_some() {
-            let elapsed = self
-                .goal_since
-                .map(|t| format!(" ({})", fmt_elapsed(t.elapsed())))
-                .unwrap_or_default();
-            line1.push_str(&format!(
-                "  {}",
-                Style::new()
-                    .fg(TN_CYAN)
-                    .render(&format!("🎯 Pursuing goal{elapsed}"))
-            ));
-        }
-        if let Some(dev) = &self.agent_dev {
-            line1.push_str(&format!(
-                "  {}",
-                Style::new().fg(TN_GREEN).render(&format!(
-                    "◇ agent:{} · Esc /agent off",
-                    truncate(&dev.name, 24)
-                ))
-            ));
-        }
-        if let Some(dev) = &self.mcp_dev {
-            line1.push_str(&format!(
-                "  {}",
-                Style::new()
-                    .fg(TN_CYAN)
-                    .render(&format!("◆ mcp:{} · Esc /mcp off", truncate(&dev.name, 24)))
-            ));
-        }
-        if let Some(dev) = &self.skill_dev {
-            line1.push_str(&format!(
-                "  {}",
-                Style::new().fg(TN_CYAN).render(&format!(
-                    "✦ skill:{} · Esc /skill off",
-                    truncate(&dev.name, 24)
-                ))
-            ));
-        }
-        if let Some(dev) = &self.okf_dev {
-            line1.push_str(&format!(
-                "  {}",
-                Style::new()
-                    .fg(TN_CYAN)
-                    .render(&format!("⌁ okf:{} · Esc /okf off", truncate(&dev.name, 24)))
-            ));
-        }
-        if self.loop_remaining > 0 {
-            line1.push_str(&format!("  ↻{}", self.loop_remaining));
-        }
-        if self.runtime.active_subagent_count() > 0 {
-            line1.push_str(&format!(
-                "  ⇉ {} agents",
-                self.runtime.active_subagent_count()
-            ));
-        }
-        if self.runtime.active_tool_count() > 0 {
-            line1.push_str(&format!("  ⚙ {} running", self.runtime.active_tool_count()));
-        }
-        if let Some(v) = &self.update_available {
-            line1.push_str(&format!("  ⬆ {v}"));
-        }
-        let status1 = pad_to(&truncate(&line1, width), width);
-        let mode_part = Style::new().fg(self.mode.color()).bold().render(&format!(
-            "  {} {} mode on",
-            self.mode.glyph(),
-            self.mode.name()
-        ));
-        let hints = dim(" (shift+tab to cycle) · /help · ↑↓ history · esc");
-        let status2 = pad_to(&truncate(&format!("{mode_part}{hints}"), width), width);
+        let status1 = self.session_status_line(width);
+        let status2 = render_mode_status_line(self.mode, width);
 
         // Gap line between transcript and loading — or a floating "jump to
         // latest" hint when the user has scrolled up away from the bottom.
@@ -3165,7 +3057,145 @@ impl Model for App {
     }
 }
 
+fn render_session_status_line(
+    cwd: &str,
+    branch: Option<&str>,
+    model: Option<&str>,
+    context_limit: u32,
+    last_prompt_tokens: usize,
+    output_tokens: usize,
+    chips: impl IntoIterator<Item = SessionStatusChip>,
+    width: usize,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut status = SessionStatus::new(cwd)
+        .accent_color(ACCENT)
+        .branch_color(TN_YELLOW)
+        .text_color(TN_FG)
+        .muted_color(TN_GRAY)
+        .threshold_colors(TN_YELLOW, TN_RED)
+        .margin(2);
+
+    if let Some(branch) = branch {
+        status = status.branch(branch);
+    }
+    if let Some(model) = model {
+        status = status.model(model);
+    }
+    if context_limit > 0 {
+        status = status.context(last_prompt_tokens, context_limit as usize);
+    } else if output_tokens > 0 {
+        status = status.output_tokens(output_tokens);
+    }
+    for chip in chips {
+        status = status.status_chip(chip);
+    }
+
+    status.view(width.min(u16::MAX as usize) as u16)
+}
+
+fn render_mode_status_line(mode: Mode, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    ModeLine::new(mode.name())
+        .glyph(mode.glyph())
+        .hints("(shift+tab to cycle) · /help · ↑↓ history · esc")
+        .mode_color(mode.color())
+        .hint_color(TN_GRAY)
+        .view(width.min(u16::MAX as usize) as u16)
+}
+
 impl App {
+    fn session_status_line(&self, width: usize) -> String {
+        render_session_status_line(
+            &self.cwd,
+            self.branch.as_deref(),
+            self.model.as_deref(),
+            self.context_limit,
+            self.last_prompt_tokens,
+            self.output_tokens,
+            self.session_status_chips(),
+            width,
+        )
+    }
+
+    fn session_status_chips(&self) -> Vec<SessionStatusChip> {
+        let mut chips = Vec::new();
+
+        if self.goal.is_some() {
+            let elapsed = self
+                .goal_since
+                .map(|t| format!(" ({})", fmt_elapsed(t.elapsed())))
+                .unwrap_or_default();
+            chips.push(
+                SessionStatusChip::new("🎯", format!("Pursuing goal{elapsed}")).color(TN_CYAN),
+            );
+        }
+        if let Some(dev) = &self.agent_dev {
+            chips.push(
+                SessionStatusChip::new(
+                    "◇",
+                    format!("agent:{} · Esc /agent off", truncate(&dev.name, 24)),
+                )
+                .color(TN_GREEN),
+            );
+        }
+        if let Some(dev) = &self.mcp_dev {
+            chips.push(
+                SessionStatusChip::new(
+                    "◆",
+                    format!("mcp:{} · Esc /mcp off", truncate(&dev.name, 24)),
+                )
+                .color(TN_CYAN),
+            );
+        }
+        if let Some(dev) = &self.skill_dev {
+            chips.push(
+                SessionStatusChip::new(
+                    "✦",
+                    format!("skill:{} · Esc /skill off", truncate(&dev.name, 24)),
+                )
+                .color(TN_CYAN),
+            );
+        }
+        if let Some(dev) = &self.okf_dev {
+            chips.push(
+                SessionStatusChip::new(
+                    "⌁",
+                    format!("okf:{} · Esc /okf off", truncate(&dev.name, 24)),
+                )
+                .color(TN_CYAN),
+            );
+        }
+        if self.loop_remaining > 0 {
+            chips.push(
+                SessionStatusChip::new("↻", self.loop_remaining.to_string()).color(TN_GRAY),
+            );
+        }
+        let active_subagents = self.runtime.active_subagent_count();
+        if active_subagents > 0 {
+            chips.push(
+                SessionStatusChip::new("⇉", format!("{active_subagents} agents")).color(TN_GRAY),
+            );
+        }
+        let active_tools = self.runtime.active_tool_count();
+        if active_tools > 0 {
+            chips.push(
+                SessionStatusChip::new("⚙", format!("{active_tools} running")).color(TN_GRAY),
+            );
+        }
+        if let Some(version) = self.update_available.as_deref() {
+            chips.push(SessionStatusChip::new("⬆", version).color(TN_YELLOW));
+        }
+
+        chips
+    }
+
     fn clone_asset_command(
         &mut self,
         family: &'static str,
@@ -6233,6 +6263,35 @@ mod tests {
             rendered.contains("\x1b["),
             "button should carry ANSI styling"
         );
+    }
+
+    #[test]
+    fn footer_uses_shared_status_components() {
+        let status = render_session_status_line(
+            "/Users/roylin/code/a3s",
+            Some("main"),
+            Some("openai/gpt-5"),
+            128_000,
+            90_000,
+            0,
+            [SessionStatusChip::new("⚙", "1 running").color(TN_GRAY)],
+            72,
+        );
+        let status_plain = a3s_tui::style::strip_ansi(&status);
+
+        assert_eq!(a3s_tui::style::visible_len(&status), 72);
+        assert!(status_plain.contains("a3s git:(main)"), "{status_plain}");
+        assert!(status_plain.contains("gpt-5 (128k context)"), "{status_plain}");
+        assert!(status_plain.contains("ctx:70%"), "{status_plain}");
+        assert!(status_plain.contains("⚙ 1 running"), "{status_plain}");
+        assert!(status.contains("\x1b["), "status should be styled");
+
+        let mode = render_mode_status_line(Mode::Auto, 48);
+        let mode_plain = a3s_tui::style::strip_ansi(&mode);
+        assert_eq!(a3s_tui::style::visible_len(&mode), 48);
+        assert!(mode_plain.starts_with("  ⏵⏵ auto mode on"), "{mode_plain}");
+        assert!(mode_plain.contains("/help"), "{mode_plain}");
+        assert!(mode.contains("\x1b["), "mode line should be styled");
     }
 
     #[test]
