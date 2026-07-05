@@ -47,6 +47,75 @@ pub(crate) fn gutter(color: Color, content: &str) -> String {
         .view()
 }
 
+fn input_chrome_width(width: usize) -> u16 {
+    width.saturating_sub(PAD).min(u16::MAX as usize) as u16
+}
+
+pub(crate) fn input_rule(width: usize, color: Color) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    a3s_tui::components::InputBorder::new()
+        .margin(PAD)
+        .rule_color(color)
+        .view(input_chrome_width(width))
+}
+
+pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    a3s_tui::components::InputBorder::new()
+        .margin(PAD)
+        .rule('━')
+        .rainbow(palette.to_vec(), offset)
+        .view(input_chrome_width(width))
+}
+
+pub(crate) fn input_status_rule(
+    width: usize,
+    border_color: Color,
+    context: &str,
+    label: &str,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    a3s_tui::components::InputBorder::new()
+        .margin(PAD)
+        .rule_color(border_color)
+        .context_color(TN_GRAY)
+        .label_color(ACCENT)
+        .context(context)
+        .label(label)
+        .view(input_chrome_width(width))
+}
+
+pub(crate) fn input_prompt_line(
+    prompt: &str,
+    color: Color,
+    text: &str,
+    tint_text: bool,
+    width: usize,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let mut line = a3s_tui::components::PromptLine::new(format!("{prompt} "))
+        .text(text)
+        .margin(PAD)
+        .width(width)
+        .prompt_style(Style::new().fg(color).bold());
+    if tint_text {
+        line = line.text_style(Style::new().fg(color));
+    }
+    line.view()
+}
+
 /// Greedy word-wrap of plain (unstyled) text to `width` display columns, with
 /// blank lines dropped so a preview stays single-spaced. Used for the reasoning
 /// ("thinking") block so it lays out like other messages instead of being one
@@ -186,7 +255,10 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{gutter, truncate, user_bubble, wrap_words};
+    use super::{
+        gutter, input_gradient_rule, input_prompt_line, input_rule, input_status_rule, truncate,
+        user_bubble, wrap_words,
+    };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
 
     #[test]
@@ -291,5 +363,58 @@ mod tests {
 
         assert_eq!(strip_ansi(&rendered), "   ● hi   ");
         assert_eq!(visible_len(&rendered), 10);
+    }
+
+    #[test]
+    fn input_prompt_line_uses_shared_prompt_component() {
+        let rendered = input_prompt_line("❯", Color::Cyan, "cargo test\n--all", false, 24);
+        let plain = strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
+
+        assert!(rows[0].starts_with("  ❯ cargo test"));
+        assert!(rows[1].starts_with("    --all"));
+        assert!(rendered.lines().all(|line| visible_len(line) == 24));
+        assert!(rendered.contains("\x1b[1;36m❯ \x1b[0m"));
+    }
+
+    #[test]
+    fn input_prompt_line_can_tint_modal_input_text() {
+        let rendered = input_prompt_line("?", Color::Cyan, "research mode", true, 28);
+
+        assert_eq!(strip_ansi(&rendered).trim_end(), "  ? research mode");
+        assert!(rendered.contains("\x1b[1;36m? \x1b[0m"));
+        assert!(rendered.contains("\x1b[36mresearch mode\x1b[0m"));
+    }
+
+    #[test]
+    fn input_rules_use_shared_border_component_widths() {
+        let plain = strip_ansi(&input_rule(20, Color::BrightBlack));
+        assert_eq!(visible_len(&plain), 18);
+        assert!(plain.starts_with("  ─"));
+
+        let status = input_status_rule(48, Color::BrightBlack, "70% context used  ", "◇ high");
+        let status_plain = strip_ansi(&status);
+        assert_eq!(visible_len(&status), 46);
+        assert!(status_plain.contains("70% context used"));
+        assert!(status_plain.contains("◇ high"));
+        assert!(status.contains("\x1b[1;38;2;0;112;243m◇ high\x1b[0m"));
+    }
+
+    #[test]
+    fn input_gradient_rule_preserves_brand_ribbon_width() {
+        let rendered = input_gradient_rule(
+            20,
+            &[
+                Color::Rgb(0, 124, 240),
+                Color::Rgb(0, 223, 216),
+                Color::Rgb(255, 0, 128),
+            ],
+            1,
+        );
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(visible_len(&rendered), 18);
+        assert!(plain.starts_with("  ━"));
+        assert!(rendered.contains("\x1b[1;38;2;"));
     }
 }

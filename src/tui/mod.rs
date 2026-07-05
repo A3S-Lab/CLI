@@ -2831,27 +2831,16 @@ impl Model for App {
         };
         // Brief brand-gradient ribbon on both input borders after picking
         // ultracode; otherwise plain bottom + effort-chip top.
-        let bar = width.saturating_sub(2 * PAD);
         let gradient = self
             .gradient_until
             .is_some_and(|t| t.elapsed() < Duration::from_millis(1600));
-        let ribbon = |offset: usize| {
-            let mut s = " ".repeat(PAD);
-            for i in 0..bar {
-                let c = BRAND_GRADIENT[(i + self.gradient_frame + offset) % BRAND_GRADIENT.len()];
-                s.push_str(&Style::new().fg(c).bold().render("━"));
-            }
-            s
-        };
         let separator = if gradient {
-            ribbon(3)
+            input_gradient_rule(width, &BRAND_GRADIENT, self.gradient_frame + 3)
         } else {
-            Style::new()
-                .fg(border)
-                .render(&format!("{}{}", " ".repeat(PAD), "─".repeat(bar)))
+            input_rule(width, border)
         };
         let top_separator = if gradient {
-            ribbon(0)
+            input_gradient_rule(width, &BRAND_GRADIENT, self.gradient_frame)
         } else {
             let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].label);
             // Context-window usage at the top-right of the input (Claude-style).
@@ -2861,15 +2850,7 @@ impl Model for App {
             } else {
                 String::new()
             };
-            let left = bar.saturating_sub(elabel.chars().count() + ctxlabel.chars().count() + 4);
-            format!(
-                "{}{} {}{} {}",
-                " ".repeat(PAD),
-                Style::new().fg(border).render(&"─".repeat(left)),
-                Style::new().fg(TN_GRAY).render(&ctxlabel),
-                Style::new().fg(ACCENT).bold().render(&elabel),
-                Style::new().fg(border).render("──"),
-            )
+            input_status_rule(width, border, &ctxlabel, &elabel)
         };
 
         // Activity line directly above the input: spinner while the agent works,
@@ -2920,33 +2901,14 @@ impl Model for App {
             }
         };
 
-        let prompt = Style::new().fg(icolor).bold().render(&format!("{sym} "));
         let typed = self.textarea.view();
-        let typed = if sym == "!"
+        let tint_input = sym == "!"
             || sym == "?"
             || sym == "◇"
             || sym == "◆"
             || sym == "⌁"
-            || inp.starts_with("/btw")
-        {
-            Style::new().fg(icolor).render(&typed)
-        } else {
-            typed
-        };
-        // First line carries the prompt; continuation lines (multi-line input)
-        // are indented to align under the prompt (PAD margin + "{sym} " = PAD+2).
-        let input_view = {
-            let cont = " ".repeat(PAD + 2);
-            let mut parts = typed.split('\n');
-            let first = parts.next().unwrap_or("");
-            let mut s = format!("{}{}{}", " ".repeat(PAD), prompt, first);
-            for line in parts {
-                s.push('\n');
-                s.push_str(&cont);
-                s.push_str(line);
-            }
-            s
-        };
+            || inp.starts_with("/btw");
+        let input_view = input_prompt_line(sym, icolor, &typed, tint_input, width);
 
         // Bottom status bar (Claude-style, two lines):
         //   dir git:(branch) <model> (<window> context) ctx:N%   [+ live chips]
