@@ -40,20 +40,15 @@ pub(crate) fn user_bubble(content: &str, width: usize) -> String {
 }
 
 pub(crate) fn gutter(color: Color, content: &str) -> String {
-    let dot = Style::new().fg(color).bold().render("●");
-    let margin = " ".repeat(PAD);
-    content
-        .lines()
-        .enumerate()
-        .map(|(i, line)| {
-            if i == 0 {
-                format!("{margin}{dot} {line}")
-            } else {
-                format!("{margin}  {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return String::new();
+    }
+
+    a3s_tui::components::GutterBlock::lines(lines)
+        .margin(PAD)
+        .marker_color(color)
+        .view()
 }
 
 /// Greedy word-wrap of plain (unstyled) text to `width` display columns, with
@@ -195,7 +190,8 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate, wrap_words};
+    use super::{gutter, truncate, wrap_words};
+    use a3s_tui::style::{strip_ansi, Color, Style};
 
     #[test]
     fn wraps_on_word_boundaries_without_splitting_words() {
@@ -252,5 +248,28 @@ mod tests {
         assert!(out.ends_with('…'));
         // Fits-as-is when within budget.
         assert_eq!(truncate("ok", 6), "ok");
+    }
+
+    #[test]
+    fn gutter_uses_shared_block_shape() {
+        let rendered = gutter(Color::Green, "hello\nworld");
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(plain, "  ● hello\n    world");
+        assert!(rendered.contains("\x1b[1;32m●\x1b[0m"));
+    }
+
+    #[test]
+    fn gutter_preserves_styled_content() {
+        let styled = Style::new().fg(Color::Yellow).render("styled");
+        let rendered = gutter(Color::Green, &styled);
+
+        assert!(rendered.contains("\x1b[33mstyled\x1b[0m"));
+        assert_eq!(strip_ansi(&rendered), "  ● styled");
+    }
+
+    #[test]
+    fn gutter_keeps_empty_input_empty() {
+        assert_eq!(gutter(Color::Green, ""), "");
     }
 }
