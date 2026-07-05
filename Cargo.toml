@@ -39,3 +39,13 @@ sha2 = "0.10"
 opt-level = "z"
 lto = true
 strip = true
+
+[patch.crates-io]
+# Monorepo development builds should exercise the local A3S crates instead of
+# waiting for every submodule change to be published to crates.io.
+a3s-code-core = { path = "../code/core" }
+a3s-common = { path = "../common" }
+a3s-lane = { path = "../lane" }
+a3s-memory = { path = "../memory" }
+a3s-search = { path = "../search" }
+a3s-tui = { path = "../tui" }
