@@ -6,7 +6,7 @@
 //! `.a3s/okf` and are managed by the sibling `/okf` module.
 
 use super::super::*;
-use a3s_tui::components::DetailPanel;
+use a3s_tui::components::{DetailPanel, DetailRow};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KbLocalCommand {
@@ -413,35 +413,42 @@ impl App {
     }
 
     fn render_kb_recent(&self, kb: &KbPanel, out: &mut Vec<String>, width: usize) {
-        out.push(kb_line(
-            &Style::new().fg(TN_FG).bold().render("  Recent sources"),
-            width,
-        ));
-        if kb.recent.is_empty() {
-            out.push(kb_line(
-                &Style::new().fg(TN_GRAY).render(
-                    "  no sources yet — start with `/kb add <text>` or `/kb import <file|folder>`",
-                ),
-                width,
-            ));
-        } else {
-            for source in &kb.recent {
-                out.push(kb_line(
-                    &format!(
-                        "  {} {}",
-                        Style::new().fg(TN_CYAN).render("•"),
-                        Style::new()
-                            .fg(TN_FG)
-                            .render(&truncate(source, width.saturating_sub(5)))
-                    ),
-                    width,
-                ));
-            }
-        }
+        out.extend(kb_recent_source_lines(&kb.recent, width));
 
         out.push(String::new());
         out.extend(kb_workflow_lines(width));
     }
+}
+
+fn kb_recent_source_lines(recent: &[String], width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mut panel = DetailPanel::new("Recent sources")
+        .show_separator(false)
+        .indent(2)
+        .title_color(TN_FG)
+        .value_color(TN_FG)
+        .muted_color(TN_GRAY);
+    if recent.is_empty() {
+        panel = panel.row(DetailRow::muted(
+            "no sources yet — start with `/kb add <text>` or `/kb import <file|folder>`",
+        ));
+    } else {
+        for source in recent {
+            panel = panel.text(format!("• {source}"));
+        }
+    }
+
+    panel
+        .view(
+            width.min(u16::MAX as usize) as u16,
+            recent.len().saturating_add(1).max(2),
+        )
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 fn kb_workflow_lines(width: usize) -> Vec<String> {
@@ -599,6 +606,39 @@ mod tests {
                 .all(|line| a3s_tui::style::visible_len(line) <= 40),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn kb_recent_source_lines_use_shared_detail_panel_and_fit_width() {
+        let recent = vec![
+            ".a3s/kb/sources/project/very-long-source-name.md".to_string(),
+            ".a3s/kb/sources/notes.md".to_string(),
+        ];
+        let lines = kb_recent_source_lines(&recent, 36);
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 3);
+        assert!(plain.contains("Recent sources"), "{plain}");
+        assert!(plain.contains("• .a3s/kb"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) <= 36),
+            "{plain}"
+        );
+
+        let empty = kb_recent_source_lines(&[], 42);
+        let empty_plain = empty
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(empty.len(), 2);
+        assert!(empty_plain.contains("no sources yet"), "{empty_plain}");
     }
 
     #[test]
