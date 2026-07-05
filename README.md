@@ -46,6 +46,8 @@ surface.
 Use this README as the TUI capability guide:
 
 - [Capability Overview](#capability-overview) maps the major product surfaces.
+- [Everyday Capability Paths](#everyday-capability-paths) explains how those
+  surfaces fit together during real work.
 - [Inside The TUI](#inside-the-tui) explains the interactive transcript,
   input modes, panels, and keyboard model.
 - [Startup, Sessions, And Safety](#startup-sessions-and-safety) covers launch,
@@ -78,6 +80,35 @@ Use this README as the TUI capability guide:
 | Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent definition. |
 | OS and RemoteUI | `/login` enables OS capabilities. `/view` reopens the latest RemoteUI ViewLink captured from shaped OS progressive responses (`.view` or `viewUrl`), using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, and `/fork` branches a new session from the current transcript. |
+
+### Everyday Capability Paths
+
+A3S Code TUI is designed around work paths rather than isolated commands. Most
+turns start as a normal chat prompt, then the TUI decides which context,
+permissions, tools, panels, and follow-up evidence are needed.
+
+| Work path | Typical flow | Useful surfaces |
+| --- | --- | --- |
+| Repository orientation | Start with `/init`, ask for a map of the codebase, attach files with `@`, and open `/ide` when you need to browse or edit directly. | `/init`, `/ide`, `@<path>`, `/ctx`, `/help` |
+| Focused coding | Ask for a change, review streamed reads/searches/diffs, approve gated writes, and let the agent run focused checks before summarizing what changed. | Tool cards, approval overlay, `DiffView`, `/output`, `! <command>` |
+| Debugging and verification | Let the model inspect logs, grep call sites, run shell or test commands, and keep the exact tool evidence visible in the transcript and output log. | `grep`, `read`, `bash`, `git`, `/output`, `/top` |
+| Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/memory`, `/sleep`, `/compact` |
+| Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task`, `parallel_task` |
+| Research | Prefix with `?` so the host gathers evidence first, then asks the model to synthesize a cited answer and report artifact. | `? <question>`, `DynamicWorkflowRuntime`, signed-in `runtime`, local `parallel_task` fallback |
+| Local asset development | Enter an asset mode, iterate on the selected local definition, review it, then publish or deploy only when the OS side is available and appropriate. | `/agent`, `/mcp`, `/skill`, `/okf`, `/flow`, `/loop` |
+| Operations and recovery | Resume saved sessions, reopen RemoteUI, inspect local or OS activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `/view`, `/top`, asset `activity`, `/plugin`, `/reload`, `/update` |
+
+The key boundary is that local automation stays useful without an OS account,
+while OS-backed actions become available only after `/login`. Local commands can
+draft assets, run tools, build memory, use MCP, delegate to child agents, and
+execute dynamic workflows. Signed-in commands add OS assets, Runtime batches,
+RemoteUI ViewLinks, service activity, and publishing or deployment.
+
+The TUI keeps these paths observable. A long turn can show a plan row,
+reasoning deltas, live tool status, approval prompts, subagent progress,
+dynamic-workflow artifacts, memory events, RemoteUI actions, and final
+verification evidence in the same transcript instead of scattering state across
+separate logs.
 
 ### Inside The TUI
 
@@ -373,6 +404,16 @@ tools, MCP, local asset drafting, memory, `/ctx`, `/kb`, `task`,
 working. Signed-in behavior adds OS assets, Function as a Service, Workflow as a
 Service, Knowledge service deployment, RemoteUI ViewLinks, asset activity
 panels, and the `runtime` tool.
+
+| Capability | Signed out | Signed in after `/login` |
+| --- | --- | --- |
+| Coding chat and workspace tools | Available with local permission checks and HITL approval. | Available with the same local safety path. |
+| Context, memory, and local knowledge | `/ctx`, `/memory`, `/sleep`, and `/kb` use local stores. | Local stores remain available; OS-backed reports can also return RemoteUI views. |
+| Dynamic workflows | `DynamicWorkflowRuntime` can run local Flow-backed orchestration and host-side `parallel_task` fallback. | Workflow PTC steps may also call the registered `runtime` tool for OS batch work. |
+| Asset authoring | `/agent`, `/mcp`, `/skill`, `/flow <description>`, and `/okf` can draft and review local assets. | Publish, deploy, run, open, logs, status, list, and activity commands can use OS services. |
+| RemoteUI | Unavailable except for existing browser URLs printed by local tools. | `.view` and `viewUrl` responses become `Open view` actions and `/view` history. |
+| Runtime activity | `/top` observes local processes. | Asset `activity` commands inspect OS Runtime jobs, runs, invocations, indexing, and workflow activity. |
+| Updates and recovery | `/update`, `/fork`, `/clear`, and `a3s code resume` remain local. | Same behavior; saved sessions keep OS login-derived capability state separate from secrets. |
 
 ### OS Service Mapping
 
