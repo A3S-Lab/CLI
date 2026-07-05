@@ -3,18 +3,31 @@
 //! drills into a coding agent's process subtree.
 
 use super::super::*;
+use a3s_tui::components::SectionHeader;
 
 fn top_panel_line(rendered: &str, width: usize) -> String {
     pad_to(&truncate(rendered, width), width)
 }
 
+fn top_panel_header(title: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    SectionHeader::new(title)
+        .show_separator(false)
+        .indent(2)
+        .title_color(ACCENT)
+        .view(width.min(u16::MAX as usize) as u16, 1)
+}
+
 fn top_panel_title(processes: usize, agents: usize, focus: Option<(&str, u32)>) -> String {
     match focus {
         Some((label, pid)) => {
-            format!("  /top ▸ {label} (pid {pid}) — {processes} activity rows · Esc back")
+            format!("/top ▸ {label} (pid {pid}) — {processes} activity rows · Esc back")
         }
         None => format!(
-            "  /top — {processes} agent activity rows · {agents} agent(s) · Enter focus agent · Esc close"
+            "/top — {processes} agent activity rows · {agents} agent(s) · Enter focus agent · Esc close"
         ),
     }
 }
@@ -52,8 +65,6 @@ impl App {
             }
             None => top_panel_title(rows.len(), agents, None),
         };
-        let title = Style::new().fg(ACCENT).bold().render(&title);
-
         // Body via the shared renderer; the panel has no per-pid history, so the
         // sparkline columns render blank (graceful degradation).
         let hidden = HashSet::new();
@@ -69,7 +80,7 @@ impl App {
             },
         );
 
-        let mut out = vec![top_panel_line(&title, width)];
+        let mut out = vec![top_panel_header(&title, width)];
         out.extend(table.lines().map(|line| top_panel_line(line, width)));
         while out.len() < h {
             out.push(String::new());
@@ -101,13 +112,7 @@ mod tests {
 
     #[test]
     fn top_panel_lines_are_width_bounded_with_styles() {
-        let line = top_panel_line(
-            &Style::new()
-                .fg(ACCENT)
-                .bold()
-                .render("  /top — many processes · Enter focus agent · Esc close"),
-            28,
-        );
+        let line = top_panel_header("/top — many processes · Enter focus agent · Esc close", 28);
 
         assert!(
             a3s_tui::style::visible_len(&line) <= 28,
