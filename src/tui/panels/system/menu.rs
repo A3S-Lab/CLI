@@ -1,6 +1,7 @@
 //! `/` slash command menu + the shared overlay-list primitive.
 
 use super::super::*;
+use a3s_tui::components::TextOverlay;
 use a3s_tui::components::{MenuItem, MenuPanel};
 
 fn slash_menu_lines(
@@ -45,6 +46,16 @@ fn slash_menu_submit_text(cmd: &str) -> String {
         let name = cmd.trim_start_matches('/');
         format!("Use your `{name}` skill.")
     }
+}
+
+fn overlay_menu_rows(composed: &str, menu: &[String], width: usize) -> String {
+    if menu.is_empty() {
+        return composed.to_string();
+    }
+    TextOverlay::new(menu.iter().cloned())
+        .above_bottom(5)
+        .width(width)
+        .apply(composed)
 }
 
 impl App {
@@ -128,19 +139,7 @@ impl App {
     /// Overlay the `/` command menu just above the input box.
     /// Overlay `menu` rows just above the input box (last row on the activity line).
     pub(crate) fn overlay_list(&self, composed: String, menu: &[String]) -> String {
-        if menu.is_empty() {
-            return composed;
-        }
-        let mut rows: Vec<String> = composed.lines().map(str::to_string).collect();
-        let bottom = (self.height as usize).saturating_sub(6);
-        let start = bottom.saturating_sub(menu.len().saturating_sub(1));
-        for (i, ml) in menu.iter().enumerate() {
-            let row = start + i;
-            if row < rows.len() {
-                rows[row] = ml.clone();
-            }
-        }
-        rows.join("\n")
+        overlay_menu_rows(&composed, menu, self.width as usize)
     }
 
     pub(crate) fn overlay_slash_menu(&self, composed: String) -> String {
@@ -200,6 +199,37 @@ mod tests {
                 a3s_tui::style::strip_ansi(&row)
             );
         }
+    }
+
+    #[test]
+    fn overlay_menu_rows_uses_shared_text_overlay_positioning() {
+        let frame = (0..10)
+            .map(|idx| format!("row {idx}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let menu = vec!["menu one".to_string(), "menu two".to_string()];
+        let rendered = overlay_menu_rows(&frame, &menu, 20);
+        let rows = rendered.lines().collect::<Vec<_>>();
+
+        assert_eq!(rows[2], "row 2");
+        assert_eq!(rows[3].trim_end(), "menu one");
+        assert_eq!(rows[4].trim_end(), "menu two");
+        assert_eq!(a3s_tui::style::visible_len(rows[3]), 20);
+        assert_eq!(a3s_tui::style::visible_len(rows[4]), 20);
+        assert_eq!(rows[5], "row 5");
+        assert_eq!(rows.len(), 10);
+    }
+
+    #[test]
+    fn overlay_menu_rows_bounds_styled_rows_to_frame_width() {
+        let frame = "row 0\nrow 1\nrow 2";
+        let styled = Style::new().fg(TN_CYAN).render("a very long overlay row");
+        let menu = vec![styled];
+        let rendered = overlay_menu_rows(frame, &menu, 8);
+        let row = rendered.lines().next().unwrap();
+
+        assert_eq!(a3s_tui::style::visible_len(row), 8);
+        assert!(row.contains('\u{1b}'));
     }
 
     #[test]
