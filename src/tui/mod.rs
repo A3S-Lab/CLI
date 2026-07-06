@@ -28,9 +28,9 @@ use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    Alert, AlertKind, ChoicePrompt, ChoicePromptMsg, InlineAction, ModeLine, Scrollbar,
-    SessionStatus, SessionStatusChip, Spinner, Textarea, Toast, ToastKind,
-    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, Viewport,
+    Alert, AlertKind, ChoicePrompt, ChoicePromptMsg, InlineAction, Scrollbar, SessionStatusChip,
+    Spinner, Textarea, Toast, ToastKind, ToolLogRecord as TuiToolLogRecord, ToolLogStatus,
+    Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -3368,11 +3368,11 @@ fn render_session_status_line(
         return String::new();
     }
 
-    let mut status = SessionStatus::new(cwd)
-        .accent_color(ACCENT)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut status = chrome
+        .session_status(cwd)
         .branch_color(TN_YELLOW)
-        .text_color(TN_FG)
-        .muted_color(TN_GRAY)
         .threshold_colors(TN_YELLOW, TN_RED)
         .margin(2);
 
@@ -3399,11 +3399,13 @@ fn render_mode_status_line(mode: Mode, width: usize) -> String {
         return String::new();
     }
 
-    ModeLine::new(mode.name())
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .mode_line(mode.name())
         .glyph(mode.glyph())
         .hints("(shift+tab to cycle) · /help · ↑↓ history · esc")
         .mode_color(mode.color())
-        .hint_color(TN_GRAY)
         .view(width.min(u16::MAX as usize) as u16)
 }
 

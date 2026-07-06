@@ -1,9 +1,7 @@
 //! Pinned plan/TODO + bottom task tracker + subagent rows, plus relayout.
 
 use super::super::*;
-use a3s_tui::components::{
-    ChecklistItem, ChecklistStatus, QueuedTask, SubagentRow, SubagentTracker, TaskQueue,
-};
+use a3s_tui::components::{ChecklistItem, ChecklistStatus, QueuedTask, SubagentRow};
 
 impl App {
     /// a3s-lane task detail lines for the very bottom: the running task plus
@@ -18,11 +16,14 @@ impl App {
         if self.queue.is_empty() {
             return Vec::new();
         }
+        let theme = agent_chrome_theme();
+        let chrome = agent_chrome(&theme);
         let queued = self
             .queue
             .iter()
             .map(|item| {
-                QueuedTask::new(item.text.clone())
+                chrome
+                    .queued_task(item.text.clone())
                     .priority(i32::from(item.prio))
                     .sequence(item.seq)
             })
@@ -95,6 +96,8 @@ impl App {
             .as_deref()
             .unwrap_or("parallel agents")
             .trim();
+        let theme = agent_chrome_theme();
+        let chrome = agent_chrome(&theme);
         let rows = subagents
             .into_iter()
             .map(|s| {
@@ -102,7 +105,8 @@ impl App {
                     .ended
                     .unwrap_or_else(Instant::now)
                     .saturating_duration_since(s.started);
-                let mut row = SubagentRow::new(s.agent.clone(), s.description.clone())
+                let mut row = chrome
+                    .subagent_row(s.agent.clone(), s.description.clone())
                     .elapsed(fmt_elapsed(elapsed))
                     .tokens(s.tokens);
                 if s.done {
@@ -120,7 +124,10 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
         return Vec::new();
     }
 
-    SubagentTracker::new(task)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .subagent_tracker(task)
         .slug(workflow_slug(task))
         .rows(rows)
         .max_running_rows(4)
@@ -147,7 +154,10 @@ fn task_queue_lines(
         return Vec::new();
     }
 
-    let mut queue = TaskQueue::new()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut queue = chrome
+        .task_queue()
         .completed(completed)
         .queued_tasks(queued)
         .margin(2)

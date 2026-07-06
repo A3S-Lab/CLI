@@ -3,7 +3,7 @@
 //! drills into a coding agent's process subtree.
 
 use super::super::*;
-use a3s_tui::components::{DataTableMsg, StatusBar};
+use a3s_tui::components::DataTableMsg;
 use a3s_tui::event::MouseEvent;
 
 use crate::top::process_data_table;
@@ -39,7 +39,10 @@ fn top_panel_header(
         ),
     };
 
-    StatusBar::new()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .status_bar()
         .left(left)
         .center(center)
         .right(right)
