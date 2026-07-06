@@ -256,7 +256,10 @@ fn help_panel() -> HelpPanel {
         command_forms.add_row(*command, *description);
     }
 
-    HelpPanel::without_title()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .help_panel_without_title()
         .section(slash_commands)
         .section(command_forms)
         .section(
