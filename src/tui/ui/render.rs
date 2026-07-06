@@ -1,10 +1,7 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
-use a3s_tui::components::{
-    ActivityBlock, Checklist, ChecklistItem, ChecklistStatus, DiffView, OutputBlock, OutputStatus,
-    ToolStatusLine,
-};
+use a3s_tui::components::{ChecklistItem, ChecklistStatus, OutputStatus};
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -70,7 +67,10 @@ fn render_completed_tool_output_block(
 ) -> String {
     const TAIL: usize = 5;
 
-    let mut block = OutputBlock::new(tool_verb(name))
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut block = chrome
+        .output(tool_verb(name))
         .indent(PAD)
         .bullet("●")
         .status(if ok {
@@ -78,10 +78,7 @@ fn render_completed_tool_output_block(
         } else {
             OutputStatus::Error
         })
-        .status_colors(TN_GREEN, TN_RED, ACCENT, TN_GRAY)
         .title_color(TN_FG)
-        .detail_color(TN_GRAY)
-        .connector_color(TN_GRAY)
         .body_color(if ok { TN_GRAY } else { TN_RED })
         .max_body_lines(TAIL)
         .text(output);
@@ -265,13 +262,12 @@ fn render_task_rows(rows: &[TaskSummaryRow], width: usize) -> String {
                 .text_color(row.text_color)
         })
         .collect();
-    let block = Checklist::new(items)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let block = chrome
+        .checklist(items)
         .indent(PAD + 2)
         .connector(true)
-        .pending_color(TN_GRAY)
-        .done_color(TN_GREEN)
-        .error_color(TN_RED)
-        .text_color(TN_GRAY)
         .strikethrough_done(false)
         .view(width.min(u16::MAX as usize) as u16, rows.len());
 
@@ -411,10 +407,12 @@ fn render_tool_header(
     args: Option<&serde_json::Value>,
     width: usize,
 ) -> String {
-    let mut line = ToolStatusLine::new(tool_verb(name))
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut line = chrome
+        .tool_status(tool_verb(name))
         .margin(PAD)
         .marker_color(if ok { TN_GREEN } else { TN_RED })
-        .detail_color(TN_GRAY)
         .label_bold(true);
     let arg = args
         .and_then(|args| arg_summary_for_tool(name, args))
@@ -437,13 +435,13 @@ pub(crate) fn render_live_tool_activity(
     width: usize,
     active: bool,
 ) -> String {
-    let mut block = ActivityBlock::new(tool_running_verb(name))
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut block = chrome
+        .activity(tool_running_verb(name))
         .margin(PAD)
         .width(width)
         .marker_colors(if active { ACCENT } else { TN_GRAY }, TN_GRAY)
-        .detail_color(TN_GRAY)
-        .output_color(TN_GRAY)
-        .connector_color(TN_GRAY)
         .max_output_lines(13);
     let arg = args
         .and_then(|args| arg_summary_for_tool(name, args))
@@ -597,8 +595,10 @@ fn summarize_tasks(tasks: &[serde_json::Value], worker: Option<&str>) -> Option<
 pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -> String {
     const MAX_DIFF_ROWS: usize = 200;
 
-    DiffView::from_texts(path, before, after)
-        .header_color(TN_GREEN)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .diff_texts(path, before, after)
         .context_color(TN_GRAY)
         .separator_color(TN_GRAY)
         .insert_color(Color::Rgb(211, 229, 255))

@@ -30,13 +30,15 @@ use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
     Alert, AlertKind, ChoicePrompt, ChoicePromptMsg, InlineAction, ModeLine, Scrollbar,
     SessionStatus, SessionStatusChip, Spinner, Textarea, Toast, ToastKind,
-    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, ToolLogView, Viewport,
+    ToolLogRecord as TuiToolLogRecord, ToolLogStatus, Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
 use a3s_tui::layout::{Constraint, Layout};
 use a3s_tui::style::{Color, Style};
-use a3s_tui::{Event, KeyCode, KeyModifiers, Model, ProgramBuilder};
+use a3s_tui::{
+    AgentChrome, Event, KeyCode, KeyModifiers, Model, ProgramBuilder, Theme as TuiTheme,
+};
 use tokio::sync::{mpsc, Mutex};
 
 use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTableView};
@@ -135,6 +137,27 @@ const BRAND_GRADIENT: [Color; 6] = [
     GRADIENT_SHIP_START,
     GRADIENT_SHIP_END,
 ];
+
+fn agent_chrome_theme() -> TuiTheme {
+    TuiTheme {
+        primary: ACCENT,
+        secondary: TN_CYAN,
+        bg: Color::Black,
+        fg: TN_FG,
+        muted: TN_GRAY,
+        border: TN_GRAY,
+        success: TN_GREEN,
+        warning: TN_ORANGE,
+        error: TN_RED,
+        info: TN_CYAN,
+        surface: SURFACE_SOFT,
+        highlight: SURFACE_SELECTED,
+    }
+}
+
+fn agent_chrome(theme: &TuiTheme) -> AgentChrome<'_> {
+    AgentChrome::new(theme)
+}
 
 /// Self-contained system-prompt directive injected ONLY when signed in to the OS
 /// platform. It disambiguates "OS" (the user means the signed-in OS open
@@ -742,14 +765,13 @@ fn format_tool_log_records(records: &[ToolCallRecord], width: usize) -> Option<S
         })
         .collect::<Vec<_>>();
 
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
     Some(
-        ToolLogView::new()
+        chrome
+            .tool_log()
             .records(records)
             .max_output_lines_per_record(OUTPUT_TAIL)
-            .header_color(TN_FG)
-            .status_colors(TN_GREEN, TN_RED)
-            .muted_color(TN_GRAY)
-            .output_color(TN_FG)
             .view(width as u16, usize::MAX),
     )
 }
@@ -6665,6 +6687,27 @@ mod tests {
                 Color::Rgb(255, 77, 77),
                 Color::Rgb(249, 203, 40),
             ]
+        );
+    }
+
+    #[test]
+    fn agent_chrome_theme_maps_tui_roles_to_code_palette() {
+        let theme = agent_chrome_theme();
+        assert_eq!(theme.primary, ACCENT);
+        assert_eq!(theme.fg, TN_FG);
+        assert_eq!(theme.muted, TN_GRAY);
+        assert_eq!(theme.border, TN_GRAY);
+        assert_eq!(theme.success, TN_GREEN);
+        assert_eq!(theme.warning, TN_ORANGE);
+        assert_eq!(theme.error, TN_RED);
+        assert_eq!(theme.surface, SURFACE_SOFT);
+        assert_eq!(theme.highlight, SURFACE_SELECTED);
+
+        let chrome = agent_chrome(&theme);
+        let rendered = chrome.tool_status("Running").view(24);
+        assert!(
+            rendered.contains(&ACCENT.fg_ansi()),
+            "agent chrome should render code primary color: {rendered:?}"
         );
     }
 

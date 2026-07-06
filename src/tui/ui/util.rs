@@ -23,12 +23,14 @@ pub(crate) fn user_bubble(content: &str, width: usize) -> String {
     // Keep the historical shape: 2 columns outside the bubble and at least an
     // 8-column colored body for very narrow terminals.
     let bubble_width = width.saturating_sub(PAD).max(PAD + 8);
-    a3s_tui::components::GutterBlock::lines(lines)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .gutter(lines.join("\n"))
         .margin(PAD)
         .marker(" ●")
         .gap(" ")
         .width(bubble_width)
-        .content_color(TN_FG)
         .background_color(SURFACE_SOFT)
         .view()
 }
@@ -56,7 +58,10 @@ pub(crate) fn input_rule(width: usize, color: Color) -> String {
         return String::new();
     }
 
-    a3s_tui::components::InputBorder::new()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .input_border()
         .margin(PAD)
         .rule_color(color)
         .view(input_chrome_width(width))
@@ -67,7 +72,10 @@ pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize
         return String::new();
     }
 
-    a3s_tui::components::InputBorder::new()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .input_border()
         .margin(PAD)
         .rule('━')
         .rainbow(palette.to_vec(), offset)
@@ -84,11 +92,12 @@ pub(crate) fn input_status_rule(
         return String::new();
     }
 
-    a3s_tui::components::InputBorder::new()
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .input_border()
         .margin(PAD)
         .rule_color(border_color)
-        .context_color(TN_GRAY)
-        .label_color(ACCENT)
         .context(context)
         .label(label)
         .view(input_chrome_width(width))
@@ -105,7 +114,10 @@ pub(crate) fn input_prompt_line(
         return String::new();
     }
 
-    let mut line = a3s_tui::components::PromptLine::new(format!("{prompt} "))
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    let mut line = chrome
+        .prompt(format!("{prompt} "))
         .text(text)
         .margin(PAD)
         .width(width)

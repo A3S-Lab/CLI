@@ -2,7 +2,7 @@
 
 use super::super::*;
 use a3s_tui::components::{
-    Checklist, ChecklistItem, ChecklistStatus, QueuedTask, SubagentRow, SubagentTracker, TaskQueue,
+    ChecklistItem, ChecklistStatus, QueuedTask, SubagentRow, SubagentTracker, TaskQueue,
 };
 
 impl App {
@@ -176,14 +176,14 @@ fn plan_checklist_lines(plan: &[(String, String, char, Color)], width: usize) ->
         .map(|(_, text, glyph, color)| plan_checklist_item(text, *glyph, *color))
         .collect::<Vec<_>>();
 
-    Checklist::new(items)
+    let theme = agent_chrome_theme();
+    let chrome = agent_chrome(&theme);
+    chrome
+        .checklist(items)
         .indent(2)
         .connector(true)
-        .pending_color(TN_GRAY)
         .active_color(TN_ORANGE)
         .done_color(TN_GRAY)
-        .error_color(TN_RED)
-        .text_color(TN_GRAY)
         .strikethrough_done(false)
         .view(width.min(u16::MAX as usize) as u16, 8)
         .lines()
