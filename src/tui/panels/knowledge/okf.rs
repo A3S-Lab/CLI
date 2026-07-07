@@ -217,6 +217,13 @@ fn is_okf_package_dir(path: &std::path::Path) -> bool {
             && (path.join("sources").is_dir() || path.join("wiki").is_dir())
 }
 
+pub(crate) fn okf_package_asset_from_dir(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<OkfPackageAsset> {
+    is_okf_package_dir(path).then(|| okf_package_asset(root, path))
+}
+
 fn okf_package_asset(root: &std::path::Path, path: &std::path::Path) -> OkfPackageAsset {
     let rel = path
         .strip_prefix(root)
@@ -1386,9 +1393,7 @@ impl App {
     }
 
     pub(crate) fn handle_okf_package_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(panel_state) = self.okf_picker.as_ref() else {
-            return None;
-        };
+        let panel_state = self.okf_picker.as_ref()?;
         let total = panel_state.packages.len();
         if total == 0 {
             return None;
@@ -1398,15 +1403,13 @@ impl App {
             return None;
         }
         let selected = panel_state.sel.min(total - 1);
-        let Some((mut panel, panel_height)) = okf_picker_panel(
+        let (mut panel, panel_height) = okf_picker_panel(
             &panel_state.packages,
             selected,
             &panel_state.root,
             width,
             self.height as usize,
-        ) else {
-            return None;
-        };
+        )?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;

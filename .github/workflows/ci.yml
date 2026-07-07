@@ -7,6 +7,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare A3S workspace crates
+        run: bash .github/scripts/checkout-a3s-workspace.sh
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - run: cargo fmt --all -- --check
@@ -24,5 +26,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Prepare A3S workspace crates
+        shell: bash
+        run: bash .github/scripts/checkout-a3s-workspace.sh
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release

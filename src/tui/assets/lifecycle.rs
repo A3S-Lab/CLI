@@ -19,6 +19,7 @@ pub(crate) enum LifecycleStage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
 pub(crate) enum OsService {
     AgentAsAService,
     FunctionAsAService,

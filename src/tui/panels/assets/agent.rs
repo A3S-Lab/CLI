@@ -516,6 +516,30 @@ pub(crate) fn agent_asset_name(kind: AgentOsKind, agent_name: &str) -> String {
     format!("{}-{}", kind.asset_prefix(), asset_slug(agent_name))
 }
 
+pub(crate) fn agent_dev_session_from_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<AgentDevSession, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let def = parse_agent_definition(path, &source)
+        .map_err(|e| format!("{} is not a valid agent definition: {e}", path.display()))?;
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(AgentDevSession {
+        name: def.name.clone(),
+        description: agent_description(&def),
+        rel,
+        path: path.to_path_buf(),
+        root: root.to_path_buf(),
+    })
+}
+
 fn agent_asset_source_path(rel: &str) -> String {
     let clean = rel.trim_start_matches('/').replace('\\', "/");
     format!(".a3s/agents/{clean}")
@@ -972,6 +996,7 @@ async fn lookup_agent_asset(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_agent_definition(
     origin: &str,
     token: &str,
@@ -1849,6 +1874,7 @@ fn capability_requires_application_deploy_metadata(value: &serde_json::Value) ->
     .any(|schema| reference.contains(schema))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_direct_capability_operation(
     client: &reqwest::Client,
     origin: &str,
@@ -2226,10 +2252,10 @@ fn agent_capability_params(
     let mut saw_kind = false;
     for name in names {
         let lower = name.to_ascii_lowercase();
-        let value = if lower.contains("asset") && lower.contains("id") {
-            saw_asset_id = true;
-            Some(serde_json::json!(asset_id))
-        } else if lower == "id" || (lower.contains("agent") && lower.contains("id")) {
+        let value = if lower == "id"
+            || (lower.contains("asset") && lower.contains("id"))
+            || (lower.contains("agent") && lower.contains("id"))
+        {
             saw_asset_id = true;
             Some(serde_json::json!(asset_id))
         } else if lower.contains("kind") || lower.ends_with("type") {
@@ -2859,9 +2885,7 @@ impl App {
     }
 
     pub(crate) fn handle_agent_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(panel_state) = self.agent_picker.as_ref() else {
-            return None;
-        };
+        let panel_state = self.agent_picker.as_ref()?;
         let total = panel_state.agents.len();
         if total == 0 {
             return None;
@@ -2871,15 +2895,13 @@ impl App {
             return None;
         }
         let selected = panel_state.sel.min(total - 1);
-        let Some((mut panel, panel_height)) = agent_picker_panel(
+        let (mut panel, panel_height) = agent_picker_panel(
             &panel_state.agents,
             selected,
             &panel_state.root,
             width,
             self.height as usize,
-        ) else {
-            return None;
-        };
+        )?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;

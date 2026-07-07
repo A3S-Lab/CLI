@@ -130,6 +130,7 @@ impl AnthropicEventMapper {
                     },
                     usage: self.usage.clone(),
                     stop_reason: self.stop_reason.clone(),
+                    token_logprobs: Vec::new(),
                     meta: Some(LlmResponseMeta {
                         provider: Some(self.meta.provider.into()),
                         request_model: Some(self.meta.request_model.clone()),

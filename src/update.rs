@@ -48,6 +48,12 @@ const BREW_TAP: &str = "a3s-lab/tap";
 const BREW_TAP_URL: &str = "https://github.com/A3S-Lab/homebrew-tap";
 const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
 const BREW_SHORT_FORMULA: &str = "a3s";
+const WEBVIEW_FORMULA: &str = "a3s-lab/tap/a3s-webview";
+const WEBVIEW_BINARY: &str = if cfg!(windows) {
+    "a3s-webview.exe"
+} else {
+    "a3s-webview"
+};
 
 fn numeric_version_parts(s: &str) -> Vec<u32> {
     let trimmed = s.trim().trim_start_matches('v');
@@ -177,6 +183,16 @@ fn version_from_output(text: &str) -> Option<String> {
     None
 }
 
+/// Version reported by the running executable. Falls back to the package
+/// version only if the self-probe fails.
+pub(crate) fn current_version() -> String {
+    let runner = RealCommandRunner;
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| binary_version(&runner, exe.as_os_str()))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+}
+
 /// GitHub release target triple for this platform, or `None` if unsupported
 /// (e.g. Windows) — those fall back to a manual download.
 pub(crate) fn release_target() -> Option<&'static str> {
@@ -227,18 +243,22 @@ fn brew_prefix_bin(runner: &impl CommandRunner, formula: &str) -> Option<PathBuf
     (!prefix.is_empty()).then(|| PathBuf::from(prefix).join("bin").join("a3s"))
 }
 
-fn verify_binary_version(
-    runner: &impl CommandRunner,
-    bin: impl AsRef<OsStr>,
-    latest: &str,
-) -> Option<String> {
+fn binary_version(runner: &impl CommandRunner, bin: impl AsRef<OsStr>) -> Option<String> {
     let out = runner.output(bin.as_ref(), &[OsString::from("--version")])?;
     if !out.success {
         return None;
     }
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    let version = version_from_output(&text)?;
+    version_from_output(&text)
+}
+
+fn verify_binary_version(
+    runner: &impl CommandRunner,
+    bin: impl AsRef<OsStr>,
+    latest: &str,
+) -> Option<String> {
+    let version = binary_version(runner, bin)?;
     version_ge(&version, latest).then_some(version)
 }
 
@@ -249,6 +269,65 @@ fn verify_brew_binary(runner: &impl CommandRunner, formula: &str, latest: &str) 
     }
     let prefix_bin = brew_prefix_bin(runner, formula)?;
     verify_binary_version(runner, prefix_bin.as_os_str(), latest).map(|_| prefix_bin)
+}
+
+fn sibling_webview_helper(current_exe: &Path) -> Option<PathBuf> {
+    let sibling = current_exe.parent()?.join(WEBVIEW_BINARY);
+    sibling.is_file().then_some(sibling)
+}
+
+fn path_webview_helper(runner: &impl CommandRunner) -> Option<PathBuf> {
+    runner
+        .output(OsStr::new(WEBVIEW_BINARY), &[OsString::from("--help")])
+        .filter(|out| out.success)
+        .map(|_| PathBuf::from(WEBVIEW_BINARY))
+}
+
+fn webview_helper_path(runner: &impl CommandRunner, current_exe: &Path) -> Option<PathBuf> {
+    sibling_webview_helper(current_exe).or_else(|| path_webview_helper(runner))
+}
+
+fn ensure_remoteui_helper_with(
+    runner: &impl CommandRunner,
+    current_exe: &Path,
+    macos: bool,
+) -> Result<Option<PathBuf>, String> {
+    if !macos {
+        return Ok(None);
+    }
+    if let Some(path) = webview_helper_path(runner, current_exe) {
+        return Ok(Some(path));
+    }
+
+    let _ = runner.status(OsStr::new("brew"), &args(&["tap", BREW_TAP, BREW_TAP_URL]));
+    let installed = runner.status(OsStr::new("brew"), &args(&["install", WEBVIEW_FORMULA]));
+    if let Some(path) = webview_helper_path(runner, current_exe) {
+        return Ok(Some(path));
+    }
+    if installed {
+        Err("Homebrew installed a3s-webview, but the helper is still not on PATH".to_string())
+    } else {
+        Err("a3s-webview is missing and Homebrew could not install it".to_string())
+    }
+}
+
+fn ensure_remoteui_helper_best_effort(runner: &impl CommandRunner, current_exe: &Path) {
+    if let Err(error) = ensure_remoteui_helper_with(runner, current_exe, cfg!(target_os = "macos"))
+    {
+        eprintln!("\n⚠  RemoteUI helper repair skipped: {error}");
+    }
+}
+
+/// Repair install-time companion tools. Today this means the macOS RemoteUI
+/// helper, which old Homebrew installs did not depend on.
+pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
+    let runner = RealCommandRunner;
+    let exe =
+        std::env::current_exe().map_err(|e| format!("could not locate current binary: {e}"))?;
+    match ensure_remoteui_helper_with(&runner, &exe, cfg!(target_os = "macos"))? {
+        Some(path) => Ok(vec![format!("RemoteUI helper ready: {}", path.display())]),
+        None => Ok(Vec::new()),
+    }
 }
 
 /// Upgrade to `latest` in place. Returns the binary to exec on success —
@@ -305,6 +384,7 @@ fn perform_upgrade_with(
         println!("\n⬇  upgrading a3s {latest} via Homebrew…\n");
         let upgrade_ok = runner.status(OsStr::new("brew"), &args(&["upgrade", formula]));
         if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+            ensure_remoteui_helper_best_effort(runner, &current_exe);
             return Ok(bin);
         }
 
@@ -322,6 +402,7 @@ fn perform_upgrade_with(
         eprintln!("\n⚠  {reason} — reinstalling…");
         let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", formula]));
         if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+            ensure_remoteui_helper_best_effort(runner, &current_exe);
             return Ok(bin);
         }
 
@@ -329,10 +410,14 @@ fn perform_upgrade_with(
         failures.push(failure);
         eprintln!("\n⚠  Homebrew didn't install a3s {latest} — falling back to a direct download…");
     }
-    standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
+    let result = standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
         failures.push(e);
         failures.join("; ")
-    })
+    });
+    if let Ok(bin) = &result {
+        ensure_remoteui_helper_best_effort(runner, bin);
+    }
+    result
 }
 
 fn standalone_upgrade_with(
@@ -522,7 +607,7 @@ fn swap_binary_and_verify(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     #[test]
@@ -691,6 +776,95 @@ mod tests {
         }
         std::fs::write(path, format!("#!/bin/sh\nprintf 'a3s {version}\\n'\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[derive(Default)]
+    struct HelperRunner {
+        commands: Mutex<Vec<String>>,
+        helper_available: AtomicBool,
+    }
+
+    impl HelperRunner {
+        fn with_helper_available() -> Self {
+            Self {
+                helper_available: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        fn record(&self, program: &OsStr, args: &[OsString]) -> String {
+            let mut line = program.to_string_lossy().to_string();
+            for arg in args {
+                line.push(' ');
+                line.push_str(&arg.to_string_lossy());
+            }
+            self.commands.lock().unwrap().push(line.clone());
+            line
+        }
+    }
+
+    impl CommandRunner for HelperRunner {
+        fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
+            let line = self.record(program, args);
+            if line == format!("{WEBVIEW_BINARY} --help") {
+                return Some(CommandOutput {
+                    success: self.helper_available.load(Ordering::SeqCst),
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                });
+            }
+            None
+        }
+
+        fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
+            let line = self.record(program, args);
+            if line == format!("brew install {WEBVIEW_FORMULA}") {
+                self.helper_available.store(true, Ordering::SeqCst);
+                return true;
+            }
+            line == format!("brew tap {BREW_TAP} {BREW_TAP_URL}")
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remoteui_helper_uses_existing_path_helper_without_brew() {
+        let tmp = TempDir::new("helper-path");
+        let runner = HelperRunner::with_helper_available();
+
+        let result = ensure_remoteui_helper_with(&runner, &tmp.path("a3s"), true).unwrap();
+
+        assert_eq!(result.as_deref(), Some(Path::new(WEBVIEW_BINARY)));
+        assert_eq!(runner.commands(), vec![format!("{WEBVIEW_BINARY} --help")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remoteui_helper_installs_missing_homebrew_helper() {
+        let tmp = TempDir::new("helper-install");
+        let runner = HelperRunner::default();
+
+        let result = ensure_remoteui_helper_with(&runner, &tmp.path("a3s"), true).unwrap();
+
+        assert_eq!(result.as_deref(), Some(Path::new(WEBVIEW_BINARY)));
+        let commands = runner.commands();
+        assert!(commands
+            .iter()
+            .any(|c| c == &format!("brew tap {BREW_TAP} {BREW_TAP_URL}")));
+        assert!(commands
+            .iter()
+            .any(|c| c == &format!("brew install {WEBVIEW_FORMULA}")));
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|c| c.as_str() == format!("{WEBVIEW_BINARY} --help"))
+                .count(),
+            2
+        );
     }
 
     #[test]

@@ -42,17 +42,12 @@ pub(crate) struct MemDetail {
 }
 
 /// Lifecycle tier derived from age, memory type, importance, and access count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum MemoryTier {
+    #[default]
     Short,
     Mid,
     Long,
-}
-
-impl Default for MemoryTier {
-    fn default() -> Self {
-        Self::Short
-    }
 }
 
 impl MemoryTier {
@@ -76,18 +71,13 @@ impl MemoryTier {
 /// Forgetting state for a memory. `Candidate` is the only state the TUI lets
 /// the user remove directly; high-importance, repeatedly-accessed, or curated
 /// memories are marked `Protected` to mirror store pruning decisions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum ForgetSignal {
+    #[default]
     Keep,
     Cooling,
     Candidate,
     Protected,
-}
-
-impl Default for ForgetSignal {
-    fn default() -> Self {
-        Self::Keep
-    }
 }
 
 impl ForgetSignal {
@@ -950,7 +940,6 @@ fn canonical_key(value: &str) -> String {
 
 fn display_entity_name(value: &str) -> String {
     value
-        .trim()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")

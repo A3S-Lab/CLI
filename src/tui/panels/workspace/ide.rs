@@ -21,15 +21,25 @@ impl App {
                 cancel_kb_delete_confirm(ide);
                 return true;
             }
+            if let Some(ide) = self.ide.as_mut().filter(|i| i.prompt.is_some()) {
+                ide.prompt = None;
+                ide.flash = None;
+                return true;
+            }
             if let Some(f) = self
                 .ide
                 .as_mut()
                 .filter(|i| i.focus_editor)
                 .and_then(|i| i.file.as_mut())
             {
-                if f.mode == EditMode::Insert || f.pending.is_some() {
+                if f.mode == EditMode::Insert
+                    || f.pending.is_some()
+                    || f.visual_line_anchor.is_some()
+                {
                     f.mode = EditMode::Normal;
                     f.pending = None;
+                    f.count = None;
+                    f.visual_line_anchor = None;
                     f.clamp_col();
                     return true;
                 }
@@ -57,6 +67,9 @@ impl App {
         // Rows inside the main panels: screen minus the metadata/keys footer
         // (3) and the panel borders (2). Must match `render_ide`.
         let body = h.saturating_sub(5);
+        if ide.prompt.is_some() {
+            return handle_ide_prompt_key(ide, key, &workspace_manifest, &workspace);
+        }
         match key.code {
             // Editor focused: full text editing of the open file.
             _ if ide.focus_editor && ide.file.is_some() => {
@@ -66,28 +79,45 @@ impl App {
                 if ctrl && matches!(key.code, KeyCode::Char('s' | 'S')) {
                     let msg = {
                         let f = ide.file.as_mut().unwrap();
-                        if f.image || f.readonly {
-                            ide_flash_line(ToastKind::Warning, "read-only")
-                        } else {
-                            let content = format!("{}\n", f.lines.join("\n"));
-                            match std::fs::write(&f.path, content) {
-                                Ok(()) => {
-                                    f.dirty = false;
-                                    touch_workspace_file_path_for_manifest(
-                                        &workspace_manifest,
-                                        &workspace,
-                                        &f.path,
-                                    );
-                                    ide_flash_line(ToastKind::Success, "saved")
-                                }
-                                Err(e) => {
-                                    ide_flash_line(ToastKind::Error, format!("save failed: {e}"))
-                                }
-                            }
-                        }
+                        save_ide_file(f, &workspace_manifest, &workspace)
                     };
                     ide.flash = Some(msg);
                     return true;
+                }
+                if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
+                    ide.flash = Some(match read_clipboard_text() {
+                        Ok(text) => paste_text_into_ide(ide, &text),
+                        Err(error) => ide_flash_line(ToastKind::Error, error),
+                    });
+                    return true;
+                }
+                if !ctrl
+                    && ide
+                        .file
+                        .as_ref()
+                        .is_some_and(|f| f.mode == EditMode::Normal && f.pending.is_none())
+                {
+                    match key.code {
+                        KeyCode::Char('/') => {
+                            ide.prompt = Some(IdePrompt::Search {
+                                forward: true,
+                                text: String::new(),
+                            });
+                            return true;
+                        }
+                        KeyCode::Char('?') => {
+                            ide.prompt = Some(IdePrompt::Search {
+                                forward: false,
+                                text: String::new(),
+                            });
+                            return true;
+                        }
+                        KeyCode::Char(':') => {
+                            ide.prompt = Some(IdePrompt::Command(String::new()));
+                            return true;
+                        }
+                        _ => {}
+                    }
                 }
                 ide.flash = None; // any edit/nav key dismisses the save flash
                                   // Editor content width — single-sourced with `render_ide` via
@@ -288,6 +318,11 @@ impl App {
                 } else if let Some(line) = f.lines.get(f.scroll + i) {
                     let lineno = f.scroll + i;
                     let cur_row = ide.focus_editor && lineno == f.row;
+                    let visual_row = f.visual_line_anchor.is_some_and(|anchor| {
+                        let lo = anchor.min(f.row);
+                        let hi = anchor.max(f.row);
+                        (lo..=hi).contains(&lineno)
+                    });
                     let num = if spf::ide_gutter_on(width) {
                         Style::new()
                             .fg(if cur_row { TN_YELLOW } else { TN_GRAY })
@@ -312,6 +347,8 @@ impl App {
                             .saturating_sub(f.hscroll)
                             .min(cw.saturating_sub(1));
                         render_cursor_line(&window, ccol)
+                    } else if visual_row {
+                        Style::new().fg(TN_FG).bg(SURFACE_SELECTED).render(&window)
                     } else {
                         highlight_code(&window, lang_of(&f.path))
                     };
@@ -352,15 +389,28 @@ impl App {
         // ── footer: metadata + keys panels ──
         let readonly = ide.file.as_ref().is_some_and(|f| f.readonly);
         let mode = ide.file.as_ref().map(|f| f.mode);
-        let hint: String = if let Some(flash) = ide.flash.as_deref() {
+        let hint: String = if let Some(prompt) = ide.prompt.as_ref() {
+            match prompt {
+                IdePrompt::Search {
+                    forward: true,
+                    text,
+                } => format!("/{text}"),
+                IdePrompt::Search {
+                    forward: false,
+                    text,
+                } => format!("?{text}"),
+                IdePrompt::Command(text) => format!(":{text}"),
+            }
+        } else if let Some(flash) = ide.flash.as_deref() {
             flash.to_string()
         } else if ide.focus_editor && readonly {
             "read-only · NORMAL · hjkl/↑↓ move · gg/G top/bottom · Esc back".to_string()
         } else if ide.focus_editor {
             match mode {
-                Some(EditMode::Insert) => "-- INSERT -- · Esc normal · Ctrl+S save".to_string(),
-                _ => "-- NORMAL -- · i insert · dd/dw/x cut · u undo · Ctrl+S save · Esc tree"
-                    .to_string(),
+                Some(EditMode::Insert) => {
+                    "-- INSERT -- · paste Cmd/Ctrl+V · Ctrl+Z undo · Ctrl+S save".to_string()
+                }
+                _ => "-- NORMAL -- · / search · V visual-line · :w/:q/:wq · . repeat".to_string(),
             }
         } else if ide.kb_root.is_some() {
             "Tab edit · ↑↓ nav · Enter open · x delete · Esc close".to_string()
@@ -393,6 +443,189 @@ impl App {
             out.push(String::new());
         }
         out.join("\n")
+    }
+}
+
+impl App {
+    pub(crate) fn ide_paste_text(&mut self, text: &str) -> bool {
+        let Some(ide) = self.ide.as_mut() else {
+            return false;
+        };
+        ide.flash = Some(paste_text_into_ide(ide, text));
+        true
+    }
+}
+
+fn paste_text_into_ide(ide: &mut Ide, text: &str) -> String {
+    let Some(file) = ide.file.as_mut() else {
+        return ide_flash_line(ToastKind::Warning, "open a file first");
+    };
+    if file.image || file.readonly {
+        return ide_flash_line(ToastKind::Warning, "read-only");
+    }
+    ide.focus_editor = true;
+    if file.paste_external_text(text) {
+        ide_flash_line(ToastKind::Success, "pasted")
+    } else {
+        ide_flash_line(ToastKind::Warning, "clipboard is empty")
+    }
+}
+
+fn read_clipboard_text() -> Result<String, String> {
+    let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+        &[("pbpaste", &[])]
+    } else if cfg!(target_os = "windows") {
+        &[(
+            "powershell",
+            &["-NoProfile", "-Command", "Get-Clipboard -Raw -Format Text"],
+        )]
+    } else {
+        &[
+            ("wl-paste", &["--no-newline"]),
+            ("xclip", &["-selection", "clipboard", "-out"]),
+            ("xsel", &["--clipboard", "--output"]),
+        ]
+    };
+    let mut last_error = None;
+    for (program, args) in candidates {
+        match std::process::Command::new(program).args(*args).output() {
+            Ok(out) if out.status.success() => {
+                return Ok(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                last_error = Some(if stderr.is_empty() {
+                    format!("{program} exited with {}", out.status)
+                } else {
+                    stderr
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => last_error = Some(format!("{program}: {err}")),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "clipboard text is unavailable".to_string()))
+}
+
+fn normalize_pasted_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ")
+}
+
+fn save_ide_file(
+    file: &mut IdeFile,
+    workspace_manifest: &std::sync::Arc<LocalWorkspaceManifest>,
+    workspace: &str,
+) -> String {
+    if file.image || file.readonly {
+        return ide_flash_line(ToastKind::Warning, "read-only");
+    }
+    let content = format!("{}\n", file.lines.join("\n"));
+    match std::fs::write(&file.path, content) {
+        Ok(()) => {
+            file.dirty = false;
+            touch_workspace_file_path_for_manifest(workspace_manifest, workspace, &file.path);
+            ide_flash_line(ToastKind::Success, "saved")
+        }
+        Err(e) => ide_flash_line(ToastKind::Error, format!("save failed: {e}")),
+    }
+}
+
+fn handle_ide_prompt_key(
+    ide: &mut Ide,
+    key: &KeyEvent,
+    workspace_manifest: &std::sync::Arc<LocalWorkspaceManifest>,
+    workspace: &str,
+) -> bool {
+    let Some(mut prompt) = ide.prompt.take() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Enter => match prompt {
+            IdePrompt::Search { forward, text } => {
+                if let Some(file) = ide.file.as_mut() {
+                    if file.apply_search(&text, forward) {
+                        ide.flash =
+                            Some(ide_flash_line(ToastKind::Success, format!("found {text}")));
+                    } else {
+                        ide.flash = Some(ide_flash_line(
+                            ToastKind::Warning,
+                            format!("not found: {text}"),
+                        ));
+                    }
+                }
+            }
+            IdePrompt::Command(text) => {
+                ide.flash = Some(apply_ide_command(
+                    ide,
+                    text.trim(),
+                    workspace_manifest,
+                    workspace,
+                ));
+            }
+        },
+        KeyCode::Backspace => {
+            match &mut prompt {
+                IdePrompt::Search { text, .. } | IdePrompt::Command(text) => {
+                    text.pop();
+                }
+            }
+            ide.prompt = Some(prompt);
+        }
+        KeyCode::Char(c) if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            match &mut prompt {
+                IdePrompt::Search { text, .. } | IdePrompt::Command(text) => text.push(c),
+            }
+            ide.prompt = Some(prompt);
+        }
+        _ => {
+            ide.prompt = Some(prompt);
+        }
+    }
+    true
+}
+
+fn apply_ide_command(
+    ide: &mut Ide,
+    command: &str,
+    workspace_manifest: &std::sync::Arc<LocalWorkspaceManifest>,
+    workspace: &str,
+) -> String {
+    match command {
+        "w" => ide
+            .file
+            .as_mut()
+            .map(|f| save_ide_file(f, workspace_manifest, workspace))
+            .unwrap_or_else(|| ide_flash_line(ToastKind::Warning, "open a file first")),
+        "q" => {
+            if ide.file.as_ref().is_some_and(|f| f.dirty) {
+                ide_flash_line(ToastKind::Warning, "unsaved changes; use :wq or :q!")
+            } else {
+                ide.focus_editor = false;
+                ide_flash_line(ToastKind::Success, "closed editor")
+            }
+        }
+        "q!" => {
+            ide.focus_editor = false;
+            if let Some(f) = ide.file.as_mut() {
+                f.dirty = false;
+            }
+            ide_flash_line(ToastKind::Success, "closed editor")
+        }
+        "wq" | "x" => {
+            let msg = ide
+                .file
+                .as_mut()
+                .map(|f| save_ide_file(f, workspace_manifest, workspace))
+                .unwrap_or_else(|| ide_flash_line(ToastKind::Warning, "open a file first"));
+            if ide.file.as_ref().is_some_and(|f| !f.dirty) {
+                ide.focus_editor = false;
+            }
+            msg
+        }
+        "" => ide_flash_line(ToastKind::Warning, "empty command"),
+        other => ide_flash_line(ToastKind::Warning, format!("unknown command: {other}")),
     }
 }
 
@@ -674,10 +907,15 @@ impl IdeFile {
             self.undo.remove(0);
         }
         self.undo.push((self.lines.clone(), self.row, self.col));
+        self.redo.clear();
     }
 
     fn undo(&mut self) {
         if let Some((lines, row, col)) = self.undo.pop() {
+            if self.redo.len() >= 200 {
+                self.redo.remove(0);
+            }
+            self.redo.push((self.lines.clone(), self.row, self.col));
             self.lines = lines;
             self.row = row.min(self.lines.len().saturating_sub(1));
             self.col = col;
@@ -686,16 +924,82 @@ impl IdeFile {
         }
     }
 
+    fn redo(&mut self) {
+        if let Some((lines, row, col)) = self.redo.pop() {
+            if self.undo.len() >= 200 {
+                self.undo.remove(0);
+            }
+            self.undo.push((self.lines.clone(), self.row, self.col));
+            self.lines = lines;
+            self.row = row.min(self.lines.len().saturating_sub(1));
+            self.col = col;
+            self.dirty = true;
+            self.clamp_col();
+        }
+    }
+
+    fn take_count_with_flag(&mut self) -> (usize, bool) {
+        match self.count.take() {
+            Some(count) => (count.max(1), true),
+            None => (1, false),
+        }
+    }
+
+    fn push_count_digit(&mut self, c: char) -> bool {
+        let Some(digit) = c.to_digit(10).map(|d| d as usize) else {
+            return false;
+        };
+        if digit == 0 && self.count.is_none() {
+            return false;
+        }
+        let next = self
+            .count
+            .unwrap_or(0)
+            .saturating_mul(10)
+            .saturating_add(digit)
+            .max(1);
+        self.count = Some(next.min(9999));
+        true
+    }
+
+    fn move_word_forward(&mut self, count: usize) {
+        for _ in 0..count {
+            self.col = self.next_word();
+        }
+    }
+
+    fn move_word_backward(&mut self, count: usize) {
+        for _ in 0..count {
+            self.col = self.prev_word();
+        }
+    }
+
+    fn move_word_end(&mut self, count: usize) {
+        for _ in 0..count {
+            self.col = self.word_end();
+        }
+    }
+
     /// Handle one key in the focused editor. Ctrl+S (save) is handled by the
     /// caller before this; Esc (Insert→Normal / leave) likewise.
     pub(crate) fn edit_key(&mut self, key: &KeyEvent, body: usize, content_w: usize) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let nlines = self.lines.len();
+        let mut handled = false;
+        if ctrl {
+            handled = true;
+            match key.code {
+                KeyCode::Char('a' | 'A') => self.col = 0,
+                KeyCode::Char('e' | 'E') => self.col = self.cur_len(),
+                KeyCode::Char('z' | 'Z') if !self.readonly => self.undo(),
+                KeyCode::Char('r' | 'R') if !self.readonly => self.redo(),
+                _ => handled = false,
+            }
+        }
         // A pending Normal-mode operator (d/c/g/y) consumes the next key — even an
         // arrow — instead of the shared navigation below.
         let pending = self.mode == EditMode::Normal && self.pending.is_some();
-        let mut handled = false;
-        if !pending {
+        if !handled && !pending {
             handled = true;
             match key.code {
                 KeyCode::Up => self.row = self.row.saturating_sub(1),
@@ -785,6 +1089,16 @@ impl IdeFile {
                     self.snapshot();
                     self.delete_word_back();
                 }
+                KeyCode::Char('d' | 'D') => {
+                    self.snapshot();
+                    self.delete_forward();
+                }
+                KeyCode::Char('h' | 'H') => {
+                    self.snapshot();
+                    self.backspace();
+                }
+                KeyCode::Char('z' | 'Z') => self.undo(),
+                KeyCode::Char('r' | 'R') => self.redo(),
                 _ => {}
             }
             return;
@@ -809,6 +1123,40 @@ impl IdeFile {
         let b = char_byte(&self.lines[self.row], self.col);
         self.lines[self.row].insert_str(b, s);
         self.col += s.chars().count();
+        self.dirty = true;
+    }
+    fn paste_external_text(&mut self, text: &str) -> bool {
+        if self.readonly || self.image {
+            return false;
+        }
+        let normalized = normalize_pasted_text(text);
+        if normalized.is_empty() {
+            return false;
+        }
+        self.snapshot();
+        self.insert_text(&normalized);
+        self.mode = EditMode::Insert;
+        true
+    }
+    fn insert_text(&mut self, text: &str) {
+        let parts: Vec<&str> = text.split('\n').collect();
+        if parts.len() == 1 {
+            self.insert_str(parts[0]);
+            return;
+        }
+
+        let b = char_byte(&self.lines[self.row], self.col);
+        let tail = self.lines[self.row].split_off(b);
+        self.lines[self.row].push_str(parts[0]);
+        let last_idx = parts.len() - 1;
+        for part in &parts[1..last_idx] {
+            self.row += 1;
+            self.lines.insert(self.row, (*part).to_string());
+        }
+        self.row += 1;
+        self.lines
+            .insert(self.row, format!("{}{}", parts[last_idx], tail));
+        self.col = parts[last_idx].chars().count();
         self.dirty = true;
     }
     fn split_line(&mut self) {
@@ -885,58 +1233,89 @@ impl IdeFile {
             KeyCode::Char(c) => c,
             _ => return,
         };
+        if self.push_count_digit(ch) {
+            return;
+        }
+        if self.visual_line_anchor.is_some() {
+            self.visual_line_key(ch);
+            return;
+        }
         let ro = self.readonly;
+        let (count, counted) = self.take_count_with_flag();
         match ch {
             // motions
-            'h' => self.col = self.col.saturating_sub(1),
+            'h' => self.col = self.col.saturating_sub(count),
             'l' => {
-                if self.col + 1 < self.cur_len() {
-                    self.col += 1;
-                }
+                self.col = (self.col + count).min(self.cur_len().saturating_sub(1));
             }
-            'j' => self.row = (self.row + 1).min(self.lines.len().saturating_sub(1)),
-            'k' => self.row = self.row.saturating_sub(1),
-            'w' => self.col = self.next_word(),
-            'b' => self.col = self.prev_word(),
-            'e' => self.col = self.word_end(),
+            'j' => self.row = (self.row + count).min(self.lines.len().saturating_sub(1)),
+            'k' => self.row = self.row.saturating_sub(count),
+            'w' => self.move_word_forward(count),
+            'b' => self.move_word_backward(count),
+            'e' => self.move_word_end(count),
             '0' => self.col = 0,
             '^' => self.col = self.first_nonblank(),
             '$' => self.col = self.cur_len().saturating_sub(1),
-            'G' => self.row = self.lines.len().saturating_sub(1),
+            'G' => {
+                self.row = if counted {
+                    count
+                        .saturating_sub(1)
+                        .min(self.lines.len().saturating_sub(1))
+                } else {
+                    self.lines.len().saturating_sub(1)
+                }
+            }
+            'n' => self.repeat_search(false),
+            'N' => self.repeat_search(true),
+            'V' => self.visual_line_anchor = Some(self.row),
             // operator / prefix — wait for the second key (g/d/c/y; r = replace one char)
-            'g' | 'd' | 'c' | 'y' => self.pending = Some(ch),
-            'r' if !ro => self.pending = Some('r'),
+            'g' | 'd' | 'c' | 'y' => self.pending = Some(PendingOp { op: ch, count }),
+            'r' if !ro => self.pending = Some(PendingOp { op: 'r', count }),
             // inline edits
             'x' if !ro => {
                 self.snapshot();
-                self.delete_char_under();
+                self.delete_chars_under(count);
+                self.last_change = Some(RepeatEdit::DeleteChar(count));
             }
             'J' if !ro => {
                 self.snapshot();
-                self.join_line();
+                for _ in 0..count {
+                    self.join_line();
+                }
+                self.last_change = Some(RepeatEdit::JoinLine(count));
             }
             '~' if !ro => {
                 self.snapshot();
-                self.toggle_case();
+                for _ in 0..count {
+                    self.toggle_case();
+                }
+                self.last_change = Some(RepeatEdit::ToggleCase(count));
             }
             'D' if !ro => {
                 self.snapshot();
                 self.delete_to_eol();
+                self.last_change = Some(RepeatEdit::DeleteToEol);
             }
             'C' if !ro => {
                 self.snapshot();
                 self.delete_to_eol();
                 self.mode = EditMode::Insert;
+                self.last_change = Some(RepeatEdit::DeleteToEol);
             }
             'p' if !ro => {
                 self.snapshot();
-                self.paste(true);
+                for _ in 0..count {
+                    self.paste(true);
+                }
             }
             'P' if !ro => {
                 self.snapshot();
-                self.paste(false);
+                for _ in 0..count {
+                    self.paste(false);
+                }
             }
             'u' if !ro => self.undo(),
+            '.' if !ro => self.repeat_last_change(),
             // enter insert
             'i' if !ro => {
                 self.snapshot();
@@ -969,47 +1348,186 @@ impl IdeFile {
         }
     }
 
+    fn visual_line_key(&mut self, ch: char) {
+        let ro = self.readonly;
+        match ch {
+            'j' => self.row = (self.row + 1).min(self.lines.len().saturating_sub(1)),
+            'k' => self.row = self.row.saturating_sub(1),
+            'G' => self.row = self.lines.len().saturating_sub(1),
+            'g' => self.pending = Some(PendingOp { op: 'g', count: 1 }),
+            'V' | '\u{1b}' => self.visual_line_anchor = None,
+            'y' => {
+                self.yank_visual_lines();
+                self.visual_line_anchor = None;
+            }
+            'd' | 'x' if !ro => {
+                self.snapshot();
+                let count = self.delete_visual_lines();
+                self.visual_line_anchor = None;
+                self.last_change = Some(RepeatEdit::DeleteLine(count));
+            }
+            _ => {}
+        }
+    }
+
+    fn visual_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual_line_anchor?;
+        Some((anchor.min(self.row), anchor.max(self.row)))
+    }
+
+    fn yank_visual_lines(&mut self) {
+        let Some((lo, hi)) = self.visual_range() else {
+            return;
+        };
+        self.clip = self.lines[lo..=hi].join("\n");
+        self.clip_linewise = true;
+    }
+
+    fn delete_visual_lines(&mut self) -> usize {
+        let Some((lo, hi)) = self.visual_range() else {
+            return 0;
+        };
+        self.clip = self.lines[lo..=hi].join("\n");
+        self.clip_linewise = true;
+        let count = hi - lo + 1;
+        if self.lines.len() == count {
+            self.lines.clear();
+            self.lines.push(String::new());
+            self.row = 0;
+        } else {
+            self.lines.drain(lo..=hi);
+            self.row = lo.min(self.lines.len().saturating_sub(1));
+        }
+        self.col = 0;
+        self.dirty = true;
+        count
+    }
+
+    fn apply_search(&mut self, query: &str, forward: bool) -> bool {
+        if query.is_empty() {
+            return false;
+        }
+        self.search = Some((query.to_string(), forward));
+        self.find_query(query, forward)
+    }
+
+    fn repeat_search(&mut self, reverse: bool) {
+        let Some((query, forward)) = self.search.clone() else {
+            return;
+        };
+        let direction = if reverse { !forward } else { forward };
+        let _ = self.find_query(&query, direction);
+    }
+
+    fn find_query(&mut self, query: &str, forward: bool) -> bool {
+        if self.lines.is_empty() || query.is_empty() {
+            return false;
+        }
+        let n = self.lines.len();
+        for step in 1..=n {
+            let idx = if forward {
+                (self.row + step) % n
+            } else {
+                (self.row + n - (step % n)) % n
+            };
+            if let Some(byte) = self.lines[idx].find(query) {
+                self.row = idx;
+                self.col = self.lines[idx][..byte].chars().count();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn repeat_last_change(&mut self) {
+        let Some(edit) = self.last_change.clone() else {
+            return;
+        };
+        self.snapshot();
+        match edit {
+            RepeatEdit::DeleteChar(count) => self.delete_chars_under(count),
+            RepeatEdit::DeleteLine(count) => self.delete_lines(count, true),
+            RepeatEdit::DeleteWord(count) => {
+                for _ in 0..count {
+                    self.delete_word();
+                }
+            }
+            RepeatEdit::DeleteToEol => self.delete_to_eol(),
+            RepeatEdit::ChangeLine(count) => {
+                self.change_lines(count);
+                self.mode = EditMode::Insert;
+            }
+            RepeatEdit::Replace(c) => self.replace_char(c),
+            RepeatEdit::JoinLine(count) => {
+                for _ in 0..count {
+                    self.join_line();
+                }
+            }
+            RepeatEdit::ToggleCase(count) => {
+                for _ in 0..count {
+                    self.toggle_case();
+                }
+            }
+        }
+    }
+
     /// Second key of a two-stroke Normal command (the operator/prefix is `op`).
-    fn apply_operator(&mut self, op: char, key: &KeyEvent) {
+    fn apply_operator(&mut self, pending: PendingOp, key: &KeyEvent) {
         let ch = match key.code {
             KeyCode::Char(c) => c,
             _ => return, // arrow/other after an operator just cancels it
         };
         let ro = self.readonly;
-        match (op, ch) {
-            ('g', 'g') => self.row = 0,
+        match (pending.op, ch) {
+            ('g', 'g') => {
+                self.row = pending
+                    .count
+                    .saturating_sub(1)
+                    .min(self.lines.len().saturating_sub(1))
+            }
             ('d', 'd') if !ro => {
                 self.snapshot();
-                self.delete_line(true);
+                self.delete_lines(pending.count, true);
+                self.last_change = Some(RepeatEdit::DeleteLine(pending.count));
             }
             ('d', 'w') if !ro => {
                 self.snapshot();
-                self.delete_word();
+                for _ in 0..pending.count {
+                    self.delete_word();
+                }
+                self.last_change = Some(RepeatEdit::DeleteWord(pending.count));
             }
             ('d', '$') if !ro => {
                 self.snapshot();
                 self.delete_to_eol();
+                self.last_change = Some(RepeatEdit::DeleteToEol);
             }
             ('c', 'c') if !ro => {
                 self.snapshot();
-                self.clear_line();
+                self.change_lines(pending.count);
                 self.mode = EditMode::Insert;
+                self.last_change = Some(RepeatEdit::ChangeLine(pending.count));
             }
             ('c', 'w') if !ro => {
                 self.snapshot();
-                self.delete_word();
+                for _ in 0..pending.count {
+                    self.delete_word();
+                }
                 self.mode = EditMode::Insert;
+                self.last_change = Some(RepeatEdit::DeleteWord(pending.count));
             }
             ('c', '$') if !ro => {
                 self.snapshot();
                 self.delete_to_eol();
                 self.mode = EditMode::Insert;
+                self.last_change = Some(RepeatEdit::DeleteToEol);
             }
-            ('y', 'y') => self.yank_line(),
+            ('y', 'y') => self.yank_lines(pending.count),
             // `r<char>` — replace the char under the cursor in place.
             ('r', c) if !ro => {
                 self.snapshot();
                 self.replace_char(c);
+                self.last_change = Some(RepeatEdit::Replace(c));
             }
             _ => {}
         }
@@ -1060,15 +1578,18 @@ impl IdeFile {
         }
     }
 
-    fn delete_char_under(&mut self) {
-        let len = self.cur_len();
-        if self.col < len {
-            let b0 = char_byte(&self.lines[self.row], self.col);
-            let b1 = char_byte(&self.lines[self.row], self.col + 1);
-            self.clip = self.lines[self.row][b0..b1].to_string();
-            self.clip_linewise = false;
-            self.lines[self.row].replace_range(b0..b1, "");
-            self.dirty = true;
+    fn delete_chars_under(&mut self, count: usize) {
+        self.clip.clear();
+        self.clip_linewise = false;
+        for _ in 0..count.max(1) {
+            let len = self.cur_len();
+            if self.col < len {
+                let b0 = char_byte(&self.lines[self.row], self.col);
+                let b1 = char_byte(&self.lines[self.row], self.col + 1);
+                self.clip.push_str(&self.lines[self.row][b0..b1]);
+                self.lines[self.row].replace_range(b0..b1, "");
+                self.dirty = true;
+            }
         }
     }
     fn delete_to_eol(&mut self) {
@@ -1080,18 +1601,24 @@ impl IdeFile {
             self.dirty = true;
         }
     }
-    fn delete_line(&mut self, yank: bool) {
+    fn delete_lines(&mut self, count: usize, yank: bool) {
+        let count = count.max(1).min(self.lines.len().saturating_sub(self.row));
+        if count == 0 {
+            return;
+        }
         if yank {
-            self.clip = self.lines[self.row].clone();
+            self.clip = self.lines[self.row..self.row + count].join("\n");
             self.clip_linewise = true;
         }
-        if self.lines.len() > 1 {
-            self.lines.remove(self.row);
+        if self.lines.len() == count {
+            self.lines.clear();
+            self.lines.push(String::new());
+            self.row = 0;
+        } else {
+            self.lines.drain(self.row..self.row + count);
             if self.row >= self.lines.len() {
                 self.row = self.lines.len() - 1;
             }
-        } else {
-            self.lines[0].clear();
         }
         self.col = 0;
         self.dirty = true;
@@ -1107,15 +1634,24 @@ impl IdeFile {
             self.dirty = true;
         }
     }
-    fn clear_line(&mut self) {
-        self.clip = self.lines[self.row].clone();
+    fn change_lines(&mut self, count: usize) {
+        let count = count.max(1).min(self.lines.len().saturating_sub(self.row));
+        if count == 0 {
+            return;
+        }
+        self.clip = self.lines[self.row..self.row + count].join("\n");
         self.clip_linewise = true;
-        self.lines[self.row].clear();
+        self.lines
+            .splice(self.row..self.row + count, std::iter::once(String::new()));
         self.col = 0;
         self.dirty = true;
     }
-    fn yank_line(&mut self) {
-        self.clip = self.lines[self.row].clone();
+    fn yank_lines(&mut self, count: usize) {
+        let count = count.max(1).min(self.lines.len().saturating_sub(self.row));
+        if count == 0 {
+            return;
+        }
+        self.clip = self.lines[self.row..self.row + count].join("\n");
         self.clip_linewise = true;
     }
     fn paste(&mut self, after: bool) {
@@ -1261,6 +1797,91 @@ mod vim_tests {
         assert_eq!(f.row, 2);
         feed(&mut f, "gg");
         assert_eq!(f.row, 0);
+        feed(&mut f, "G");
+        assert_eq!(f.row, 2);
+        feed(&mut f, "1G");
+        assert_eq!(f.row, 0);
+    }
+
+    #[test]
+    fn count_prefix_repeats_motion_and_delete_line() {
+        let mut f = buf(&["a", "b", "c", "d"]);
+
+        feed(&mut f, "3j");
+        assert_eq!(f.row, 3);
+        feed(&mut f, "2k");
+        assert_eq!(f.row, 1);
+
+        feed(&mut f, "2dd");
+        assert_eq!(f.lines, vec!["a", "d"]);
+        assert_eq!(f.row, 1);
+        assert_eq!(f.clip, "b\nc");
+        assert!(f.clip_linewise);
+    }
+
+    #[test]
+    fn dot_repeats_last_normal_change() {
+        let mut f = buf(&["abc", "def"]);
+
+        feed(&mut f, "x");
+        assert_eq!(f.lines[0], "bc");
+        feed(&mut f, ".");
+        assert_eq!(f.lines[0], "c");
+
+        let mut f = buf(&["one", "two", "three"]);
+        feed(&mut f, "dd");
+        feed(&mut f, ".");
+        assert_eq!(f.lines, vec!["three"]);
+    }
+
+    #[test]
+    fn ctrl_r_redoes_undo() {
+        let mut f = buf(&["abc"]);
+
+        feed(&mut f, "x");
+        assert_eq!(f.lines[0], "bc");
+        feed(&mut f, "u");
+        assert_eq!(f.lines[0], "abc");
+        f.edit_key(
+            &KeyEvent {
+                code: KeyCode::Char('r'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            20,
+            80,
+        );
+
+        assert_eq!(f.lines[0], "bc");
+    }
+
+    #[test]
+    fn search_and_repeat_search_wrap() {
+        let mut f = buf(&["alpha", "beta", "gamma beta"]);
+
+        assert!(f.apply_search("beta", true));
+        assert_eq!(f.row, 1);
+        feed(&mut f, "n");
+        assert_eq!(f.row, 2);
+        feed(&mut f, "N");
+        assert_eq!(f.row, 1);
+
+        assert!(!f.apply_search("missing", true));
+    }
+
+    #[test]
+    fn visual_line_yanks_and_deletes_range() {
+        let mut f = buf(&["one", "two", "three", "four"]);
+
+        feed(&mut f, "Vj");
+        assert_eq!(f.visual_line_anchor, Some(0));
+        feed(&mut f, "y");
+        assert_eq!(f.clip, "one\ntwo");
+        assert!(f.visual_line_anchor.is_none());
+
+        feed(&mut f, "ggVjd");
+        assert_eq!(f.lines, vec!["three", "four"]);
+        assert_eq!(f.clip, "one\ntwo");
+        assert!(f.dirty);
     }
 
     #[test]
@@ -1281,6 +1902,49 @@ mod vim_tests {
         assert_eq!(f.col, 2);
         feed(&mut f, "c");
         assert_eq!(f.lines[0], "abc");
+    }
+
+    #[test]
+    fn external_paste_inserts_multiline_text_at_cursor() {
+        let mut f = buf(&["ab"]);
+        f.col = 1;
+
+        assert!(f.paste_external_text("X\nY\tZ\r\n"));
+
+        assert_eq!(f.lines, vec!["aX", "Y    Z", "b"]);
+        assert_eq!(f.row, 2);
+        assert_eq!(f.col, 0);
+        assert_eq!(f.mode, EditMode::Insert);
+        assert!(f.dirty);
+    }
+
+    #[test]
+    fn external_paste_is_one_undo_step() {
+        let mut f = buf(&["ab"]);
+        f.col = 1;
+
+        assert!(f.paste_external_text("XYZ"));
+        assert_eq!(f.lines[0], "aXYZb");
+        f.edit_key(
+            &KeyEvent {
+                code: KeyCode::Char('z'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            20,
+            80,
+        );
+
+        assert_eq!(f.lines, vec!["ab"]);
+        assert_eq!(f.col, 1);
+    }
+
+    #[test]
+    fn external_paste_respects_readonly_buffers() {
+        let mut f = ro(&["ab"]);
+
+        assert!(!f.paste_external_text("XYZ"));
+        assert_eq!(f.lines, vec!["ab"]);
+        assert!(!f.dirty);
     }
 
     #[test]
@@ -1340,6 +2004,35 @@ mod vim_tests {
             80,
         );
         assert_eq!(f.lines[0], "foo ");
+    }
+
+    #[test]
+    fn ctrl_d_and_ctrl_h_delete_in_insert() {
+        let mut f = buf(&["abc"]);
+        f.mode = EditMode::Insert;
+        f.col = 1;
+
+        f.edit_key(
+            &KeyEvent {
+                code: KeyCode::Char('d'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            20,
+            80,
+        );
+        assert_eq!(f.lines[0], "ac");
+        assert_eq!(f.col, 1);
+
+        f.edit_key(
+            &KeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            20,
+            80,
+        );
+        assert_eq!(f.lines[0], "c");
+        assert_eq!(f.col, 0);
     }
 
     #[test]

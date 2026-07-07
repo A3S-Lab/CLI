@@ -223,6 +223,20 @@ fn skill_asset_from_file(root: &std::path::Path, path: &std::path::Path) -> Skil
     }
 }
 
+pub(crate) fn skill_dev_session_from_file(
+    root: &std::path::Path,
+    path: &std::path::Path,
+) -> SkillDevSession {
+    let asset = skill_asset_from_file(root, path);
+    SkillDevSession {
+        name: asset.name,
+        description: asset.description,
+        rel: asset.rel,
+        path: asset.path,
+        root: root.to_path_buf(),
+    }
+}
+
 fn skill_meta(body: &str) -> Option<(String, String)> {
     let rest = body.trim_start().strip_prefix("---")?;
     let end = rest.find("\n---")?;
@@ -994,16 +1008,15 @@ fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -
                 action_hit = true;
             }
         }
-        SkillOsAction::Deploy => {
+        SkillOsAction::Deploy
             if combined.contains("deploy")
                 || combined.contains("serve")
                 || combined.contains("serving")
                 || combined.contains("release")
-                || combined.contains("binding")
-            {
-                score += 8;
-                action_hit = true;
-            }
+                || combined.contains("binding") =>
+        {
+            score += 8;
+            action_hit = true;
         }
         _ => {}
     }
@@ -1334,9 +1347,7 @@ impl App {
     }
 
     pub(crate) fn handle_skill_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(panel_state) = self.skill_picker.as_ref() else {
-            return None;
-        };
+        let panel_state = self.skill_picker.as_ref()?;
         let total = panel_state.skills.len();
         if total == 0 {
             return None;
@@ -1346,15 +1357,13 @@ impl App {
             return None;
         }
         let selected = panel_state.sel.min(total - 1);
-        let Some((mut panel, panel_height)) = skill_picker_panel(
+        let (mut panel, panel_height) = skill_picker_panel(
             &panel_state.skills,
             selected,
             &panel_state.root,
             width,
             self.height as usize,
-        ) else {
-            return None;
-        };
+        )?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;

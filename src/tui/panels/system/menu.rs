@@ -176,9 +176,7 @@ impl App {
         }
         let max_rows = (self.height as usize).saturating_sub(8).clamp(3, 10);
         let selected = self.slash_sel.min(total - 1);
-        let Some((mut panel, panel_height)) = slash_menu_panel(&cands, selected, max_rows) else {
-            return None;
-        };
+        let (mut panel, panel_height) = slash_menu_panel(&cands, selected, max_rows)?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;

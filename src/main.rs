@@ -23,6 +23,11 @@ fn usage_text() -> String {
         "usage:".to_string(),
         "  a3s code                  launch the interactive coding agent (TUI)".to_string(),
         "  a3s code resume <id>      resume a saved session by id".to_string(),
+        "  a3s code login|logout     manage the configured OS account".to_string(),
+        "  a3s code config|dirs      inspect config and local asset roots".to_string(),
+        "  a3s code kb|ctx|memory    use TUI knowledge/history tools from scripts".to_string(),
+        "  a3s code <family> <cmd>   run asset lifecycle commands (agent/mcp/skill/flow/okf)"
+            .to_string(),
         "  a3s box <args...>         run a3s-box, installing it automatically if needed"
             .to_string(),
         "  a3s list                  list installed a3s-* tools on PATH".to_string(),
@@ -46,14 +51,23 @@ fn version_text() -> String {
 /// Check the latest GitHub release and upgrade in place via the shared `update`
 /// module (Homebrew, with a direct-download fallback).
 async fn self_update() -> anyhow::Result<()> {
-    let current = env!("CARGO_PKG_VERSION");
+    let current = update::current_version();
     println!("a3s {current} — checking for updates…");
     let Some(latest) = update::fetch_latest() else {
         eprintln!("a3s: couldn't reach the release server (try again later)");
         std::process::exit(1);
     };
-    if update::version_ge(current, &latest) {
+    if update::version_ge(&current, &latest) {
         println!("✓ already up to date (a3s {current})");
+        match update::repair_installation() {
+            Ok(items) if items.is_empty() => println!("✓ installation looks healthy"),
+            Ok(items) => {
+                for item in items {
+                    println!("✓ {item}");
+                }
+            }
+            Err(error) => eprintln!("warning: install repair failed: {error}"),
+        }
         return Ok(());
     }
     println!("→ a3s {latest} available (you have {current})");
@@ -88,6 +102,8 @@ async fn main() -> anyhow::Result<()> {
             let rest: Vec<String> = args.collect();
             if rest.first().map(String::as_str) == Some("update") {
                 self_update().await
+            } else if tui::is_code_cli_command(&rest) {
+                tui::run_code_cli(rest).await
             } else {
                 tui::run(rest).await
             }

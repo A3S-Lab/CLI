@@ -1283,16 +1283,15 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
                 score -= 4;
             }
         }
-        McpOsAction::Logs => {
+        McpOsAction::Logs
             if combined.contains("log")
                 || combined.contains("trace")
                 || combined.contains("job")
                 || combined.contains("process")
-                || combined.contains("observability")
-            {
-                score += 10;
-                action_hit = true;
-            }
+                || combined.contains("observability") =>
+        {
+            score += 10;
+            action_hit = true;
         }
         _ => {}
     }
@@ -1349,6 +1348,7 @@ async fn try_mcp_progressive_observe(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn try_mcp_progressive_function(
     client: &reqwest::Client,
     origin: &str,
@@ -1920,9 +1920,7 @@ impl App {
     }
 
     pub(crate) fn handle_mcp_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(panel_state) = self.mcp_picker.as_ref() else {
-            return None;
-        };
+        let panel_state = self.mcp_picker.as_ref()?;
         let total = panel_state.projects.len();
         if total == 0 {
             return None;
@@ -1932,15 +1930,13 @@ impl App {
             return None;
         }
         let selected = panel_state.sel.min(total - 1);
-        let Some((mut panel, panel_height)) = mcp_picker_panel(
+        let (mut panel, panel_height) = mcp_picker_panel(
             &panel_state.projects,
             selected,
             &panel_state.root,
             width,
             self.height as usize,
-        ) else {
-            return None;
-        };
+        )?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;
@@ -2080,22 +2076,31 @@ mod tests {
     }
 
     async fn spawn_mcp_asset_create_mock(captured: Arc<Mutex<Vec<String>>>) -> String {
+        spawn_mcp_os_mock(captured, mcp_asset_create_mock_response).await
+    }
+
+    async fn spawn_mcp_os_mock<F>(captured: Arc<Mutex<Vec<String>>>, responder: F) -> String
+    where
+        F: Fn(&str, &str) -> (&'static str, String) + Send + Sync + 'static,
+    {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
+        let responder = Arc::new(responder);
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
                     return;
                 };
                 let captured = captured.clone();
+                let responder = responder.clone();
                 tokio::spawn(async move {
-                    let mut buf = vec![0u8; 32768];
+                    let mut buf = vec![0u8; 65536];
                     let n = sock.read(&mut buf).await.unwrap_or(0);
                     let req = String::from_utf8_lossy(&buf[..n]).into_owned();
                     let line = req.lines().next().unwrap_or("").to_string();
                     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
                     captured.lock().unwrap().push(format!("{line}\n{body}"));
-                    let (status, payload) = mcp_asset_create_mock_response(&line, &body);
+                    let (status, payload) = responder(&line, &body);
                     let resp = format!(
                         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                         payload.len()
@@ -2116,9 +2121,42 @@ mod tests {
             .unwrap_or_else(|| panic!("missing request {prefix}; got:\n{}", requests.join("\n")))
     }
 
-    fn mcp_asset_create_mock_response(line: &str, body: &str) -> (&'static str, &'static str) {
+    fn has_request(requests: &[String], prefix: &str) -> bool {
+        requests.iter().any(|request| request.starts_with(prefix))
+    }
+
+    fn request_count(requests: &[String], prefix: &str) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.starts_with(prefix))
+            .count()
+    }
+
+    fn assert_no_mcp_asset_mutation(requests: &[String]) {
+        assert!(
+            !has_request(requests, "POST /api/v1/assets HTTP/1.1"),
+            "read-only MCP action must not create assets:\n{}",
+            requests.join("\n")
+        );
+        assert!(
+            !requests.iter().any(
+                |request| request.starts_with("POST ") && request.contains("/repository/files")
+            ),
+            "read-only MCP action must not upload repository files:\n{}",
+            requests.join("\n")
+        );
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.starts_with("PUT ") && request.contains("/runtime-binding")),
+            "read-only MCP action must not write runtime binding:\n{}",
+            requests.join("\n")
+        );
+    }
+
+    fn mcp_asset_create_mock_response(line: &str, body: &str) -> (&'static str, String) {
         if line.starts_with("GET /api/v1/assets?") {
-            return ("200 OK", r#"{"data":{"items":[]}}"#);
+            return ("200 OK", r#"{"data":{"items":[]}}"#.to_string());
         }
         if line.starts_with("POST /api/v1/assets HTTP/1.1") {
             if body.contains(r#""category":"mcp""#)
@@ -2130,15 +2168,350 @@ mod tests {
             {
                 return (
                     "200 OK",
-                    r#"{"data":{"id":"mcp-asset-1","name":"mcp-weather-tools"}}"#,
+                    r#"{"data":{"id":"mcp-asset-1","name":"mcp-weather-tools"}}"#.to_string(),
                 );
             }
             return (
                 "422 Unprocessable Entity",
-                r#"{"message":"bad MCP asset body"}"#,
+                r#"{"message":"bad MCP asset body"}"#.to_string(),
             );
         }
-        ("404 Not Found", r#"{"message":"not found"}"#)
+        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+    }
+
+    fn mcp_existing_asset_mock_response(line: &str, _body: &str) -> (&'static str, String) {
+        if line.starts_with("GET /api/v1/assets?") {
+            return (
+                "200 OK",
+                r#"{"data":{"items":[{"id":"mcp-asset-1","name":"mcp-weather-tools","category":"mcp"}]}}"#.to_string(),
+            );
+        }
+        if line.starts_with("GET /api/v1/assets/mcp-asset-1/runtime-binding ") {
+            return (
+                "200 OK",
+                r#"{"data":{"configured":true,"kind":"mcp"}}"#.to_string(),
+            );
+        }
+        if line.starts_with("POST /api/v1/assets/mcp-asset-1/runtime-binding/validate ") {
+            return ("200 OK", r#"{"data":{"valid":true}}"#.to_string());
+        }
+        if line.starts_with("POST /api/v1/kernel/capabilities ") {
+            return (
+                "404 Not Found",
+                r#"{"code":404,"message":"capabilities unavailable in mock"}"#.to_string(),
+            );
+        }
+        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+    }
+
+    fn mcp_publish_function_mock_response(line: &str, body: &str) -> (&'static str, String) {
+        if line.starts_with("GET /api/v1/assets?") {
+            return ("200 OK", r#"{"data":{"items":[]}}"#.to_string());
+        }
+        if line.starts_with("POST /api/v1/assets HTTP/1.1") {
+            return mcp_asset_create_mock_response(line, body);
+        }
+        if line.starts_with("POST /api/v1/assets/mcp-asset-1/repository/files ") {
+            return ("200 OK", r#"{"data":{"ok":true}}"#.to_string());
+        }
+        if line.starts_with("PUT /api/v1/assets/mcp-asset-1/runtime-binding ") {
+            return ("200 OK", r#"{"data":{"configured":true}}"#.to_string());
+        }
+        if line.starts_with("POST /api/v1/assets/mcp-asset-1/runtime-binding/validate ") {
+            return ("200 OK", r#"{"data":{"valid":true}}"#.to_string());
+        }
+        if line.starts_with("POST /api/v1/kernel/capabilities ") {
+            return (
+                "404 Not Found",
+                r#"{"code":404,"message":"capabilities unavailable in mock"}"#.to_string(),
+            );
+        }
+        if line.starts_with("POST /api/v1/functions/mcp-weather-tools/invoke ") {
+            return (
+                "200 OK",
+                r#"{"data":{"viewUrl":"/admin/infrastructure/batch?asset=mcp-asset-1&debug=1&embed=1"}}"#.to_string(),
+            );
+        }
+        if line.starts_with("POST /api/v1/functions/mcp-weather-tools/batch ") {
+            return (
+                "200 OK",
+                r#"{"data":{"viewUrl":"/admin/infrastructure/batch?asset=mcp-asset-1&batch=1&embed=1"}}"#.to_string(),
+            );
+        }
+        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+    }
+
+    fn test_os_session(origin: String) -> crate::a3s_os::StoredOsSession {
+        crate::a3s_os::StoredOsSession {
+            address: origin,
+            access_token: "token".into(),
+            refresh_token: None,
+            token_type: Some("Bearer".into()),
+            expires_at_ms: None,
+            account_label: Some("test-os".into()),
+            login_at_ms: 1,
+        }
+    }
+
+    fn write_mcp_fixture(name: &str) -> (std::path::PathBuf, McpDevSession) {
+        let root = temp_root(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("weather-tools");
+        std::fs::create_dir_all(project.join(".a3s")).unwrap();
+        std::fs::write(
+            project.join(".a3s/mcp.server.json"),
+            r#"{
+              "name": "weather-tools",
+              "description": "Weather MCP tools",
+              "transport": "stdio",
+              "entrypoint": "server.js",
+              "tools": [{"name":"forecast"},{"name":"current"}]
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(project.join("server.js"), "console.log('weather tools');\n").unwrap();
+        let dev = McpDevSession {
+            name: "weather-tools".into(),
+            description: "Weather MCP tools".into(),
+            rel: "weather-tools".into(),
+            path: project,
+            root: root.clone(),
+        };
+        (root, dev)
+    }
+
+    #[tokio::test]
+    async fn mcp_status_checks_existing_asset_without_mutating_it() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_existing_asset_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-status-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin), dev, McpOsAction::Status)
+            .await
+            .expect("status should inspect existing MCP asset");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Status);
+        assert_eq!(result.asset_name, "mcp-weather-tools");
+        assert_eq!(result.asset_id, "mcp-asset-1");
+        assert!(!result.open_view);
+        assert!(result.note.contains("asset exists"), "{}", result.note);
+        assert!(
+            result.note.contains("runtime-binding valid"),
+            "{}",
+            result.note
+        );
+        assert!(result.view.url.contains("/admin/assets/mcp-asset-1"));
+        assert_eq!(request_count(&requests, "GET /api/v1/assets?"), 1);
+        assert_no_mcp_asset_mutation(&requests);
+    }
+
+    #[tokio::test]
+    async fn mcp_open_observes_existing_asset_without_mutating_it() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_existing_asset_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-open-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin), dev, McpOsAction::Open)
+            .await
+            .expect("open should inspect existing MCP asset");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Open);
+        assert!(result.open_view);
+        assert!(result.view.url.contains("/admin/assets/mcp-asset-1"));
+        assert!(result.view.url.contains("embed=1"));
+        assert!(
+            result.note.contains("Function as a Service MCP asset view"),
+            "{}",
+            result.note
+        );
+        assert_eq!(
+            request_count(&requests, "POST /api/v1/kernel/capabilities "),
+            1,
+            "/mcp open should try the progressive ViewLink path before fallback"
+        );
+        assert_no_mcp_asset_mutation(&requests);
+    }
+
+    #[tokio::test]
+    async fn mcp_logs_observes_existing_asset_without_mutating_it() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_existing_asset_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-logs-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin), dev, McpOsAction::Logs)
+            .await
+            .expect("logs should inspect existing MCP asset");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Logs);
+        assert!(result.open_view);
+        assert!(result.view.url.contains("/admin/infrastructure/batch"));
+        assert!(result.view.url.contains("asset=mcp-asset-1"));
+        assert!(result.view.url.contains("logs=1"));
+        assert!(
+            result.note.contains("Function as a Service MCP logs view"),
+            "{}",
+            result.note
+        );
+        assert_eq!(
+            request_count(&requests, "POST /api/v1/kernel/capabilities "),
+            1,
+            "/mcp logs should try the progressive ViewLink path before fallback"
+        );
+        assert_no_mcp_asset_mutation(&requests);
+    }
+
+    #[tokio::test]
+    async fn publish_mcp_to_os_debug_invokes_function_service() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_publish_function_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-debug-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Debug)
+            .await
+            .expect("debug should publish and invoke MCP function");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Debug);
+        assert_eq!(result.asset_id, "mcp-asset-1");
+        assert!(result.open_view);
+        assert!(result.view.url.starts_with(&origin), "{}", result.view.url);
+        assert!(result.view.url.contains("debug=1"), "{}", result.view.url);
+        assert!(
+            result.note.contains("MCP debug invoke")
+                && result.note.contains("runtime binding was synced"),
+            "{}",
+            result.note
+        );
+
+        assert!(has_request(&requests, "POST /api/v1/assets HTTP/1.1"));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files "
+        ));
+        assert!(has_request(
+            &requests,
+            "PUT /api/v1/assets/mcp-asset-1/runtime-binding "
+        ));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/functions/mcp-weather-tools/invoke "
+        ));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/functions/mcp-weather-tools/batch "
+        ));
+
+        let upload = request_body(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files ",
+        );
+        let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
+        let uploaded_paths = upload_json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|file| file["path"].as_str())
+            .collect::<Vec<_>>();
+        assert!(uploaded_paths.contains(&"server.js"), "{uploaded_paths:?}");
+        assert!(
+            uploaded_paths.contains(&MCP_SERVER_CONFIG_PATH),
+            "{uploaded_paths:?}"
+        );
+        assert!(
+            uploaded_paths.contains(&MCP_RUNTIME_BINDING_PATH),
+            "{uploaded_paths:?}"
+        );
+
+        let invoke = request_body(
+            &requests,
+            "POST /api/v1/functions/mcp-weather-tools/invoke ",
+        );
+        let invoke_json: serde_json::Value = serde_json::from_str(&invoke).unwrap();
+        assert_eq!(invoke_json["agentKind"], "tool");
+        assert_eq!(invoke_json["config"]["category"], "mcp");
+        assert_eq!(invoke_json["config"]["protocol"], "mcp");
+        assert_eq!(invoke_json["input"]["mode"], "debug");
+        assert_eq!(invoke_json["input"]["protocol"], "mcp");
+        assert_eq!(invoke_json["input"]["assetId"], "mcp-asset-1");
+        assert_eq!(invoke_json["input"]["assetName"], "mcp-weather-tools");
+        assert_eq!(
+            invoke_json["input"]["serverConfig"]["entrypoint"],
+            "server.js"
+        );
+        assert_eq!(invoke_json["input"]["tool"], "current");
+    }
+
+    #[tokio::test]
+    async fn publish_mcp_to_os_test_batches_function_service() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_publish_function_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-test-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Test)
+            .await
+            .expect("test should publish and batch MCP function inputs");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Test);
+        assert_eq!(result.asset_id, "mcp-asset-1");
+        assert!(result.open_view);
+        assert!(result.view.url.starts_with(&origin), "{}", result.view.url);
+        assert!(result.view.url.contains("batch=1"), "{}", result.view.url);
+        assert!(
+            result.note.contains("MCP batch test")
+                && result.note.contains("runtime binding was synced"),
+            "{}",
+            result.note
+        );
+
+        assert!(has_request(&requests, "POST /api/v1/assets HTTP/1.1"));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files "
+        ));
+        assert!(has_request(
+            &requests,
+            "PUT /api/v1/assets/mcp-asset-1/runtime-binding "
+        ));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/functions/mcp-weather-tools/batch "
+        ));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/functions/mcp-weather-tools/invoke "
+        ));
+
+        let batch = request_body(&requests, "POST /api/v1/functions/mcp-weather-tools/batch ");
+        let batch_json: serde_json::Value = serde_json::from_str(&batch).unwrap();
+        assert_eq!(batch_json["agentKind"], "tool");
+        assert_eq!(batch_json["config"]["category"], "mcp");
+        assert_eq!(batch_json["config"]["protocol"], "mcp");
+        let inputs = batch_json["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), 2);
+        let modes = inputs
+            .iter()
+            .map(|input| input["mode"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(modes, vec!["test", "test"]);
+        let tools = inputs
+            .iter()
+            .map(|input| input["tool"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tools, vec!["current", "forecast"]);
+        assert!(inputs.iter().all(|input| {
+            input["assetId"] == "mcp-asset-1"
+                && input["assetName"] == "mcp-weather-tools"
+                && input["protocol"] == "mcp"
+        }));
     }
 
     #[test]

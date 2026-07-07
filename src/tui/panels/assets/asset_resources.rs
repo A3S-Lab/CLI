@@ -141,12 +141,8 @@ fn with_asset_query(origin: &str, query: &str) -> Result<reqwest::Url, String> {
 }
 
 fn with_runtime_query(origin: &str, path: &str, query: &str) -> Result<reqwest::Url, String> {
-    let (category, search) = activity_query_parts(query);
-    let mut url = with_query(origin, path, &search)?;
-    if let Some(category) = category {
-        url.query_pairs_mut().append_pair("category", &category);
-    }
-    Ok(url)
+    let (_, search) = activity_query_parts(query);
+    with_query(origin, path, &search)
 }
 
 fn path_segment(value: &str) -> String {
@@ -290,6 +286,49 @@ fn asset_from_value(v: &Value) -> Option<AssetRow> {
     })
 }
 
+fn inferred_activity_category(v: &Value) -> Option<&'static str> {
+    let runtime_plane = str_at(v, &["runtimePlane"])
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let row_source = str_at(v, &["source"]).unwrap_or("").to_ascii_lowercase();
+    let target_kind = str_at(v, &["targetKind"])
+        .or_else(|| nested_str_at(v, &["/metadata/targetKind"]))
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let kind = str_at(v, &["kind", "type", "resourceType", "runtimeKind"])
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let protocol = nested_str_at(v, &["/metadata/protocol", "/runtime/protocol"])
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if target_kind == "workflow"
+        || kind == "workflow"
+        || runtime_plane == "workflow-core"
+        || row_source == "workflow-execution"
+    {
+        return Some("workflow");
+    }
+    if protocol == "mcp" || target_kind == "mcp" || kind == "mcp" {
+        return Some("mcp");
+    }
+    if protocol == "skill" || target_kind == "skill" || kind == "skill" {
+        return Some("skill");
+    }
+    if target_kind == "agent"
+        || target_kind == "agent-session"
+        || kind == "agent"
+        || kind == "agentic"
+        || kind == "tool"
+        || kind == "agent-session"
+        || runtime_plane == "agent-core"
+        || row_source == "kernel-session-runtime"
+    {
+        return Some("agent");
+    }
+    None
+}
+
 fn activity_from_value(v: &Value, source: &str) -> Option<RuntimeActivityRow> {
     let id = str_at(
         v,
@@ -320,9 +359,20 @@ fn activity_from_value(v: &Value, source: &str) -> Option<RuntimeActivityRow> {
     .unwrap_or(&id)
     .to_string();
     let asset_category = str_at(v, &["assetCategory", "category", "assetType", "assetKind"])
-        .or_else(|| nested_str_at(v, &["/asset/category", "/metadata/category"]))
-        .unwrap_or("")
-        .to_string();
+        .or_else(|| {
+            nested_str_at(
+                v,
+                &[
+                    "/asset/category",
+                    "/metadata/assetCategory",
+                    "/metadata/category",
+                    "/metadata/assetType",
+                ],
+            )
+        })
+        .map(str::to_string)
+        .or_else(|| inferred_activity_category(v).map(str::to_string))
+        .unwrap_or_default();
     let kind = str_at(v, &["kind", "type", "resourceType", "runtimeKind"])
         .unwrap_or_else(|| {
             if source.contains("function") {
@@ -1306,10 +1356,10 @@ mod tests {
             );
         }
         if line.starts_with("GET /api/v1/runtime/services?") {
-            if line.contains("category=mcp") {
+            if line.contains("search=mcp-api") {
                 return (
                     "200 OK",
-                    r#"{"data":{"services":[{"serviceId":"svc-mcp","serviceName":"api","assetCategory":"mcp","state":"running","image":"img:mcp"},{"serviceId":"svc-workflow","serviceName":"api","assetCategory":"workflow","state":"running","image":"img:workflow"}]}}"#,
+                    r#"{"data":{"services":[{"serviceId":"svc-mcp","serviceName":"mcp-api","metadata":{"protocol":"mcp"},"state":"running","image":"img:mcp"},{"serviceId":"svc-workflow","serviceName":"mcp-api","targetKind":"workflow","state":"running","image":"img:workflow"}]}}"#,
                 );
             }
             return (
@@ -1536,6 +1586,20 @@ mod tests {
         assert_eq!(row.kind, "deployment");
         assert_eq!(row.status, "running");
         assert_eq!(row.access_url.as_deref(), Some("https://x"));
+
+        let runtime_service = activity_from_value(
+            &v(r#"{"id":"wf:1","name":"daily-flow","targetKind":"workflow","runtimePlane":"workflow-core","state":"running"}"#),
+            "/api/v1/runtime/services",
+        )
+        .unwrap();
+        assert_eq!(runtime_service.asset_category, "workflow");
+
+        let mcp_service = activity_from_value(
+            &v(r#"{"id":"fn:1","name":"weather-mcp","kind":"serving","metadata":{"protocol":"mcp"},"state":"running"}"#),
+            "/api/v1/runtime/services",
+        )
+        .unwrap();
+        assert_eq!(mcp_service.asset_category, "mcp");
     }
 
     #[test]
@@ -1668,16 +1732,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_runtime_activity_uses_category_query_and_filters_same_named_assets() {
+    async fn fetch_runtime_activity_keeps_category_local_and_filters_same_named_assets() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_mock_os(captured.clone()).await;
-        let fetch = fetch_runtime_activity(&origin, "tok-service", "category:mcp api")
+        let fetch = fetch_runtime_activity(&origin, "tok-service", "category:mcp mcp-api")
             .await
             .unwrap();
 
         assert_eq!(fetch.rows.len(), 1);
         assert_eq!(fetch.rows[0].id, "svc-mcp");
-        assert_eq!(fetch.rows[0].name, "api");
+        assert_eq!(fetch.rows[0].name, "mcp-api");
         assert_eq!(fetch.rows[0].asset_category, "mcp");
         assert!(
             !fetch.rows.iter().any(|row| row.id == "svc-workflow"),
@@ -1686,8 +1750,8 @@ mod tests {
         let lines = captured_lines(&captured);
         assert!(lines.iter().any(|line| {
             line.contains("/api/v1/runtime/services?")
-                && line.contains("search=api")
-                && line.contains("category=mcp")
+                && line.contains("search=mcp-api")
+                && !line.contains("category=mcp")
         }));
     }
 }

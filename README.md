@@ -45,6 +45,8 @@ surface.
 
 Use this README as the TUI capability guide:
 
+- [A3S Code CLI Command Examples](#a3s-code-cli-command-examples) shows
+  copyable non-interactive command forms and how they map to TUI workflows.
 - [Capability Overview](#capability-overview) maps the major product surfaces.
 - [Everyday Capability Paths](#everyday-capability-paths) explains how those
   surfaces fit together during real work.
@@ -62,6 +64,191 @@ Use this README as the TUI capability guide:
   commands that are not tied to an asset family.
 - [Agents, Research, and Loops](#agents-research-and-loops) lists the detailed
   command forms for assets, DeepResearch, and engineered loops.
+
+### A3S Code CLI Command Examples
+
+`a3s code` is both the interactive TUI entry point and a small non-interactive
+CLI for the same asset, model, knowledge, RemoteUI, and OS surfaces. The CLI
+forms are useful in scripts, release checks, terminals without a full-screen UI,
+and docs that need reproducible examples. Commands that read or mutate OS
+resources require `a3s code login`; local discovery, config, memory, KB, review
+prompts, and `view` URL opening keep working without an OS session.
+
+Start, resume, and update the TUI:
+
+```sh
+a3s code                         # launch the TUI in the current workspace
+a3s code resume                  # resume the newest saved TUI session here
+a3s code resume 018f-session-id  # resume a specific saved session
+a3s code update                  # upgrade the CLI and restart into this session
+```
+
+Inspect and create `config.acl`:
+
+```sh
+a3s code config path                 # print the discovered config path
+a3s code config init                 # create the preferred default config
+a3s code config init .a3s/config.acl # create a project-local config
+a3s code config cat                  # print the active config
+a3s code config check                # summarize providers, models, and OS config
+a3s code config edit                 # open VISUAL/EDITOR, or print the path
+a3s code config dirs                 # print config, asset, memory, KB, and OKF dirs
+a3s code dirs                        # shorthand for the same directory summary
+```
+
+Sign in to A3S OS and check account state:
+
+```sh
+a3s code login                 # open the configured OS OAuth login flow
+a3s code login "$A3S_OS_TOKEN" # store an existing OS bearer token
+a3s code auth status           # show OS endpoint, account, and expiry
+a3s code auth login            # alias for interactive login
+a3s code auth logout           # alias for logout
+a3s code logout                # remove the stored OS session
+```
+
+List runtime-callable models:
+
+```sh
+a3s code models
+a3s code model
+a3s code model list
+```
+
+The model commands list `config.acl` models, local Claude/Codex account models,
+and signed-in OS gateway models from the unified gateway. They are not the same
+thing as digital asset repository entries whose category happens to be `model`.
+
+Find local asset sources, clone repositories, and inspect OS assets:
+
+```sh
+a3s code agent local
+a3s code agent local reviewer
+a3s code agent clone https://github.com/acme/reviewer-agent.git
+a3s code agent list reviewer
+a3s code agent activity failed
+
+a3s code mcp local weather
+a3s code mcp clone https://github.com/acme/weather-mcp.git
+a3s code mcp list weather
+a3s code mcp activity running
+
+a3s code skill local summarize
+a3s code flow local release
+a3s code okf local security
+```
+
+`local`, `clone`, and `review` are local developer conveniences. `list`,
+`activity`, and every publish/deploy/open/log/status operation call OS APIs and
+therefore need a configured `os = "https://..."` plus a valid login.
+
+Run agent lifecycle commands:
+
+```sh
+a3s code agent review agents/reviewer/agent.md
+a3s code agent publish agentic agents/reviewer/agent.md
+a3s code agent publish application agents/portal/agent.md
+a3s code agent publish tool agents/sql-checker/agent.md
+a3s code agent run agents/reviewer/agent.md
+a3s code agent deploy agents/portal/agent.md
+a3s code agent open agentic agents/reviewer/agent.md
+a3s code agent logs tool agents/sql-checker/agent.md
+a3s code agent status application agents/portal/agent.md
+```
+
+Run MCP lifecycle commands:
+
+```sh
+a3s code mcp review mcps/weather
+a3s code mcp publish mcps/weather
+a3s code mcp debug mcps/weather
+a3s code mcp test mcps/weather
+a3s code mcp deploy mcps/weather
+a3s code mcp open mcps/weather
+a3s code mcp logs mcps/weather
+a3s code mcp status mcps/weather
+```
+
+Run skill, workflow, and OKF lifecycle commands:
+
+```sh
+a3s code skill review skills/summarize/SKILL.md
+a3s code skill publish skills/summarize/SKILL.md
+a3s code skill deploy skills/summarize/SKILL.md
+a3s code skill open skills/summarize/SKILL.md
+a3s code skill status skills/summarize/SKILL.md
+
+a3s code flow review flows/release-gate.json
+a3s code flow publish flows/release-gate.json
+a3s code flow run flows/release-gate.json
+a3s code flow deploy flows/release-gate.json
+a3s code flow open flows/release-gate.json
+a3s code flow logs flows/release-gate.json
+a3s code flow status flows/release-gate.json
+
+a3s code okf review .a3s/okf/security-playbook
+a3s code okf publish .a3s/okf/security-playbook
+a3s code okf deploy .a3s/okf/security-playbook
+a3s code okf status .a3s/okf/security-playbook
+```
+
+Manage local knowledge, context history, and memory:
+
+```sh
+a3s code kb stats
+a3s code kb add "Release notes should mention the gateway model split."
+a3s code kb import docs/
+a3s code kb search "gateway model split"
+a3s code kb vault
+
+a3s code ctx search "RemoteUI view link"
+a3s code ctx show 01HVEXAMPLEEVENT --window 8
+a3s code ctx session 018f-session-id
+
+a3s code memory list
+a3s code memory list "database migration"
+a3s code memory stats
+a3s code memory dir
+a3s code mem list "preference" # alias for memory
+```
+
+`/ctx <n>` attachment and `/ctx save <n>` memory promotion are interactive TUI
+state, so the CLI exposes the durable `search`, `show`, and `session` forms
+instead of pretending to attach context to a running transcript.
+
+Inspect local process activity and open explicit RemoteUI URLs:
+
+```sh
+a3s code top
+a3s code top --json
+a3s code view "https://os.example.com/admin/assets/abc"
+a3s code view "https://os.example.com/admin/assets/abc" --width 1280 --height 820
+a3s code view "https://os.example.com/admin/assets/abc" --size 1280x820
+```
+
+Inside the TUI, the same surfaces are available through slash commands and
+input prefixes:
+
+```text
+/help
+/model
+/effort
+/config
+/ide
+/output
+/login
+/view
+/agent
+/mcp
+/skill
+/flow
+/okf
+/loop init release-gate ci-sweeper
+/loop run release-gate
+? research how the OS gateway discovers runtime models
+! cargo test --all-targets
+@src/main.rs
+```
 
 ### Capability Overview
 

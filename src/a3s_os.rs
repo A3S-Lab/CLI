@@ -653,10 +653,10 @@ pub(crate) struct GatewayModel {
     pub context: Option<u32>,
 }
 
-/// List the OS unified AI gateway's models via the OpenAI-compatible
-/// `GET {origin}/v1/models` (Bearer = the OS token). The gateway is
-/// "gateway-managed" (it holds the real provider keys; callers send only the OS
-/// token + a model id).
+/// List the OS unified AI gateway's runtime-callable models via
+/// `GET {origin}/api/v1/llm/models` (Bearer = the OS token). These are not model
+/// assets from the digital asset repository; the gateway is "gateway-managed" (it
+/// holds the real provider keys; callers send only the OS token + a model id).
 ///
 /// Returns a precise `Err` on failure so the `/model` picker can say WHY the
 /// gateway is unavailable — in particular it distinguishes an HTML/SPA response

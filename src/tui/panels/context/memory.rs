@@ -74,17 +74,14 @@ fn memory_detail_metadata_lines(
         &e.memory_type
     };
     let header = format!(
-        "{} {}",
+        "{} {} {}",
         Badge::new(ty).color(color).view(),
-        format!(
-            "{} {}",
-            importance_bar(e.importance, color),
-            Style::new().fg(TN_GRAY).render(&format!(
-                "importance {:.2} · {}",
-                e.importance,
-                rel_time(e.timestamp, now)
-            ))
-        )
+        importance_bar(e.importance, color),
+        Style::new().fg(TN_GRAY).render(&format!(
+            "importance {:.2} · {}",
+            e.importance,
+            rel_time(e.timestamp, now)
+        ))
     );
     let mut lines = vec![a3s_tui::style::fit_visible(&header, width)];
     let mut panel = DetailPanel::without_title()
@@ -282,9 +279,7 @@ impl App {
     fn memory_forget_candidate(&mut self) -> Option<Cmd<Msg>> {
         let session_memory = self.session.memory().cloned();
         let m = self.memory.as_mut()?;
-        let Some(entry) = m.entries.get(m.sel).cloned() else {
-            return None;
-        };
+        let entry = m.entries.get(m.sel).cloned()?;
         let Some(facet) = m.graph.by_memory.get(&entry.id) else {
             m.note = "graph data is still loading".to_string();
             return None;

@@ -297,6 +297,10 @@ fn help_panel() -> HelpPanel {
                     "full-screen file editors and knowledge-base browser",
                 )
                 .row(
+                    "editor keys",
+                    "Cmd/Ctrl+V paste text, Ctrl+S save, Ctrl+Z undo, Esc normal/tree",
+                )
+                .row(
                     "/memory",
                     "memory graph with entities, tiers, aliases, and forget candidates",
                 )
@@ -417,7 +421,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{agent, flow, mcp, okf, skill};
     use super::*;
+    use std::collections::BTreeSet;
 
     fn contains_cjk(s: &str) -> bool {
         s.chars().any(|ch| {
@@ -441,6 +447,203 @@ mod tests {
         haystack
             .split(|ch: char| !ch.is_ascii_alphanumeric())
             .any(|word| word == needle)
+    }
+
+    fn documented_command_keys() -> BTreeSet<&'static str> {
+        PARAMETER_HELP_ROWS
+            .iter()
+            .map(|(command, _)| *command)
+            .collect()
+    }
+
+    #[test]
+    fn documented_asset_help_forms_are_parser_backed() {
+        let keys = documented_command_keys();
+        for documented in [
+            "/okf <description>",
+            "/okf",
+            "/okf off",
+            "/okf clone <git-url>",
+            "/okf review/publish/deploy",
+            "/okf status",
+            "/okf list [query]",
+            "/okf activity [query]",
+            "/agent <description>",
+            "/agent clone <git-url>",
+            "/agent off",
+            "/agent review",
+            "/agent list [query]",
+            "/agent activity [query]",
+            "/agent publish agentic",
+            "/agent publish application",
+            "/agent publish tool",
+            "/agent run",
+            "/agent deploy",
+            "/agent open [agentic|application|tool]",
+            "/agent logs [agentic|application|tool]",
+            "/agent status [agentic|application|tool]",
+            "/mcp <description>",
+            "/mcp clone <git-url>",
+            "/mcp off",
+            "/mcp review",
+            "/mcp list [query]",
+            "/mcp activity [query]",
+            "/mcp publish",
+            "/mcp deploy",
+            "/mcp debug",
+            "/mcp test",
+            "/mcp open",
+            "/mcp logs",
+            "/mcp status",
+            "/flow <description>",
+            "/flow clone <git-url>",
+            "/flow review [file]",
+            "/flow list [query]",
+            "/flow activity [query]",
+            "/flow publish",
+            "/flow run",
+            "/flow deploy",
+            "/flow open",
+            "/flow logs",
+            "/flow status",
+            "/skill <description>",
+            "/skill clone <git-url>",
+            "/skill off",
+            "/skill review",
+            "/skill list [query]",
+            "/skill activity [query]",
+            "/skill publish",
+            "/skill deploy",
+            "/skill open",
+            "/skill status",
+        ] {
+            assert!(
+                keys.contains(documented),
+                "{documented} should remain documented in /help"
+            );
+        }
+
+        for input in [
+            "clone https://github.com/a/agent.git",
+            "off",
+            "review",
+            "list agentic",
+            "activity failed runs",
+            "publish agentic",
+            "publish application",
+            "publish tool",
+            "run",
+            "deploy",
+            "open",
+            "open application",
+            "open tool",
+            "logs",
+            "logs application",
+            "logs tool",
+            "status",
+            "status application",
+            "status tool",
+        ] {
+            assert!(
+                matches!(agent::parse_agent_subcommand(input), Some(Ok(_))),
+                "/agent {input} should parse from the documented help surface"
+            );
+        }
+        assert!(
+            agent::parse_agent_subcommand("draft a code reviewer").is_none(),
+            "/agent <description> should stay a freeform draft command"
+        );
+
+        for input in [
+            "clone https://github.com/a/mcp.git",
+            "off",
+            "review",
+            "list weather",
+            "activity failed invocations",
+            "publish",
+            "deploy",
+            "debug",
+            "test",
+            "open",
+            "logs",
+            "status",
+        ] {
+            assert!(
+                matches!(mcp::parse_mcp_subcommand(input), Some(Ok(_))),
+                "/mcp {input} should parse from the documented help surface"
+            );
+        }
+        assert!(
+            mcp::parse_mcp_subcommand("weather server").is_none(),
+            "/mcp <description> should stay a freeform draft command"
+        );
+
+        for input in [
+            "clone https://github.com/a/flow.git",
+            "review",
+            "review flows/main.design.json",
+            "list nightly",
+            "activity failed jobs",
+            "publish",
+            "run",
+            "deploy",
+            "open",
+            "logs",
+            "status",
+        ] {
+            assert!(
+                matches!(flow::parse_flow_subcommand(input), Some(Ok(_))),
+                "/flow {input} should parse from the documented help surface"
+            );
+        }
+        assert!(
+            flow::parse_flow_subcommand("draft a workflow").is_none(),
+            "/flow <description> should stay a freeform draft command"
+        );
+
+        for input in [
+            "clone https://github.com/a/skill.git",
+            "off",
+            "review",
+            "list triage",
+            "activity evaluations",
+            "publish",
+            "deploy",
+            "open",
+            "status",
+        ] {
+            assert!(
+                matches!(skill::parse_skill_subcommand(input), Some(Ok(_))),
+                "/skill {input} should parse from the documented help surface"
+            );
+        }
+        assert!(
+            skill::parse_skill_subcommand("draft a skill").is_none(),
+            "/skill <description> should stay a freeform draft command"
+        );
+
+        for input in [
+            "clone https://github.com/a/okf.git",
+            "off",
+            "review",
+            "list runbook",
+            "activity indexing",
+            "publish",
+            "deploy",
+            "status",
+        ] {
+            assert!(
+                !matches!(okf::parse_okf_command(input), okf::OkfCommand::Prototype(_)),
+                "/okf {input} should parse from the documented help surface"
+            );
+        }
+        assert!(
+            matches!(
+                okf::parse_okf_command("draft an incident-response package"),
+                okf::OkfCommand::Prototype(_)
+            ),
+            "/okf <description> should stay a freeform draft command"
+        );
     }
 
     #[test]

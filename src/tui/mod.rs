@@ -12,7 +12,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use a3s_code_core::config::OsConfig;
 use a3s_code_core::context::RecentWorkspaceFilesContextProvider;
@@ -50,6 +50,9 @@ mod asset_clone;
 mod asset_lifecycle;
 #[path = "assets/naming.rs"]
 mod asset_naming;
+#[path = "code_cli.rs"]
+mod code_cli;
+pub(crate) use code_cli::{is_code_cli_command, run_code_cli};
 
 // System configuration and integrations.
 #[path = "system/config.rs"]
@@ -671,12 +674,36 @@ struct IdeEntry {
     expanded: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum IdePrompt {
+    Search { forward: bool, text: String },
+    Command(String),
+}
+
 /// Editor input mode — vim-aligned: Normal navigates/operates, Insert types.
 /// Freshly opened buffers start in Normal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum EditMode {
     Normal,
     Insert,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct PendingOp {
+    op: char,
+    count: usize,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+enum RepeatEdit {
+    DeleteChar(usize),
+    DeleteLine(usize),
+    DeleteWord(usize),
+    DeleteToEol,
+    ChangeLine(usize),
+    Replace(char),
+    JoinLine(usize),
+    ToggleCase(usize),
 }
 
 /// An open, editable file in the `/ide` panel.
@@ -692,9 +719,19 @@ struct IdeFile {
     readonly: bool, // view-only (e.g. a dynamic-workflow artifact) — edits blocked
     mode: EditMode, // vim Normal/Insert (see `ide_key`)
     /// A pending operator/prefix awaiting its second keystroke (`d`, `c`, `g`, `y`).
-    pending: Option<char>,
+    pending: Option<PendingOp>,
+    /// Normal-mode numeric prefix (`3j`, `5dd`, `2w`).
+    count: Option<usize>,
     /// Undo snapshots (lines + cursor) for `u`; bounded — configs are small.
     undo: Vec<(Vec<String>, usize, usize)>,
+    /// Redo snapshots for Ctrl+R.
+    redo: Vec<(Vec<String>, usize, usize)>,
+    /// Last repeatable Normal-mode change for `.`.
+    last_change: Option<RepeatEdit>,
+    /// Last search query and direction for `n` / `N`.
+    search: Option<(String, bool)>,
+    /// Visual Line anchor row (`V`).
+    visual_line_anchor: Option<usize>,
     clip: String,        // yank/delete register for p / P
     clip_linewise: bool, // register holds whole lines (dd/yy) vs an inline span
 }
@@ -718,7 +755,12 @@ impl IdeFile {
             readonly,
             mode: EditMode::Normal,
             pending: None,
+            count: None,
             undo: Vec::new(),
+            redo: Vec::new(),
+            last_change: None,
+            search: None,
+            visual_line_anchor: None,
             clip: String::new(),
             clip_linewise: false,
         }
@@ -795,7 +837,7 @@ async function run(ctx, inputs) {
     const title = track.title || `Track ${index + 1}`;
     const focus = track.focus || String(track);
     return {
-      agent: "explore",
+      agent: "general",
       description: `Research ${index + 1}: ${title}`,
       prompt: `Deep-research track for: ${query}\n\nFocus: ${focus}\n\nUse web_search and web_fetch. Return URLs, publication dates, key evidence, contradictions, and confidence notes.`
     };
@@ -1073,6 +1115,7 @@ fn osc52_copy(text: &str) -> String {
 /// remembered view (`/view` does the same). The styled button is still transcript
 /// text, so ANSI stripping keeps this marker clickable.
 const VIEW_BUTTON_MARKER: &str = "Open view";
+const VIEW_BUTTON_CLICK_DRIFT_COLS: u16 = 2;
 
 fn remote_view_button(detail: &str) -> String {
     InlineAction::new(VIEW_BUTTON_MARKER)
@@ -1164,6 +1207,28 @@ fn selection_to_text(view: &str, r1: usize, c1: usize, r2: usize, c2: usize) -> 
     out.join("\n")
 }
 
+fn viewport_row_contains_view_button(view: &str, row: u16) -> bool {
+    view.split('\n')
+        .nth(row as usize)
+        .map(a3s_tui::style::strip_ansi)
+        .is_some_and(|line| line.to_ascii_lowercase().contains("open view"))
+}
+
+fn is_remote_view_click(view: &str, selection: Selection) -> bool {
+    selection.anchor.0 == selection.head.0
+        && selection.anchor.1.abs_diff(selection.head.1) <= VIEW_BUTTON_CLICK_DRIFT_COLS
+        && viewport_row_contains_view_button(view, selection.anchor.0)
+}
+
+fn is_quit_key(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+}
+
+fn quit_is_confirmed(armed: Option<Instant>, now: Instant) -> bool {
+    armed.is_some_and(|t| now.saturating_duration_since(t) < Duration::from_secs(2))
+}
+
 /// Re-render the viewport `view` with the selected span highlighted: selected
 /// rows render in plain text (no syntax colour, transiently) with the selected
 /// columns on `SELECTION_BG`; other rows keep their styling.
@@ -1203,6 +1268,8 @@ struct Ide {
     /// Superfile-style hover preview of the tree-selected file, keyed by path
     /// so it reloads only when the selection actually moves.
     preview: Option<(std::path::PathBuf, Vec<String>)>,
+    /// Active command prompt inside the editor footer (`/`, `?`, `:`).
+    prompt: Option<IdePrompt>,
     /// `/kb` browser: the vault root. Enables `x` delete, hard-bounded to
     /// paths inside this root. `None` for /ide and /config.
     kb_root: Option<std::path::PathBuf>,
@@ -1224,6 +1291,7 @@ impl Ide {
             flash: None,
             title: title.to_string(),
             preview: None,
+            prompt: None,
             kb_root: None,
             armed_delete: None,
             delete_confirm_yes: true,
@@ -1537,6 +1605,8 @@ enum Msg {
     },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
+    /// `/update` found no binary upgrade was needed and repaired companion tools.
+    UpdateRepair(Result<Vec<String>, String>),
     /// OS login completed.
     OsLogin(Result<String, String>),
     /// Post-login SSH-key sync finished (registers the local pubkey with OS).
@@ -1596,7 +1666,7 @@ enum Msg {
 
 impl From<Event> for Msg {
     fn from(event: Event) -> Self {
-        // Ctrl+C is handled in the key loop (double-press to quit), not here.
+        // Ctrl+C is handled in the key loop as a global graceful quit key.
         Msg::Term(event)
     }
 }
@@ -1656,7 +1726,39 @@ fn with_recent_workspace_context(
 fn tui_session_options(confirmation: a3s_code_core::hitl::ConfirmationPolicy) -> SessionOptions {
     SessionOptions::new()
         .with_confirmation_policy(confirmation)
+        .with_permission_policy(tui_permission_policy())
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
+}
+
+/// Core permission policy for the TUI: keep research/read tools unblocked even
+/// when dynamic workflows or child runs bypass the UI auto-approval helper.
+fn tui_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
+    a3s_code_core::permissions::PermissionPolicy::new().allow_all(&[
+        "Read(*)",
+        "Grep(*)",
+        "Glob(*)",
+        "LS(*)",
+        "read(*)",
+        "grep(*)",
+        "glob(*)",
+        "ls(*)",
+        "web_search(*)",
+        "web_fetch(*)",
+    ])
+}
+
+fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
+    let now = Instant::now();
+    if epoch_ms == 0 {
+        return now;
+    }
+    let wall_now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(epoch_ms);
+    let age_ms = wall_now_ms.saturating_sub(epoch_ms);
+    now.checked_sub(Duration::from_millis(age_ms))
+        .unwrap_or(now)
 }
 
 fn touch_workspace_file_path_for_manifest(
@@ -1993,6 +2095,9 @@ struct App {
     messages: Vec<String>,
     rx: Option<SharedRx>,
     stream_join: Option<StreamJoin>,
+    /// True while `rx` is carrying host-direct tool progress rather than an
+    /// agent stream; channel close must not finish the turn.
+    host_progress_inflight: bool,
     interrupting: bool,
     pending_tool: Option<(String, String)>,
     /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
@@ -2147,6 +2252,10 @@ impl Model for App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.ide.is_some() {
+                    self.ide_paste_text(&text);
+                    return None;
+                }
                 self.textarea.insert_str(&text);
                 self.relayout();
             }
@@ -2154,21 +2263,23 @@ impl Model for App {
             Msg::Term(Event::Key(key)) => {
                 self.last_activity = Instant::now();
                 self.auto_reviewed = false;
-                self.selection = None; // any keypress dismisses the copy highlight
-                                       // Ctrl+C: arm on the first press, exit on a second within 2s.
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    match self.quit_armed {
-                        Some(t) if t.elapsed() < Duration::from_secs(2) => return Some(cmd::quit()),
-                        _ => {
-                            self.quit_armed = Some(Instant::now());
-                            self.push_line(
-                                &Style::new()
-                                    .fg(TN_YELLOW)
-                                    .render("  press Ctrl+C again to exit"),
-                            );
-                            return None;
-                        }
+                // Any keypress dismisses the copy highlight.
+                self.selection = None;
+                // Ctrl+C is a global quit key. Keep it before panels, approval
+                // prompts, and streaming handlers so terminal variants cannot
+                // route it into hidden input instead of exiting.
+                if is_quit_key(&key) {
+                    let now = Instant::now();
+                    if quit_is_confirmed(self.quit_armed, now) {
+                        return Some(cmd::quit());
                     }
+                    self.quit_armed = Some(now);
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  press Ctrl+C again to exit"),
+                    );
+                    return None;
                 }
                 // Esc closes the /btw side-chat panel.
                 if self.btw.is_some() && key.code == KeyCode::Esc {
@@ -2234,14 +2345,12 @@ impl Model for App {
                         KeyCode::PageDown => self.top_sel = (self.top_sel + 10).min(last),
                         // Enter / → drills into the selected coding agent's
                         // process subtree (its child processes).
-                        KeyCode::Enter | KeyCode::Right => {
-                            if self.top_focus.is_none() {
-                                if let Some(row) = rows.get(self.top_sel) {
-                                    if row.agent.is_some() {
-                                        self.top_focus = Some(row.pid);
-                                        self.top_sel = 0;
-                                        self.top_scroll = 0;
-                                    }
+                        KeyCode::Enter | KeyCode::Right if self.top_focus.is_none() => {
+                            if let Some(row) = rows.get(self.top_sel) {
+                                if row.agent.is_some() {
+                                    self.top_focus = Some(row.pid);
+                                    self.top_sel = 0;
+                                    self.top_scroll = 0;
                                 }
                             }
                         }
@@ -2543,24 +2652,21 @@ impl Model for App {
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if let Some(s) = self.selection {
-                            if s.is_empty() {
-                                // A plain click: open the OS view if it landed on
-                                // the agent's inline "Open view" button; else just clear.
-                                let view = self.viewport.view();
-                                let clicked = a3s_tui::style::strip_ansi(
-                                    view.split('\n')
-                                        .nth(s.anchor.0 as usize)
-                                        .unwrap_or_default(),
-                                );
+                            let view = self.viewport.view();
+                            if is_remote_view_click(&view, s) {
                                 self.selection = None;
-                                if clicked.contains(VIEW_BUTTON_MARKER) {
-                                    if let Some(spec) = self.last_view.clone() {
-                                        self.open_remote_view(&spec);
-                                    }
+                                if let Some(spec) = self.last_view.clone() {
+                                    self.open_remote_view(&spec);
+                                } else {
+                                    self.push_line(&Style::new().fg(TN_GRAY).render(
+                                        "  no OS view is available for this Open view marker yet",
+                                    ));
                                 }
+                            } else if s.is_empty() {
+                                self.selection = None;
                             } else {
                                 let (r1, c1, r2, c2) = s.ordered();
-                                let text = selection_to_text(&self.viewport.view(), r1, c1, r2, c2);
+                                let text = selection_to_text(&view, r1, c1, r2, c2);
                                 if text.trim().is_empty() {
                                     self.selection = None;
                                 } else {
@@ -2582,6 +2688,7 @@ impl Model for App {
             Msg::StreamStarted(rx, join) => {
                 self.rx = Some(rx.clone());
                 self.stream_join = Some(join);
+                self.host_progress_inflight = false;
                 self.interrupting = false;
                 return Some(pump(rx));
             }
@@ -2626,6 +2733,10 @@ impl Model for App {
             Msg::Agent(event) => return self.on_agent_event(*event),
 
             Msg::StreamEnded => {
+                if self.host_progress_inflight {
+                    self.rx = None;
+                    return None;
+                }
                 if self.interrupting || self.state != State::Streaming {
                     return None;
                 }
@@ -2793,9 +2904,10 @@ impl Model for App {
             }
 
             Msg::UpdateCheck(latest) => {
+                let current = crate::update::current_version();
                 let newer = latest
                     .as_deref()
-                    .is_some_and(|l| !crate::update::version_ge(env!("CARGO_PKG_VERSION"), l));
+                    .is_some_and(|l| !crate::update::version_ge(&current, l));
                 if newer {
                     self.update_available = latest;
                     // Refresh the start screen so the notice shows in the banner
@@ -2851,18 +2963,35 @@ impl Model for App {
             Msg::UpdatePlan(latest) => {
                 self.updating = None;
                 self.relayout();
-                let current = env!("CARGO_PKG_VERSION");
+                let current = crate::update::current_version();
                 match latest {
                     None => self.push_line(
                         &Style::new()
                             .fg(TN_YELLOW)
                             .render("  couldn't reach the release server — try again later"),
                     ),
-                    Some(l) if crate::update::version_ge(current, &l) => self.push_line(
-                        &Style::new()
-                            .fg(TN_GREEN)
-                            .render(&format!("  ✓ already up to date (a3s {current})")),
-                    ),
+                    Some(l) if crate::update::version_ge(&current, &l) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_GREEN)
+                                .render(&format!("  ✓ already up to date (a3s {current})")),
+                        );
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_GRAY)
+                                .render("  checking companion tools…"),
+                        );
+                        self.updating = Some(Instant::now());
+                        self.relayout();
+                        return Some(cmd::cmd(|| async {
+                            let result =
+                                tokio::task::spawn_blocking(crate::update::repair_installation)
+                                    .await
+                                    .map_err(|e| format!("repair task failed: {e}"))
+                                    .and_then(|r| r);
+                            Msg::UpdateRepair(result)
+                        }));
+                    }
                     Some(l) => {
                         // macOS/Linux self-update in place (Homebrew or a direct
                         // download); unsupported platforms get the download link.
@@ -2880,6 +3009,30 @@ impl Model for App {
                             "  → a3s {l} available — download: https://github.com/A3S-Lab/Cli/releases/latest"
                         )));
                     }
+                }
+            }
+
+            Msg::UpdateRepair(result) => {
+                self.updating = None;
+                self.relayout();
+                match result {
+                    Ok(items) if items.is_empty() => self.push_line(
+                        &Style::new()
+                            .fg(TN_GREEN)
+                            .render("  ✓ installation looks healthy"),
+                    ),
+                    Ok(items) => {
+                        for item in items {
+                            self.push_line(
+                                &Style::new().fg(TN_GREEN).render(&format!("  ✓ {item}")),
+                            );
+                        }
+                    }
+                    Err(error) => self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  install repair failed: {error}")),
+                    ),
                 }
             }
 
@@ -3354,6 +3507,7 @@ impl Model for App {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_session_status_line(
     cwd: &str,
     branch: Option<&str>,
@@ -4946,13 +5100,20 @@ impl App {
         self.rebuild_viewport();
 
         let args = deep_research_workflow_args(&query, os_runtime);
-        let session = self.session.clone();
+        let (progress_rx, workflow_join) = self
+            .session
+            .tool_with_events("dynamic_workflow", args.clone());
+        let progress_rx = Arc::new(Mutex::new(progress_rx));
+        self.rx = Some(progress_rx.clone());
+        self.stream_join = None;
+        self.host_progress_inflight = true;
+        self.interrupting = false;
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
-                let result = session
-                    .tool("dynamic_workflow", args.clone())
-                    .await
-                    .map_err(|err| err.to_string());
+                let result = match workflow_join.await {
+                    Ok(result) => result.map_err(|err| err.to_string()),
+                    Err(err) => Err(err.to_string()),
+                };
                 Msg::DeepResearchWorkflowCompleted {
                     query,
                     os_runtime,
@@ -4960,6 +5121,7 @@ impl App {
                     result,
                 }
             }),
+            pump(progress_rx),
             spinner_tick(),
         ]))
     }
@@ -4974,6 +5136,8 @@ impl App {
         if self.state != State::Streaming {
             return None;
         }
+        self.host_progress_inflight = false;
+        self.rx = None;
 
         let (output, exit_code, metadata) = match result {
             Ok(result) => (result.output, result.exit_code, result.metadata),
@@ -5336,14 +5500,19 @@ impl App {
                 task_id,
                 agent,
                 description,
+                started_ms,
                 ..
             } => {
                 self.mark_agent_activity();
                 self.finalize_streaming();
                 self.record_runtime_parallel_evidence();
                 // Track it in the live bottom panel instead of a transcript line.
-                self.runtime
-                    .start_subagent(task_id, agent, description, Instant::now());
+                self.runtime.start_subagent(
+                    task_id,
+                    agent,
+                    description,
+                    instant_from_epoch_ms(started_ms),
+                );
                 self.relayout();
             }
             AgentEvent::SubagentProgress {
@@ -5368,11 +5537,16 @@ impl App {
                 agent,
                 output,
                 success,
+                finished_ms,
                 ..
             } => {
                 self.mark_agent_activity();
-                self.runtime
-                    .end_subagent(task_id, agent.clone(), success, Instant::now());
+                self.runtime.end_subagent(
+                    task_id,
+                    agent.clone(),
+                    success,
+                    instant_from_epoch_ms(finished_ms),
+                );
                 self.relayout();
                 let (mark, color) = if success {
                     ("✓", TN_GREEN)
@@ -5755,6 +5929,7 @@ impl App {
         self.spinner.stop();
         self.rx = None;
         self.stream_join = None;
+        self.host_progress_inflight = false;
         self.interrupting = false;
         self.rebuild_viewport();
     }
@@ -5764,17 +5939,30 @@ impl App {
         self.rebuild_viewport();
     }
 
-    /// Open a OS viewUrl in the native `a3s-webview` window. Silent on success
-    /// (the window appearing is feedback enough); only a missing helper binary
-    /// leaves a transcript hint.
+    /// Open an OS viewUrl in the native `a3s-webview` window. If the helper is
+    /// not installed, fall back to the system browser and leave a transcript
+    /// hint so the click never feels like a no-op.
     fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
-        if remote_ui::open_window(spec).is_err() {
-            // No helper binary (not shipped on Linux/Windows, or not installed):
-            // print the url so the user can open it in a browser themselves.
-            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                "  🔗 open in your browser: {} (install a3s-webview for an in-app window, macOS)",
-                spec.url
-            )));
+        match remote_ui::open_window(spec) {
+            Ok(remote_ui::OpenedWith::Webview) => {}
+            Ok(remote_ui::OpenedWith::Browser) => {
+                let helper = remote_ui::webview_helper_path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| {
+                        "missing; install a3s-webview or set A3S_WEBVIEW_BIN".to_string()
+                    });
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  ↗ opened URL in browser: {} · authenticated RemoteUI popup helper: {helper}",
+                    spec.url
+                )));
+            }
+            Err(err) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GRAY)
+                        .render(&format!("  🔗 open in your browser: {} ({err})", spec.url)),
+                );
+            }
         }
     }
 
@@ -6514,6 +6702,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         messages: initial_messages,
         rx: None,
         stream_join: None,
+        host_progress_inflight: false,
         interrupting: false,
         pending_tool: None,
         approval_sel: 0,
@@ -6723,6 +6912,89 @@ mod tests {
             rendered.contains("\x1b["),
             "button should carry ANSI styling"
         );
+    }
+
+    #[test]
+    fn remote_view_click_tolerates_small_terminal_mouse_drift() {
+        let rendered = remote_view_button("click or /view to open");
+        let view = format!("plain transcript\n{rendered}\nnext line");
+
+        assert!(is_remote_view_click(
+            &view,
+            Selection {
+                anchor: (1, 4),
+                head: (1, 6),
+            }
+        ));
+        assert!(!is_remote_view_click(
+            &view,
+            Selection {
+                anchor: (1, 4),
+                head: (1, 12),
+            }
+        ));
+        assert!(!is_remote_view_click(
+            &view,
+            Selection {
+                anchor: (1, 4),
+                head: (2, 4),
+            }
+        ));
+        assert!(!is_remote_view_click(
+            &view,
+            Selection {
+                anchor: (0, 4),
+                head: (0, 4),
+            }
+        ));
+    }
+
+    #[test]
+    fn remote_view_click_marker_is_case_insensitive_after_ansi_strip() {
+        let view = format!(
+            "  {}\n",
+            Style::new()
+                .fg(Color::BrightWhite)
+                .bg(ACCENT)
+                .render(" ↗ Open View ")
+        );
+
+        assert!(is_remote_view_click(
+            &view,
+            Selection {
+                anchor: (0, 3),
+                head: (0, 3),
+            }
+        ));
+    }
+
+    #[test]
+    fn quit_key_accepts_control_c_terminal_variants() {
+        let key = |code, modifiers| KeyEvent { code, modifiers };
+
+        assert!(is_quit_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(is_quit_key(&key(
+            KeyCode::Char('C'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )));
+        assert!(!is_quit_key(&key(KeyCode::Char('c'), KeyModifiers::NONE)));
+        assert!(!is_quit_key(&key(
+            KeyCode::Char('v'),
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn quit_confirmation_requires_second_press_inside_window() {
+        let now = Instant::now();
+
+        assert!(!quit_is_confirmed(None, now));
+        if let Some(recent) = now.checked_sub(Duration::from_millis(500)) {
+            assert!(quit_is_confirmed(Some(recent), now));
+        }
+        if let Some(stale) = now.checked_sub(Duration::from_secs(3)) {
+            assert!(!quit_is_confirmed(Some(stale), now));
+        }
     }
 
     #[test]
@@ -6979,6 +7251,7 @@ mod tests {
             },
             usage: TokenUsage::default(),
             stop_reason: Some("tool_use".into()),
+            token_logprobs: Vec::new(),
             meta: None,
         }
     }
@@ -6994,6 +7267,7 @@ mod tests {
             },
             usage: TokenUsage::default(),
             stop_reason: Some("stop".into()),
+            token_logprobs: Vec::new(),
             meta: None,
         }
     }
@@ -7224,6 +7498,8 @@ mod tests {
         assert!(source.contains("runtime_error"), "{source}");
         assert!(source.contains("local_fallback"), "{source}");
         assert!(source.contains("step_name: \"parallel_task\""), "{source}");
+        assert!(source.contains("agent: \"general\""), "{source}");
+        assert!(!source.contains("agent: \"explore\""), "{source}");
     }
 
     #[test]
@@ -7369,6 +7645,101 @@ mod tests {
         assert!(
             names.contains(&"web_search".to_string()) && names.contains(&"web_fetch".to_string()),
             "the `?` deep-research mode relies on web_search + web_fetch; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn tui_default_policy_allows_readonly_research_tools() {
+        use a3s_code_core::permissions::PermissionDecision;
+
+        let policy = tui_permission_policy();
+
+        assert_eq!(
+            policy.check(
+                "web_fetch",
+                &serde_json::json!({"url": "https://example.com"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check("web_search", &serde_json::json!({"query": "a3s"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check("read", &serde_json::json!({"file_path": "README.md"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check(
+                "write",
+                &serde_json::json!({"file_path": "x", "content": "y"})
+            ),
+            PermissionDecision::Ask,
+            "mutating tools must still go through TUI confirmation"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_session_policy_does_not_block_web_fetch() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-web-fetch-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.acl");
+        test_config(&cfg);
+
+        let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+            .await
+            .unwrap();
+        let llm = Arc::new(CaptureLlmClient::new(vec![
+            tool_call_response("web_fetch", serde_json::json!({"url": "not-a-url"})),
+            done_response(),
+        ]));
+        let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+            .with_timeout(300, TimeoutAction::Reject);
+        let opts = tui_session_options(confirmation)
+            .with_llm_client(llm)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let (mut rx, join) = session
+            .stream("Fetch a URL for research.", None)
+            .await
+            .unwrap();
+        let mut saw_fetch_end = None;
+        while let Some(event) = rx.recv().await {
+            match event {
+                a3s_code_core::AgentEvent::ToolEnd {
+                    name,
+                    output,
+                    exit_code,
+                    ..
+                } if name == "web_fetch" => {
+                    saw_fetch_end = Some((output, exit_code));
+                }
+                a3s_code_core::AgentEvent::PermissionDenied {
+                    tool_name, reason, ..
+                } => panic!("{tool_name} was denied: {reason}"),
+                a3s_code_core::AgentEvent::End { .. } => break,
+                a3s_code_core::AgentEvent::Error { message } => panic!("{message}"),
+                _ => {}
+            }
+        }
+        join.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (output, exit_code) = saw_fetch_end.expect("web_fetch should run");
+        assert_ne!(exit_code, 0, "invalid URL should fail validation");
+        assert!(
+            !output.contains("Permission denied"),
+            "web_fetch should not be blocked by permission policy: {output}"
         );
     }
 

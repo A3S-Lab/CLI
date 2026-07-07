@@ -344,6 +344,7 @@ impl LlmClient for CodexClient {
                                     stop_reason: Some(
                                         if has_calls { "tool_calls" } else { "stop" }.into(),
                                     ),
+                                    token_logprobs: Vec::new(),
                                     meta: Some(LlmResponseMeta {
                                         provider: Some("codex".into()),
                                         request_model: Some(model.clone()),

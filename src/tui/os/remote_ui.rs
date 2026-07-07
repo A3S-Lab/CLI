@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
+const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 
 /// A `viewUrl` (+ optional size / embeddable hint) extracted from a tool result.
 #[derive(Clone, Debug, PartialEq)]
@@ -21,6 +22,12 @@ pub(crate) struct ViewSpec {
     pub height: Option<u32>,
     /// The API explicitly marked this view as a sized popup (or returned a size).
     pub embeddable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OpenedWith {
+    Webview,
+    Browser,
 }
 
 /// Find a renderable view in a tool's JSON output. Prefers the current `view`
@@ -121,8 +128,9 @@ fn parse_legacy_view_url(
     })
 }
 
-/// Locate the `a3s-webview` binary: prefer a sibling of the running `a3s`
-/// executable (how it ships), else fall back to the bare name on `PATH`.
+/// Locate the `a3s-webview` binary: prefer an explicit env override, then a
+/// sibling of the running `a3s` executable (how it ships), then source-tree dev
+/// builds, then PATH.
 fn webview_binary_name() -> &'static str {
     if cfg!(windows) {
         "a3s-webview.exe"
@@ -146,8 +154,40 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
         .find_map(|path| executable_path(&path))
 }
 
+fn env_webview_override() -> Option<PathBuf> {
+    let raw = std::env::var_os(WEBVIEW_BIN_ENV)?;
+    if raw.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(raw))
+    }
+}
+
+fn dev_webview_candidates(manifest_dir: &Path, name: &str) -> Vec<PathBuf> {
+    vec![
+        manifest_dir.join("target/debug").join(name),
+        manifest_dir.join("target/release").join(name),
+        manifest_dir.join("../webview/target/debug").join(name),
+        manifest_dir.join("../webview/target/release").join(name),
+        manifest_dir.join("../../target/debug").join(name),
+        manifest_dir.join("../../target/release").join(name),
+    ]
+}
+
+fn find_dev_webview(name: &str) -> Option<PathBuf> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    dev_webview_candidates(manifest_dir, name)
+        .into_iter()
+        .find_map(|path| executable_path(&path))
+}
+
 fn find_existing_webview() -> Option<PathBuf> {
     let name = webview_binary_name();
+    if let Some(path) = env_webview_override() {
+        // Honor an explicit override even before the file exists; spawn will
+        // produce the concrete path error instead of silently using another bin.
+        return Some(path);
+    }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(sibling) = exe.parent().map(|d| d.join(name)) {
             if let Some(path) = executable_path(&sibling) {
@@ -155,7 +195,14 @@ fn find_existing_webview() -> Option<PathBuf> {
             }
         }
     }
+    if let Some(path) = find_dev_webview(name) {
+        return Some(path);
+    }
     find_on_path(name)
+}
+
+pub(crate) fn webview_helper_path() -> Option<PathBuf> {
+    find_existing_webview().filter(|path| executable_path(path).is_some())
 }
 
 fn resolve_webview_bin() -> PathBuf {
@@ -191,12 +238,53 @@ fn webview_args(spec: &ViewSpec) -> Vec<String> {
     args
 }
 
-/// Open a view's url in the native `a3s-webview` window (detached). Inherits the
-/// process env so the helper reads `A3S_OS_TOKEN` for auth. Returns Err if the
-/// helper binary isn't present/launchable (caller surfaces a hint).
-pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<()> {
+/// Open a view's url in the native `a3s-webview` window (detached), falling back
+/// to the system browser when the helper is not installed or cannot launch.
+/// The webview inherits the process env so it can read `A3S_OS_TOKEN` for auth.
+pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<OpenedWith> {
     Command::new(webview_bin())
         .args(webview_args(spec))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_child| OpenedWith::Webview)
+        .or_else(|webview_error| {
+            open_in_browser(&spec.url)
+                .map(|()| OpenedWith::Browser)
+                .map_err(|browser_error| {
+                    std::io::Error::new(
+                        browser_error.kind(),
+                        format!(
+                            "a3s-webview failed: {webview_error}; browser fallback failed: {browser_error}"
+                        ),
+                    )
+                })
+        })
+}
+
+fn browser_open_command(url: &str) -> (&'static str, Vec<String>) {
+    if cfg!(target_os = "macos") {
+        ("open", vec![url.to_string()])
+    } else if cfg!(windows) {
+        (
+            "cmd",
+            vec![
+                "/C".to_string(),
+                "start".to_string(),
+                String::new(),
+                url.to_string(),
+            ],
+        )
+    } else {
+        ("xdg-open", vec![url.to_string()])
+    }
+}
+
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let (program, args) = browser_open_command(url);
+    Command::new(program)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -322,6 +410,35 @@ mod tests {
             webview_args(&no_size),
             vec!["--url", "https://os.x/p", "--title", "A3S RemoteUI"]
         );
+    }
+
+    #[test]
+    fn browser_fallback_command_tracks_platform() {
+        let (program, args) = browser_open_command("https://os.x/p?embed=1");
+        if cfg!(target_os = "macos") {
+            assert_eq!(program, "open");
+            assert_eq!(args, vec!["https://os.x/p?embed=1"]);
+        } else if cfg!(windows) {
+            assert_eq!(program, "cmd");
+            assert_eq!(args, vec!["/C", "start", "", "https://os.x/p?embed=1"]);
+        } else {
+            assert_eq!(program, "xdg-open");
+            assert_eq!(args, vec!["https://os.x/p?embed=1"]);
+        }
+    }
+
+    #[test]
+    fn dev_webview_candidates_include_cli_and_sibling_webview_targets() {
+        let root = Path::new("/repo/crates/cli");
+        let candidates = dev_webview_candidates(root, "a3s-webview");
+
+        assert!(candidates.contains(&PathBuf::from("/repo/crates/cli/target/debug/a3s-webview")));
+        assert!(candidates.contains(&PathBuf::from(
+            "/repo/crates/cli/../webview/target/debug/a3s-webview"
+        )));
+        assert!(candidates.contains(&PathBuf::from(
+            "/repo/crates/cli/../../target/release/a3s-webview"
+        )));
     }
 
     #[test]

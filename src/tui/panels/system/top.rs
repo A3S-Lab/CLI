@@ -152,6 +152,45 @@ impl App {
     }
 }
 
+/// Coding-agent roots plus all transitive children by ppid, preserving input order.
+fn agent_activity_rows(rows: &[ProcessRow]) -> Vec<ProcessRow> {
+    let roots = rows
+        .iter()
+        .filter(|row| row.agent.is_some())
+        .map(|row| row.pid)
+        .collect::<HashSet<_>>();
+    if roots.is_empty() {
+        return Vec::new();
+    }
+    process_forest(rows, roots)
+}
+
+/// All processes in `root`'s subtree (root + transitive children by ppid),
+/// preserving the input order.
+fn process_subtree(rows: &[ProcessRow], root: u32) -> Vec<ProcessRow> {
+    process_forest(rows, HashSet::from([root]))
+}
+
+fn process_forest(rows: &[ProcessRow], roots: HashSet<u32>) -> Vec<ProcessRow> {
+    let mut included = roots;
+    loop {
+        let mut added = false;
+        for r in rows {
+            if !included.contains(&r.pid) && included.contains(&r.ppid) {
+                included.insert(r.pid);
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    rows.iter()
+        .filter(|r| included.contains(&r.pid))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,43 +423,4 @@ mod tests {
         assert_eq!(table.selected_index(), Some(3));
         assert_eq!(table.scroll_offset(), 2);
     }
-}
-
-/// Coding-agent roots plus all transitive children by ppid, preserving input order.
-fn agent_activity_rows(rows: &[ProcessRow]) -> Vec<ProcessRow> {
-    let roots = rows
-        .iter()
-        .filter(|row| row.agent.is_some())
-        .map(|row| row.pid)
-        .collect::<HashSet<_>>();
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    process_forest(rows, roots)
-}
-
-/// All processes in `root`'s subtree (root + transitive children by ppid),
-/// preserving the input order.
-fn process_subtree(rows: &[ProcessRow], root: u32) -> Vec<ProcessRow> {
-    process_forest(rows, HashSet::from([root]))
-}
-
-fn process_forest(rows: &[ProcessRow], roots: HashSet<u32>) -> Vec<ProcessRow> {
-    let mut included = roots;
-    loop {
-        let mut added = false;
-        for r in rows {
-            if !included.contains(&r.pid) && included.contains(&r.ppid) {
-                included.insert(r.pid);
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-    rows.iter()
-        .filter(|r| included.contains(&r.pid))
-        .cloned()
-        .collect()
 }

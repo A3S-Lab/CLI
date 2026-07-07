@@ -1244,9 +1244,7 @@ impl App {
                         | Some(FlowSubcommand::Logs)
                         | Some(FlowSubcommand::Status)
                 ) {
-                    let Some(session) = self.os_session.clone() else {
-                        return None;
-                    };
+                    let session = self.os_session.clone()?;
                     let os_action = match pending {
                         Some(FlowSubcommand::Open) => FlowOsAction::Open,
                         Some(FlowSubcommand::Logs) => FlowOsAction::Logs,
@@ -1308,9 +1306,7 @@ impl App {
                     Some(action @ FlowSubcommand::Publish)
                     | Some(action @ FlowSubcommand::Run)
                     | Some(action @ FlowSubcommand::Deploy) => {
-                        let Some(session) = self.os_session.clone() else {
-                            return None;
-                        };
+                        let session = self.os_session.clone()?;
                         let os_action = match action {
                             FlowSubcommand::Publish => FlowOsAction::Publish,
                             FlowSubcommand::Run => FlowOsAction::Run,
@@ -1347,9 +1343,7 @@ impl App {
     }
 
     pub(crate) fn handle_flow_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(panel_state) = self.flow.as_ref() else {
-            return None;
-        };
+        let panel_state = self.flow.as_ref()?;
         let total = panel_state.flows.len();
         if total == 0 {
             return None;
@@ -1359,15 +1353,13 @@ impl App {
             return None;
         }
         let selected = panel_state.sel.min(total - 1);
-        let Some((mut panel, panel_height)) = flow_picker_panel(
+        let (mut panel, panel_height) = flow_picker_panel(
             &panel_state.flows,
             selected,
             &panel_state.root,
             width,
             self.height as usize,
-        ) else {
-            return None;
-        };
+        )?;
         let row_count = panel.view(width as u16, panel_height).lines().count();
         if row_count == 0 {
             return None;

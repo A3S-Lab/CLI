@@ -154,8 +154,7 @@ pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
     ));
     let progress_width = width
         .saturating_sub(a3s_tui::style::visible_len(&prefix))
-        .min(29)
-        .max(1);
+        .clamp(1, 29);
     let progress = a3s_tui::components::Progress::new()
         .value(pct / 100.0)
         .width(progress_width.min(u16::MAX as usize) as u16)

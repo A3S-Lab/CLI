@@ -189,9 +189,15 @@ impl RuntimeProjection {
         description: String,
         now: Instant,
     ) {
-        if !self.subagents.contains_key(&task_id) {
-            self.subagent_order.push(task_id.clone());
+        if let Some(run) = self.subagents.get_mut(&task_id) {
+            run.agent = agent;
+            run.description = description;
+            if !run.done {
+                run.ended = None;
+            }
+            return;
         }
+        self.subagent_order.push(task_id.clone());
         self.subagents.insert(
             task_id.clone(),
             SubagentRun {
@@ -355,5 +361,39 @@ mod tests {
         assert_eq!(runs[0].tokens, 12);
         assert!(runs[0].done);
         assert!(!runs[1].done);
+    }
+
+    #[test]
+    fn subagent_projection_preserves_first_start_time_on_duplicate_start() {
+        let mut projection = RuntimeProjection::default();
+        let first = Instant::now();
+        let duplicate = first + std::time::Duration::from_secs(5);
+        let end = first + std::time::Duration::from_secs(8);
+
+        projection.start_subagent(
+            "a".into(),
+            "explore".into(),
+            "first description".into(),
+            first,
+        );
+        projection.start_subagent(
+            "a".into(),
+            "general".into(),
+            "refreshed description".into(),
+            duplicate,
+        );
+        projection.end_subagent("a".into(), "general".into(), true, end);
+
+        let runs = projection.subagents();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].agent, "general");
+        assert_eq!(runs[0].description, "refreshed description");
+        assert_eq!(
+            runs[0]
+                .ended
+                .unwrap()
+                .saturating_duration_since(runs[0].started),
+            std::time::Duration::from_secs(8)
+        );
     }
 }
