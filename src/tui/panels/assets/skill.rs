@@ -421,7 +421,7 @@ fn skill_asset_url(origin: &str, asset_id: &str) -> String {
 
 fn skill_asset_search_url(origin: &str, asset_name: &str) -> String {
     format!(
-        "{}/admin/kernel/assets?focus=1&category=skill&search={}&embed=1",
+        "{}/admin/kernel/assets?focus=1&category=skill&scope=mine&status=all&search={}&embed=1",
         origin.trim_end_matches('/'),
         path_segment(asset_name)
     )
@@ -552,6 +552,14 @@ fn skill_runtime_binding_json(dev: &SkillDevSession, asset_name: &str) -> serde_
 }
 
 fn skill_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> serde_json::Value {
+    let target_ref = runtime_binding
+        .pointer("/target/ref")
+        .and_then(|value| value.as_str())
+        .unwrap_or("main");
+    let runtime_kind = runtime_binding
+        .pointer("/runtime/kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("a3s-function-service");
     serde_json::json!({
         "kind": runtime_binding
             .get("kind")
@@ -561,20 +569,17 @@ fn skill_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> ser
             .get("isolation")
             .and_then(|value| value.as_str())
             .unwrap_or("serving"),
-        "target": runtime_binding
-            .get("target")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"kind": "asset", "ref": "main"})),
-        "runtime": runtime_binding
-            .get("runtime")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({
-                "kind": "a3s-function-service",
-                "protocol": "skill",
-                "agentKind": "tool",
-            })),
+        "target": {
+            "kind": "asset",
+            "ref": target_ref,
+        },
+        "runtime": {
+            "kind": runtime_kind,
+            "sharedRuntime": runtime_binding
+                .pointer("/runtime/sharedRuntime")
+                .and_then(|value| value.as_str())
+                .unwrap_or("node-20"),
+        },
         "env": runtime_binding
             .get("env")
             .filter(|value| value.is_array())
@@ -590,11 +595,7 @@ fn skill_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> ser
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
-        "network": runtime_binding
-            .get("network")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        "network": {},
         "enabled": runtime_binding
             .get("enabled")
             .and_then(|value| value.as_bool())
@@ -669,7 +670,13 @@ async fn ensure_skill_asset(
     let base = format!("{}/api/v1/assets", origin.trim_end_matches('/'));
     let found: serde_json::Value = client
         .get(&base)
-        .query(&[("search", name), ("category", "skill"), ("limit", "50")])
+        .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
+            ("search", name),
+            ("category", "skill"),
+            ("limit", "50"),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -899,6 +906,8 @@ async fn inspect_skill_asset(
     let found: serde_json::Value = client
         .get(&base)
         .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
             ("search", asset_name),
             ("category", "skill"),
             ("limit", "50"),
@@ -1751,7 +1760,9 @@ mod tests {
         assert_eq!(binding["runtime"]["agentKind"], "tool");
         assert_eq!(binding["metadata"]["service"], "Function as a Service");
         assert_eq!(upsert["kind"], "tool");
-        assert_eq!(upsert["runtime"]["protocol"], "skill");
+        assert_eq!(upsert["runtime"]["sharedRuntime"], "node-20");
+        assert!(upsert["runtime"].get("protocol").is_none());
+        assert!(upsert["runtime"].get("agentKind").is_none());
     }
 
     #[test]
@@ -1878,7 +1889,8 @@ mod tests {
         );
         let synced_json: serde_json::Value = serde_json::from_str(&synced).unwrap();
         assert_eq!(synced_json["kind"], "tool");
-        assert_eq!(synced_json["runtime"]["protocol"], "skill");
+        assert_eq!(synced_json["runtime"]["sharedRuntime"], "node-20");
+        assert!(synced_json["runtime"].get("protocol").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2073,9 +2085,9 @@ mod tests {
         }
         if line.starts_with("PUT /api/v1/assets/skill-asset-1/runtime-binding HTTP/1.1") {
             if body.contains(r#""kind":"tool""#)
-                && body.contains(r#""protocol":"skill""#)
-                && body.contains(r#""agentKind":"tool""#)
+                && body.contains(r#""sharedRuntime":"node-20""#)
                 && !body.contains(r#""version""#)
+                && !body.contains(r#""protocol":"skill""#)
             {
                 return (
                     "200 OK",

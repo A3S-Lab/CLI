@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-07
+
+### Fixed
+
+- Changed Agent lifecycle commands to treat an Agent asset as a package
+  directory, with `agent.md`/`agent.yaml`/`agent.yml` as the entrypoint only.
+- Published Agent assets now upload the whole local package source plus
+  generated manifest, config, and runtime-binding metadata instead of only the
+  entry definition file.
+- Updated non-interactive `a3s code agent ...` examples and resolution logic to
+  prefer package paths while retaining entry-file compatibility.
+
 ## [0.7.0] - 2026-07-06
 
 ### Added

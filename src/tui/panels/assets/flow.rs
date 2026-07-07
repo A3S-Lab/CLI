@@ -369,7 +369,7 @@ fn flow_asset_url(origin: &str, asset_id: &str) -> String {
 
 fn flow_asset_search_url(origin: &str, asset_name: &str) -> String {
     format!(
-        "{}/assets?category=workflow&search={}&embed=1",
+        "{}/assets?category=workflow&scope=mine&status=all&search={}&embed=1",
         origin.trim_end_matches('/'),
         path_segment(asset_name)
     )
@@ -384,6 +384,14 @@ fn flow_logs_url(origin: &str, asset_id: &str) -> String {
 }
 
 fn workflow_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> serde_json::Value {
+    let target_ref = runtime_binding
+        .pointer("/target/ref")
+        .and_then(|value| value.as_str())
+        .unwrap_or("main");
+    let runtime_kind = runtime_binding
+        .pointer("/runtime/kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("a3s-workflow-service");
     serde_json::json!({
         "kind": runtime_binding
             .get("kind")
@@ -393,23 +401,13 @@ fn workflow_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> 
             .get("isolation")
             .and_then(|value| value.as_str())
             .unwrap_or("native"),
-        "target": runtime_binding
-            .get("target")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({
-                "kind": "asset",
-                "ref": "main",
-                "designDocumentPath": DESIGN_DOCUMENT_PATH,
-            })),
-        "runtime": runtime_binding
-            .get("runtime")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({
-                "kind": "a3s-workflow-service",
-                "protocol": "workflow",
-            })),
+        "target": {
+            "kind": "asset",
+            "ref": target_ref,
+        },
+        "runtime": {
+            "kind": runtime_kind,
+        },
         "env": runtime_binding
             .get("env")
             .filter(|value| value.is_array())
@@ -425,11 +423,7 @@ fn workflow_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> 
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
-        "network": runtime_binding
-            .get("network")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        "network": {},
         "enabled": runtime_binding
             .get("enabled")
             .and_then(|value| value.as_bool())
@@ -800,7 +794,14 @@ pub(crate) async fn ensure_flow_asset(
     let base = format!("{}/api/v1/assets", origin.trim_end_matches('/'));
     // Search is ILIKE-broad; require the exact name client-side.
     let found: serde_json::Value = client
-        .get(format!("{base}?search={name}&category=workflow&limit=50"))
+        .get(&base)
+        .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
+            ("search", name),
+            ("category", "workflow"),
+            ("limit", "50"),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -1043,9 +1044,14 @@ async fn inspect_flow_asset(
     let client = http()?;
     let base = format!("{}/api/v1/assets", origin.trim_end_matches('/'));
     let found: serde_json::Value = client
-        .get(format!(
-            "{base}?search={asset_name}&category=workflow&limit=50"
-        ))
+        .get(&base)
+        .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
+            ("search", asset_name),
+            ("category", "workflow"),
+            ("limit", "50"),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -1649,8 +1655,9 @@ mod tests {
         assert!(binding["runtime"].get("agentKind").is_none());
         let upsert = workflow_runtime_binding_upsert_body(&binding);
         assert_eq!(upsert["kind"], "workflow");
-        assert_eq!(upsert["runtime"]["protocol"], "workflow");
-        assert_eq!(upsert["target"]["designDocumentPath"], DESIGN_DOCUMENT_PATH);
+        assert_eq!(upsert["runtime"]["kind"], "a3s-workflow-service");
+        assert!(upsert["runtime"].get("protocol").is_none());
+        assert!(upsert["target"].get("designDocumentPath").is_none());
     }
 
     #[tokio::test]
@@ -1767,7 +1774,8 @@ mod tests {
         );
         let synced_json: serde_json::Value = serde_json::from_str(&synced).unwrap();
         assert_eq!(synced_json["kind"], "workflow");
-        assert_eq!(synced_json["runtime"]["protocol"], "workflow");
+        assert_eq!(synced_json["runtime"]["kind"], "a3s-workflow-service");
+        assert!(synced_json["runtime"].get("protocol").is_none());
     }
 
     #[tokio::test]
@@ -2111,9 +2119,9 @@ mod tests {
         }
         if line.starts_with("PUT /api/v1/assets/workflow-asset-1/runtime-binding HTTP/1.1") {
             if body.contains(r#""kind":"workflow""#)
-                && body.contains(r#""protocol":"workflow""#)
                 && body.contains(r#""a3s-workflow-service""#)
                 && !body.contains(r#""version""#)
+                && !body.contains(r#""protocol":"workflow""#)
             {
                 return (
                     "200 OK",

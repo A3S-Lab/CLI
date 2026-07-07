@@ -134,8 +134,13 @@ fn with_query(origin: &str, path: &str, query: &str) -> Result<reqwest::Url, Str
 fn with_asset_query(origin: &str, query: &str) -> Result<reqwest::Url, String> {
     let (category, search) = asset_query_parts(query);
     let mut url = with_query(origin, "/api/v1/assets", &search)?;
-    if let Some(category) = category {
-        url.query_pairs_mut().append_pair("category", &category);
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair("scope", "mine");
+        pairs.append_pair("status", "all");
+        if let Some(category) = category {
+            pairs.append_pair("category", &category);
+        }
     }
     Ok(url)
 }
@@ -1699,6 +1704,8 @@ mod tests {
         let request_line = req.lines().next().unwrap();
         assert!(request_line.contains("/api/v1/assets?"));
         assert!(request_line.contains("limit=100"));
+        assert!(request_line.contains("scope=mine"), "{request_line}");
+        assert!(request_line.contains("status=all"), "{request_line}");
         assert!(
             request_line.contains("search=Payment+Agent")
                 || request_line.contains("search=Payment%20Agent"),

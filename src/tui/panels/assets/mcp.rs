@@ -404,7 +404,7 @@ fn mcp_asset_url(origin: &str, asset_id: &str) -> String {
 
 fn mcp_asset_search_url(origin: &str, asset_name: &str) -> String {
     format!(
-        "{}/admin/kernel/assets?focus=1&category=mcp&search={}&embed=1",
+        "{}/admin/kernel/assets?focus=1&category=mcp&scope=mine&status=all&search={}&embed=1",
         origin.trim_end_matches('/'),
         path_segment(asset_name)
     )
@@ -739,7 +739,13 @@ async fn lookup_mcp_asset(
     let base = format!("{}/api/v1/assets", origin.trim_end_matches('/'));
     let found: serde_json::Value = client
         .get(&base)
-        .query(&[("search", name), ("category", "mcp"), ("limit", "50")])
+        .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
+            ("search", name),
+            ("category", "mcp"),
+            ("limit", "50"),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -948,6 +954,14 @@ async fn sync_mcp_runtime_binding_inner(
 }
 
 fn mcp_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> serde_json::Value {
+    let target_ref = runtime_binding
+        .pointer("/target/ref")
+        .and_then(|value| value.as_str())
+        .unwrap_or("main");
+    let runtime_kind = runtime_binding
+        .pointer("/runtime/kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("a3s-function-service");
     serde_json::json!({
         "kind": runtime_binding
             .get("kind")
@@ -957,20 +971,17 @@ fn mcp_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> serde
             .get("isolation")
             .and_then(|value| value.as_str())
             .unwrap_or("serving"),
-        "target": runtime_binding
-            .get("target")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({"kind": "asset", "ref": "main"})),
-        "runtime": runtime_binding
-            .get("runtime")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({
-                "kind": "a3s-function-service",
-                "protocol": "mcp",
-                "agentKind": "tool",
-            })),
+        "target": {
+            "kind": "asset",
+            "ref": target_ref,
+        },
+        "runtime": {
+            "kind": runtime_kind,
+            "sharedRuntime": runtime_binding
+                .pointer("/runtime/sharedRuntime")
+                .and_then(|value| value.as_str())
+                .unwrap_or("node-20"),
+        },
         "env": runtime_binding
             .get("env")
             .filter(|value| value.is_array())
@@ -986,11 +997,7 @@ fn mcp_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> serde
             .filter(|value| value.is_object())
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
-        "network": runtime_binding
-            .get("network")
-            .filter(|value| value.is_object())
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({})),
+        "network": {},
         "enabled": runtime_binding
             .get("enabled")
             .and_then(|value| value.as_bool())
@@ -2853,8 +2860,10 @@ mod tests {
         assert_eq!(binding["runtime"]["agentKind"], "tool");
         assert_eq!(binding["metadata"]["tools"][0], "current");
         assert_eq!(upsert["kind"], "mcp");
-        assert_eq!(upsert["runtime"]["agentKind"], "tool");
-        assert_eq!(upsert["target"]["configPath"], MCP_SERVER_CONFIG_PATH);
+        assert_eq!(upsert["runtime"]["sharedRuntime"], "node-20");
+        assert!(upsert["runtime"].get("agentKind").is_none());
+        assert!(upsert["runtime"].get("protocol").is_none());
+        assert!(upsert["target"].get("configPath").is_none());
     }
 
     #[test]

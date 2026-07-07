@@ -1,13 +1,15 @@
-//! `/agent` — local multi-turn development for a3s-code agent definitions.
+//! `/agent` — local multi-turn development for a3s-code agent packages.
 //!
 //! Bare `/agent` opens a picker over `agent_dir()` (`~/.a3s/agents` or the
-//! `agent_dir` config key). Enter validates the selected Markdown/YAML agent
-//! definition and puts the TUI into a local agent-development context. Subsequent
-//! user turns are wrapped with the selected file path and editing constraints so
-//! the current TUI session can iteratively improve the agent definition.
+//! `agent_dir` config key). Enter validates the selected package entrypoint
+//! (`agent.md`, `agent.yaml`, `agent.yml`, or a compatible Markdown/YAML
+//! definition) and puts the TUI into a local agent-development context.
+//! Subsequent user turns are wrapped with the package path, entrypoint path, and
+//! editing constraints so the current TUI session can iteratively improve the
+//! agent package.
 //!
 //! `/agent <natural language>` asks the agent to draft a local Markdown agent
-//! definition under `agent_dir()`.
+//! package under `agent_dir()`.
 
 use super::super::os_progressive;
 use super::super::*;
@@ -21,26 +23,38 @@ const AGENT_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
 pub(crate) struct AgentFile {
+    /// Package-relative path used as the local asset id.
     pub(crate) rel: String,
+    /// Package directory, or the definition file itself for legacy one-file agents.
     pub(crate) path: std::path::PathBuf,
+    /// Entrypoint path relative to the package root.
+    pub(crate) definition_rel: String,
+    /// Absolute Markdown/YAML entrypoint path.
+    pub(crate) definition_path: std::path::PathBuf,
 }
 
-/// `/agent` selection panel: local agent definitions + cursor.
+/// `/agent` selection panel: local agent packages + cursor.
 pub(crate) struct AgentPanel {
     /// Absolute path of the agents root (config `agent_dir`).
     pub(crate) root: std::path::PathBuf,
-    /// Markdown/YAML files under the root, sorted by relative path.
+    /// Local agent packages under the root, sorted by package relative path.
     pub(crate) agents: Vec<AgentFile>,
     pub(crate) sel: usize,
 }
 
-/// The local agent currently being developed in the TUI.
+/// The local agent package currently being developed in the TUI.
 #[derive(Clone)]
 pub(crate) struct AgentDevSession {
     pub(crate) name: String,
     pub(crate) description: String,
+    /// Package-relative path used as the local asset id.
     pub(crate) rel: String,
+    /// Entrypoint path relative to the package root.
+    pub(crate) definition_rel: String,
+    /// Absolute Markdown/YAML entrypoint path.
     pub(crate) path: std::path::PathBuf,
+    /// Package directory, or the definition file itself for legacy one-file agents.
+    pub(crate) package_path: std::path::PathBuf,
     pub(crate) root: std::path::PathBuf,
 }
 
@@ -318,12 +332,18 @@ fn parse_agent_os_kind(value: &str, usage: &'static str) -> Result<AgentOsKind, 
     }
 }
 
-/// List local `*.md`, `*.yaml`, and `*.yml` agent definitions recursively,
-/// skipping dotfiles and dot-directories. Sorted for a stable picker.
+/// List local agent packages recursively, skipping dotfiles and dot-directories.
+/// A package is normally a directory with `agent.md`, `agent.yaml`, `agent.yml`,
+/// or a definition file named after the directory. Legacy one-file definitions
+/// are still listed as one-file packages for compatibility.
 pub(crate) fn list_agents(root: &std::path::Path) -> Vec<AgentFile> {
     let mut out = Vec::new();
     list_agents_inner(root, root, &mut out);
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+    out.sort_by(|a, b| {
+        a.rel
+            .cmp(&b.rel)
+            .then_with(|| a.definition_rel.cmp(&b.definition_rel))
+    });
     out
 }
 
@@ -331,28 +351,54 @@ fn list_agents_inner(root: &std::path::Path, dir: &std::path::Path, out: &mut Ve
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    if dir != root {
+        if let Some(definition_path) = agent_entry_file(dir) {
+            out.push(agent_file_from_entry(root, dir, &definition_path));
+            return;
+        }
+    }
+
+    for entry in &entries {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
             continue;
         }
-        if path.is_dir() {
-            list_agents_inner(root, &path, out);
-            continue;
-        }
         if !path.is_file() || !is_agent_definition_file(&path) {
             continue;
         }
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        out.push(AgentFile { rel, path });
+        out.push(agent_file_from_entry(root, &path, &path));
     }
+
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !path.is_dir() {
+            continue;
+        }
+        list_agents_inner(root, &path, out);
+    }
+}
+
+pub(crate) fn agent_entry_file(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let candidates = ["agent.md", "agent.yaml", "agent.yml"];
+    for candidate in candidates {
+        let path = dir.join(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let dir_stem = dir.file_name().and_then(|name| name.to_str())?;
+    for ext in ["md", "yaml", "yml"] {
+        let path = dir.join(format!("{dir_stem}.{ext}"));
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 fn is_agent_definition_file(path: &std::path::Path) -> bool {
@@ -363,6 +409,73 @@ fn is_agent_definition_file(path: &std::path::Path) -> bool {
             .as_deref(),
         Some("md" | "yaml" | "yml")
     )
+}
+
+fn normalized_rel(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn rel_without_extension(rel: &str) -> String {
+    let path = std::path::Path::new(rel);
+    match path.file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) => path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| {
+                let parent = parent
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                format!("{parent}/{stem}")
+            })
+            .unwrap_or_else(|| stem.to_string()),
+        None => rel.to_string(),
+    }
+}
+
+fn agent_file_from_entry(
+    root: &std::path::Path,
+    package_path: &std::path::Path,
+    definition_path: &std::path::Path,
+) -> AgentFile {
+    let definition_root_rel = normalized_rel(root, definition_path);
+    let (rel, definition_rel, path) = if package_path.is_file() {
+        (
+            rel_without_extension(&definition_root_rel),
+            definition_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or(definition_root_rel),
+            definition_path.to_path_buf(),
+        )
+    } else {
+        let package_rel = normalized_rel(root, package_path);
+        let rel = if package_rel.is_empty() {
+            package_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel_without_extension(&definition_root_rel))
+        } else {
+            package_rel
+        };
+        (
+            rel,
+            normalized_rel(package_path, definition_path),
+            package_path.to_path_buf(),
+        )
+    };
+    AgentFile {
+        rel,
+        path,
+        definition_rel,
+        definition_path: definition_path.to_path_buf(),
+    }
 }
 
 fn parse_agent_definition(
@@ -385,7 +498,7 @@ fn parse_agent_definition(
 fn agent_picker_header(total: usize, root: &std::path::Path, width: usize) -> String {
     truncate(
         &format!(
-            "  ◇ agent — select a definition ({total} in {})",
+            "  ◇ agent — select a package ({total} in {})",
             root.to_string_lossy()
         ),
         width,
@@ -461,7 +574,7 @@ fn agent_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-/// Directive for `/agent <description>`: create a local Markdown agent definition.
+/// Directive for `/agent <description>`: create a local Markdown agent package.
 pub(crate) fn agent_gen_prompt(description: &str, dir: &str) -> String {
     format!(
         "Create one local A3S agent asset prototype from the description below and save it under \
@@ -472,7 +585,7 @@ pub(crate) fn agent_gen_prompt(description: &str, dir: &str) -> String {
          tools will reject it — use the `bash` tool (`mkdir -p {dir}`, then write the \
          files with heredocs).\n\
          Create {dir}/<kebab-case-agent-name>/ with a Markdown definition plus OS asset \
-         metadata. The definition file MUST be Markdown with YAML frontmatter, because a3s-code can load \
+         metadata. The entrypoint file MUST be Markdown with YAML frontmatter, because a3s-code can load \
          `.md`, `.yaml`, and `.yml` agents but Markdown gives VibeCoding a readable \
          prompt body. Use this exact shape:\n\
          ---\n\
@@ -494,7 +607,7 @@ pub(crate) fn agent_gen_prompt(description: &str, dir: &str) -> String {
          application. For tool agents use service=Function as a Service, runtimeIntent.kind=tool, \
          runtime.kind=a3s-function-service, protocol=agent-tool, isolation=serving, and \
          agentKind=tool.\n\
-         Save the definition as {dir}/<kebab-case-agent-name>/<kebab-case-agent-name>.md \
+         Save the entry definition as {dir}/<kebab-case-agent-name>/agent.md \
          (if that folder exists, append -2, -3, …). Validate JSON files with \
          `python3 -m json.tool` and validate the definition with `test -s \"$FILE\" && sed -n '1,40p' \"$FILE\"` \
          (always pass the file path — never run a command that waits on stdin). Then \
@@ -524,25 +637,42 @@ pub(crate) fn agent_dev_session_from_file(
         .map_err(|e| format!("could not read {}: {e}", path.display()))?;
     let def = parse_agent_definition(path, &source)
         .map_err(|e| format!("{} is not a valid agent definition: {e}", path.display()))?;
-    let rel = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .components()
-        .map(|part| part.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let path_stem = path.file_stem().and_then(|stem| stem.to_str());
+    let parent_stem = parent.file_name().and_then(|name| name.to_str());
+    let entry_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let package_path = if entry_name.starts_with("agent.")
+        || path_stem
+            .zip(parent_stem)
+            .is_some_and(|(path, parent)| path == parent)
+    {
+        parent.to_path_buf()
+    } else {
+        path.to_path_buf()
+    };
+    let agent_file = agent_file_from_entry(root, &package_path, path);
     Ok(AgentDevSession {
         name: def.name.clone(),
         description: agent_description(&def),
-        rel,
+        rel: agent_file.rel,
+        definition_rel: agent_file.definition_rel,
         path: path.to_path_buf(),
+        package_path,
         root: root.to_path_buf(),
     })
 }
 
-fn agent_asset_source_path(rel: &str) -> String {
+fn agent_package_source_path(rel: &str) -> String {
     let clean = rel.trim_start_matches('/').replace('\\', "/");
     format!(".a3s/agents/{clean}")
+}
+
+fn agent_asset_source_path(package_rel: &str, definition_rel: &str) -> String {
+    let definition = definition_rel.trim_start_matches('/').replace('\\', "/");
+    format!("{}/{}", agent_package_source_path(package_rel), definition)
 }
 
 fn path_segment(value: &str) -> String {
@@ -568,7 +698,7 @@ pub(crate) fn agent_asset_url(origin: &str, asset_id: &str) -> String {
 
 pub(crate) fn agent_asset_search_url(origin: &str, name: &str) -> String {
     format!(
-        "{}/admin/kernel/assets?focus=1&search={}&embed=1",
+        "{}/admin/kernel/assets?focus=1&scope=mine&status=all&search={}&embed=1",
         origin.trim_end_matches('/'),
         path_segment(name)
     )
@@ -601,10 +731,13 @@ pub(crate) fn agent_view_spec(url: String) -> remote_ui::ViewSpec {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn agent_manifest_json(
     kind: AgentOsKind,
     def: &a3s_code_core::subagent::AgentDefinition,
     local_rel: &str,
+    package_source_path: &str,
+    definition_rel: &str,
     asset_source_path: &str,
     config_path: &str,
     runtime_binding_path: &str,
@@ -624,6 +757,8 @@ pub(crate) fn agent_manifest_json(
         "agentKind": kind.agent_kind(),
         "name": def.name.as_str(),
         "description": agent_description(def),
+        "packagePath": package_source_path,
+        "entrypoint": definition_rel,
         "definitionPath": asset_source_path,
         "configPath": config_path,
         "runtimeBindingPath": runtime_binding_path,
@@ -639,6 +774,8 @@ pub(crate) fn agent_config_json(
     kind: AgentOsKind,
     def: &a3s_code_core::subagent::AgentDefinition,
     local_rel: &str,
+    package_source_path: &str,
+    definition_rel: &str,
     asset_source_path: &str,
     runtime_binding_path: &str,
 ) -> serde_json::Value {
@@ -669,6 +806,8 @@ pub(crate) fn agent_config_json(
         "runtimePolicy": {
             "agentKind": kind.agent_kind(),
             "source": "a3s-code-tui",
+            "packagePath": package_source_path,
+            "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
             "runtimeBindingPath": runtime_binding_path,
             "localPath": local_rel,
@@ -693,6 +832,8 @@ pub(crate) fn agent_runtime_binding_json(
     kind: AgentOsKind,
     def: &a3s_code_core::subagent::AgentDefinition,
     local_rel: &str,
+    package_source_path: &str,
+    definition_rel: &str,
     asset_source_path: &str,
     config_path: &str,
 ) -> serde_json::Value {
@@ -717,6 +858,8 @@ pub(crate) fn agent_runtime_binding_json(
         "target": {
             "kind": "asset",
             "ref": "main",
+            "packagePath": package_source_path,
+            "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
             "configPath": config_path,
         },
@@ -733,6 +876,8 @@ pub(crate) fn agent_runtime_binding_json(
             "agentKind": kind.agent_kind(),
             "agentName": def.name.as_str(),
             "description": agent_description(def),
+            "packagePath": package_source_path,
+            "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
             "configPath": config_path,
             "localPath": local_rel,
@@ -977,7 +1122,13 @@ async fn lookup_agent_asset(
     let base = format!("{}/api/v1/assets", origin.trim_end_matches('/'));
     let found: serde_json::Value = client
         .get(&base)
-        .query(&[("search", name), ("category", "agent"), ("limit", "50")])
+        .query(&[
+            ("scope", "mine"),
+            ("status", "all"),
+            ("search", name),
+            ("category", "agent"),
+            ("limit", "50"),
+        ])
         .bearer_auth(token)
         .send()
         .await
@@ -996,13 +1147,17 @@ async fn lookup_agent_asset(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Clone, Debug)]
+pub(crate) struct AgentRepositoryFile {
+    pub(crate) path: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
 pub(crate) async fn upload_agent_definition(
     origin: &str,
     token: &str,
     asset_id: &str,
-    asset_source_path: &str,
-    source: &str,
+    package_files: Vec<AgentRepositoryFile>,
     manifest: &serde_json::Value,
     config: &serde_json::Value,
     runtime_binding: &serde_json::Value,
@@ -1013,11 +1168,27 @@ pub(crate) async fn upload_agent_definition(
     let config_bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
     let runtime_binding_bytes =
         serde_json::to_vec_pretty(runtime_binding).map_err(|e| e.to_string())?;
-    let source_b64 = base64::engine::general_purpose::STANDARD.encode(source.as_bytes());
-    let manifest_b64 = base64::engine::general_purpose::STANDARD.encode(manifest_bytes);
-    let config_b64 = base64::engine::general_purpose::STANDARD.encode(config_bytes);
-    let runtime_binding_b64 =
-        base64::engine::general_purpose::STANDARD.encode(runtime_binding_bytes);
+    let mut files = package_files
+        .into_iter()
+        .map(|file| {
+            serde_json::json!({
+                "path": file.path,
+                "contentBase64": base64::engine::general_purpose::STANDARD.encode(file.bytes),
+            })
+        })
+        .collect::<Vec<_>>();
+    files.push(serde_json::json!({
+        "path": AGENT_MANIFEST_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(manifest_bytes),
+    }));
+    files.push(serde_json::json!({
+        "path": AGENT_CONFIG_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(config_bytes),
+    }));
+    files.push(serde_json::json!({
+        "path": AGENT_RUNTIME_BINDING_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(runtime_binding_bytes),
+    }));
     let resp = http()?
         .post(format!(
             "{}/api/v1/assets/{}/repository/files",
@@ -1027,13 +1198,8 @@ pub(crate) async fn upload_agent_definition(
         .bearer_auth(token)
         .json(&serde_json::json!({
             "overwrite": true,
-            "message": "a3s code /agent: update agent definition",
-            "files": [
-                { "path": asset_source_path, "contentBase64": source_b64 },
-                { "path": AGENT_MANIFEST_PATH, "contentBase64": manifest_b64 },
-                { "path": AGENT_CONFIG_PATH, "contentBase64": config_b64 },
-                { "path": AGENT_RUNTIME_BINDING_PATH, "contentBase64": runtime_binding_b64 },
-            ],
+            "message": "a3s code /agent: update agent package",
+            "files": files,
         }))
         .send()
         .await
@@ -1044,9 +1210,90 @@ pub(crate) async fn upload_agent_definition(
     }
     let body = resp.text().await.unwrap_or_default();
     Err(format!(
-        "upload agent definition failed ({status}): {}",
+        "upload agent package failed ({status}): {}",
         truncate(&body, 200)
     ))
+}
+
+fn collect_agent_package_files(dev: &AgentDevSession) -> Result<Vec<AgentRepositoryFile>, String> {
+    let package_source_path = agent_package_source_path(&dev.rel);
+    if dev.package_path.is_file() {
+        let bytes = std::fs::read(&dev.path)
+            .map_err(|e| format!("could not read {}: {e}", dev.path.display()))?;
+        return Ok(vec![AgentRepositoryFile {
+            path: agent_asset_source_path(&dev.rel, &dev.definition_rel),
+            bytes,
+        }]);
+    }
+
+    let mut files = Vec::new();
+    collect_agent_package_dir(
+        &dev.package_path,
+        &dev.package_path,
+        &package_source_path,
+        &mut files,
+    )?;
+    if !files
+        .iter()
+        .any(|file| file.path == agent_asset_source_path(&dev.rel, &dev.definition_rel))
+    {
+        return Err(format!(
+            "agent package {} does not contain entrypoint {}",
+            dev.package_path.display(),
+            dev.path.display()
+        ));
+    }
+    Ok(files)
+}
+
+fn collect_agent_package_dir(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    package_source_path: &str,
+    out: &mut Vec<AgentRepositoryFile>,
+) -> Result<(), String> {
+    let mut entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("could not read package directory {}: {e}", dir.display()))?
+        .flatten()
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if should_skip_agent_package_entry(&name, file_type.is_dir()) {
+            continue;
+        }
+        if file_type.is_dir() {
+            collect_agent_package_dir(base, &path, package_source_path, out)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let rel = normalized_rel(base, &path);
+        let bytes =
+            std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+        out.push(AgentRepositoryFile {
+            path: format!("{package_source_path}/{}", rel.replace('\\', "/")),
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+fn should_skip_agent_package_entry(name: &str, is_dir: bool) -> bool {
+    if matches!(name, ".DS_Store" | ".git" | ".hg" | ".svn") {
+        return true;
+    }
+    is_dir
+        && matches!(
+            name,
+            "target" | "node_modules" | "dist" | "build" | ".cache" | ".next"
+        )
 }
 
 pub(crate) async fn sync_agent_config(
@@ -1222,6 +1469,10 @@ fn agent_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> ser
         .pointer("/target/ref")
         .and_then(|value| value.as_str())
         .unwrap_or("main");
+    let isolation = runtime_binding
+        .get("isolation")
+        .and_then(|value| value.as_str())
+        .unwrap_or("container");
     let runtime_kind = runtime_binding
         .pointer("/runtime/kind")
         .and_then(|value| value.as_str())
@@ -1237,6 +1488,18 @@ fn agent_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> ser
         });
     if let serde_json::Value::Object(map) = &mut runtime {
         map.remove("mode");
+        map.remove("agentKind");
+        map.remove("protocol");
+        if isolation == "serving" && !map.contains_key("sharedRuntime") {
+            map.insert("sharedRuntime".to_string(), serde_json::json!("node-20"));
+        }
+        if isolation == "container"
+            && !map.contains_key("image")
+            && !map.contains_key("command")
+            && !map.contains_key("entrypoint")
+        {
+            map.insert("command".to_string(), serde_json::json!(runtime_kind));
+        }
     }
     let env = runtime_binding
         .get("env")
@@ -1264,10 +1527,7 @@ fn agent_runtime_binding_upsert_body(runtime_binding: &serde_json::Value) -> ser
             .get("kind")
             .and_then(|value| value.as_str())
             .unwrap_or("agent"),
-        "isolation": runtime_binding
-            .get("isolation")
-            .and_then(|value| value.as_str())
-            .unwrap_or("container"),
+        "isolation": isolation,
         "target": {
             "kind": "asset",
             "ref": target_ref,
@@ -2419,15 +2679,18 @@ async fn inspect_agent_asset(
     action: AgentOsAction,
     asset_name: &str,
     def: &a3s_code_core::subagent::AgentDefinition,
-    local_rel: &str,
+    dev: &AgentDevSession,
 ) -> Result<AgentOsResult, String> {
     let kind = action.target_kind();
     let client = http()?;
-    let asset_source_path = agent_asset_source_path(local_rel);
+    let package_source_path = agent_package_source_path(&dev.rel);
+    let asset_source_path = agent_asset_source_path(&dev.rel, &dev.definition_rel);
     let config = agent_config_json(
         kind,
         def,
-        local_rel,
+        &dev.rel,
+        &package_source_path,
+        &dev.definition_rel,
         &asset_source_path,
         AGENT_RUNTIME_BINDING_PATH,
     );
@@ -2529,7 +2792,7 @@ pub(crate) async fn publish_agent_to_os(
             action,
             &asset_name,
             &def,
-            &dev.rel,
+            &dev,
         )
         .await;
     }
@@ -2543,11 +2806,15 @@ pub(crate) async fn publish_agent_to_os(
     )
     .await?;
     let asset_id = asset.id.clone();
-    let asset_source_path = agent_asset_source_path(&dev.rel);
+    let package_source_path = agent_package_source_path(&dev.rel);
+    let asset_source_path = agent_asset_source_path(&dev.rel, &dev.definition_rel);
+    let package_files = collect_agent_package_files(&dev)?;
     let config = agent_config_json(
         kind,
         &def,
         &dev.rel,
+        &package_source_path,
+        &dev.definition_rel,
         &asset_source_path,
         AGENT_RUNTIME_BINDING_PATH,
     );
@@ -2555,18 +2822,26 @@ pub(crate) async fn publish_agent_to_os(
         kind,
         &def,
         &dev.rel,
+        &package_source_path,
+        &dev.definition_rel,
         &asset_source_path,
         AGENT_CONFIG_PATH,
         AGENT_RUNTIME_BINDING_PATH,
     );
-    let runtime_binding =
-        agent_runtime_binding_json(kind, &def, &dev.rel, &asset_source_path, AGENT_CONFIG_PATH);
+    let runtime_binding = agent_runtime_binding_json(
+        kind,
+        &def,
+        &dev.rel,
+        &package_source_path,
+        &dev.definition_rel,
+        &asset_source_path,
+        AGENT_CONFIG_PATH,
+    );
     upload_agent_definition(
         &origin,
         &session.access_token,
         &asset.id,
-        &asset_source_path,
-        &source,
+        package_files,
         &manifest,
         &config,
         &runtime_binding,
@@ -2710,26 +2985,28 @@ fn append_runtime_binding_sync_note(
 
 pub(crate) fn agent_dev_prompt(session: &AgentDevSession, request: &str) -> String {
     format!(
-        "You are in A3S Code local agent-development mode.\n\
+        "You are in A3S Code local agent-package development mode.\n\
          Current agent: {name}\n\
          Description: {description}\n\
-         Definition file: {path}\n\
+         Package: {package}\n\
+         Entrypoint: {path}\n\
          Agents root: {root}\n\n\
          User request:\n{request}\n\n\
-         Work on this local agent definition iteratively. Read the current file from disk before \
+         Work on this local agent package iteratively. Read the entrypoint from disk before \
          editing; if normal file tools cannot access it because it is outside the workspace, use \
-         non-interactive bash commands with the full quoted path. Keep the definition valid for \
+         non-interactive bash commands with the full quoted path. Keep the entrypoint valid for \
          a3s-code: Markdown agents need YAML frontmatter followed by the system prompt; YAML/YML \
          agents must remain valid YAML. Preserve or improve the stable agent `name`, trigger \
-         `description`, tools, model, max_steps, workflow guidance, and success criteria according \
+         `description`, tools, model, max_steps, workflow guidance, package resources, and success criteria according \
          to the user's request. Do not open OS, WebIDE, RemoteUI, or browser pages for this local \
          agent-dev turn. Validate the file after edits by printing its first relevant lines and, \
          when practical, parsing or sanity-checking the frontmatter/YAML. End with a concise \
          summary of changes and any next suggested improvement.\n\n\
-         The TUI remains in agent-development mode for `{name}` after this turn; the user can \
+         The TUI remains in agent package-development mode for `{name}` after this turn; the user can \
          press Esc or run `/agent off` to return to normal mode.",
         name = session.name.as_str(),
         description = session.description.as_str(),
+        package = session.package_path.display(),
         path = session.path.display(),
         root = session.root.display(),
     )
@@ -2738,19 +3015,22 @@ pub(crate) fn agent_dev_prompt(session: &AgentDevSession, request: &str) -> Stri
 pub(crate) fn agent_review_prompt(session: &AgentDevSession) -> String {
     let contract = super::review::review_report_contract(&session.root);
     format!(
-        "Review this local A3S agent asset without changing files unless the user explicitly asks \
+        "Review this local A3S agent package without changing files unless the user explicitly asks \
          for fixes.\n\
          Agent name: {name}\n\
          Description: {description}\n\
-         Definition path: {path}\n\
+         Package path: {package}\n\
+         Entrypoint path: {path}\n\
          Agent root: {root}\n\n\
-         Read the definition and report concise findings on: YAML/frontmatter validity, trigger \
-         clarity, scope boundaries, tool permissions, workflow instructions, safety constraints, \
-         success criteria, examples/tests, and readiness for Agent as a Service. Mention the \
+         Read the package and entrypoint, then report concise findings on: YAML/frontmatter \
+         validity, trigger clarity, scope boundaries, tool permissions, workflow instructions, \
+         safety constraints, package resources, success criteria, examples/tests, and readiness \
+         for Agent as a Service. Mention the \
          smallest recommended improvements and whether `/agent run` or `/agent deploy` is the \
          right next lifecycle step.{contract}",
         name = session.name.as_str(),
         description = session.description.as_str(),
+        package = session.package_path.display(),
         path = session.path.display(),
         root = session.root.display(),
     )
@@ -2766,22 +3046,24 @@ pub(crate) fn agent_goal_label(session: &AgentDevSession, goal: &str) -> String 
 
 pub(crate) fn agent_loop_prompt(session: &AgentDevSession, loop_prompt: &str) -> String {
     format!(
-        "You are running A3S Code loop engineering inside local /agent development mode.\n\
+        "You are running A3S Code loop engineering inside local /agent package-development mode.\n\
          Active agent: {name}\n\
          Description: {description}\n\
-         Definition file: {path}\n\
+         Package: {package}\n\
+         Entrypoint: {path}\n\
          Agents root: {root}\n\n\
          Agent-loop rules:\n\
-         - Keep this loop scoped to the active agent definition and its loop artifacts.\n\
+         - Keep this loop scoped to the active agent package and its loop artifacts.\n\
          - Stay local: do not open OS, WebIDE, RemoteUI, browser pages, or OS workflow designer.\n\
-         - Read the current agent definition before proposing or applying changes.\n\
-         - Use maker/checker passes: one pass improves the definition, a separate pass verifies \
+         - Read the current package entrypoint before proposing or applying changes.\n\
+         - Use maker/checker passes: one pass improves the package, a separate pass verifies \
          frontmatter/YAML validity, tool scope, trigger description, workflow guidance, and \
          success criteria.\n\
          - Validate the file after edits when practical, then summarize report paths and changes.\n\n\
          {loop_prompt}",
         name = session.name.as_str(),
         description = session.description.as_str(),
+        package = session.package_path.display(),
         path = session.path.display(),
         root = session.root.display(),
     )
@@ -2943,23 +3225,22 @@ impl App {
     ) -> Option<Cmd<Msg>> {
         let last = panel.agents.len().saturating_sub(1);
         let picked = panel.agents.get(selected.min(last))?.clone();
-        let source = match std::fs::read_to_string(&picked.path) {
+        let source = match std::fs::read_to_string(&picked.definition_path) {
             Ok(s) => s,
             Err(e) => {
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  could not read {}: {e}", picked.path.display())),
-                );
+                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                    "  could not read {}: {e}",
+                    picked.definition_path.display()
+                )));
                 return None;
             }
         };
-        let def = match parse_agent_definition(&picked.path, &source) {
+        let def = match parse_agent_definition(&picked.definition_path, &source) {
             Ok(def) => def,
             Err(e) => {
                 self.push_line(&Style::new().fg(TN_RED).render(&format!(
-                    "  {} is not a valid agent definition — fix it (or redraft with /agent <description>): {e}",
-                    picked.rel
+                    "  {} entrypoint {} is not a valid agent definition — fix it (or redraft with /agent <description>): {e}",
+                    picked.rel, picked.definition_rel
                 )));
                 return None;
             }
@@ -2971,14 +3252,16 @@ impl App {
             name: def.name.clone(),
             description: agent_description(&def),
             rel: picked.rel.clone(),
-            path: picked.path.clone(),
+            definition_rel: picked.definition_rel.clone(),
+            path: picked.definition_path.clone(),
+            package_path: picked.path.clone(),
             root: panel.root,
         });
         self.push_line(&gutter(
             TN_CYAN,
             &format!(
-                "◇ agent dev: {} ({}) · Esc or /agent off returns to normal mode",
-                def.name, picked.rel
+                "◇ agent dev: {} ({} · {}) · Esc or /agent off returns to normal mode",
+                def.name, picked.rel, picked.definition_rel
             ),
         ));
         self.relayout();
@@ -3016,7 +3299,7 @@ mod tests {
     }
 
     #[test]
-    fn lists_agent_files_recursively_sorted_skipping_dotfiles() {
+    fn lists_agent_packages_recursively_sorted_skipping_dotfiles() {
         let root = temp_root("agents");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("nested")).unwrap();
@@ -3030,7 +3313,7 @@ mod tests {
 
         let agents = list_agents(&root);
         let rels: Vec<_> = agents.into_iter().map(|a| a.rel).collect();
-        assert_eq!(rels, vec!["alpha.md", "nested/beta.yml", "zeta.yaml"]);
+        assert_eq!(rels, vec!["alpha", "nested/beta", "zeta"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3059,13 +3342,19 @@ Be precise.
         );
         let agents = vec![
             AgentFile {
-                rel: "nested/very-long-agent-file-name-that-would-overflow-the-panel.md".into(),
+                rel: "nested/very-long-agent-package-name-that-would-overflow-the-panel".into(),
                 path: root
-                    .join("nested/very-long-agent-file-name-that-would-overflow-the-panel.md"),
+                    .join("nested/very-long-agent-package-name-that-would-overflow-the-panel"),
+                definition_rel: "agent.md".into(),
+                definition_path: root.join(
+                    "nested/very-long-agent-package-name-that-would-overflow-the-panel/agent.md",
+                ),
             },
             AgentFile {
-                rel: "reviewer.md".into(),
-                path: root.join("reviewer.md"),
+                rel: "reviewer".into(),
+                path: root.join("reviewer"),
+                definition_rel: "agent.md".into(),
+                definition_path: root.join("reviewer/agent.md"),
             },
         ];
         let lines = agent_picker_lines(&agents, 0, &root, 40, 20);
@@ -3076,8 +3365,8 @@ Be precise.
             .join("\n");
 
         assert!(plain.contains("agent"), "{plain}");
-        assert!(plain.contains("select a definition"), "{plain}");
-        assert!(plain.contains("very-long-agent-file"), "{plain}");
+        assert!(plain.contains("select a package"), "{plain}");
+        assert!(plain.contains("very-long-agent-package"), "{plain}");
         assert!(plain.contains('…'), "{plain}");
         assert!(
             lines
@@ -3092,8 +3381,10 @@ Be precise.
         let root = std::path::PathBuf::from("/tmp/agents");
         let agents = (0..16)
             .map(|index| AgentFile {
-                rel: format!("agent-{index}.md"),
-                path: root.join(format!("agent-{index}.md")),
+                rel: format!("agent-{index}"),
+                path: root.join(format!("agent-{index}")),
+                definition_rel: "agent.md".into(),
+                definition_path: root.join(format!("agent-{index}/agent.md")),
             })
             .collect::<Vec<_>>();
         let plain = agent_picker_lines(&agents, 14, &root, 48, 16)
@@ -3102,7 +3393,7 @@ Be precise.
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(plain.contains("agent-14.md"), "{plain}");
+        assert!(plain.contains("agent-14"), "{plain}");
         assert!(plain.contains("↑↓ 15/16"), "{plain}");
     }
 
@@ -3124,8 +3415,10 @@ Be precise.
         let root = std::path::PathBuf::from("/tmp/agents");
         let agents = (0..4)
             .map(|index| AgentFile {
-                rel: format!("agent-{index}.md"),
-                path: root.join(format!("agent-{index}.md")),
+                rel: format!("agent-{index}"),
+                path: root.join(format!("agent-{index}")),
+                definition_rel: "agent.md".into(),
+                definition_path: root.join(format!("agent-{index}/agent.md")),
             })
             .collect::<Vec<_>>();
         let width = 48;
@@ -3153,8 +3446,10 @@ Be precise.
         let root = std::path::PathBuf::from("/tmp/agents");
         let agents = (0..4)
             .map(|index| AgentFile {
-                rel: format!("agent-{index}.md"),
-                path: root.join(format!("agent-{index}.md")),
+                rel: format!("agent-{index}"),
+                path: root.join(format!("agent-{index}")),
+                definition_rel: "agent.md".into(),
+                definition_path: root.join(format!("agent-{index}/agent.md")),
             })
             .collect::<Vec<_>>();
         let width = 48;
@@ -3288,11 +3583,14 @@ Be precise.
             "Tool Captain",
             "Run a small reusable tool",
         );
-        let asset_source_path = agent_asset_source_path("tools/captain.md");
+        let package_source_path = agent_package_source_path("tools/captain");
+        let asset_source_path = agent_asset_source_path("tools/captain", "agent.md");
         let manifest = agent_manifest_json(
             AgentOsKind::Tool,
             &def,
-            "tools/captain.md",
+            "tools/captain",
+            &package_source_path,
+            "agent.md",
             &asset_source_path,
             AGENT_CONFIG_PATH,
             AGENT_RUNTIME_BINDING_PATH,
@@ -3300,7 +3598,9 @@ Be precise.
         let runtime_binding = agent_runtime_binding_json(
             AgentOsKind::Tool,
             &def,
-            "tools/captain.md",
+            "tools/captain",
+            &package_source_path,
+            "agent.md",
             &asset_source_path,
             AGENT_CONFIG_PATH,
         );
@@ -3332,7 +3632,9 @@ Be precise.
         let upsert = agent_runtime_binding_upsert_body(&runtime_binding);
         assert_eq!(upsert["kind"], "tool");
         assert_eq!(upsert["runtime"]["kind"], "a3s-function-service");
-        assert_eq!(upsert["runtime"]["protocol"], "agent-tool");
+        assert_eq!(upsert["runtime"]["sharedRuntime"], "node-20");
+        assert!(upsert["runtime"].get("protocol").is_none());
+        assert!(upsert["runtime"].get("agentKind").is_none());
         assert_eq!(AgentOsKind::Tool.service_label(), "Function as a Service");
         assert_eq!(AgentOsKind::Agentic.service_label(), "Agent as a Service");
         assert_eq!(
@@ -3358,11 +3660,14 @@ Be precise.
                 .ask("Bash(cargo test:*)"),
         )
         .with_prompt("Review the patch and return crisp findings.");
-        let asset_source_path = agent_asset_source_path("review\\captain.md");
+        let package_source_path = agent_package_source_path("review/captain");
+        let asset_source_path = agent_asset_source_path("review/captain", "agent.md");
         let manifest = agent_manifest_json(
             AgentOsKind::Application,
             &def,
-            "review/captain.md",
+            "review/captain",
+            &package_source_path,
+            "agent.md",
             &asset_source_path,
             AGENT_CONFIG_PATH,
             AGENT_RUNTIME_BINDING_PATH,
@@ -3370,14 +3675,18 @@ Be precise.
         let config = agent_config_json(
             AgentOsKind::Application,
             &def,
-            "review/captain.md",
+            "review/captain",
+            &package_source_path,
+            "agent.md",
             &asset_source_path,
             AGENT_RUNTIME_BINDING_PATH,
         );
         let runtime_binding = agent_runtime_binding_json(
             AgentOsKind::Application,
             &def,
-            "review/captain.md",
+            "review/captain",
+            &package_source_path,
+            "agent.md",
             &asset_source_path,
             AGENT_CONFIG_PATH,
         );
@@ -3394,7 +3703,8 @@ Be precise.
             agent_asset_name(AgentOsKind::Tool, "Review Captain"),
             "agent-tool-review-captain"
         );
-        assert_eq!(asset_source_path, ".a3s/agents/review/captain.md");
+        assert_eq!(package_source_path, ".a3s/agents/review/captain");
+        assert_eq!(asset_source_path, ".a3s/agents/review/captain/agent.md");
         assert_eq!(manifest["category"], "agent");
         assert_eq!(manifest["agentKind"], "application");
         assert_eq!(manifest["service"], "Agent as a Service");
@@ -3405,7 +3715,12 @@ Be precise.
             manifest["runtimeIntent"]["runtimeKind"],
             "a3s-agent-service"
         );
-        assert_eq!(manifest["definitionPath"], ".a3s/agents/review/captain.md");
+        assert_eq!(manifest["packagePath"], ".a3s/agents/review/captain");
+        assert_eq!(manifest["entrypoint"], "agent.md");
+        assert_eq!(
+            manifest["definitionPath"],
+            ".a3s/agents/review/captain/agent.md"
+        );
         assert_eq!(manifest["configPath"], AGENT_CONFIG_PATH);
         assert_eq!(manifest["runtimeBindingPath"], AGENT_RUNTIME_BINDING_PATH);
         assert_eq!(manifest["definition"]["name"], "Review Captain");
@@ -3417,6 +3732,11 @@ Be precise.
         assert_eq!(config["model"]["modelId"], "gpt-4o");
         assert_eq!(config["maxIterations"], 12);
         assert_eq!(config["runtimePolicy"]["agentKind"], "application");
+        assert_eq!(
+            config["runtimePolicy"]["packagePath"],
+            ".a3s/agents/review/captain"
+        );
+        assert_eq!(config["runtimePolicy"]["entrypoint"], "agent.md");
         assert_eq!(
             config["runtimePolicy"]["runtimeBindingPath"],
             AGENT_RUNTIME_BINDING_PATH
@@ -3441,7 +3761,7 @@ Be precise.
         assert_eq!(runtime_binding["resources"]["replicas"], 1);
         assert_eq!(
             runtime_binding["metadata"]["definitionPath"],
-            ".a3s/agents/review/captain.md"
+            ".a3s/agents/review/captain/agent.md"
         );
         let upsert = agent_runtime_binding_upsert_body(&runtime_binding);
         assert!(upsert.get("version").is_none());
@@ -3458,14 +3778,14 @@ Be precise.
             upsert["runtime"],
             serde_json::json!({
                 "kind": "a3s-agent-service",
-                "agentKind": "application",
+                "command": "a3s-agent-service",
             })
         );
         assert_eq!(upsert["resources"]["replicas"], 1);
         assert_eq!(upsert["network"], serde_json::json!({}));
         assert_eq!(
             upsert["metadata"]["definitionPath"],
-            ".a3s/agents/review/captain.md"
+            ".a3s/agents/review/captain/agent.md"
         );
         assert_eq!(
             agent_asset_url("https://os.example.com/", "asset 1?#"),
@@ -3874,8 +4194,10 @@ Review the target carefully.
         let dev = AgentDevSession {
             name: "reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "reviewer.md".into(),
+            rel: "reviewer".into(),
+            definition_rel: "reviewer.md".into(),
             path: path.clone(),
+            package_path: path.clone(),
             root: root.clone(),
         };
 
@@ -3945,8 +4267,10 @@ Review the target carefully.
         let dev = AgentDevSession {
             name: "reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "reviewer.md".into(),
+            rel: "reviewer".into(),
+            definition_rel: "reviewer.md".into(),
             path: path.clone(),
+            package_path: path.clone(),
             root: root.clone(),
         };
 
@@ -3996,8 +4320,10 @@ Review the target carefully.
         let dev = AgentDevSession {
             name: "reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "reviewer.md".into(),
+            rel: "reviewer".into(),
+            definition_rel: "reviewer.md".into(),
             path: path.clone(),
+            package_path: path.clone(),
             root: root.clone(),
         };
 
@@ -4033,8 +4359,9 @@ Review the target carefully.
     async fn publish_agent_to_os_full_chain_creates_uploads_and_runs_aaas() {
         let root = temp_root("agent-aaas-full");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("reviewer.md");
+        let package = root.join("reviewer");
+        std::fs::create_dir_all(package.join("prompts")).unwrap();
+        let path = package.join("agent.md");
         let source = r#"---
 name: reviewer
 description: Review code changes carefully
@@ -4043,6 +4370,7 @@ max_steps: 20
 Review the target carefully.
 "#;
         std::fs::write(&path, source).unwrap();
+        std::fs::write(package.join("prompts/checklist.md"), "- inspect tests\n").unwrap();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_full_agent_os_mock(captured.clone()).await;
         let session = crate::a3s_os::StoredOsSession {
@@ -4057,8 +4385,10 @@ Review the target carefully.
         let dev = AgentDevSession {
             name: "reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "reviewer.md".into(),
+            rel: "reviewer".into(),
+            definition_rel: "agent.md".into(),
             path: path.clone(),
+            package_path: package.clone(),
             root: root.clone(),
         };
 
@@ -4129,7 +4459,10 @@ Review the target carefully.
         let files = upload_json["files"].as_array().unwrap();
         assert!(files
             .iter()
-            .any(|file| file["path"] == ".a3s/agents/reviewer.md"));
+            .any(|file| file["path"] == ".a3s/agents/reviewer/agent.md"));
+        assert!(files
+            .iter()
+            .any(|file| file["path"] == ".a3s/agents/reviewer/prompts/checklist.md"));
         assert!(files
             .iter()
             .any(|file| file["path"] == AGENT_RUNTIME_BINDING_PATH));
@@ -4144,7 +4477,12 @@ Review the target carefully.
         let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
         assert_eq!(manifest_json["agentKind"], "agentic");
         assert_eq!(manifest_json["definition"]["name"], "reviewer");
-        assert_eq!(manifest_json["definitionPath"], ".a3s/agents/reviewer.md");
+        assert_eq!(manifest_json["packagePath"], ".a3s/agents/reviewer");
+        assert_eq!(manifest_json["entrypoint"], "agent.md");
+        assert_eq!(
+            manifest_json["definitionPath"],
+            ".a3s/agents/reviewer/agent.md"
+        );
         assert_eq!(manifest_json["configPath"], AGENT_CONFIG_PATH);
         assert_eq!(
             manifest_json["runtimeBindingPath"],
@@ -4184,7 +4522,7 @@ Review the target carefully.
         assert_eq!(binding_json["metadata"]["agentKind"], "agentic");
         assert_eq!(
             binding_json["metadata"]["definitionPath"],
-            ".a3s/agents/reviewer.md"
+            ".a3s/agents/reviewer/agent.md"
         );
 
         let validate = request_body(
@@ -4211,8 +4549,9 @@ Review the target carefully.
     async fn publish_tool_agent_uses_function_as_a_service_without_agent_config_sync() {
         let root = temp_root("agent-tool-faas");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("tooler.md");
+        let package = root.join("tooler");
+        std::fs::create_dir_all(package.join("schemas")).unwrap();
+        let path = package.join("agent.md");
         let source = r#"---
 name: tooler
 description: Run reusable tool actions
@@ -4221,6 +4560,7 @@ max_steps: 8
 Run the requested tool action carefully.
 "#;
         std::fs::write(&path, source).unwrap();
+        std::fs::write(package.join("schemas/input.json"), "{}\n").unwrap();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_tool_agent_publish_mock(captured.clone()).await;
         let session = crate::a3s_os::StoredOsSession {
@@ -4235,8 +4575,10 @@ Run the requested tool action carefully.
         let dev = AgentDevSession {
             name: "tooler".into(),
             description: "Run reusable tool actions".into(),
-            rel: "tooler.md".into(),
+            rel: "tooler".into(),
+            definition_rel: "agent.md".into(),
             path: path.clone(),
+            package_path: package.clone(),
             root: root.clone(),
         };
 
@@ -4308,6 +4650,12 @@ Run the requested tool action carefully.
         );
         let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
         let files = upload_json["files"].as_array().unwrap();
+        assert!(files
+            .iter()
+            .any(|file| file["path"] == ".a3s/agents/tooler/agent.md"));
+        assert!(files
+            .iter()
+            .any(|file| file["path"] == ".a3s/agents/tooler/schemas/input.json"));
         let binding_file = files
             .iter()
             .find(|file| file["path"] == AGENT_RUNTIME_BINDING_PATH)
@@ -4338,8 +4686,9 @@ Run the requested tool action carefully.
     {
         let root = temp_root("agent-aaas-build");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("reviewer.md");
+        let package = root.join("reviewer");
+        std::fs::create_dir_all(&package).unwrap();
+        let path = package.join("agent.md");
         let source = r#"---
 name: reviewer
 description: Review code changes carefully
@@ -4362,8 +4711,10 @@ Review the target carefully.
         let dev = AgentDevSession {
             name: "reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "reviewer.md".into(),
+            rel: "reviewer".into(),
+            definition_rel: "agent.md".into(),
             path: path.clone(),
+            package_path: package.clone(),
             root: root.clone(),
         };
 
@@ -4887,7 +5238,7 @@ Review the target carefully.
             if body.contains(AGENT_MANIFEST_PATH)
                 && body.contains(AGENT_CONFIG_PATH)
                 && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/reviewer.md")
+                && body.contains(".a3s/agents/reviewer/agent.md")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
@@ -4928,6 +5279,7 @@ Review the target carefully.
             if body.contains(r#""kind":"agent""#)
                 && body.contains(r#""isolation":"serving""#)
                 && body.contains(r#""agentKind":"agentic""#)
+                && body.contains(r#""sharedRuntime":"node-20""#)
                 && body.contains(r#""env":[]"#)
                 && !body.contains(r#""version""#)
                 && !body.contains(r#""mode""#)
@@ -4983,7 +5335,7 @@ Review the target carefully.
             if body.contains(AGENT_MANIFEST_PATH)
                 && body.contains(AGENT_CONFIG_PATH)
                 && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/tooler.md")
+                && body.contains(".a3s/agents/tooler/agent.md")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
@@ -4996,10 +5348,10 @@ Review the target carefully.
             if body.contains(r#""kind":"tool""#)
                 && body.contains(r#""isolation":"serving""#)
                 && body.contains(r#""kind":"a3s-function-service""#)
-                && body.contains(r#""protocol":"agent-tool""#)
-                && body.contains(r#""agentKind":"tool""#)
+                && body.contains(r#""sharedRuntime":"node-20""#)
                 && !body.contains(r#""version""#)
                 && !body.contains(r#""mode""#)
+                && !body.contains(r#""protocol":"agent-tool""#)
             {
                 return (
                     "200 OK",
@@ -5045,7 +5397,7 @@ Review the target carefully.
             if body.contains(AGENT_MANIFEST_PATH)
                 && body.contains(AGENT_CONFIG_PATH)
                 && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/reviewer.md")
+                && body.contains(".a3s/agents/reviewer/agent.md")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
@@ -5085,6 +5437,7 @@ Review the target carefully.
             if body.contains(r#""kind":"agent""#)
                 && body.contains(r#""isolation":"container""#)
                 && body.contains(r#""agentKind":"application""#)
+                && body.contains(r#""command":"a3s-agent-service""#)
                 && body.contains(r#""replicas":1"#)
                 && !body.contains(r#""version""#)
                 && !body.contains(r#""mode""#)
@@ -5155,15 +5508,17 @@ Review the target carefully.
         let session = AgentDevSession {
             name: "code-reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "review/code-reviewer.md".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer.md"),
+            rel: "review/code-reviewer".into(),
+            definition_rel: "agent.md".into(),
+            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer/agent.md"),
+            package_path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer"),
             root: std::path::PathBuf::from("/Users/x/.a3s/agents"),
         };
         let p = agent_dev_prompt(&session, "add a security checklist");
         assert!(p.contains("code-reviewer"), "{p}");
         assert!(p.contains("add a security checklist"), "{p}");
         assert!(
-            p.contains("/Users/x/.a3s/agents/review/code-reviewer.md"),
+            p.contains("/Users/x/.a3s/agents/review/code-reviewer/agent.md"),
             "{p}"
         );
         assert!(p.contains("Do not open OS"), "{p}");
@@ -5175,8 +5530,10 @@ Review the target carefully.
         let session = AgentDevSession {
             name: "code-reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "review/code-reviewer.md".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer.md"),
+            rel: "review/code-reviewer".into(),
+            definition_rel: "agent.md".into(),
+            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer/agent.md"),
+            package_path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer"),
             root: std::path::PathBuf::from("/Users/x/.a3s/agents"),
         };
 
@@ -5191,8 +5548,10 @@ Review the target carefully.
         let session = AgentDevSession {
             name: "code-reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "review/code-reviewer.md".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer.md"),
+            rel: "review/code-reviewer".into(),
+            definition_rel: "agent.md".into(),
+            path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer/agent.md"),
+            package_path: std::path::PathBuf::from("/Users/x/.a3s/agents/review/code-reviewer"),
             root: std::path::PathBuf::from("/Users/x/.a3s/agents"),
         };
         let p = agent_loop_prompt(&session, "Run this A3S Code engineered loop.");
@@ -5200,7 +5559,7 @@ Review the target carefully.
         assert!(p.contains("loop engineering inside local /agent"), "{p}");
         assert!(p.contains("code-reviewer"), "{p}");
         assert!(
-            p.contains("/Users/x/.a3s/agents/review/code-reviewer.md"),
+            p.contains("/Users/x/.a3s/agents/review/code-reviewer/agent.md"),
             "{p}"
         );
         assert!(p.contains("Stay local"), "{p}");

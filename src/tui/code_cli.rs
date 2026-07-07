@@ -42,8 +42,8 @@ pub(crate) fn code_cli_usage_text() -> String {
         "families: agent, mcp, skill, flow, okf".to_string(),
         String::new(),
         "lifecycle commands:".to_string(),
-        "  a3s code agent publish agentic|application|tool [path]".to_string(),
-        "  a3s code agent run|deploy|open|logs|status [kind] [path]".to_string(),
+        "  a3s code agent publish agentic|application|tool [package]".to_string(),
+        "  a3s code agent run|deploy|open|logs|status [kind] [package]".to_string(),
         "  a3s code mcp publish|deploy|debug|test|open|logs|status [path]".to_string(),
         "  a3s code skill publish|deploy|open|status [path]".to_string(),
         "  a3s code flow publish|run|deploy|open|logs|status [file]".to_string(),
@@ -1364,12 +1364,15 @@ fn choose_agent_file(target: &Path) -> anyhow::Result<PathBuf> {
     if target.is_file() {
         return Ok(target.to_path_buf());
     }
+    if let Some(entry) = panels::agent::agent_entry_file(target) {
+        return Ok(entry);
+    }
     let agents = panels::agent::list_agents(target);
     match agents.as_slice() {
-        [agent] => Ok(agent.path.clone()),
-        [] => anyhow::bail!("no agent definition found in {}", target.display()),
+        [agent] => Ok(agent.definition_path.clone()),
+        [] => anyhow::bail!("no agent package found in {}", target.display()),
         _ => anyhow::bail!(
-            "multiple agent definitions found in {}; pass one file path",
+            "multiple agent packages found in {}; pass one package path",
             target.display()
         ),
     }
@@ -1544,11 +1547,11 @@ fn parse_agent_publish_args(
     args: &[String],
 ) -> anyhow::Result<(panels::agent::AgentOsKind, Option<String>)> {
     if args.is_empty() || args.len() > 2 {
-        anyhow::bail!("usage: a3s code agent publish agentic|application|tool [path]");
+        anyhow::bail!("usage: a3s code agent publish agentic|application|tool [package]");
     }
     let parsed = panels::agent::parse_agent_subcommand(&format!("publish {}", args[0]))
         .ok_or_else(|| {
-            anyhow::anyhow!("usage: a3s code agent publish agentic|application|tool [path]")
+            anyhow::anyhow!("usage: a3s code agent publish agentic|application|tool [package]")
         })?
         .map_err(anyhow::Error::msg)?;
     let kind = match parsed {
@@ -1563,7 +1566,7 @@ fn parse_agent_kind_path(
     args: &[String],
 ) -> anyhow::Result<(panels::agent::AgentOsKind, Option<String>)> {
     if args.len() > 2 {
-        anyhow::bail!("usage: a3s code agent {command} [agentic|application|tool] [path]");
+        anyhow::bail!("usage: a3s code agent {command} [agentic|application|tool] [package]");
     }
     let default = panels::agent::AgentOsKind::Agentic;
     let Some(first) = args.first() else {
@@ -1571,7 +1574,7 @@ fn parse_agent_kind_path(
     };
     if is_agent_kind(first) {
         let parsed = panels::agent::parse_agent_subcommand(&format!("{command} {first}"))
-            .ok_or_else(|| anyhow::anyhow!("usage: a3s code agent {command} [kind] [path]"))?
+            .ok_or_else(|| anyhow::anyhow!("usage: a3s code agent {command} [kind] [package]"))?
             .map_err(anyhow::Error::msg)?;
         let kind = match parsed {
             panels::agent::AgentSubcommand::Open(kind)
@@ -1582,7 +1585,7 @@ fn parse_agent_kind_path(
         return Ok((kind, args.get(1).cloned()));
     }
     if args.len() > 1 {
-        anyhow::bail!("usage: a3s code agent {command} [kind] [path]");
+        anyhow::bail!("usage: a3s code agent {command} [kind] [package]");
     }
     Ok((default, Some(first.clone())))
 }
@@ -1690,12 +1693,17 @@ fn print_local_agents(query: &str) {
         .filter(|row| matches_query(&row.rel, query))
         .collect::<Vec<_>>();
     println!(
-        "{} local agent definition(s) in {}",
+        "{} local agent package(s) in {}",
         rows.len(),
         root.display()
     );
     for row in rows {
-        println!("{}\t{}", row.rel, row.path.display());
+        println!(
+            "{}\t{}\t{}",
+            row.rel,
+            row.definition_rel,
+            row.path.display()
+        );
     }
 }
 
@@ -1798,8 +1806,8 @@ fn print_family_help(family: &str) {
     println!("  review [path]");
     match family {
         "agent" => {
-            println!("  publish agentic|application|tool [path]");
-            println!("  run|deploy|open|logs|status [agentic|application|tool] [path]");
+            println!("  publish agentic|application|tool [package]");
+            println!("  run|deploy|open|logs|status [agentic|application|tool] [package]");
         }
         "mcp" => println!("  publish|deploy|debug|test|open|logs|status [path]"),
         "skill" => println!("  publish|deploy|open|status [path]"),
@@ -1852,15 +1860,15 @@ mod tests {
         assert_eq!(kind, panels::agent::AgentOsKind::Agentic);
         assert_eq!(path, None);
 
-        let (kind, path) = parse_agent_kind_path("open", &["tool".into(), "agent.md".into()])
+        let (kind, path) = parse_agent_kind_path("open", &["tool".into(), "agents/tooler".into()])
             .expect("kind plus path");
         assert_eq!(kind, panels::agent::AgentOsKind::Tool);
-        assert_eq!(path.as_deref(), Some("agent.md"));
+        assert_eq!(path.as_deref(), Some("agents/tooler"));
 
-        let (kind, path) = parse_agent_kind_path("open", &["agent.md".into()])
+        let (kind, path) = parse_agent_kind_path("open", &["agents/reviewer".into()])
             .expect("path only uses default kind");
         assert_eq!(kind, panels::agent::AgentOsKind::Agentic);
-        assert_eq!(path.as_deref(), Some("agent.md"));
+        assert_eq!(path.as_deref(), Some("agents/reviewer"));
     }
 
     #[test]
@@ -1914,8 +1922,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = temp_dir("code-cli-agent");
-        std::fs::create_dir_all(&dir).unwrap();
-        let agent = dir.join("reviewer.md");
+        let package = dir.join("reviewer");
+        std::fs::create_dir_all(&package).unwrap();
+        let agent = package.join("agent.md");
         std::fs::write(
             &agent,
             "---\nname: reviewer\ndescription: Review code changes carefully\n---\nReview.\n",
@@ -1935,8 +1944,43 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(dev.name, "reviewer");
-        assert_eq!(dev.rel, "reviewer.md");
+        assert_eq!(dev.rel, "reviewer");
+        assert_eq!(dev.definition_rel, "agent.md");
         assert_eq!(dev_path, agent_path);
+    }
+
+    #[test]
+    fn resolves_agent_package_from_entry_file_path_for_compatibility() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = temp_dir("code-cli-agent-entry");
+        let package = dir.join("agents/reviewer");
+        std::fs::create_dir_all(&package).unwrap();
+        let agent = package.join("agent.md");
+        std::fs::write(
+            &agent,
+            "---\nname: reviewer\ndescription: Review code changes carefully\n---\nReview.\n",
+        )
+        .unwrap();
+        let old_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        let dev = resolve_agent_dev(Some(agent.to_string_lossy().to_string()))
+            .expect("entry file should resolve to package");
+        let dev_path = std::fs::canonicalize(&dev.path).unwrap();
+        let agent_path = std::fs::canonicalize(&agent).unwrap();
+        let package_path = std::fs::canonicalize(&dev.package_path).unwrap();
+        let expected_package = std::fs::canonicalize(&package).unwrap();
+
+        std::env::set_current_dir(old_cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(dev.name, "reviewer");
+        assert_eq!(dev.rel, "reviewer");
+        assert_eq!(dev.definition_rel, "agent.md");
+        assert_eq!(dev_path, agent_path);
+        assert_eq!(package_path, expected_package);
     }
 
     #[test]

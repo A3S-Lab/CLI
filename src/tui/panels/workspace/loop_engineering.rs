@@ -478,10 +478,11 @@ fn agent_loop_init_arg(agent: &AgentDevSession, arg: &str) -> String {
 
 fn agent_loop_goal(agent: &AgentDevSession) -> String {
     format!(
-        "Iteratively improve A3S Code agent `{}` ({}) for its stated purpose: {}. Keep work scoped to {} and maintain a valid agent definition.",
+        "Iteratively improve A3S Code agent package `{}` ({}) for its stated purpose: {}. Keep work scoped to {} with entrypoint {} and maintain a valid agent definition.",
         agent.name,
         agent.rel,
         agent.description,
+        agent.package_path.display(),
         agent.path.display()
     )
 }
@@ -503,10 +504,11 @@ pub(crate) fn init_agent_loop(
     std::fs::write(
         spec.dir.join(STATE_FILE),
         format!(
-            "# Loop State: {}\n\nStatus: ready\n\n## Current Focus\n- {}\n\n## Target Agent\n- Name: {}\n- Definition: {}\n- Root: {}\n\n## Open Items\n- None yet.\n\n## Human Handoff\n- None.\n",
+            "# Loop State: {}\n\nStatus: ready\n\n## Current Focus\n- {}\n\n## Target Agent\n- Name: {}\n- Package: {}\n- Entrypoint: {}\n- Root: {}\n\n## Open Items\n- None yet.\n\n## Human Handoff\n- None.\n",
             spec.id,
             spec.goal,
             agent.name,
+            agent.package_path.display(),
             agent.path.display(),
             agent.root.display()
         ),
@@ -515,7 +517,8 @@ pub(crate) fn init_agent_loop(
     std::fs::write(
         spec.dir.join("skills").join("triage.md"),
         format!(
-            "# Agent Triage Skill\n\nRead `{}` and identify the highest-value improvements for `{}`. Focus on trigger description, tools, workflow, constraints, verification, and examples.\n",
+            "# Agent Triage Skill\n\nRead package `{}` and entrypoint `{}`. Identify the highest-value improvements for `{}`. Focus on trigger description, tools, workflow, package resources, constraints, verification, and examples.\n",
+            agent.package_path.display(),
             agent.path.display(),
             agent.name
         ),
@@ -1308,8 +1311,10 @@ mod tests {
         AgentDevSession {
             name: "code-reviewer".into(),
             description: "Review code changes carefully".into(),
-            rel: "review/code-reviewer.md".into(),
-            path: root.join("agents/review/code-reviewer.md"),
+            rel: "review/code-reviewer".into(),
+            definition_rel: "agent.md".into(),
+            path: root.join("agents/review/code-reviewer/agent.md"),
+            package_path: root.join("agents/review/code-reviewer"),
             root: root.join("agents"),
         }
     }
@@ -1527,7 +1532,8 @@ mod tests {
         assert!(!spec.worktree);
         assert!(spec.connectors.is_empty());
         assert!(spec.goal.contains("code-reviewer"));
-        assert!(spec.goal.contains("review/code-reviewer.md"));
+        assert!(spec.goal.contains("review/code-reviewer"));
+        assert!(spec.goal.contains("agent.md"));
         assert!(file_text(spec.dir.join(LOOP_CONFIG)).contains("os_runtime = false"));
         assert!(file_text(spec.dir.join(STATE_FILE)).contains("Target Agent"));
 
