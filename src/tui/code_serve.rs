@@ -16,6 +16,7 @@ use axum::http::{
 use axum::response::Response;
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tokio::sync::Mutex;
 
 use super::config;
@@ -293,6 +294,75 @@ impl CodeWebState {
         }
     }
 
+    fn system_info(&self) -> serde_json::Value {
+        json!({
+            "appName": "书小安",
+            "logoUrl": "/logo.png",
+            "version": env!("CARGO_PKG_VERSION"),
+        })
+    }
+
+    fn assistant_settings(&self) -> serde_json::Value {
+        json!({
+            "name": "书小安",
+            "avatar": "",
+            "description": "A3S Code local assistant",
+            "model": self.default_model.clone(),
+        })
+    }
+
+    fn app_settings(&self) -> serde_json::Value {
+        let default_model = self.default_model.clone().unwrap_or_default();
+        let workspace = self.default_workspace.display().to_string();
+        let storage_path = config::memory_dir().display().to_string();
+        json!({
+            "general": {
+                "appName": "书小安",
+                "language": "zh-CN",
+                "splashScreen": true,
+                "restoreWorkspace": true,
+                "workspacePath": workspace,
+            },
+            "appearance": {
+                "theme": "system",
+                "sideBarPosition": "left",
+                "statusBar": true,
+                "activityBar": true,
+                "zoomLevel": 1,
+            },
+            "editor": {},
+            "llm": {
+                "defaultModel": default_model,
+                "providers": [],
+                "mcpServers": [],
+            },
+            "ocr": {
+                "defaultBackend": "",
+                "backends": [],
+            },
+            "security": {
+                "allowTelemetry": false,
+                "checkUpdates": true,
+            },
+            "network": {
+                "connectionTimeout": 30000,
+                "readTimeout": 30000,
+                "proxyPool": [],
+            },
+            "search": {
+                "enabledEngines": ["ddg"],
+                "language": "zh-CN",
+                "safesearch": "moderate",
+                "timeout": 10,
+                "limit": 8,
+            },
+            "storage": {
+                "defaultProvider": "local",
+                "localStoragePath": storage_path,
+            },
+        })
+    }
+
     async fn create_session(&self, request: CreateSessionRequest) -> BootResult<SessionResponse> {
         let session = self.create_or_get_session(None, request).await?;
         Ok(SessionResponse::from_session(
@@ -454,6 +524,9 @@ impl Module for CodeWebModule {
         let v1_health_state = Arc::clone(&state);
         let kernel_create_state = Arc::clone(&state);
         let kernel_list_state = Arc::clone(&state);
+        let system_info_state = Arc::clone(&state);
+        let assistant_state = Arc::clone(&state);
+        let app_settings_state = Arc::clone(&state);
 
         Ok(vec![ControllerDefinition::new("/")?
             .get_json("/health", move |_| {
@@ -463,6 +536,21 @@ impl Module for CodeWebModule {
             .get_json("/v1/health", move |_| {
                 let state = Arc::clone(&v1_health_state);
                 async move { Ok(state.health()) }
+            })?
+            .get_json("/v1/config/public/system-info", move |_| {
+                let state = Arc::clone(&system_info_state);
+                async move { Ok(state.system_info()) }
+            })?
+            .get_json("/v1/config/assistant", move |_| {
+                let state = Arc::clone(&assistant_state);
+                async move { Ok(state.assistant_settings()) }
+            })?
+            .get_json("/v1/config", move |_| {
+                let state = Arc::clone(&app_settings_state);
+                async move { Ok(state.app_settings()) }
+            })?
+            .get_json("/v1/plugins/menu", move |_| async move {
+                Ok(Vec::<serde_json::Value>::new())
             })?
             .post_json("/sessions", move |request: CreateSessionRequest| {
                 let state = Arc::clone(&session_state);
