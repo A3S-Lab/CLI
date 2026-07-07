@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.2] - 2026-07-07
+## [0.7.3] - 2026-07-07
 
 ### Fixed
 
@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workspace patches.
 - Made the release workflow fail when crates.io or Homebrew publishing
   credentials are missing instead of reporting a misleading successful release.
+- Added a crates.io User-Agent and retry policy to release dependency checks so
+  GitHub Actions does not misclassify already published A3S crates as missing.
 
 ## [0.7.1] - 2026-07-07
 

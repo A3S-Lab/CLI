@@ -74,13 +74,18 @@ jobs:
           if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
             echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"; exit 1
           fi
-          if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-code-core/4.3.0" >/dev/null 2>&1; then
+          crate_exists() {
+            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+              -A "a3s-release-check/1.0" \
+              "https://crates.io/api/v1/crates/$1/$2" >/dev/null
+          }
+          if ! crate_exists a3s-code-core 4.3.0; then
             echo "::error::a3s-code-core 4.3.0 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-memory/0.1.2" >/dev/null 2>&1; then
+          if ! crate_exists a3s-memory 0.1.2; then
             echo "::error::a3s-memory 0.1.2 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-tui/0.1.5" >/dev/null 2>&1; then
+          if ! crate_exists a3s-tui 0.1.5; then
             echo "::error::a3s-tui 0.1.5 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           cargo publish
