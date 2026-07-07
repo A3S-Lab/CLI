@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare the sibling A3S crates expected by this repository's local
 # [patch.crates-io] paths. GitHub Actions checks out Cli as a standalone repo,
-# so the parent directory is otherwise missing ../code, ../memory, and friends.
+# so the parent directory is otherwise missing ../boot, ../code, ../memory, and friends.
 
 set -euo pipefail
 
@@ -53,6 +53,7 @@ clone_common() {
   rm -rf "$checkout"
 }
 
+clone_repo Boot boot
 clone_repo Code code
 clone_common
 clone_repo Flow flow
