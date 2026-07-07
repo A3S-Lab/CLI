@@ -52,6 +52,8 @@ mod asset_lifecycle;
 mod asset_naming;
 #[path = "code_cli.rs"]
 mod code_cli;
+#[path = "code_serve.rs"]
+mod code_serve;
 pub(crate) use code_cli::{is_code_cli_command, run_code_cli};
 
 // System configuration and integrations.
@@ -1173,6 +1175,35 @@ impl Selection {
     }
 }
 
+fn viewport_mouse_cell(
+    row: u16,
+    column: u16,
+    viewport_rows: usize,
+    max_col: u16,
+) -> Option<(u16, u16)> {
+    if viewport_rows == 0 || row as usize >= viewport_rows {
+        None
+    } else {
+        Some((row, column.min(max_col)))
+    }
+}
+
+fn viewport_mouse_cell_clamped(
+    row: u16,
+    column: u16,
+    viewport_rows: usize,
+    max_col: u16,
+) -> Option<(u16, u16)> {
+    if viewport_rows == 0 {
+        None
+    } else {
+        Some((
+            row.min(viewport_rows.saturating_sub(1) as u16),
+            column.min(max_col),
+        ))
+    }
+}
+
 /// Substring of `s` spanning visible columns `[from, to)` (wide chars counted by
 /// display width). A char straddling the start is dropped; one straddling the
 /// end is kept.
@@ -1348,6 +1379,14 @@ fn project_instructions(workspace: &str) -> Option<String> {
 
 /// Left margin for the whole UI (inner padding).
 const PAD: usize = 2;
+
+fn viewport_content_width_for(width: u16) -> usize {
+    (width as usize).saturating_sub(1)
+}
+
+fn transcript_markdown_width_for(width: u16) -> usize {
+    viewport_content_width_for(width).saturating_sub(PAD + 2)
+}
 
 /// One `/effort` level. Effort scales reasoning depth on THREE axes so it is
 /// meaningful on every model, not just Anthropic:
@@ -2187,6 +2226,14 @@ impl App {
     pub(crate) fn touch_workspace_file(&self, path: &str) {
         self.workspace_manifest.touch_file(path);
     }
+
+    pub(crate) fn viewport_content_width(&self) -> usize {
+        viewport_content_width_for(self.width)
+    }
+
+    fn transcript_markdown_width(&self) -> usize {
+        transcript_markdown_width_for(self.width)
+    }
 }
 
 impl Model for App {
@@ -2240,7 +2287,7 @@ impl Model for App {
                 // Re-wrap the live answer at the new width instead of discarding it
                 // (the old reset lost any text streamed before the resize).
                 let raw = self.streaming.raw_content().to_string();
-                self.streaming = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
+                self.streaming = StreamingMarkdown::new(self.transcript_markdown_width());
                 if !raw.is_empty() {
                     self.streaming.push(&raw);
                 }
@@ -2637,21 +2684,25 @@ impl Model for App {
                     // still scrolls; the app owns selection, so scroll + copy work
                     // together (no mode toggle). Release copies to the clipboard.
                     MouseEventKind::Down(MouseButton::Left) => {
-                        self.selection = if (m.row as usize) < vp_rows {
-                            let p = (m.row, m.column.min(max_col));
-                            Some(Selection { anchor: p, head: p })
-                        } else {
-                            None
-                        };
+                        self.selection = viewport_mouse_cell(m.row, m.column, vp_rows, max_col)
+                            .map(|p| Selection { anchor: p, head: p });
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
                         if let Some(s) = self.selection.as_mut() {
-                            let row = m.row.min(vp_rows.saturating_sub(1) as u16);
-                            s.head = (row, m.column.min(max_col));
+                            if let Some(p) =
+                                viewport_mouse_cell_clamped(m.row, m.column, vp_rows, max_col)
+                            {
+                                s.head = p;
+                            }
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
-                        if let Some(s) = self.selection {
+                        if let Some(mut s) = self.selection {
+                            if let Some(p) =
+                                viewport_mouse_cell_clamped(m.row, m.column, vp_rows, max_col)
+                            {
+                                s.head = p;
+                            }
                             let view = self.viewport.view();
                             if is_remote_view_click(&view, s) {
                                 self.selection = None;
@@ -3852,7 +3903,7 @@ impl App {
                     return None;
                 };
                 self.messages
-                    .push(user_bubble("/agent review", self.width as usize));
+                    .push(user_bubble("/agent review", self.viewport_content_width()));
                 self.engage_autonomy(4);
                 self.review_pending = true;
                 let prompt = panels::agent::agent_review_prompt(&agent_dev);
@@ -3940,7 +3991,7 @@ impl App {
                     return None;
                 };
                 self.messages
-                    .push(user_bubble("/mcp review", self.width as usize));
+                    .push(user_bubble("/mcp review", self.viewport_content_width()));
                 self.engage_autonomy(4);
                 self.review_pending = true;
                 let prompt = panels::mcp::mcp_review_prompt(&mcp_dev);
@@ -4023,7 +4074,7 @@ impl App {
                     }
                 };
                 self.messages
-                    .push(user_bubble("/skill review", self.width as usize));
+                    .push(user_bubble("/skill review", self.viewport_content_width()));
                 self.engage_autonomy(4);
                 self.review_pending = true;
                 let prompt = panels::skill::skill_review_prompt(&skill.path, &body);
@@ -4490,7 +4541,7 @@ impl App {
                         }
                         self.messages.push(user_bubble(
                             &format!("/flow review {file}"),
-                            self.width as usize,
+                            self.viewport_content_width(),
                         ));
                         self.engage_autonomy(4);
                         self.review_pending = true;
@@ -4716,7 +4767,7 @@ impl App {
                 self.textarea.clear();
                 self.messages.push(user_bubble(
                     "/init — generate AGENTS.md",
-                    self.width as usize,
+                    self.viewport_content_width(),
                 ));
                 self.rebuild_viewport();
                 return self.start_stream(
@@ -4966,7 +5017,7 @@ impl App {
         // Show the user message in a background bubble, then run now (if idle)
         // or queue it (if the agent is busy).
         self.messages
-            .push(user_bubble(trimmed, self.width as usize));
+            .push(user_bubble(trimmed, self.viewport_content_width()));
         self.textarea.clear();
         // One-shot `/ctx <n>` context: attach the staged transcript to THIS
         // genuine typed message only (never a `/loop` "Continue." re-entry),
@@ -5042,7 +5093,7 @@ impl App {
         ));
         // Render narrower than the viewport so half-block rows never wrap (a
         // wrapped row splits the picture and garbles it). Indent to align.
-        let cols = (self.width as usize).saturating_sub(PAD + 2).min(72);
+        let cols = self.transcript_markdown_width().min(72);
         if let Some(lines) = render_image_file(&dest, cols, 16) {
             for l in lines {
                 self.messages.push(format!("{}{l}", " ".repeat(PAD)));
@@ -5160,7 +5211,7 @@ impl App {
             &output,
             metadata.as_ref(),
             completed.args.as_ref(),
-            self.width as usize,
+            self.viewport_content_width(),
         ));
         self.record_runtime_tool_evidence("dynamic_workflow");
         if metadata
@@ -5486,7 +5537,7 @@ impl App {
                     &output,
                     metadata.as_ref(),
                     completed.args.as_ref(),
-                    self.width as usize,
+                    self.viewport_content_width(),
                 ));
                 self.record_runtime_tool_evidence(&name);
                 self.capture_workflow(&name, completed.args.as_ref());
@@ -6091,7 +6142,7 @@ impl App {
 
     /// Format every retained tool call for the `/output` viewer.
     fn format_tool_log(&self) -> Option<String> {
-        format_tool_log_records(self.runtime.tool_log(), self.width as usize)
+        format_tool_log_records(self.runtime.tool_log(), self.viewport_content_width())
     }
 
     /// Move through prompt history and load the entry into the input. Going
@@ -6123,7 +6174,7 @@ impl App {
         }
         self.last_paint = Some(Instant::now());
         let mut blocks: Vec<String> = self.messages.clone();
-        let body = thinking_block(&self.thinking, self.width as usize);
+        let body = thinking_block(&self.thinking, self.viewport_content_width());
         if !body.is_empty() {
             blocks.push(body);
         }
@@ -6138,7 +6189,7 @@ impl App {
                 &tool.name,
                 tool.args().as_ref(),
                 tool.output(),
-                self.width as usize,
+                self.viewport_content_width(),
                 on,
             ));
         }
@@ -6542,7 +6593,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 // Same gutter (● dot + indent) as live messages.
                 "user" => Some(gutter(ACCENT, text.trim())),
                 "assistant" => {
-                    let mut md = StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2));
+                    let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
                     md.push(&text);
                     Some(gutter(TN_GREEN, &md.view()))
                 }
@@ -6692,7 +6743,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             .with_width(width.saturating_sub((PAD + 2) as u16)) // PAD margin + "❯ "
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
-        streaming: StreamingMarkdown::new((width as usize).saturating_sub(PAD + 2)),
+        streaming: StreamingMarkdown::new(transcript_markdown_width_for(width)),
         got_delta: false,
         compacting: None,
         updating: None,
@@ -6773,12 +6824,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     ProgramBuilder::new(app)
         .with_alt_screen()
-        // Capture the mouse so the wheel scrolls the transcript (alt-screen has no
-        // terminal scrollback, so capture is the only way to get wheel events).
-        // Copy is preserved: most terminals still do native selection on
-        // Shift+drag (Fn/⌥ on macOS Terminal) even with capture on, plus `/copy`
-        // yanks the last reply via OSC52, and `/mouse` drops capture entirely for
-        // pure native selection.
+        // Capture mouse input so wheel/trackpad scrolling works in the alternate
+        // screen. Drag-copy is app-owned: on release we write the selected text to
+        // the clipboard, so scroll and copy can coexist.
         .with_mouse_support()
         .with_fps(30)
         .run()
@@ -7606,6 +7654,14 @@ mod tests {
         // row0 col2..end, through row1 col0..8 — trailing padding trimmed.
         let t = selection_to_text(view, 0, 2, 1, 8);
         assert_eq!(t, "hello world\n  second");
+    }
+
+    #[test]
+    fn mouse_selection_uses_release_position_clamped_to_viewport() {
+        assert_eq!(viewport_mouse_cell(2, 40, 4, 20), Some((2, 20)));
+        assert_eq!(viewport_mouse_cell(4, 2, 4, 20), None);
+        assert_eq!(viewport_mouse_cell_clamped(9, 40, 4, 20), Some((3, 20)));
+        assert_eq!(viewport_mouse_cell_clamped(0, 1, 0, 20), None);
     }
 
     #[test]
@@ -8661,6 +8717,7 @@ mod tests {
     #[test]
     fn removed_top_level_aliases_stay_unregistered() {
         let removed = [
+            "/mouse".to_string(),
             "/plugins".to_string(),
             "/quit".to_string(),
             format!("/{}{}", "re", "po"),

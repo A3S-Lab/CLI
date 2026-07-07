@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -15,11 +15,12 @@ path = "src/main.rs"
 
 [dependencies]
 a3s-code-core = "=4.3.0"
+a3s-boot = "0.1.0"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.2"
-a3s-tui = "=0.1.5"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net"] }
+a3s-tui = "=0.1.6"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "fs", "signal"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,6 +35,7 @@ futures = "0.3"
 rand = "0.8"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
+axum = "0.8"
 
 [profile.release]
 opt-level = "z"
@@ -44,6 +46,7 @@ strip = true
 # Monorepo development builds should exercise the local A3S crates instead of
 # waiting for every submodule change to be published to crates.io.
 a3s-code-core = { path = "../code/core" }
+a3s-boot = { path = "../boot" }
 a3s-common = { path = "../common" }
 a3s-lane = { path = "../lane" }
 a3s-memory = { path = "../memory" }

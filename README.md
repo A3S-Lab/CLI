@@ -7,6 +7,7 @@ The umbrella CLI for the [A3S](https://github.com/A3S-Lab) platform.
 
 ```
 a3s code            # launch the A3S Code TUI
+a3s code serve      # start the local A3S Code API + Shu Xiao'an web UI
 a3s box ps          # → a3s-box ps (auto-installs a3s-box if needed)
 a3s <tool> --help   # a tool's own help
 a3s list            # list installed a3s-* tools
@@ -78,10 +79,24 @@ Start, resume, and update the TUI:
 
 ```sh
 a3s code                         # launch the TUI in the current workspace
+a3s code serve                   # start local API and Shu Xiao'an web UI
 a3s code resume                  # resume the newest saved TUI session here
 a3s code resume 018f-session-id  # resume a specific saved session
 a3s code update                  # upgrade the CLI and restart into this session
 ```
+
+Start the local Web API and bundled 书小安 frontend:
+
+```sh
+a3s code serve
+a3s code serve --workspace /path/to/project
+a3s code serve --host 127.0.0.1 --port 29653
+a3s code serve --api-only
+```
+
+The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
+the TUI. By default it serves the Rsbuild output from `apps/web/dist/workspace`; pass
+`--web-dir` to serve a different frontend build.
 
 Inspect and create `config.acl`:
 

@@ -82,11 +82,14 @@ jobs:
           if ! crate_exists a3s-code-core 4.3.0; then
             echo "::error::a3s-code-core 4.3.0 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
+          if ! crate_exists a3s-boot 0.1.0; then
+            echo "::error::a3s-boot 0.1.0 is not on crates.io yet — cannot publish a3s"; exit 1
+          fi
           if ! crate_exists a3s-memory 0.1.2; then
             echo "::error::a3s-memory 0.1.2 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          if ! crate_exists a3s-tui 0.1.5; then
-            echo "::error::a3s-tui 0.1.5 is not on crates.io yet — cannot publish a3s"; exit 1
+          if ! crate_exists a3s-tui 0.1.6; then
+            echo "::error::a3s-tui 0.1.6 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           cargo publish
 

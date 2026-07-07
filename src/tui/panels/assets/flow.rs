@@ -1289,7 +1289,7 @@ impl App {
                     Some(FlowSubcommand::Review(_)) => {
                         self.messages.push(user_bubble(
                             &format!("/flow review {file}"),
-                            self.width as usize,
+                            self.viewport_content_width(),
                         ));
                         self.engage_autonomy(4);
                         self.review_pending = true;

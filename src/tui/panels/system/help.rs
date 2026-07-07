@@ -283,7 +283,10 @@ fn help_panel() -> HelpPanel {
                 )
                 .row("PgUp / PgDn", "scroll the transcript or this help panel")
                 .row("Shift+End", "jump to the latest transcript output")
-                .row("drag", "select transcript text; auto-copies on release")
+                .row(
+                    "wheel / drag",
+                    "scroll; select transcript text and copy on release",
+                )
                 .row(
                     "Esc",
                     "interrupt the running turn; close panels where applicable",

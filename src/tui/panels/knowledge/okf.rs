@@ -1291,7 +1291,7 @@ impl App {
                     return None;
                 };
                 self.messages
-                    .push(user_bubble("/okf review", self.width as usize));
+                    .push(user_bubble("/okf review", self.viewport_content_width()));
                 self.engage_autonomy(4);
                 self.review_pending = true;
                 let prompt = okf_lifecycle_prompt("review", &okf_dev, self.os_session.is_some());
@@ -1319,8 +1319,10 @@ impl App {
                         );
                         return None;
                     }
-                    self.messages
-                        .push(user_bubble(&format!("/okf {action}"), self.width as usize));
+                    self.messages.push(user_bubble(
+                        &format!("/okf {action}"),
+                        self.viewport_content_width(),
+                    ));
                     self.engage_autonomy(6);
                     let prompt = okf_lifecycle_prompt(action, &okf_dev, false);
                     let display = format!("⌁ {} {action}", okf_dev.name);
@@ -1332,8 +1334,10 @@ impl App {
                     OkfCommand::Status => OkfOsAction::Status,
                     _ => unreachable!(),
                 };
-                self.messages
-                    .push(user_bubble(&format!("/okf {action}"), self.width as usize));
+                self.messages.push(user_bubble(
+                    &format!("/okf {action}"),
+                    self.viewport_content_width(),
+                ));
                 self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
                     "  ⌁ {} → OS Knowledge service {}…",
                     okf_dev.name,

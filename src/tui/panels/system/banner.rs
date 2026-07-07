@@ -23,7 +23,7 @@ impl App {
             &os,
             &self.cwd,
             self.update_available.as_deref(),
-            self.width,
+            self.viewport_content_width().min(u16::MAX as usize) as u16,
         )
     }
 }
@@ -104,6 +104,8 @@ mod tests {
 
     #[test]
     fn welcome_banner_uses_shared_component_and_fits_width() {
+        let terminal_width = 52;
+        let viewport_width = terminal_width - 1;
         let rendered = banner_view(
             3,
             "gpt-5",
@@ -111,7 +113,7 @@ mod tests {
             "  ·  OS: dev@example",
             "/Users/roylin/code/a3s",
             Some("0.9.0"),
-            52,
+            viewport_width,
         );
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
@@ -121,10 +123,31 @@ mod tests {
         assert!(rendered.contains("\x1b["), "banner should carry styling");
         for line in rendered.lines().filter(|line| !line.is_empty()) {
             assert!(
-                a3s_tui::style::visible_len(line) <= 52,
+                a3s_tui::style::visible_len(line) <= viewport_width as usize,
                 "{:?}",
                 a3s_tui::style::strip_ansi(line)
             );
         }
+    }
+
+    #[test]
+    fn welcome_banner_does_not_wrap_inside_scrollbar_viewport() {
+        let terminal_width = 52;
+        let viewport_width = terminal_width - 1;
+        let rendered = banner_view(
+            3,
+            "gpt-5",
+            "  ·  4 skills",
+            "  ·  OS: dev@example",
+            "/Users/roylin/code/a3s",
+            Some("0.9.0"),
+            viewport_width,
+        );
+        let expected_rows = rendered.split('\n').count();
+        let mut viewport = a3s_tui::components::Viewport::new(viewport_width, 80);
+
+        viewport.set_content(&rendered);
+
+        assert_eq!(viewport.total_lines(), expected_rows);
     }
 }

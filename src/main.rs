@@ -25,6 +25,7 @@ fn usage_text() -> String {
         "  a3s code resume <id>      resume a saved session by id".to_string(),
         "  a3s code login|logout     manage the configured OS account".to_string(),
         "  a3s code config|dirs      inspect config and local asset roots".to_string(),
+        "  a3s code serve            start the local API and Shu Xiao'an web UI".to_string(),
         "  a3s code kb|ctx|memory    use TUI knowledge/history tools from scripts".to_string(),
         "  a3s code <family> <cmd>   run asset lifecycle commands (agent/mcp/skill/flow/okf)"
             .to_string(),

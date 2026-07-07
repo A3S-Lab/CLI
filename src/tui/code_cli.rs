@@ -7,7 +7,7 @@ use super::{asset_clone, config, kbutil, memutil, panels, remote_ui};
 
 const TOP_LEVEL_COMMANDS: &[&str] = &[
     "agent", "mcp", "skill", "flow", "okf", "login", "logout", "auth", "config", "dirs", "models",
-    "model", "kb", "ctx", "memory", "mem", "top", "view",
+    "model", "kb", "ctx", "memory", "mem", "top", "view", "serve",
 ];
 
 pub(crate) fn is_code_cli_command(args: &[String]) -> bool {
@@ -33,6 +33,7 @@ pub(crate) fn code_cli_usage_text() -> String {
         "  a3s code config path|init|cat    inspect or create config.acl".to_string(),
         "  a3s code dirs                    print local asset and memory roots".to_string(),
         "  a3s code models                  list configured and account-backed models".to_string(),
+        "  a3s code serve                   start local API and Shu Xiao'an web UI".to_string(),
         "  a3s code <family> local [query]  list local assets for a family".to_string(),
         "  a3s code <family> clone <url>    clone an asset source into the configured root"
             .to_string(),
@@ -88,6 +89,7 @@ pub(crate) async fn run_code_cli(args: Vec<String>) -> anyhow::Result<()> {
         Some("memory" | "mem") => run_memory(&args[1..]),
         Some("top") => crate::top::run(args[1..].to_vec()).await,
         Some("view") => run_view(&args[1..]).await,
+        Some("serve") => super::code_serve::run(&args[1..]).await,
         Some(other) => anyhow::bail!(
             "unknown a3s code subcommand `{other}`; expected one of {}",
             TOP_LEVEL_COMMANDS.join(", ")

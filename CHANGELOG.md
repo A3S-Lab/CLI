@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.4] - 2026-07-07
+
+### Fixed
+
+- Fixed A3S Code TUI transcript wrapping so the welcome banner, user bubbles,
+  streaming Markdown, thinking text, pasted images, and tool cards render for
+  the scrollbar-adjusted viewport width instead of wrapping a second time.
+- Restored reliable transcript wheel scrolling and drag-to-copy behavior by
+  keeping mouse capture enabled while copying the app-managed selection on mouse
+  release with clamped viewport coordinates.
+- Ignored terminal key-release events in `a3s-tui` so Windows terminals do not
+  replay a single key press as duplicate input.
+
 ## [0.7.3] - 2026-07-07
 
 ### Fixed
