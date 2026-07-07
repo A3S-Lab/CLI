@@ -79,8 +79,8 @@ jobs:
               -A "a3s-release-check/1.0" \
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
-          if ! crate_exists a3s-code-core 4.3.0; then
-            echo "::error::a3s-code-core 4.3.0 is not on crates.io yet — cannot publish a3s"; exit 1
+          if ! crate_exists a3s-code-core 4.3.1; then
+            echo "::error::a3s-code-core 4.3.1 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           if ! crate_exists a3s-boot 0.1.0; then
             echo "::error::a3s-boot 0.1.0 is not on crates.io yet — cannot publish a3s"; exit 1
