@@ -2,8 +2,9 @@ name: Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
-# Secret-backed jobs skip cleanly when their secret is absent. Binary and
-# Homebrew artifacts wait for the crate job so release channels do not drift.
+# Binary and Homebrew artifacts wait for the crate job so release channels do
+# not drift. Missing publish credentials or unpublished dependency crates fail
+# the release instead of producing a misleading green job.
 on:
   push:
     tags: ["v*"]
@@ -71,13 +72,13 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "CARGO_REGISTRY_TOKEN not set — skipping crates.io publish"; exit 0
+            echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"; exit 1
           fi
           if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-code-core/4.3.0" >/dev/null 2>&1; then
-            echo "a3s-code-core 4.3.0 is not on crates.io yet — skipping CLI crate publish"; exit 0
+            echo "::error::a3s-code-core 4.3.0 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-memory/0.1.2" >/dev/null 2>&1; then
-            echo "a3s-memory 0.1.2 is not on crates.io yet — skipping CLI crate publish"; exit 0
+            echo "::error::a3s-memory 0.1.2 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           cargo publish
 
@@ -91,7 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${TAP_TOKEN:-}" ]; then
-            echo "HOMEBREW_TAP_TOKEN not set — skipping Homebrew update"; exit 0
+            echo "::error::HOMEBREW_TAP_TOKEN not set — cannot update Homebrew tap"; exit 1
           fi
           tag="$GITHUB_REF_NAME"; v="${tag#v}"
           base="https://github.com/A3S-Lab/Cli/releases/download/${tag}"
