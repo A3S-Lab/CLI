@@ -80,6 +80,9 @@ jobs:
           if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-memory/0.1.2" >/dev/null 2>&1; then
             echo "::error::a3s-memory 0.1.2 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
+          if ! curl -fsSL "https://crates.io/api/v1/crates/a3s-tui/0.1.5" >/dev/null 2>&1; then
+            echo "::error::a3s-tui 0.1.5 is not on crates.io yet — cannot publish a3s"; exit 1
+          fi
           cargo publish
 
   homebrew:
@@ -95,7 +98,7 @@ jobs:
             echo "::error::HOMEBREW_TAP_TOKEN not set — cannot update Homebrew tap"; exit 1
           fi
           tag="$GITHUB_REF_NAME"; v="${tag#v}"
-          base="https://github.com/A3S-Lab/Cli/releases/download/${tag}"
+          base="https://github.com/A3S-Lab/CLI/releases/download/${tag}"
           sha() { curl -fsSL "$base/a3s-${tag}-$1.tar.gz" | sha256sum | cut -d' ' -f1; }
           mac_arm=$(sha aarch64-apple-darwin)
           mac_x86=$(sha x86_64-apple-darwin)
@@ -105,7 +108,7 @@ jobs:
           cat > tap/Formula/a3s.rb <<RB
           class A3s < Formula
             desc "A3S coding agent CLI — a3s code launches the interactive TUI"
-            homepage "https://github.com/A3S-Lab/Cli"
+            homepage "https://github.com/A3S-Lab/CLI"
             version "${v}"
             license "MIT"
 

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-07-07
+
+### Fixed
+
+- Published the matching `a3s-tui` crate API used by the CLI so crates.io
+  verification can build the released package without relying on local
+  workspace patches.
+- Made the release workflow fail when crates.io or Homebrew publishing
+  credentials are missing instead of reporting a misleading successful release.
+
 ## [0.7.1] - 2026-07-07
 
 ### Fixed
