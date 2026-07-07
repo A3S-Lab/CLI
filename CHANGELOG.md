@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.5] - 2026-07-07
+
+### Fixed
+
+- Updated A3S Code Core to `4.3.1` so DynamicWorkflowRuntime scripts can use
+  legacy `ctx.tools.<name>(args)` tool calls without bypassing allow-list,
+  call-count, or output-size limits.
+- Made `?` DeepResearch choose OS Runtime fan-out adaptively: broad,
+  multi-source research can use the signed-in runtime, while concise or
+  explicitly local tasks stay on the local dynamic workflow path and no longer
+  require RemoteUI evidence.
+
 ## [0.7.4] - 2026-07-07
 
 ### Fixed

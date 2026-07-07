@@ -930,26 +930,22 @@ async function run(ctx, inputs) {
 
 /// The directive sent to the agent for a `?` deep-research turn: decompose the
 /// question, run the evidence fan-out through DynamicWorkflowRuntime, then
-/// cross-check and synthesize a cited report. When OS is signed in, the Flow step
-/// may call the login-gated A3S Runtime `runtime` tool and publish RemoteUI.
+/// cross-check and synthesize a cited report. When OS Runtime is selected for a
+/// broad enough task, the Flow step may call the login-gated `runtime` tool.
 #[cfg(test)]
 fn deep_research_prompt(query: &str, os_runtime: bool) -> String {
     let tracks_directive = if os_runtime {
-        format!(
-            "OS runtime is available. The DynamicWorkflowRuntime step may call \
-         the login-gated `runtime` tool, so set `os_runtime: true` in the \
-         workflow input and include `allowed_tools: [\"runtime\"]`. Split the \
-         query into 4-8 independent research tracks before the call. Do not do \
-         all source gathering serially. After merging the tracks, create both a \
-         Markdown report and a standalone HTML page, then use the OS progressive \
-         UI/RemoteUI path (shaped response with `.view`/`viewUrl`) so the TUI can \
-         show the user a one-click view. Runtime evidence must include \
-         `dynamic_workflow` and the report view. Do not print a raw authenticated \
-         URL; summarize and let the host surface the RemoteUI view. {}",
-            RuntimePolicy::Required.directive()
-        )
+        "This query is broad enough for OS Runtime fan-out. Set \
+         `os_runtime: true` in the workflow input and include \
+         `allowed_tools: [\"runtime\"]`. Split the query into 4-8 independent \
+         research tracks before the call. After merging the tracks, create both a \
+         Markdown report and a standalone HTML page. If an OS progressive \
+         operation naturally returns `.view` or `viewUrl`, preserve that shaped \
+         response so the TUI can show a one-click view; otherwise provide the \
+         local report artifacts and do not fabricate RemoteUI evidence."
+            .to_string()
     } else {
-        "OS runtime is not available in this session. Set `os_runtime: false`; \
+        "OS Runtime is unavailable or not warranted for this query. Set `os_runtime: false`; \
          the DynamicWorkflowRuntime script will schedule a host-side \
          `parallel_task` step for local subagent fan-out because PTC itself \
          cannot call `parallel_task`. Still create a Markdown report and \
@@ -998,6 +994,68 @@ fn deep_research_workflow_args(query: &str, os_runtime: bool) -> serde_json::Val
     })
 }
 
+fn should_use_os_runtime_for_deep_research(query: &str, os_available: bool) -> bool {
+    if !os_available {
+        return false;
+    }
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    let local_only_markers = [
+        "local only",
+        "locally",
+        "no os",
+        "without os",
+        "不要 os",
+        "不用 os",
+        "不使用 os",
+        "本地",
+        "不要远程",
+        "不用远程",
+    ];
+    if local_only_markers.iter().any(|marker| q.contains(marker)) {
+        return false;
+    }
+
+    let broad_markers = [
+        "comprehensive",
+        "deep dive",
+        "landscape",
+        "benchmark",
+        "compare",
+        "comparison",
+        "market",
+        "regulation",
+        "policy",
+        "paper",
+        "papers",
+        "latest",
+        "recent",
+        "timeline",
+        "多来源",
+        "全面",
+        "深入",
+        "调研",
+        "研究",
+        "对比",
+        "比较",
+        "竞品",
+        "市场",
+        "法规",
+        "政策",
+        "论文",
+        "最新",
+        "趋势",
+        "时间线",
+        "大量",
+        "并行",
+    ];
+    broad_markers.iter().any(|marker| q.contains(marker))
+        || q.split_whitespace().count() >= 14
+        || q.chars().count() >= 80
+}
+
 fn deep_research_synthesis_prompt(
     query: &str,
     os_runtime: bool,
@@ -1005,15 +1063,16 @@ fn deep_research_synthesis_prompt(
     workflow_metadata: Option<&serde_json::Value>,
 ) -> String {
     let remoteui_directive = if os_runtime {
-        format!(
-            "OS is signed in. Use the OS progressive UI/RemoteUI path with \
-             shaped:true so the TUI can surface a `.view` or `viewUrl` for the \
-             final report. {}",
-            RuntimePolicy::Required.directive()
-        )
+        "OS Runtime was selected for this run because the query looked broad or \
+         highly parallelizable. If the gathered evidence already includes a \
+         shaped `.view` or `viewUrl`, preserve it so the TUI can surface the \
+         view. Otherwise provide Markdown/HTML report artifacts and do not claim \
+         RemoteUI success."
+            .to_string()
     } else {
-        "OS runtime is not available. Create a Markdown report and standalone HTML \
-         page under `.a3s/research/<slug>/`, and provide local paths."
+        "OS Runtime was not selected for this run. Create a Markdown report and \
+         standalone HTML page under `.a3s/research/<slug>/`, provide local paths, \
+         and do not claim a RemoteUI view unless a later shaped response exists."
             .to_string()
     };
     let metadata = workflow_metadata
@@ -1042,16 +1101,14 @@ fn deep_research_recovery_prompt(
     workflow_metadata: Option<&serde_json::Value>,
 ) -> String {
     let recovery_path = if os_runtime {
-        format!(
-            "OS is signed in. The host-controlled workflow already attempted the \
-             runtime path and failed before usable evidence was gathered. Recover by \
-             using the signed-in `runtime` tool directly if it is available; if the \
-             runtime worker or endpoint is unavailable, fall back to local web_search \
-             and web_fetch and explicitly explain the OS Runtime failure. {}",
-            RuntimePolicy::Required.directive()
-        )
+        "The host-controlled workflow selected OS Runtime and failed before usable \
+         evidence was gathered. Recover with local web_search/web_fetch or the \
+         signed-in `runtime` tool only if it is clearly available and useful; if \
+         the runtime worker or endpoint is unavailable, explain the failure and \
+         continue locally."
+            .to_string()
     } else {
-        "OS runtime is not available. Recover with local web_search/web_fetch and \
+        "OS Runtime was not selected. Recover with local web_search/web_fetch and \
          local artifacts under `.a3s/research/<slug>/`."
             .to_string()
     };
@@ -4200,8 +4257,12 @@ impl App {
                     .bold()
                     .render(&format!("🔬 deep research: {query}")),
             ));
-            let runtime_hint = if self.os_session.is_some() {
-                "  🎯 goal set · OS A3S Runtime parallel research · report + RemoteUI view (Esc stops)"
+            let os_runtime =
+                should_use_os_runtime_for_deep_research(&query, self.os_session.is_some());
+            let runtime_hint = if os_runtime {
+                "  🎯 goal set · adaptive deep research · OS Runtime fan-out selected (Esc stops)"
+            } else if self.os_session.is_some() {
+                "  🎯 goal set · adaptive deep research · local workflow selected (Esc stops)"
             } else {
                 "  🎯 goal set · local deep research · report + HTML artifacts (Esc stops)"
             };
@@ -4210,11 +4271,7 @@ impl App {
             // Long-horizon budget: keep researching across turns toward the
             // goal, with tool prompts auto-approved for the run's duration.
             self.engage_autonomy(8);
-            let os_runtime = self.os_session.is_some();
-            let runtime_expectation = self
-                .os_session
-                .is_some()
-                .then(|| RuntimeExpectation::required_report_view("deep research"));
+            let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
             if self.state == State::Idle {
                 return self.start_deep_research_workflow(query, os_runtime, runtime_expectation);
             }
@@ -5375,7 +5432,7 @@ impl App {
         if let Some((prompt, display_task)) = synthesis {
             return self.start_ultracode_synthesis(prompt, display_task);
         }
-        // Required OS Runtime evidence is a deliverable, not just a warning. In
+        // Required runtime evidence is a deliverable, not just a warning. In
         // autonomous runs, spend the next loop turn on a targeted correction
         // before falling back to the generic "Continue" prompt.
         if self.loop_remaining > 0 && self.queue.is_empty() {
@@ -7514,24 +7571,44 @@ mod tests {
     }
 
     #[test]
-    fn deep_research_prompt_uses_os_runtime_and_remoteui_when_available() {
-        let p = deep_research_prompt("rust async runtimes", true);
+    fn deep_research_prompt_uses_os_runtime_when_selected_without_requiring_remoteui() {
+        let p = deep_research_prompt("comprehensive rust async runtimes comparison", true);
         assert!(p.contains("rust async runtimes"), "{p}");
         assert!(p.contains("dynamic_workflow"), "{p}");
-        assert!(p.contains("OS A3S Runtime") && p.contains("runtime"), "{p}");
-        assert!(p.contains("Runtime evidence is required"), "{p}");
-        assert!(p.contains("`runtime`"), "{p}");
+        assert!(
+            p.contains("OS Runtime fan-out") && p.contains("runtime"),
+            "{p}"
+        );
+        assert!(!p.contains("Runtime evidence is required"), "{p}");
         assert!(p.contains("allowed_tools: [\"runtime\"]"), "{p}");
         assert!(p.contains("result.exitCode !== 0"), "{p}");
         assert!(p.contains("runtime tool failed"), "{p}");
-        assert!(p.contains("shaped:true"), "{p}");
-        assert!(p.contains("RemoteUI"), "{p}");
+        assert!(p.contains("naturally returns"), "{p}");
         assert!(p.contains(".view") && p.contains("viewUrl"), "{p}");
-        assert!(p.contains("must include `dynamic_workflow`"), "{p}");
         assert!(
             p.contains("Markdown report") && p.contains("HTML page"),
             "{p}"
         );
+    }
+
+    #[test]
+    fn deep_research_os_runtime_selection_is_adaptive() {
+        assert!(!should_use_os_runtime_for_deep_research(
+            "rust async runtimes",
+            true
+        ));
+        assert!(should_use_os_runtime_for_deep_research(
+            "全面调研 2026 年多智能体运行时市场、最新论文、竞品和趋势",
+            true
+        ));
+        assert!(!should_use_os_runtime_for_deep_research(
+            "全面调研 2026 年多智能体运行时市场",
+            false
+        ));
+        assert!(!should_use_os_runtime_for_deep_research(
+            "本地分析一下这个 README",
+            true
+        ));
     }
 
     #[test]
@@ -7575,7 +7652,8 @@ mod tests {
         );
         assert!(prompt.contains("rust async runtimes"), "{prompt}");
         assert!(prompt.contains("mode\":\"os_runtime"), "{prompt}");
-        assert!(prompt.contains("shaped:true"), "{prompt}");
+        assert!(prompt.contains("OS Runtime was selected"), "{prompt}");
+        assert!(prompt.contains("do not claim"), "{prompt}");
     }
 
     #[test]
