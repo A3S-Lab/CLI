@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Reworked DeepResearch evidence gathering into a bounded, complexity-driven
+  recursive parallel retrieval-summary workflow. Local DynamicWorkflowRuntime
+  rounds now derive follow-up searches from prior gaps and contradictions,
+  stop early when no useful follow-up remains, and keep OS Runtime tool-call
+  fan-out disabled until Function-as-a-Service support is available.
+
+### Fixed
+
+- Sanitized DeepResearch partial `parallel_task` failures before synthesis so
+  successful structured evidence is preserved while failed child tasks are
+  surfaced as compact caveats instead of raw failure blocks.
+- Hardened DeepResearch report boundaries so workflow JSON, tool-card
+  transcripts, `.a3s-flow` paths, truncated tool-output artifact notices, and
+  raw failure diagnostics are withheld from prompts, fallback drafts, final
+  report artifacts, and RemoteUI auto-open validation.
+
 ## [0.7.6] - 2026-07-08
 
 ### Changed

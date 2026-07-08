@@ -826,12 +826,53 @@ async function run(ctx, inputs) {
     { title: "Facts and timeline", focus: "establish the current facts, dates, and key actors" },
     { title: "Primary sources", focus: "find official or primary-source evidence" },
     { title: "Independent analysis", focus: "compare reputable independent analysis and disagreements" },
+    { title: "Quantitative evidence", focus: "find concrete numbers, benchmarks, market data, or measurable claims when applicable" },
+    { title: "Contradictions", focus: "look for reputable disagreement, minority views, and claims that conflict with the emerging answer" },
     { title: "Risks and caveats", focus: "identify uncertainty, recency caveats, and weak claims" },
   ];
+  const complexityMarkers = [
+    ["comprehensive", "deep dive", "research", "全面", "深入", "调研", "研究"],
+    ["compare", "comparison", "versus", "benchmark", "对比", "比较", "竞品"],
+    ["latest", "recent", "timeline", "2026", "2025", "最新", "趋势", "时间线"],
+    ["market", "regulation", "policy", "paper", "papers", "市场", "法规", "政策", "论文"],
+    ["multi-source", "multi source", "many sources", "多来源", "大量", "并行"]
+  ];
+  const queryComplexity = () => {
+    const q = String(query || "").toLowerCase();
+    let score = 0;
+    for (const group of complexityMarkers) {
+      if (group.some((marker) => q.includes(marker))) {
+        score += 1;
+      }
+    }
+    const wordCount = q.split(/\s+/).filter(Boolean).length;
+    const charCount = Array.from(q).length;
+    if (wordCount >= 14 || charCount >= 80) {
+      score += 1;
+    }
+    if (wordCount >= 28 || charCount >= 140) {
+      score += 1;
+    }
+    return score;
+  };
+  const complexityScore = queryComplexity();
   const requestedLocalParallelTasks = Number(input.local_max_parallel_tasks);
   const maxLocalParallelTasks = Number.isFinite(requestedLocalParallelTasks) && requestedLocalParallelTasks > 0
     ? Math.max(1, Math.min(64, Math.floor(requestedLocalParallelTasks)))
     : fallbackTracks.length;
+  const requestedResearchRounds = Number(input.local_research_rounds);
+  const derivedResearchRounds = complexityScore <= 1
+    ? 1
+    : (complexityScore <= 3 ? 2 : (complexityScore <= 5 ? 3 : 4));
+  const maxResearchRounds = Number.isFinite(requestedResearchRounds) && requestedResearchRounds > 0
+    ? Math.max(1, Math.min(4, Math.floor(requestedResearchRounds)))
+    : derivedResearchRounds;
+  const minResearchRounds = maxResearchRounds > 1 ? 2 : 1;
+  const initialFallbackTrackCount = Math.min(
+    fallbackTracks.length,
+    maxLocalParallelTasks,
+    complexityScore <= 1 ? 2 : (complexityScore <= 3 ? 3 : (complexityScore <= 5 ? 4 : 6))
+  );
   const requestedLocalMaxSteps = Number(input.local_max_steps);
   const localMaxSteps = Number.isFinite(requestedLocalMaxSteps) && requestedLocalMaxSteps > 0
     ? Math.floor(requestedLocalMaxSteps)
@@ -853,7 +894,7 @@ async function run(ctx, inputs) {
       })
     : [];
   const tracks = (providedTracks.length > 0 ? providedTracks : fallbackTracks)
-    .slice(0, maxLocalParallelTasks);
+    .slice(0, providedTracks.length > 0 ? maxLocalParallelTasks : initialFallbackTrackCount);
   const evidenceSchema = {
     type: "object",
     additionalProperties: false,
@@ -881,15 +922,18 @@ async function run(ctx, inputs) {
     },
     required: ["summary", "sources", "key_evidence", "contradictions", "confidence", "gaps"]
   };
-  const localTasks = () => tracks.map((track, index) => {
+  const localTasks = (roundNumber, roundTracks, previousEvidence) => roundTracks.map((track, index) => {
     const title = track.title || `Track ${index + 1}`;
     const focus = track.focus || String(track);
+    const roundContext = roundNumber > 1
+      ? `\n\nRecursive round: ${roundNumber}/${maxResearchRounds}. Use the prior evidence summary below to resolve only the remaining gaps or contradictions. Do not repeat the same query, source, path, or fetch from earlier rounds unless you are checking a changed/stronger source.\n\nPrior evidence summary:\n${previousEvidence || "No prior evidence summary available."}`
+      : "";
     return {
       agent: "explore",
-      description: `Research ${index + 1}: ${title}`,
+      description: `Research round ${roundNumber}.${index + 1}: ${title}`,
       max_steps: localMaxSteps,
       output_schema: evidenceSchema,
-      prompt: `Deep-research evidence track for: ${query}\n\nFocus: ${focus}\n\nEvidence only: do not write files, create report artifacts, run tests, or modify the workspace. You are an evidence collector, not a verification runner. Use dedicated read-only tools: web_search/web_fetch for current external evidence, read/grep/glob/ls for local workspace evidence. Do not use bash for research collection. Do not inspect .a3s-flow/dynamic-workflows logs unless the focus explicitly asks about DeepResearch/runtime diagnostics; workflow logs are host diagnostics, not research evidence. If the query is about public/current facts, use web_search first and fetch the strongest sources; do not fall back to local repository grep just because a web query is empty. If web tools are unavailable or return no useful results after several distinct queries, report that gap with the attempted queries and stop instead of looping. If the query explicitly asks for local workspace evidence only, inspect local files and do not use web tools. Use as many distinct high-signal tool calls as the evidence actually requires, avoid repeating the same query/pattern/path, and synthesize when evidence is sufficient. Return concise evidence, URLs or local paths, publication dates when available, key evidence, contradictions, and confidence notes. Your final child response should contain enough information to satisfy the provided output_schema: summary, sources, key_evidence, contradictions, confidence, and gaps.`
+      prompt: `Deep-research evidence track for: ${query}\n\nFocus: ${focus}${roundContext}\n\nEvidence only: do not write files, create report artifacts, run tests, or modify the workspace. You are an evidence collector, not a verification runner. Use dedicated read-only tools: web_search/web_fetch for current external evidence, read/grep/glob/ls for local workspace evidence. Do not use bash for research collection. Do not inspect .a3s-flow/dynamic-workflows logs unless the focus explicitly asks about DeepResearch/runtime diagnostics; workflow logs are host diagnostics, not research evidence. If the query is about public/current facts, use web_search first and fetch the strongest sources; do not fall back to local repository grep just because a web query is empty. If web tools are unavailable or return no useful results after several distinct queries, report that gap with the attempted queries and stop instead of looping. If the query explicitly asks for local workspace evidence only, inspect local files and do not use web tools. Use as many distinct high-signal tool calls as the evidence actually requires, avoid repeating the same query/pattern/path, and synthesize when evidence is sufficient. Return concise evidence, URLs or local paths, publication dates when available, key evidence, contradictions, and confidence notes. Your final child response should contain enough information to satisfy the provided output_schema: summary, sources, key_evidence, contradictions, confidence, and gaps.`
     };
   });
   const isNonEmptyString = (value) => typeof value === "string" && value.trim().length > 0;
@@ -951,6 +995,326 @@ async function run(ctx, inputs) {
     });
     return normalized;
   };
+  const compactText = (value, limit) => {
+    let text = "";
+    if (typeof value === "string") {
+      text = value;
+    } else if (value !== undefined && value !== null) {
+      try {
+        text = JSON.stringify(value);
+      } catch (_err) {
+        text = String(value);
+      }
+    }
+    const compact = text.replace(/\s+/g, " ").trim();
+    if (compact.length <= limit) {
+      return compact;
+    }
+    return `${compact.slice(0, limit)} ... [truncated]`;
+  };
+  const failureSummary = (value) => {
+    const compact = compactText(value, 600);
+    const lower = compact.toLowerCase();
+    if (lower.includes("permission denied: tool")) {
+      return "Delegated task could not use a requested tool because the permission policy denied it.";
+    }
+    if (lower.includes("max tool rounds")) {
+      return "Delegated task exhausted its tool-round budget before returning usable evidence.";
+    }
+    if (lower.includes("timed out") || lower.includes("[command timed out")) {
+      return "Delegated task timed out before returning usable evidence.";
+    }
+    if (
+      lower.includes("[tool output truncated") ||
+      lower.includes("full output artifact:") ||
+      lower.includes("a3s://tool-output")
+    ) {
+      return "Delegated task produced oversized tool output that was withheld from the report context.";
+    }
+    if (
+      lower.includes(".a3s-flow/dynamic-workflows") ||
+      lower.includes("● searched") ||
+      lower.includes("● ran") ||
+      lower.includes("● read") ||
+      compact.includes("⎿")
+    ) {
+      return "Delegated task returned internal workflow/tool logs that were withheld from the report context.";
+    }
+    return "Delegated task failed before returning usable evidence.";
+  };
+  const copyIfPresent = (target, source, keys) => {
+    for (const key of keys) {
+      if (source[key] !== undefined) {
+        target[key] = source[key];
+      }
+    }
+  };
+  const compactLocalResult = (item, success) => {
+    const next = {};
+    copyIfPresent(next, item, [
+      "task_id",
+      "session_id",
+      "agent",
+      "success",
+      "artifact_id",
+      "artifact_uri",
+      "output_bytes",
+      "truncated_for_context",
+      "structured_error"
+    ]);
+    if (success) {
+      if (item.structured) {
+        next.structured = item.structured;
+      } else if (item.output !== undefined) {
+        next.output_summary = compactText(item.output, 1200);
+      }
+    } else {
+      next.error_summary = failureSummary(item.output || item.error || "task failed");
+    }
+    return next;
+  };
+  const normalizeLocalResearch = (parallelOutput) => {
+    if (!parallelOutput || typeof parallelOutput !== "object" || Array.isArray(parallelOutput)) {
+      return parallelOutput;
+    }
+    const metadata = parallelOutput.metadata && typeof parallelOutput.metadata === "object"
+      ? parallelOutput.metadata
+      : null;
+    const results = metadata && Array.isArray(metadata.results) ? metadata.results : null;
+    if (!results) {
+      return parallelOutput;
+    }
+    const successfulResults = results.filter((item) => item && item.success === true);
+    const failedResults = results.filter((item) => item && item.success === false);
+    const compactSuccesses = successfulResults.map((item) => compactLocalResult(item, true));
+    const countFromMetadata = (key, fallback) => {
+      const value = Number(metadata[key]);
+      return Number.isFinite(value) ? value : fallback;
+    };
+    const successCount = countFromMetadata("success_count", successfulResults.length);
+    const failedCount = countFromMetadata("failed_count", failedResults.length);
+    const resultCount = countFromMetadata("result_count", results.length);
+    const taskCount = countFromMetadata("task_count", resultCount);
+    const partialFailure = failedCount > 0 && successCount > 0;
+    const normalized = {
+      tool: parallelOutput.tool || "parallel_task",
+      exit_code: parallelOutput.exit_code ?? parallelOutput.exitCode ?? (successCount > 0 ? 0 : 1),
+      status: failedCount > 0 ? (successCount > 0 ? "partial_success" : "failed") : "success",
+      metadata: {
+        task_count: taskCount,
+        result_count: resultCount,
+        success_count: successCount,
+        failed_count: failedCount,
+        all_success: failedCount === 0,
+        partial_failure: partialFailure,
+        allow_partial_failure: metadata.allow_partial_failure === true,
+        results: compactSuccesses
+      },
+      results: compactSuccesses
+    };
+    copyIfPresent(normalized, parallelOutput, ["artifact_id", "artifact_uri"]);
+    if (failedResults.length > 0) {
+      normalized.warnings = {
+        failed_tasks: failedResults.map((item) => compactLocalResult(item, false))
+      };
+    }
+    return normalized;
+  };
+  const roundStepId = (prefix, roundNumber) =>
+    roundNumber === 1 ? prefix : `${prefix}_round_${roundNumber}`;
+  const collectRoundOutputs = (stepOutputs, prefix) => {
+    const rounds = [];
+    for (let roundNumber = 1; roundNumber <= maxResearchRounds; roundNumber += 1) {
+      const output = stepOutputs[roundStepId(prefix, roundNumber)];
+      if (!output) {
+        break;
+      }
+      rounds.push({ round: roundNumber, research: normalizeLocalResearch(output) });
+    }
+    return rounds;
+  };
+  const collectRoundFailures = (stepFailures, prefix) => {
+    const failures = [];
+    for (let roundNumber = 1; roundNumber <= maxResearchRounds; roundNumber += 1) {
+      const failure = stepFailures[roundStepId(prefix, roundNumber)];
+      if (failure) {
+        failures.push({
+          round: roundNumber,
+          error: failure.error || "research round failed",
+          attempt: failure.attempt
+        });
+      }
+    }
+    return failures;
+  };
+  const uniqueStrings = (items) => {
+    const seen = new Set();
+    const unique = [];
+    for (const item of items) {
+      const text = typeof item === "string" ? item.trim() : "";
+      if (!text) {
+        continue;
+      }
+      const key = text.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      unique.push(text);
+    }
+    return unique;
+  };
+  const structuredEvidence = (rounds) => {
+    const structured = [];
+    for (const round of rounds) {
+      const results = round.research && Array.isArray(round.research.results)
+        ? round.research.results
+        : [];
+      for (const result of results) {
+        if (result && result.structured) {
+          structured.push({ round: round.round, value: result.structured });
+        }
+      }
+    }
+    return structured;
+  };
+  const evidenceSummary = (rounds) => {
+    const structured = structuredEvidence(rounds);
+    const summaries = structured.map((item) => `round ${item.round}: ${item.value.summary}`);
+    const sources = structured.flatMap((item) =>
+      Array.isArray(item.value.sources)
+        ? item.value.sources.map((source) => `${source.title || "source"} — ${source.url_or_path || ""}`)
+        : []
+    );
+    const gaps = structured.flatMap((item) => Array.isArray(item.value.gaps) ? item.value.gaps : []);
+    const contradictions = structured.flatMap((item) =>
+      Array.isArray(item.value.contradictions) ? item.value.contradictions : []
+    );
+    return compactText(JSON.stringify({
+      summaries: summaries.slice(-8),
+      sources: uniqueStrings(sources).slice(-16),
+      gaps: uniqueStrings(gaps).slice(-12),
+      contradictions: uniqueStrings(contradictions).slice(-12)
+    }), 4000);
+  };
+  const followUpTracks = (rounds, nextRound) => {
+    const structured = structuredEvidence(rounds);
+    const gaps = uniqueStrings(structured.flatMap((item) =>
+      Array.isArray(item.value.gaps) ? item.value.gaps : []
+    ));
+    const contradictions = uniqueStrings(structured.flatMap((item) =>
+      Array.isArray(item.value.contradictions) ? item.value.contradictions : []
+    ));
+    const tracks = [];
+    for (const gap of gaps) {
+      tracks.push({
+        title: `Resolve gap: ${compactText(gap, 80)}`,
+        focus: `Resolve this remaining evidence gap without repeating prior searches: ${gap}`
+      });
+    }
+    for (const contradiction of contradictions) {
+      tracks.push({
+        title: `Check contradiction: ${compactText(contradiction, 80)}`,
+        focus: `Investigate this contradiction or disagreement and decide which claim is best supported: ${contradiction}`
+      });
+    }
+    if (tracks.length === 0 && nextRound <= minResearchRounds) {
+      tracks.push({
+        title: "Independent corroboration",
+        focus: "Find independent corroboration for the strongest claims from prior rounds; avoid repeating the same sources."
+      });
+      tracks.push({
+        title: "Adversarial caveat check",
+        focus: "Look for missing caveats, outdated claims, weak sources, or counterexamples in the prior evidence."
+      });
+    }
+    return tracks.slice(0, maxLocalParallelTasks);
+  };
+  const aggregateResearchRounds = (rounds, stopReason, workflowFailures) => {
+    const aggregate = {
+      algorithm: "bounded_recursive_parallel_retrieval_summary",
+      tool: "parallel_task",
+      status: "failed",
+      max_rounds: maxResearchRounds,
+      completed_rounds: rounds.length,
+      stop_reason: stopReason,
+      complexity: {
+        score: complexityScore,
+        min_rounds: minResearchRounds,
+        max_rounds: maxResearchRounds,
+        initial_track_count: tracks.length,
+        max_parallel_tasks: maxLocalParallelTasks
+      },
+      metadata: {
+        task_count: 0,
+        result_count: 0,
+        success_count: 0,
+        failed_count: 0,
+        all_success: true,
+        partial_failure: false,
+        allow_partial_failure: true,
+        results: []
+      },
+      results: [],
+      rounds: []
+    };
+    const failedTasks = [];
+    for (const round of rounds) {
+      const research = round.research || {};
+      const metadata = research.metadata || {};
+      const results = Array.isArray(research.results) ? research.results : [];
+      const roundResults = results.map((item) => Object.assign({ round: round.round }, item));
+      aggregate.metadata.task_count += Number(metadata.task_count) || 0;
+      aggregate.metadata.result_count += Number(metadata.result_count) || 0;
+      aggregate.metadata.success_count += Number(metadata.success_count) || 0;
+      aggregate.metadata.failed_count += Number(metadata.failed_count) || 0;
+      aggregate.results.push(...roundResults);
+      aggregate.metadata.results.push(...roundResults);
+      if (research.warnings && Array.isArray(research.warnings.failed_tasks)) {
+        failedTasks.push(...research.warnings.failed_tasks.map((item) =>
+          Object.assign({ round: round.round }, item)
+        ));
+      }
+      aggregate.rounds.push({
+        round: round.round,
+        status: research.status || "unknown",
+        metadata: {
+          task_count: metadata.task_count || 0,
+          result_count: metadata.result_count || 0,
+          success_count: metadata.success_count || 0,
+          failed_count: metadata.failed_count || 0
+        },
+        results: roundResults,
+        warnings: research.warnings
+      });
+    }
+    aggregate.metadata.all_success = aggregate.metadata.failed_count === 0;
+    aggregate.metadata.partial_failure =
+      aggregate.metadata.failed_count > 0 && aggregate.metadata.success_count > 0;
+    aggregate.status = aggregate.metadata.failed_count > 0
+      ? (aggregate.metadata.success_count > 0 ? "partial_success" : "failed")
+      : "success";
+    if (failedTasks.length > 0 || (workflowFailures && workflowFailures.length > 0)) {
+      aggregate.warnings = {};
+      if (failedTasks.length > 0) {
+        aggregate.warnings.failed_tasks = failedTasks;
+      }
+      if (workflowFailures && workflowFailures.length > 0) {
+        aggregate.warnings.failed_rounds = workflowFailures;
+      }
+    }
+    return aggregate;
+  };
+  const shouldContinueRounds = (rounds, failures) => {
+    if (rounds.length === 0 || failures.length > 0 || rounds.length >= maxResearchRounds) {
+      return false;
+    }
+    const aggregate = aggregateResearchRounds(rounds, "checking_next_round", []);
+    if (aggregate.metadata.success_count === 0) {
+      return false;
+    }
+    return followUpTracks(rounds, rounds.length + 1).length > 0;
+  };
   const hasStructuredEvidence = (runtimeOutput) =>
     runtimeOutput &&
     Array.isArray(runtimeOutput.results) &&
@@ -963,29 +1327,70 @@ async function run(ctx, inputs) {
   if (inputs.kind === "workflow") {
     const runtimePreflight = inputs.step_outputs.runtime_preflight;
     const runtimeResearch = inputs.step_outputs.runtime_research;
-    const localResearch = inputs.step_outputs.local_research;
-    const localFallback = inputs.step_outputs.local_fallback;
     const stepFailures = inputs.step_failures || {};
-    const localResearchFailure = stepFailures.local_research;
-    const localFallbackFailure = stepFailures.local_fallback;
+    const localRounds = collectRoundOutputs(inputs.step_outputs, "local_research");
+    const localRoundFailures = collectRoundFailures(stepFailures, "local_research");
+    const localFallbackRounds = collectRoundOutputs(inputs.step_outputs, "local_fallback");
+    const localFallbackFailures = collectRoundFailures(stepFailures, "local_fallback");
 
-    if (localFallback) {
+    if (localFallbackRounds.length > 0) {
+      if (shouldContinueRounds(localFallbackRounds, localFallbackFailures)) {
+        const nextRound = localFallbackRounds.length + 1;
+        return {
+          type: "schedule_step",
+          step_id: roundStepId("local_fallback", nextRound),
+          step_name: "parallel_task",
+          input: {
+            allow_partial_failure: true,
+            tasks: localTasks(nextRound, followUpTracks(localFallbackRounds, nextRound), evidenceSummary(localFallbackRounds))
+          },
+          retry: continueWorkflowRetry,
+        };
+      }
       return {
         type: "complete",
         output: {
           query,
           mode: "local_fallback",
           runtime_error: (runtimeResearch && runtimeResearch.runtime_error) || (runtimePreflight && runtimePreflight.runtime_error),
-          research: localFallback
+          research: aggregateResearchRounds(
+            localFallbackRounds,
+            localFallbackFailures.length > 0 ? "round_failed_after_partial_evidence" : "bounded_rounds_complete",
+            localFallbackFailures
+          )
         }
       };
     }
 
-    if (localResearch) {
-      return { type: "complete", output: { query, mode: "local_parallel_task", research: localResearch } };
+    if (localRounds.length > 0) {
+      if (shouldContinueRounds(localRounds, localRoundFailures)) {
+        const nextRound = localRounds.length + 1;
+        return {
+          type: "schedule_step",
+          step_id: roundStepId("local_research", nextRound),
+          step_name: "parallel_task",
+          input: {
+            allow_partial_failure: true,
+            tasks: localTasks(nextRound, followUpTracks(localRounds, nextRound), evidenceSummary(localRounds))
+          },
+          retry: continueWorkflowRetry,
+        };
+      }
+      return {
+        type: "complete",
+        output: {
+          query,
+          mode: "local_parallel_task",
+          research: aggregateResearchRounds(
+            localRounds,
+            localRoundFailures.length > 0 ? "round_failed_after_partial_evidence" : "bounded_rounds_complete",
+            localRoundFailures
+          )
+        }
+      };
     }
 
-    if (localResearchFailure) {
+    if (localRoundFailures.length > 0) {
       return {
         type: "complete",
         output: {
@@ -993,14 +1398,17 @@ async function run(ctx, inputs) {
           mode: "local_parallel_task_failed",
           research: {
             status: "failed",
-            error: localResearchFailure.error || "local research step failed",
+            algorithm: "bounded_recursive_parallel_retrieval_summary",
+            max_rounds: maxResearchRounds,
+            completed_rounds: 0,
+            error: localRoundFailures[0].error || "local research step failed",
             note: "Local evidence fan-out failed before producing usable structured evidence; synthesis should create a transparent fallback report instead of retrying the workflow."
           }
         }
       };
     }
 
-    if (localFallbackFailure) {
+    if (localFallbackFailures.length > 0) {
       return {
         type: "complete",
         output: {
@@ -1009,7 +1417,10 @@ async function run(ctx, inputs) {
           runtime_error: (runtimeResearch && runtimeResearch.runtime_error) || (runtimePreflight && runtimePreflight.runtime_error),
           research: {
             status: "failed",
-            error: localFallbackFailure.error || "local fallback research step failed",
+            algorithm: "bounded_recursive_parallel_retrieval_summary",
+            max_rounds: maxResearchRounds,
+            completed_rounds: 0,
+            error: localFallbackFailures[0].error || "local fallback research step failed",
             note: "Both OS-runtime research and local fallback fan-out failed; synthesis should report the failure and materialize a transparent fallback artifact."
           }
         }
@@ -1023,9 +1434,9 @@ async function run(ctx, inputs) {
     if (runtimeResearch && runtimeResearch.runtime_error) {
       return {
         type: "schedule_step",
-        step_id: "local_fallback",
+        step_id: roundStepId("local_fallback", 1),
         step_name: "parallel_task",
-        input: { allow_partial_failure: true, tasks: localTasks() },
+        input: { allow_partial_failure: true, tasks: localTasks(1, tracks, "") },
         retry: continueWorkflowRetry,
       };
     }
@@ -1033,9 +1444,9 @@ async function run(ctx, inputs) {
     if (runtimePreflight && runtimePreflight.runtime_error) {
       return {
         type: "schedule_step",
-        step_id: "local_fallback",
+        step_id: roundStepId("local_fallback", 1),
         step_name: "parallel_task",
-        input: { allow_partial_failure: true, tasks: localTasks() },
+        input: { allow_partial_failure: true, tasks: localTasks(1, tracks, "") },
         retry: continueWorkflowRetry,
       };
     }
@@ -1072,9 +1483,9 @@ async function run(ctx, inputs) {
 
     return {
       type: "schedule_step",
-      step_id: "local_research",
+      step_id: roundStepId("local_research", 1),
       step_name: "parallel_task",
-      input: { allow_partial_failure: true, tasks: localTasks() },
+      input: { allow_partial_failure: true, tasks: localTasks(1, tracks, "") },
       retry: continueWorkflowRetry,
     };
   }
@@ -1192,11 +1603,12 @@ fn deep_research_prompt(query: &str, _os_runtime: bool) -> String {
     let report_contract = deep_research_report_contract();
     let duplicate_guard = deep_research_duplicate_tool_guard();
     let tracks_directive = "OS Runtime tool-call fan-out is temporarily disabled. Set \
-         `os_runtime: false`; the DynamicWorkflowRuntime script will schedule a \
-         host-side `parallel_task` step for local subagent fan-out because PTC \
-         itself cannot call `parallel_task`. Future OS Runtime support should use \
-         Function-as-a-Service, not remote tool-call fan-out. Still create the \
-         local Markdown + HTML report artifacts and finish with the RemoteUI marker."
+         `os_runtime: false`; the DynamicWorkflowRuntime script will run a bounded, \
+         complexity-driven recursive parallel retrieval-summary loop through \
+         host-side `parallel_task` steps because PTC itself cannot call \
+         `parallel_task`. Future OS Runtime support should use Function-as-a-Service, \
+         not remote tool-call fan-out. Still create the local Markdown + HTML \
+         report artifacts and finish with the RemoteUI marker."
         .to_string();
     let source = deep_research_workflow_source();
     format!(
@@ -1204,9 +1616,12 @@ fn deep_research_prompt(query: &str, _os_runtime: bool) -> String {
          Required execution path:\n\
          1. First call `dynamic_workflow` with the JavaScript source below. \
          The workflow must gather evidence through Flow before final synthesis.\n\
-         2. Provide `input.query` and only the `input.tracks` that are genuinely independent \
-         enough to run in parallel; choose the count yourself, from one focused track to the \
-         local max. Each track should have `title` and `focus`. \
+         2. Provide `input.query`, `input.local_research_rounds` when you have a \
+         strong complexity judgment, and only the `input.tracks` that are genuinely independent \
+         enough for round-1 parallel retrieval; choose the count yourself, from one focused track to the \
+         local max. Each track should have `title` and `focus`. The workflow will \
+         recursively derive follow-up tracks from unresolved gaps and contradictions, \
+         then stop at the finite round cap or when no useful follow-up remains. \
          {tracks_directive}\n\
          3. After `dynamic_workflow` returns, read the evidence, cross-check \
          claims across independent sources, call out disagreements and recency \
@@ -1233,6 +1648,16 @@ fn deep_research_workflow_args(query: &str, os_runtime: bool) -> serde_json::Val
     deep_research_workflow_args_for_budget(query, os_runtime, deep_research_default_budget())
 }
 
+fn deep_research_research_rounds(query: &str, os_runtime: bool, budget: BudgetPlan) -> usize {
+    let complexity_rounds = deep_research_loop_layers(query, os_runtime).saturating_add(1);
+    let effort_cap = match budget.effort_id {
+        "low" => 2,
+        "medium" => 3,
+        _ => 4,
+    };
+    complexity_rounds.clamp(1, effort_cap)
+}
+
 fn deep_research_workflow_args_for_budget(
     query: &str,
     _os_runtime: bool,
@@ -1240,6 +1665,7 @@ fn deep_research_workflow_args_for_budget(
 ) -> serde_json::Value {
     let os_runtime = false;
     let allowed_tools = serde_json::json!([]);
+    let local_research_rounds = deep_research_research_rounds(query, os_runtime, budget);
     serde_json::json!({
         "source": deep_research_workflow_source(),
         "input": {
@@ -1248,6 +1674,7 @@ fn deep_research_workflow_args_for_budget(
             "runtime_preflight_timeout_ms": DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS,
             "runtime_timeout_ms": DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS,
             "local_max_parallel_tasks": budget.max_parallel_tasks,
+            "local_research_rounds": local_research_rounds,
             "local_max_steps": budget.deep_research_child_steps,
         },
         "allowed_tools": allowed_tools,
@@ -1261,6 +1688,708 @@ fn deep_research_workflow_args_for_budget(
 
 fn should_use_os_runtime_for_deep_research(_query: &str, _os_available: bool) -> bool {
     false
+}
+
+const DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT: usize = 1200;
+const DEEP_RESEARCH_PROMPT_TEXT_LIMIT: usize = 12_000;
+const DEEP_RESEARCH_MAX_DIGEST_EVIDENCE: usize = 18;
+const DEEP_RESEARCH_MAX_DIGEST_SOURCES: usize = 12;
+const DEEP_RESEARCH_MAX_DIGEST_STRINGS: usize = 12;
+
+fn deep_research_prompt_workflow_output(workflow_output: &str) -> String {
+    let value = match serde_json::from_str::<serde_json::Value>(workflow_output) {
+        Ok(value) => value,
+        Err(_) => {
+            if deep_research_output_has_internal_leak(workflow_output) {
+                return "Workflow output was non-JSON and contained internal tool/workflow logs; raw text withheld from synthesis.".to_string();
+            }
+            return deep_research_truncate_chars(
+                &workflow_output
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                DEEP_RESEARCH_PROMPT_TEXT_LIMIT,
+            );
+        }
+    };
+    let digest = deep_research_workflow_output_digest(&value);
+    serde_json::to_string_pretty(&digest).unwrap_or_else(|_| {
+        deep_research_truncate_chars(workflow_output, DEEP_RESEARCH_PROMPT_TEXT_LIMIT)
+    })
+}
+
+fn deep_research_tool_card_output(workflow_output: &str) -> String {
+    workflow_evidence_summary(workflow_output)
+        .unwrap_or_else(|| {
+            if deep_research_output_has_internal_leak(workflow_output) {
+                "Dynamic workflow returned internal diagnostic logs; raw output withheld from the tool card.".to_string()
+            } else {
+                deep_research_truncate_chars(workflow_output, 1200)
+            }
+        })
+}
+
+fn deep_research_prompt_metadata(workflow_metadata: Option<&serde_json::Value>) -> String {
+    workflow_metadata
+        .map(deep_research_workflow_metadata_digest)
+        .and_then(|metadata| serde_json::to_string_pretty(&metadata).ok())
+        .unwrap_or_else(|| "{}".to_string())
+}
+
+fn deep_research_sanitize_workflow_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    let mut sanitized = metadata.clone();
+    deep_research_sanitize_parallel_task_values(&mut sanitized);
+    sanitized
+}
+
+fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json::Value {
+    let mut digest = serde_json::Map::new();
+    copy_json_field(&mut digest, value, "query");
+    copy_json_field(&mut digest, value, "mode");
+    if let Some(runtime_error) = value.get("runtime_error") {
+        digest.insert(
+            "runtime_error".to_string(),
+            serde_json::Value::String(deep_research_error_or_digest_text(runtime_error, 1000)),
+        );
+    }
+
+    if let Some(research) = value.get("research") {
+        if let Some(research) = research.as_object() {
+            let mut compact = serde_json::Map::new();
+            for key in [
+                "algorithm",
+                "tool",
+                "status",
+                "max_rounds",
+                "completed_rounds",
+                "stop_reason",
+            ] {
+                copy_json_field(
+                    &mut compact,
+                    &serde_json::Value::Object(research.clone()),
+                    key,
+                );
+            }
+            if let Some(complexity) = research.get("complexity") {
+                compact.insert("complexity".to_string(), complexity.clone());
+            }
+            if let Some(metadata) = research.get("metadata") {
+                compact.insert(
+                    "counts".to_string(),
+                    deep_research_compact_count_metadata(metadata),
+                );
+            }
+            compact.insert(
+                "rounds".to_string(),
+                deep_research_compact_rounds(research.get("rounds")),
+            );
+            compact.insert(
+                "structured_evidence".to_string(),
+                serde_json::Value::Array(deep_research_collect_structured_evidence(
+                    research.get("runtime_output").unwrap_or(
+                        research
+                            .get("results")
+                            .unwrap_or(research.get("rounds").unwrap_or(&serde_json::Value::Null)),
+                    ),
+                )),
+            );
+            if let Some(warnings) = research.get("warnings") {
+                compact.insert(
+                    "warnings".to_string(),
+                    deep_research_compact_warnings(warnings),
+                );
+            }
+            digest.insert("research".to_string(), serde_json::Value::Object(compact));
+        } else {
+            digest.insert(
+                "research_summary".to_string(),
+                serde_json::Value::String(deep_research_compact_json_text(
+                    research,
+                    DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT,
+                )),
+            );
+        }
+    }
+
+    serde_json::Value::Object(digest)
+}
+
+fn deep_research_workflow_metadata_digest(metadata: &serde_json::Value) -> serde_json::Value {
+    let sanitized = deep_research_sanitize_workflow_metadata(metadata);
+    let Some(workflow) = sanitized.get("dynamic_workflow") else {
+        return sanitized;
+    };
+    let mut dynamic = serde_json::Map::new();
+    copy_json_field(&mut dynamic, workflow, "run_id");
+    copy_json_field(&mut dynamic, workflow, "status");
+    copy_json_field(&mut dynamic, workflow, "last_sequence");
+    copy_json_field(&mut dynamic, workflow, "source_hash");
+
+    if let Some(steps) = workflow
+        .pointer("/snapshot/steps")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut compact_steps = Vec::new();
+        for (step_id, step) in steps {
+            let mut compact = serde_json::Map::new();
+            compact.insert(
+                "step_id".to_string(),
+                serde_json::Value::String(step_id.clone()),
+            );
+            copy_json_field(&mut compact, step, "step_name");
+            copy_json_field(&mut compact, step, "status");
+            copy_json_field(&mut compact, step, "attempt");
+            if let Some(output) = step.get("output") {
+                copy_json_field(&mut compact, output, "tool");
+                if let Some(metadata) = output.get("metadata") {
+                    compact.insert(
+                        "counts".to_string(),
+                        deep_research_compact_count_metadata(metadata),
+                    );
+                }
+                if let Some(warnings) = output.get("warnings") {
+                    compact.insert(
+                        "warnings".to_string(),
+                        deep_research_compact_warnings(warnings),
+                    );
+                }
+            }
+            compact_steps.push(serde_json::Value::Object(compact));
+        }
+        dynamic.insert("steps".to_string(), serde_json::Value::Array(compact_steps));
+    }
+    dynamic.insert(
+        "structured_evidence".to_string(),
+        serde_json::Value::Array(deep_research_collect_structured_evidence(&sanitized)),
+    );
+
+    serde_json::json!({ "dynamic_workflow": dynamic })
+}
+
+fn deep_research_sanitize_parallel_task_values(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_parallel_task = map
+                .get("tool")
+                .or_else(|| map.get("name"))
+                .or_else(|| map.get("tool_name"))
+                .and_then(serde_json::Value::as_str)
+                == Some("parallel_task");
+            if is_parallel_task {
+                deep_research_sanitize_parallel_task_object(map);
+            }
+            for value in map.values_mut() {
+                deep_research_sanitize_parallel_task_values(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                deep_research_sanitize_parallel_task_values(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn deep_research_sanitize_parallel_task_object(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let sanitized_results = map
+        .get("metadata")
+        .and_then(|metadata| metadata.get("results"))
+        .and_then(serde_json::Value::as_array)
+        .map(|results| {
+            let mut successes = Vec::new();
+            let mut failed_tasks = Vec::new();
+            for result in results {
+                let success = result
+                    .get("success")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if success {
+                    successes.push(deep_research_sanitize_parallel_result(result, true));
+                } else {
+                    failed_tasks.push(deep_research_sanitize_parallel_result(result, false));
+                }
+            }
+            (successes, failed_tasks)
+        });
+
+    if let Some((successes, failed_tasks)) = sanitized_results {
+        if let Some(metadata) = map
+            .get_mut("metadata")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            metadata.insert(
+                "results".to_string(),
+                serde_json::Value::Array(successes.clone()),
+            );
+        }
+        if !failed_tasks.is_empty() {
+            let warnings = map
+                .entry("warnings".to_string())
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+            if let Some(warnings) = warnings.as_object_mut() {
+                warnings.insert(
+                    "failed_tasks".to_string(),
+                    serde_json::Value::Array(failed_tasks),
+                );
+            }
+        }
+        map.remove("output");
+    } else if let Some(output) = map.remove("output") {
+        map.insert(
+            "output_summary".to_string(),
+            serde_json::Value::String(deep_research_compact_json_text(
+                &output,
+                DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT,
+            )),
+        );
+    }
+}
+
+fn deep_research_sanitize_parallel_result(
+    result: &serde_json::Value,
+    success: bool,
+) -> serde_json::Value {
+    let mut next = serde_json::Map::new();
+    for key in [
+        "task_id",
+        "session_id",
+        "agent",
+        "success",
+        "artifact_id",
+        "artifact_uri",
+        "output_bytes",
+        "truncated_for_context",
+        "structured_error",
+    ] {
+        if let Some(value) = result.get(key) {
+            next.insert(key.to_string(), value.clone());
+        }
+    }
+
+    if success {
+        if let Some(structured) = result.get("structured") {
+            next.insert("structured".to_string(), structured.clone());
+        } else if let Some(output) = result.get("output") {
+            next.insert(
+                "output_summary".to_string(),
+                serde_json::Value::String(deep_research_compact_json_text(
+                    output,
+                    DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT,
+                )),
+            );
+        }
+    } else {
+        let summary = result
+            .get("output")
+            .or_else(|| result.get("error"))
+            .map(deep_research_failure_summary)
+            .unwrap_or_else(|| {
+                "Delegated task failed before returning usable evidence.".to_string()
+            });
+        next.insert(
+            "error_summary".to_string(),
+            serde_json::Value::String(summary),
+        );
+    }
+
+    serde_json::Value::Object(next)
+}
+
+fn copy_json_field(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Value,
+    key: &str,
+) {
+    if let Some(value) = source.get(key) {
+        target.insert(key.to_string(), value.clone());
+    }
+}
+
+fn deep_research_compact_count_metadata(metadata: &serde_json::Value) -> serde_json::Value {
+    let mut counts = serde_json::Map::new();
+    for key in [
+        "task_count",
+        "result_count",
+        "success_count",
+        "failed_count",
+        "all_success",
+        "partial_failure",
+        "allow_partial_failure",
+    ] {
+        copy_json_field(&mut counts, metadata, key);
+    }
+    serde_json::Value::Object(counts)
+}
+
+fn deep_research_compact_rounds(rounds: Option<&serde_json::Value>) -> serde_json::Value {
+    let items = rounds
+        .and_then(serde_json::Value::as_array)
+        .map(|rounds| {
+            rounds
+                .iter()
+                .map(|round| {
+                    let mut compact = serde_json::Map::new();
+                    copy_json_field(&mut compact, round, "round");
+                    copy_json_field(&mut compact, round, "status");
+                    if let Some(metadata) = round.get("metadata") {
+                        compact.insert(
+                            "counts".to_string(),
+                            deep_research_compact_count_metadata(metadata),
+                        );
+                    }
+                    if let Some(warnings) = round.get("warnings") {
+                        compact.insert(
+                            "warnings".to_string(),
+                            deep_research_compact_warnings(warnings),
+                        );
+                    }
+                    serde_json::Value::Object(compact)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::Value::Array(items)
+}
+
+fn deep_research_compact_warnings(warnings: &serde_json::Value) -> serde_json::Value {
+    let mut compact = serde_json::Map::new();
+    if let Some(failed_tasks) = warnings
+        .get("failed_tasks")
+        .and_then(serde_json::Value::as_array)
+    {
+        compact.insert(
+            "failed_tasks".to_string(),
+            serde_json::Value::Array(
+                failed_tasks
+                    .iter()
+                    .take(8)
+                    .map(|item| {
+                        let mut task = serde_json::Map::new();
+                        copy_json_field(&mut task, item, "round");
+                        copy_json_field(&mut task, item, "agent");
+                        copy_json_field(&mut task, item, "task_id");
+                        if let Some(summary) = item
+                            .get("error_summary")
+                            .or_else(|| item.get("error"))
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            task.insert(
+                                "error_summary".to_string(),
+                                serde_json::Value::String(deep_research_failure_summary(
+                                    &serde_json::Value::String(summary.to_string()),
+                                )),
+                            );
+                        }
+                        serde_json::Value::Object(task)
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(failed_rounds) = warnings
+        .get("failed_rounds")
+        .and_then(serde_json::Value::as_array)
+    {
+        compact.insert(
+            "failed_rounds".to_string(),
+            serde_json::Value::Array(
+                failed_rounds
+                    .iter()
+                    .take(4)
+                    .map(|item| {
+                        let mut round = serde_json::Map::new();
+                        copy_json_field(&mut round, item, "round");
+                        if let Some(error) = item.get("error").and_then(serde_json::Value::as_str) {
+                            round.insert(
+                                "error".to_string(),
+                                serde_json::Value::String(deep_research_failure_summary(
+                                    &serde_json::Value::String(error.to_string()),
+                                )),
+                            );
+                        }
+                        serde_json::Value::Object(round)
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::Value::Object(compact)
+}
+
+fn deep_research_collect_structured_evidence(root: &serde_json::Value) -> Vec<serde_json::Value> {
+    fn walk(
+        value: &serde_json::Value,
+        round_hint: Option<u64>,
+        out: &mut Vec<serde_json::Value>,
+        seen: &mut HashSet<String>,
+    ) {
+        if out.len() >= DEEP_RESEARCH_MAX_DIGEST_EVIDENCE {
+            return;
+        }
+        match value {
+            serde_json::Value::Object(map) => {
+                let round = map
+                    .get("round")
+                    .and_then(serde_json::Value::as_u64)
+                    .or(round_hint);
+                if let Some(structured) = map.get("structured") {
+                    if let Some(compact) =
+                        deep_research_compact_evidence_object(structured, round, seen)
+                    {
+                        out.push(compact);
+                    }
+                } else if is_deep_research_evidence_object(value) {
+                    if let Some(compact) = deep_research_compact_evidence_object(value, round, seen)
+                    {
+                        out.push(compact);
+                    }
+                }
+                for (key, child) in map {
+                    if matches!(
+                        key.as_str(),
+                        "output_summary" | "error_summary" | "input" | "history"
+                    ) || (key == "output" && !child.is_object() && !child.is_array())
+                    {
+                        continue;
+                    }
+                    walk(child, round, out, seen);
+                    if out.len() >= DEEP_RESEARCH_MAX_DIGEST_EVIDENCE {
+                        break;
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, round_hint, out, seen);
+                    if out.len() >= DEEP_RESEARCH_MAX_DIGEST_EVIDENCE {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    walk(root, None, &mut out, &mut seen);
+    out
+}
+
+fn is_deep_research_evidence_object(value: &serde_json::Value) -> bool {
+    value
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && value
+            .get("sources")
+            .and_then(serde_json::Value::as_array)
+            .is_some()
+        && value
+            .get("confidence")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+}
+
+fn deep_research_compact_evidence_object(
+    evidence: &serde_json::Value,
+    round: Option<u64>,
+    seen: &mut HashSet<String>,
+) -> Option<serde_json::Value> {
+    let summary = evidence.get("summary")?.as_str()?.trim();
+    if summary.is_empty() {
+        return None;
+    }
+    let dedupe_key = format!(
+        "{}|{}",
+        round.unwrap_or_default(),
+        summary.to_ascii_lowercase()
+    );
+    if !seen.insert(dedupe_key) {
+        return None;
+    }
+
+    let mut compact = serde_json::Map::new();
+    if let Some(round) = round {
+        compact.insert(
+            "round".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(round)),
+        );
+    }
+    compact.insert(
+        "summary".to_string(),
+        serde_json::Value::String(deep_research_digest_text(summary, 700)),
+    );
+    compact.insert(
+        "sources".to_string(),
+        serde_json::Value::Array(
+            evidence
+                .get("sources")
+                .and_then(serde_json::Value::as_array)
+                .map(|sources| {
+                    sources
+                        .iter()
+                        .take(DEEP_RESEARCH_MAX_DIGEST_SOURCES)
+                        .map(deep_research_compact_source)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        ),
+    );
+    for key in ["key_evidence", "contradictions", "gaps"] {
+        compact.insert(
+            key.to_string(),
+            serde_json::Value::Array(deep_research_compact_string_array(
+                evidence.get(key),
+                DEEP_RESEARCH_MAX_DIGEST_STRINGS,
+                350,
+            )),
+        );
+    }
+    if let Some(confidence) = evidence
+        .get("confidence")
+        .and_then(serde_json::Value::as_str)
+    {
+        compact.insert(
+            "confidence".to_string(),
+            serde_json::Value::String(deep_research_digest_text(confidence, 350)),
+        );
+    }
+    Some(serde_json::Value::Object(compact))
+}
+
+fn deep_research_compact_source(source: &serde_json::Value) -> serde_json::Value {
+    let mut compact = serde_json::Map::new();
+    for (key, limit) in [
+        ("title", 220usize),
+        ("url_or_path", 500),
+        ("date", 120),
+        ("quote_or_fact", 450),
+        ("reliability", 220),
+    ] {
+        if let Some(value) = source.get(key).and_then(serde_json::Value::as_str) {
+            compact.insert(
+                key.to_string(),
+                serde_json::Value::String(deep_research_digest_text(value, limit)),
+            );
+        }
+    }
+    serde_json::Value::Object(compact)
+}
+
+fn deep_research_compact_string_array(
+    value: Option<&serde_json::Value>,
+    max_items: usize,
+    max_chars: usize,
+) -> Vec<serde_json::Value> {
+    let mut seen = HashSet::new();
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(|item| {
+                    let item = item.trim();
+                    if item.is_empty() {
+                        return None;
+                    }
+                    let key = item.to_ascii_lowercase();
+                    if !seen.insert(key) {
+                        return None;
+                    }
+                    Some(serde_json::Value::String(deep_research_digest_text(
+                        item, max_chars,
+                    )))
+                })
+                .take(max_items)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn deep_research_compact_json_text(value: &serde_json::Value, limit: usize) -> String {
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    deep_research_digest_text(&compact, limit)
+}
+
+fn deep_research_digest_text(text: &str, limit: usize) -> String {
+    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return compact;
+    }
+    if deep_research_output_has_internal_leak(&compact) {
+        return "Internal workflow/tool log text withheld from DeepResearch synthesis.".to_string();
+    }
+    deep_research_truncate_chars(&compact, limit)
+}
+
+fn deep_research_error_or_digest_text(value: &serde_json::Value, limit: usize) -> String {
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
+    if deep_research_output_has_internal_leak(&text) {
+        deep_research_failure_summary(&serde_json::Value::String(text))
+    } else {
+        deep_research_digest_text(&text, limit)
+    }
+}
+
+fn deep_research_failure_summary(value: &serde_json::Value) -> String {
+    let text = value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default());
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("permission denied: tool") || lower.contains("permission policy denied") {
+        return "Delegated task could not use a requested tool because the permission policy denied it.".to_string();
+    }
+    if lower.contains("max tool rounds") || lower.contains("tool-round budget") {
+        return "Delegated task exhausted its tool-round budget before returning usable evidence."
+            .to_string();
+    }
+    if lower.contains("timed out") || lower.contains("[command timed out") {
+        return "Delegated task timed out before returning usable evidence.".to_string();
+    }
+    if lower.contains("[tool output truncated")
+        || lower.contains("full output artifact:")
+        || lower.contains("a3s://tool-output")
+    {
+        return "Delegated task produced oversized tool output that was withheld from the report context.".to_string();
+    }
+    if lower.contains(".a3s-flow/dynamic-workflows")
+        || lower.contains("● searched")
+        || lower.contains("● ran")
+        || lower.contains("● read")
+        || text.contains('⎿')
+    {
+        return "Delegated task returned internal workflow/tool logs that were withheld from the report context.".to_string();
+    }
+    "Delegated task failed before returning usable evidence.".to_string()
+}
+
+fn deep_research_truncate_chars(text: &str, limit: usize) -> String {
+    let mut output = String::new();
+    let mut truncated = false;
+    for (index, ch) in text.chars().enumerate() {
+        if index >= limit {
+            truncated = true;
+            break;
+        }
+        output.push(ch);
+    }
+    if truncated {
+        output.push_str(" ... [truncated]");
+    }
+    output
 }
 
 fn deep_research_loop_layers(query: &str, os_runtime: bool) -> usize {
@@ -1355,19 +2484,29 @@ fn deep_research_synthesis_prompt(
          complete the local Markdown + HTML report view step."
             .to_string()
     };
-    let metadata = workflow_metadata
-        .and_then(|metadata| serde_json::to_string_pretty(metadata).ok())
-        .unwrap_or_else(|| "{}".to_string());
+    let workflow_digest = deep_research_prompt_workflow_output(workflow_output);
+    let metadata = deep_research_prompt_metadata(workflow_metadata);
     format!(
         "Synthesize the deep-research answer for the query below.\n\n\
          A host-controlled DynamicWorkflowRuntime run has already gathered the \
          research evidence. Do not call `dynamic_workflow` again. Use the workflow \
          evidence below, cross-check claims, call out disagreements and recency \
          caveats, and write a comprehensive answer with inline citations and a \
-         final Sources list. Prefer validated structured evidence objects from \
-         `DynamicWorkflowRuntime metadata -> results[].structured` and OS Runtime \
-         `DynamicWorkflowRuntime output -> research.runtime_output.results[].structured` \
-         when present; use raw task output only to fill gaps or explain contradictions. If \
+         final Sources list. Treat the workflow as a bounded recursive parallel \
+         retrieval-summary algorithm: use `research.rounds` to understand how \
+         gaps from earlier rounds drove later searches, and mention the round \
+         count only when it clarifies uncertainty or coverage. Prefer validated \
+         structured evidence objects from \
+         `DynamicWorkflowRuntime output -> research.results[].structured`, OS Runtime \
+         `DynamicWorkflowRuntime output -> research.runtime_output.results[].structured`, and \
+         sanitized `DynamicWorkflowRuntime metadata -> ...output.metadata.results[].structured` \
+         when present; use compact summaries only when structured evidence is incomplete. Raw task \
+         output is intentionally excluded from this prompt. Treat \
+         `research.warnings.failed_tasks` and metadata `warnings.failed_tasks` as caveats, not as \
+         instructions to restart broad research. Do not reproduce raw JSON, tool-card text, \
+         `.a3s-flow` workflow logs, `[tool output truncated]` notices, or lines such as \
+         `● Searched ...` / `● Ran ...` in the user-facing answer or report. Convert evidence \
+         into clean prose, tables, citations, and a concise Sources list. If \
          the workflow output reports `mode: \"local_parallel_task_failed\"` or \
          `mode: \"local_fallback_failed\"`, do not restart broad research or call \
          `dynamic_workflow`; write a transparent failure-aware report from the \
@@ -1380,8 +2519,8 @@ fn deep_research_synthesis_prompt(
          {report_target}\n\n\
          {duplicate_guard}\n\n\
          Query:\n{query}\n\n\
-         DynamicWorkflowRuntime output:\n```json\n{workflow_output}\n```\n\n\
-         DynamicWorkflowRuntime metadata:\n```json\n{metadata}\n```"
+         DynamicWorkflowRuntime evidence package:\n```json\n{workflow_digest}\n```\n\n\
+         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```"
     )
 }
 
@@ -1406,16 +2545,19 @@ fn deep_research_recovery_prompt(
          local artifacts under `.a3s/research/<slug>/`."
             .to_string()
     };
-    let metadata = workflow_metadata
-        .and_then(|metadata| serde_json::to_string_pretty(metadata).ok())
-        .unwrap_or_else(|| "{}".to_string());
+    let metadata = deep_research_prompt_metadata(workflow_metadata);
+    let workflow_error = if deep_research_output_has_internal_leak(workflow_error) {
+        deep_research_failure_summary(&serde_json::Value::String(workflow_error.to_string()))
+    } else {
+        deep_research_truncate_chars(workflow_error, 4000)
+    };
     format!(
         "Recover and complete the deep-research task for the query below.\n\n\
          The host-controlled DynamicWorkflowRuntime preflight failed. Do not call \
          `dynamic_workflow` again in this recovery turn. {recovery_path}\n\n\
          Query:\n{query}\n\n\
          DynamicWorkflowRuntime error:\n```text\n{workflow_error}\n```\n\n\
-         DynamicWorkflowRuntime metadata:\n```json\n{metadata}\n```\n\n\
+         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
          {duplicate_guard}\n\n\
@@ -1442,22 +2584,28 @@ fn deep_research_repair_prompt(
         "OS Runtime was not selected. Use the local workflow evidence already \
          gathered by the host-controlled workflow."
     };
-    let metadata = workflow_metadata
-        .and_then(|metadata| serde_json::to_string_pretty(metadata).ok())
-        .unwrap_or_else(|| "{}".to_string());
-    let prior = nonempty_report_section(prior_text, "The previous synthesis returned no text.");
+    let metadata = deep_research_prompt_metadata(workflow_metadata);
+    let workflow_digest = deep_research_prompt_workflow_output(workflow_output);
+    let prior = if deep_research_output_has_internal_leak(prior_text) {
+        "The previous synthesis was discarded because it contained internal workflow/tool logs or raw JSON. Do not reuse its wording.".to_string()
+    } else {
+        nonempty_report_section(prior_text, "The previous synthesis returned no text.")
+    };
     format!(
         "Repair the DeepResearch report artifact step for the query below.\n\n\
          The previous synthesis did not produce a valid completed report marker \
          and artifact pair. Do not call `dynamic_workflow` again, do not restart \
          broad research, and do not write ordinary workspace files. Use only the \
          gathered evidence and prior synthesis below to create or correct the \
-         required report artifacts under `.a3s/research/<slug>/`.\n\n\
+         required report artifacts under `.a3s/research/<slug>/`. Remove any raw JSON, \
+         tool-card text, `.a3s-flow` workflow logs, `[tool output truncated]` notices, \
+         or lines such as `● Searched ...` / `● Ran ...`; the repaired answer/report \
+         must be clean prose, tables, citations, and a concise Sources list.\n\n\
          {runtime_note}\n\n\
          Query:\n{query}\n\n\
          Previous synthesis text:\n```text\n{prior}\n```\n\n\
-         DynamicWorkflowRuntime output:\n```json\n{workflow_output}\n```\n\n\
-         DynamicWorkflowRuntime metadata:\n```json\n{metadata}\n```\n\n\
+         DynamicWorkflowRuntime evidence package:\n```json\n{workflow_digest}\n```\n\n\
+         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
          {duplicate_guard}\n\n\
@@ -1740,6 +2888,8 @@ fn completed_research_report_artifacts(artifacts: &ResearchReportArtifacts) -> b
         && !looks_like_deep_research_fallback_draft(&html)
         && !is_deep_research_model_failure_text(&markdown)
         && !is_deep_research_model_failure_text(&html)
+        && !deep_research_output_has_internal_leak(&markdown)
+        && !deep_research_output_has_internal_leak(&html)
         && complete_html_document(&html)
         && has_research_report_substance(&markdown, &html)
 }
@@ -1843,6 +2993,45 @@ fn has_research_report_substance(markdown: &str, html: &str) -> bool {
     has_findings && has_sources && has_confidence && has_report_source_anchor(&combined)
 }
 
+fn deep_research_output_has_internal_leak(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let markers = [
+        ".a3s-flow/dynamic-workflows",
+        "a3s://tool-output",
+        "[tool output truncated",
+        "full output artifact:",
+        "permission denied: tool",
+        "max tool rounds",
+        "dynamicworkflowruntime output:",
+        "dynamicworkflowruntime metadata:",
+        "dynamicworkflowruntime evidence package:",
+        "dynamicworkflowruntime diagnostic package:",
+        "workflow evidence\n\n```text",
+        "● searched",
+        "● ran",
+        "● read ",
+        "⎿",
+    ];
+    if markers.iter().any(|marker| lower.contains(marker)) {
+        return true;
+    }
+
+    let json_field_hits = [
+        "\"summary\"",
+        "\"sources\"",
+        "\"key_evidence\"",
+        "\"contradictions\"",
+        "\"confidence\"",
+        "\"gaps\"",
+        "\"url_or_path\"",
+        "\"quote_or_fact\"",
+    ]
+    .iter()
+    .filter(|field| lower.contains(**field))
+    .count();
+    json_field_hits >= 3
+}
+
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
@@ -1938,7 +3127,7 @@ fn materialize_deep_research_fallback_draft(
         .map_err(|e| format!("could not create {}: {e}", report_dir.display()))?;
 
     let answer = deep_research_fallback_answer(answer_text, workflow_output);
-    let evidence = nonempty_report_section(workflow_output, "No workflow evidence was captured.");
+    let evidence = deep_research_fallback_evidence(workflow_output);
     let artifact_note = deep_research_fallback_artifact_note(answer_text);
     let markdown = format!(
         "# DeepResearch Fallback Draft\n\n\
@@ -1946,7 +3135,7 @@ fn materialize_deep_research_fallback_draft(
          should not be opened automatically as a final RemoteUI view.\n\n\
          ## Query\n\n{query}\n\n\
          ## Draft Answer\n\n{answer}\n\n\
-         ## Workflow Evidence\n\n```text\n{evidence}\n```\n\n\
+         ## Workflow Evidence Digest\n\n```json\n{evidence}\n```\n\n\
          ## Artifact Note\n\n\
          {artifact_note}\n"
     );
@@ -1959,7 +3148,7 @@ fn materialize_deep_research_fallback_draft(
          <div class=\"banner\">This draft was generated after DeepResearch failed to complete. It is not a final report and RemoteUI should not open it automatically.</div>\
          <section><h2>Query</h2><p>{query_html}</p></section>\
          <section><h2>Draft Answer</h2><pre>{answer_html}</pre></section>\
-         <section><h2>Workflow Evidence</h2><pre>{evidence_html}</pre></section>\
+         <section><h2>Workflow Evidence Digest</h2><pre>{evidence_html}</pre></section>\
          <section><h2>Artifact Note</h2><p>{artifact_note_html}</p></section>\
          </main></body></html>\n",
         query_html = html_escape(query),
@@ -2026,13 +3215,31 @@ fn nonempty_report_section(text: &str, fallback: &str) -> String {
     }
 }
 
+fn deep_research_fallback_evidence(workflow_output: &str) -> String {
+    let evidence = deep_research_prompt_workflow_output(workflow_output);
+    if evidence.trim().is_empty() {
+        "{}".to_string()
+    } else if deep_research_output_has_internal_leak(&evidence) {
+        serde_json::json!({
+            "status": "internal_workflow_logs_withheld",
+            "note": "A3S Code captured workflow diagnostics, but raw tool/workflow logs are not written into DeepResearch fallback artifacts."
+        })
+        .to_string()
+    } else {
+        evidence
+    }
+}
+
 fn deep_research_fallback_answer(answer_text: &str, workflow_output: &str) -> String {
     let answer = answer_text.trim();
-    if !answer.is_empty() && !is_deep_research_model_failure_text(answer) {
+    if !answer.is_empty()
+        && !is_deep_research_model_failure_text(answer)
+        && !deep_research_output_has_internal_leak(answer)
+    {
         return answer.to_string();
     }
     workflow_evidence_summary(workflow_output).unwrap_or_else(|| {
-        "The model did not return a final synthesis, but A3S Code preserved the captured workflow evidence below.".to_string()
+        "The model did not return a final synthesis, but A3S Code preserved a sanitized workflow evidence digest below.".to_string()
     })
 }
 
@@ -2079,7 +3286,7 @@ fn workflow_evidence_summary(workflow_output: &str) -> Option<String> {
         (None, None) => "delegated research evidence".to_string(),
     };
     let mut summary = format!(
-        "The host workflow completed in `{mode}` mode and captured {count_text}. The full captured evidence is preserved below."
+        "The host workflow completed in `{mode}` mode and captured {count_text}. A sanitized evidence digest is preserved below."
     );
     if workflow_output.contains("README.md") {
         summary.push_str(" The evidence includes `README.md` as a cited local source.");
@@ -5606,9 +6813,9 @@ impl App {
             }));
         }
         // Deep-research mode (`?`) is host-orchestrated for stability: the TUI
-        // first executes DynamicWorkflowRuntime directly to gather evidence through
-        // OS Runtime (when signed in) or local parallel_task fallback, then starts
-        // one synthesis turn over the gathered evidence.
+        // first executes a finite, complexity-driven recursive retrieval-summary
+        // workflow through local parallel_task fan-out, then starts one synthesis
+        // turn over the gathered evidence.
         if self.research_mode {
             self.research_mode = false;
             let query = trimmed.trim_start_matches('?').trim().to_string();
@@ -5630,29 +6837,36 @@ impl App {
             let os_runtime =
                 should_use_os_runtime_for_deep_research(&query, self.os_session.is_some());
             let loop_layers = deep_research_loop_layers(&query, os_runtime);
+            let budget = deep_research_budget_for_effort_index(self.effort, self.context_limit);
+            let research_rounds = deep_research_research_rounds(&query, os_runtime, budget);
             let layer_hint = match loop_layers {
                 0 => "single synthesis pass".to_string(),
                 1 => "1 verification layer".to_string(),
                 n => format!("{n} verification layers"),
             };
+            let round_hint = if research_rounds == 1 {
+                "1 retrieval round".to_string()
+            } else {
+                format!("up to {research_rounds} retrieval rounds")
+            };
             let runtime_hint = if os_runtime {
                 format!(
-                    "  🎯 goal set · adaptive deep research · local workflow selected · OS Runtime FaaS pending · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  🎯 goal set · adaptive deep research · local workflow selected · OS Runtime FaaS pending · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             } else if self.os_session.is_some() {
                 format!(
-                    "  🎯 goal set · adaptive deep research · local workflow selected · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  🎯 goal set · adaptive deep research · local workflow selected · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             } else {
                 format!(
-                    "  🎯 goal set · local deep research · report + HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  🎯 goal set · local deep research · {round_hint} · report + HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             };
             self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
             let display = format!("🔬 {query}");
-            // DeepResearch is a bounded two-phase run: host workflow, then one
-            // synthesis turn. Complex queries may get a small, scored number of
-            // follow-up verification layers, capped by `deep_research_loop_layers`.
+            // DeepResearch is bounded in two places: the host workflow runs a
+            // finite recursive retrieval-summary loop, then the synthesis turn
+            // may get a small scored number of report verification layers.
             if loop_layers == 0 {
                 self.engage_single_turn_autonomy();
             } else {
@@ -6647,7 +7861,7 @@ impl App {
         self.push_line(
             &Style::new()
                 .fg(TN_GRAY)
-                .render("  ⇉ gathering evidence with DynamicWorkflowRuntime…"),
+                .render("  ⇉ gathering evidence with bounded recursive DynamicWorkflowRuntime…"),
         );
         self.rebuild_viewport();
 
@@ -6718,16 +7932,17 @@ impl App {
             .start_tool(tool_id.clone(), "dynamic_workflow".to_string());
         self.runtime
             .push_tool_input(&serde_json::to_string(&args).unwrap_or_default());
+        let display_output = deep_research_tool_card_output(&output);
         let completed = self.runtime.end_tool(
             &tool_id,
             "dynamic_workflow".to_string(),
-            output.clone(),
+            display_output.clone(),
             exit_code,
         );
         self.push_line(&render_tool_end(
             "dynamic_workflow",
             exit_code,
-            &output,
+            &display_output,
             metadata.as_ref(),
             completed.args.as_ref(),
             self.viewport_content_width(),
@@ -7406,13 +8621,15 @@ impl App {
                     .deep_research_loop
                     .as_ref()
                     .map(|state| state.query.as_str());
+                let deep_research_dirty_output = self.deep_research_loop.is_some()
+                    && deep_research_output_has_internal_leak(&review_text);
                 let deep_research_missing_report = deep_research_report_is_missing(
                     self.deep_research_loop.is_some(),
                     self.deep_research_report_ready,
                     deep_research_query,
                     &review_text,
                     Path::new(&self.cwd),
-                );
+                ) || deep_research_dirty_output;
                 // /loop: stop once the agent signals completion (the word DONE).
                 // Not during /sleep: its completion signal is the a3s-sleep
                 // report itself, and consolidation narration ("what was done
@@ -7440,6 +8657,13 @@ impl App {
                     self.mark_assistant_text(&text);
                     self.streaming.push(&text);
                 }
+                if deep_research_dirty_output {
+                    self.streaming.clear();
+                    self.turn_text.clear();
+                    self.push_line(&Style::new().fg(TN_YELLOW).render(
+                        "  ⚠ DeepResearch synthesis contained internal workflow/tool logs; discarding that draft and running a clean repair pass…",
+                    ));
+                }
                 self.finalize_streaming();
                 // Asset code review: a ```a3s-review report in the final message
                 // ends the review loop and opens the issue checklist.
@@ -7447,7 +8671,9 @@ impl App {
                 // `/sleep`: an ```a3s-sleep report ends the consolidation loop
                 // and persists the distilled memories (async, batched below).
                 let sleep_save = self.capture_sleep(&review_text);
-                self.capture_research_report_view(&review_text);
+                if !deep_research_dirty_output {
+                    self.capture_research_report_view(&review_text);
+                }
                 if deep_research_missing_report {
                     let fallback_query = self
                         .deep_research_loop
@@ -9803,6 +11029,24 @@ mod tests {
             "fallback draft artifacts must not be accepted as completed report markers"
         );
 
+        let dirty_dir = root.join(".a3s/research/dirty");
+        std::fs::create_dir_all(&dirty_dir).unwrap();
+        std::fs::write(
+            dirty_dir.join("index.html"),
+            "<!doctype html><html><body><h1>Dirty Report</h1><section><h2>Findings</h2><p>The analysis has enough apparent substance but contains leaked transcript output.</p><pre>● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]</pre></section><section><h2>Sources</h2><p>Evidence source: https://example.com/dirty. Confidence is low because leaked logs were detected.</p></section></body></html>",
+        )
+        .unwrap();
+        std::fs::write(
+            dirty_dir.join("report.md"),
+            "# Dirty Report\n\n## Findings\n\nThe analysis has enough apparent substance but contains leaked transcript output.\n\n● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]\n\n## Sources\n\n- https://example.com/dirty\n\n## Confidence\n\nConfidence is low because leaked logs were detected.\n",
+        )
+        .unwrap();
+        assert!(
+            research_report_view_spec("A3S_RESEARCH_VIEW: .a3s/research/dirty/index.html", &root,)
+                .is_none(),
+            "DeepResearch report markers must reject artifacts that contain internal tool logs"
+        );
+
         assert!(research_report_view_spec(
             "A3S_RESEARCH_VIEW: .a3s/research/rust-async/report.md",
             &root,
@@ -10092,6 +11336,28 @@ mod tests {
             "Model synthesis status: DeepResearch synthesis model call timed out after 480000 ms."
         ));
 
+        let dirty_artifacts = materialize_deep_research_fallback_draft(
+            &root,
+            "Dirty fallback report",
+            "● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]",
+            r#"{"mode":"local_parallel_task","research":{"metadata":{"success_count":1,"task_count":1},"output":"● Searched web\n⎿ [tool output truncated]"}}"#,
+        )
+        .expect("dirty fallback draft should be written with sanitized content");
+        let dirty_markdown = std::fs::read_to_string(&dirty_artifacts.markdown).unwrap();
+        let dirty_html = std::fs::read_to_string(&dirty_artifacts.html).unwrap();
+        assert!(
+            dirty_markdown.contains("sanitized evidence digest"),
+            "{dirty_markdown}"
+        );
+        assert!(
+            !deep_research_output_has_internal_leak(&dirty_markdown),
+            "{dirty_markdown}"
+        );
+        assert!(
+            !deep_research_output_has_internal_leak(&dirty_html),
+            "{dirty_html}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -10154,6 +11420,7 @@ mod tests {
             args["input"]["local_max_steps"],
             budget.deep_research_child_steps
         );
+        assert_eq!(args["input"]["local_research_rounds"], 1);
         assert_eq!(
             args["input"]["runtime_preflight_timeout_ms"],
             DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS
@@ -10173,6 +11440,18 @@ mod tests {
         );
         assert_eq!(args["allowed_tools"], serde_json::json!([]));
         assert!(source.contains("local_research"), "{source}");
+        assert!(
+            source.contains("bounded_recursive_parallel_retrieval_summary"),
+            "{source}"
+        );
+        assert!(source.contains("maxResearchRounds"), "{source}");
+        assert!(source.contains("minResearchRounds"), "{source}");
+        assert!(source.contains("followUpTracks"), "{source}");
+        assert!(source.contains("evidenceSummary"), "{source}");
+        assert!(
+            source.contains("${prefix}_round_${roundNumber}"),
+            "{source}"
+        );
         assert!(source.contains("maxLocalParallelTasks"), "{source}");
         assert!(
             source.contains("const osRuntimeEnabled = false"),
@@ -10210,11 +11489,18 @@ mod tests {
             "{source}"
         );
         assert!(source.contains("max_steps: localMaxSteps"), "{source}");
+        assert!(source.contains("Recursive round:"), "{source}");
         assert!(
             source.contains("on_exhausted: \"continue_workflow\""),
             "{source}"
         );
         assert!(source.contains("step_failures"), "{source}");
+        assert!(source.contains("normalizeLocalResearch"), "{source}");
+        assert!(source.contains("aggregateResearchRounds"), "{source}");
+        assert!(source.contains("partial_success"), "{source}");
+        assert!(source.contains("failed_tasks"), "{source}");
+        assert!(source.contains("error_summary"), "{source}");
+        assert!(source.contains("output_summary"), "{source}");
         assert!(
             source.contains("local_parallel_task_failed")
                 && source.contains("local_fallback_failed"),
@@ -10246,6 +11532,39 @@ mod tests {
     }
 
     #[test]
+    fn deep_research_research_rounds_scale_with_complexity_and_effort() {
+        let low = crate::budget::budget_plan_for_effort_id(
+            "low",
+            Some(128_000),
+            BudgetWorkload::DeepResearch,
+        );
+        let medium = crate::budget::budget_plan_for_effort_id(
+            "medium",
+            Some(128_000),
+            BudgetWorkload::DeepResearch,
+        );
+        let high = crate::budget::budget_plan_for_effort_id(
+            "high",
+            Some(128_000),
+            BudgetWorkload::DeepResearch,
+        );
+
+        assert_eq!(
+            deep_research_research_rounds("rust async runtimes", false, high),
+            1
+        );
+        assert_eq!(
+            deep_research_research_rounds("比较 tokio 和 async-std 的设计取舍", false, high),
+            2
+        );
+        let broad =
+            "全面调研 2026 年多智能体运行时市场、最新论文、竞品、趋势、多来源、大量并行证据";
+        assert_eq!(deep_research_research_rounds(broad, false, low), 2);
+        assert_eq!(deep_research_research_rounds(broad, false, medium), 3);
+        assert_eq!(deep_research_research_rounds(broad, false, high), 4);
+    }
+
+    #[test]
     fn deep_research_synthesis_prompt_uses_host_workflow_evidence() {
         let prompt = deep_research_synthesis_prompt(
             "rust async runtimes",
@@ -10269,17 +11588,38 @@ mod tests {
             "{prompt}"
         );
         assert!(prompt.contains("rust async runtimes"), "{prompt}");
-        assert!(prompt.contains("mode\":\"os_runtime"), "{prompt}");
+        assert!(
+            prompt.contains("DynamicWorkflowRuntime evidence package"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("DynamicWorkflowRuntime diagnostic package"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("\"mode\": \"os_runtime\""), "{prompt}");
+        assert!(
+            !prompt.contains("DynamicWorkflowRuntime output:"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("DynamicWorkflowRuntime metadata:"),
+            "{prompt}"
+        );
         assert!(prompt.contains("OS Runtime was selected"), "{prompt}");
         assert!(prompt.contains("results[].structured"), "{prompt}");
+        assert!(prompt.contains("bounded recursive parallel"), "{prompt}");
+        assert!(prompt.contains("research.rounds"), "{prompt}");
         assert!(
             prompt.contains("research.runtime_output.results[].structured"),
             "{prompt}"
         );
+        assert!(prompt.contains("research.results[].structured"), "{prompt}");
+        assert!(prompt.contains("warnings.failed_tasks"), "{prompt}");
         assert!(
-            prompt.contains("use raw task output only to fill gaps"),
+            prompt.contains("Raw task output is intentionally excluded"),
             "{prompt}"
         );
+        assert!(prompt.contains("Do not reproduce raw JSON"), "{prompt}");
         assert!(
             prompt.contains("host expects report slug `rust-async-runtimes`"),
             "{prompt}"
@@ -10300,6 +11640,87 @@ mod tests {
         );
         assert!(
             prompt.contains("Do not repeat an identical grep"),
+            "{prompt}"
+        );
+    }
+
+    #[test]
+    fn deep_research_synthesis_prompt_sanitizes_parallel_task_metadata() {
+        let verbose_failure = format!(
+            "Task failed: Max tool rounds (30) exceeded {}",
+            format!(
+                "{}RAW_FAILURE_DETAIL_SHOULD_NOT_SURVIVE",
+                "padding ".repeat(120)
+            )
+        );
+        let prompt = deep_research_synthesis_prompt(
+            "unstable research",
+            false,
+            r#"{"mode":"local_parallel_task"}"#,
+            Some(&serde_json::json!({
+                "dynamic_workflow": {
+                    "snapshot": {
+                        "steps": {
+                            "local_research": {
+                                "output": {
+                                    "tool": "parallel_task",
+                                    "output": format!("Executed 2 tasks in parallel:\n\n{verbose_failure}"),
+                                    "metadata": {
+                                        "task_count": 2,
+                                        "result_count": 2,
+                                        "success_count": 1,
+                                        "failed_count": 1,
+                                        "partial_failure": true,
+                                        "allow_partial_failure": true,
+                                        "results": [
+                                            {
+                                                "task_id": "ok",
+                                                "agent": "explore",
+                                                "success": true,
+                                                "output": "successful raw output should be redundant",
+                                                "structured": {
+                                                    "summary": "source-backed evidence",
+                                                    "sources": [{
+                                                        "title": "Source",
+                                                        "url_or_path": "https://example.com",
+                                                        "quote_or_fact": "evidence"
+                                                    }],
+                                                    "key_evidence": ["evidence"],
+                                                    "contradictions": [],
+                                                    "confidence": "high",
+                                                    "gaps": []
+                                                }
+                                            },
+                                            {
+                                                "task_id": "bad",
+                                                "agent": "explore",
+                                                "success": false,
+                                                "output": verbose_failure
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            })),
+        );
+
+        assert!(prompt.contains("source-backed evidence"), "{prompt}");
+        assert!(prompt.contains("failed_tasks"), "{prompt}");
+        assert!(
+            prompt.contains("Delegated task exhausted its tool-round budget"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("Task failed: Max tool rounds"), "{prompt}");
+        assert!(!prompt.contains("Executed 2 tasks in parallel"), "{prompt}");
+        assert!(
+            !prompt.contains("RAW_FAILURE_DETAIL_SHOULD_NOT_SURVIVE"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("successful raw output should be redundant"),
             "{prompt}"
         );
     }
