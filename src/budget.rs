@@ -9,12 +9,12 @@ use serde_json::{json, Value};
 
 const DEFAULT_CONTEXT_LIMIT: u32 = 128_000;
 const CORE_MAX_CONTEXT_TOKENS: f32 = 200_000.0;
-const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 300;
-const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 4;
-const DEEP_RESEARCH_MIN_PARALLEL_TASKS: usize = 2;
-const DEEP_RESEARCH_MIN_CHILD_STEPS: usize = 30;
-const DEEP_RESEARCH_MIN_WORKFLOW_TOOL_CALLS: usize = 30;
-const DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES: usize = 512 * 1024;
+const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 1_200;
+const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 12;
+const DEEP_RESEARCH_MIN_PARALLEL_TASKS: usize = 4;
+const DEEP_RESEARCH_MIN_CHILD_STEPS: usize = 200;
+const DEEP_RESEARCH_MIN_WORKFLOW_TOOL_CALLS: usize = 300;
+const DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
 pub(crate) const DEFAULT_TUI_EFFORT_INDEX: usize = 2;
 pub(crate) const DEFAULT_CODE_WEB_EFFORT_ID: &str = "medium";
@@ -97,27 +97,27 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         label: "low",
         display_label: "Low",
         description: "Fast, focused edits with narrow verification.",
-        thinking_budget: 1024,
-        max_tool_rounds: 120,
-        max_continuation_turns: 2,
-        max_parallel_tasks: 3,
-        deep_research_child_steps: 20,
-        workflow_max_tool_calls: 6,
-        workflow_max_output_bytes: 128 * 1024,
+        thinking_budget: 2_048,
+        max_tool_rounds: 240,
+        max_continuation_turns: 4,
+        max_parallel_tasks: 4,
+        deep_research_child_steps: 80,
+        workflow_max_tool_calls: 120,
+        workflow_max_output_bytes: 1024 * 1024,
         guideline: Some(EFFORT_LOW),
     },
     BudgetProfile {
         id: "medium",
         label: "medium",
         display_label: "Medium",
-        description: "Balanced default behavior.",
-        thinking_budget: 4096,
-        max_tool_rounds: 200,
-        max_continuation_turns: 3,
-        max_parallel_tasks: 4,
-        deep_research_child_steps: 25,
-        workflow_max_tool_calls: 8,
-        workflow_max_output_bytes: 192 * 1024,
+        description: "Balanced default behavior with room for long tasks.",
+        thinking_budget: 8_192,
+        max_tool_rounds: 800,
+        max_continuation_turns: 8,
+        max_parallel_tasks: 8,
+        deep_research_child_steps: 160,
+        workflow_max_tool_calls: 240,
+        workflow_max_output_bytes: 2 * 1024 * 1024,
         guideline: None,
     },
     BudgetProfile {
@@ -125,13 +125,13 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         label: "high",
         display_label: "High",
         description: "Deeper reasoning with stronger verification.",
-        thinking_budget: 8192,
-        max_tool_rounds: 300,
-        max_continuation_turns: 4,
-        max_parallel_tasks: 6,
-        deep_research_child_steps: 30,
-        workflow_max_tool_calls: 8,
-        workflow_max_output_bytes: 256 * 1024,
+        thinking_budget: 16_384,
+        max_tool_rounds: 1_200,
+        max_continuation_turns: 12,
+        max_parallel_tasks: 12,
+        deep_research_child_steps: 240,
+        workflow_max_tool_calls: 360,
+        workflow_max_output_bytes: 4 * 1024 * 1024,
         guideline: Some(EFFORT_HIGH),
     },
     BudgetProfile {
@@ -139,13 +139,13 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         label: "xhigh",
         display_label: "XHigh",
         description: "Rigorous alternative analysis and edge-case checks.",
-        thinking_budget: 16_384,
-        max_tool_rounds: 400,
-        max_continuation_turns: 6,
-        max_parallel_tasks: 8,
-        deep_research_child_steps: 40,
-        workflow_max_tool_calls: 10,
-        workflow_max_output_bytes: 384 * 1024,
+        thinking_budget: 32_768,
+        max_tool_rounds: 1_800,
+        max_continuation_turns: 16,
+        max_parallel_tasks: 16,
+        deep_research_child_steps: 320,
+        workflow_max_tool_calls: 480,
+        workflow_max_output_bytes: 6 * 1024 * 1024,
         guideline: Some(EFFORT_XHIGH),
     },
     BudgetProfile {
@@ -153,13 +153,13 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         label: "max",
         display_label: "Max",
         description: "Maximum completeness and self-review.",
-        thinking_budget: 32_768,
-        max_tool_rounds: 500,
-        max_continuation_turns: 8,
-        max_parallel_tasks: 8,
-        deep_research_child_steps: 50,
-        workflow_max_tool_calls: 12,
-        workflow_max_output_bytes: 512 * 1024,
+        thinking_budget: 65_536,
+        max_tool_rounds: 2_400,
+        max_continuation_turns: 24,
+        max_parallel_tasks: 24,
+        deep_research_child_steps: 480,
+        workflow_max_tool_calls: 720,
+        workflow_max_output_bytes: 8 * 1024 * 1024,
         guideline: Some(EFFORT_MAX),
     },
     BudgetProfile {
@@ -167,13 +167,13 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         label: "ultracode",
         display_label: "Ultracode",
         description: "Workflow-grade decomposition and local fan-out when useful.",
-        thinking_budget: 32_768,
-        max_tool_rounds: 600,
-        max_continuation_turns: 8,
-        max_parallel_tasks: 8,
-        deep_research_child_steps: 60,
-        workflow_max_tool_calls: 12,
-        workflow_max_output_bytes: 512 * 1024,
+        thinking_budget: 65_536,
+        max_tool_rounds: 3_200,
+        max_continuation_turns: 32,
+        max_parallel_tasks: 32,
+        deep_research_child_steps: 640,
+        workflow_max_tool_calls: 960,
+        workflow_max_output_bytes: 12 * 1024 * 1024,
         guideline: Some(ULTRACODE_GUIDELINES),
     },
 ];
@@ -390,6 +390,8 @@ mod tests {
         assert!(low.max_parallel_tasks >= DEEP_RESEARCH_MIN_PARALLEL_TASKS);
         assert!(low.workflow_max_tool_calls >= DEEP_RESEARCH_MIN_WORKFLOW_TOOL_CALLS);
         assert!(low.workflow_max_output_bytes >= DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES);
+        assert!(low.deep_research_child_steps > 30);
+        assert!(low.workflow_max_tool_calls > 30);
     }
 
     #[test]

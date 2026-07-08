@@ -830,12 +830,17 @@ async function run(ctx, inputs) {
   ];
   const requestedLocalParallelTasks = Number(input.local_max_parallel_tasks);
   const maxLocalParallelTasks = Number.isFinite(requestedLocalParallelTasks) && requestedLocalParallelTasks > 0
-    ? Math.max(1, Math.min(8, Math.floor(requestedLocalParallelTasks)))
+    ? Math.max(1, Math.min(64, Math.floor(requestedLocalParallelTasks)))
     : fallbackTracks.length;
   const requestedLocalMaxSteps = Number(input.local_max_steps);
   const localMaxSteps = Number.isFinite(requestedLocalMaxSteps) && requestedLocalMaxSteps > 0
     ? Math.floor(requestedLocalMaxSteps)
-    : 30;
+    : 200;
+  const continueWorkflowRetry = {
+    max_attempts: 1,
+    delay_ms: 0,
+    on_exhausted: "continue_workflow",
+  };
   const providedTracks = Array.isArray(input.tracks)
     ? input.tracks.filter((track) => {
         if (track === null || track === undefined) {
@@ -880,11 +885,11 @@ async function run(ctx, inputs) {
     const title = track.title || `Track ${index + 1}`;
     const focus = track.focus || String(track);
     return {
-      agent: "verification",
+      agent: "explore",
       description: `Research ${index + 1}: ${title}`,
       max_steps: localMaxSteps,
       output_schema: evidenceSchema,
-      prompt: `Deep-research track for: ${query}\n\nFocus: ${focus}\n\nEvidence only: do not write files, create report artifacts, or modify the workspace. Use dedicated tools: web_search/web_fetch for current external evidence, read/grep/glob/ls for local workspace evidence. Do not use bash for research collection; use the dedicated read-only tools instead. Do not inspect .a3s-flow/dynamic-workflows logs unless the focus explicitly asks about DeepResearch/runtime diagnostics; workflow logs are host diagnostics, not research evidence. If the query asks for local workspace evidence only, inspect local files and do not use web tools. Otherwise use web_search and web_fetch when useful. Return concise evidence, URLs or local paths, publication dates when available, key evidence, contradictions, and confidence notes. Your final child response should contain enough information to satisfy the provided output_schema: summary, sources, key_evidence, contradictions, confidence, and gaps.`
+      prompt: `Deep-research evidence track for: ${query}\n\nFocus: ${focus}\n\nEvidence only: do not write files, create report artifacts, run tests, or modify the workspace. You are an evidence collector, not a verification runner. Use dedicated read-only tools: web_search/web_fetch for current external evidence, read/grep/glob/ls for local workspace evidence. Do not use bash for research collection. Do not inspect .a3s-flow/dynamic-workflows logs unless the focus explicitly asks about DeepResearch/runtime diagnostics; workflow logs are host diagnostics, not research evidence. If the query is about public/current facts, use web_search first and fetch the strongest sources; do not fall back to local repository grep just because a web query is empty. If web tools are unavailable or return no useful results after several distinct queries, report that gap with the attempted queries and stop instead of looping. If the query explicitly asks for local workspace evidence only, inspect local files and do not use web tools. Use as many distinct high-signal tool calls as the evidence actually requires, avoid repeating the same query/pattern/path, and synthesize when evidence is sufficient. Return concise evidence, URLs or local paths, publication dates when available, key evidence, contradictions, and confidence notes. Your final child response should contain enough information to satisfy the provided output_schema: summary, sources, key_evidence, contradictions, confidence, and gaps.`
     };
   });
   const isNonEmptyString = (value) => typeof value === "string" && value.trim().length > 0;
@@ -960,6 +965,9 @@ async function run(ctx, inputs) {
     const runtimeResearch = inputs.step_outputs.runtime_research;
     const localResearch = inputs.step_outputs.local_research;
     const localFallback = inputs.step_outputs.local_fallback;
+    const stepFailures = inputs.step_failures || {};
+    const localResearchFailure = stepFailures.local_research;
+    const localFallbackFailure = stepFailures.local_fallback;
 
     if (localFallback) {
       return {
@@ -977,6 +985,37 @@ async function run(ctx, inputs) {
       return { type: "complete", output: { query, mode: "local_parallel_task", research: localResearch } };
     }
 
+    if (localResearchFailure) {
+      return {
+        type: "complete",
+        output: {
+          query,
+          mode: "local_parallel_task_failed",
+          research: {
+            status: "failed",
+            error: localResearchFailure.error || "local research step failed",
+            note: "Local evidence fan-out failed before producing usable structured evidence; synthesis should create a transparent fallback report instead of retrying the workflow."
+          }
+        }
+      };
+    }
+
+    if (localFallbackFailure) {
+      return {
+        type: "complete",
+        output: {
+          query,
+          mode: "local_fallback_failed",
+          runtime_error: (runtimeResearch && runtimeResearch.runtime_error) || (runtimePreflight && runtimePreflight.runtime_error),
+          research: {
+            status: "failed",
+            error: localFallbackFailure.error || "local fallback research step failed",
+            note: "Both OS-runtime research and local fallback fan-out failed; synthesis should report the failure and materialize a transparent fallback artifact."
+          }
+        }
+      };
+    }
+
     if (runtimeResearch && !runtimeResearch.runtime_error) {
       return { type: "complete", output: { query, mode: "os_runtime", research: runtimeResearch } };
     }
@@ -987,7 +1026,7 @@ async function run(ctx, inputs) {
         step_id: "local_fallback",
         step_name: "parallel_task",
         input: { allow_partial_failure: true, tasks: localTasks() },
-        retry: { max_attempts: 1, delay_ms: 0 },
+        retry: continueWorkflowRetry,
       };
     }
 
@@ -997,7 +1036,7 @@ async function run(ctx, inputs) {
         step_id: "local_fallback",
         step_name: "parallel_task",
         input: { allow_partial_failure: true, tasks: localTasks() },
-        retry: { max_attempts: 1, delay_ms: 0 },
+        retry: continueWorkflowRetry,
       };
     }
 
@@ -1036,7 +1075,7 @@ async function run(ctx, inputs) {
       step_id: "local_research",
       step_name: "parallel_task",
       input: { allow_partial_failure: true, tasks: localTasks() },
-      retry: { max_attempts: 1, delay_ms: 0 },
+      retry: continueWorkflowRetry,
     };
   }
 
@@ -1328,7 +1367,12 @@ fn deep_research_synthesis_prompt(
          final Sources list. Prefer validated structured evidence objects from \
          `DynamicWorkflowRuntime metadata -> results[].structured` and OS Runtime \
          `DynamicWorkflowRuntime output -> research.runtime_output.results[].structured` \
-         when present; use raw task output only to fill gaps or explain contradictions. If the workflow output reports a `runtime_error` and \
+         when present; use raw task output only to fill gaps or explain contradictions. If \
+         the workflow output reports `mode: \"local_parallel_task_failed\"` or \
+         `mode: \"local_fallback_failed\"`, do not restart broad research or call \
+         `dynamic_workflow`; write a transparent failure-aware report from the \
+         returned error/gap details and any partial evidence, then let the host \
+         fallback materializer handle missing artifacts if needed. If the workflow output reports a `runtime_error` and \
          `mode: \"local_fallback\"`, clearly mention that OS Runtime was attempted \
          and local parallel research was used as the fallback.\n\n\
          {remoteui_directive}\n\n\
@@ -9849,8 +9893,8 @@ mod tests {
         assert!(source.contains("contradictions"), "{source}");
         assert!(source.contains("confidence"), "{source}");
         assert!(source.contains("gaps"), "{source}");
-        assert!(source.contains("agent: \"verification\""), "{source}");
-        assert!(!source.contains("agent: \"explore\""), "{source}");
+        assert!(source.contains("agent: \"explore\""), "{source}");
+        assert!(!source.contains("agent: \"verification\""), "{source}");
         assert!(
             source.contains("Number(input.local_max_parallel_tasks)"),
             "{source}"
@@ -9861,20 +9905,37 @@ mod tests {
         );
         assert!(source.contains("max_steps: localMaxSteps"), "{source}");
         assert!(
+            source.contains("on_exhausted: \"continue_workflow\""),
+            "{source}"
+        );
+        assert!(source.contains("step_failures"), "{source}");
+        assert!(
+            source.contains("local_parallel_task_failed")
+                && source.contains("local_fallback_failed"),
+            "{source}"
+        );
+        assert!(
             source.contains("Evidence only: do not write files"),
             "{source}"
         );
+        assert!(source.contains("You are an evidence collector"), "{source}");
         assert!(
             source.contains("Do not inspect .a3s-flow/dynamic-workflows logs"),
             "{source}"
         );
-        assert!(source.contains("Use dedicated tools:"), "{source}");
+        assert!(
+            source.contains("Use dedicated read-only tools:"),
+            "{source}"
+        );
         assert!(
             source.contains("web_search/web_fetch")
                 && source.contains("read/grep/glob/ls")
                 && source.contains("Do not use bash for research collection"),
             "{source}"
         );
+        assert!(source.contains("Math.min(64"), "{source}");
+        assert!(!source.contains("Math.min(8"), "{source}");
+        assert!(source.contains(": 200"), "{source}");
         assert!(!source.contains("agent: \"general\""), "{source}");
     }
 
