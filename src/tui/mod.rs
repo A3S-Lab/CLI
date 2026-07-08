@@ -2638,36 +2638,342 @@ fn with_recent_workspace_context(
 }
 
 fn tui_session_options(confirmation: a3s_code_core::hitl::ConfirmationPolicy) -> SessionOptions {
+    let permission_policy = tui_permission_policy();
     SessionOptions::new()
         .with_confirmation_policy(confirmation)
-        .with_permission_policy(tui_permission_policy())
+        .with_permission_policy(permission_policy.clone())
+        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(permission_policy)))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
 }
 
-/// Core permission policy for the TUI: keep research/read tools unblocked even
-/// when dynamic workflows or child runs bypass the UI auto-approval helper.
+/// Core serializable permission policy for the TUI.
+///
+/// The runtime checker below layers structured decisions for bash, git, and
+/// batch on top of this policy. Keep this policy conservative and serializable
+/// so persisted sessions still have a safe fallback.
 fn tui_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
-    a3s_code_core::permissions::PermissionPolicy::new().allow_all(&[
-        "Read(*)",
-        "Grep(*)",
-        "Glob(*)",
-        "LS(*)",
-        "read(*)",
-        "grep(*)",
-        "glob(*)",
-        "ls(*)",
-        "web_search(*)",
-        "web_fetch(*)",
-        "Write(.a3s/research/**)",
-        "Write(**/.a3s/research/**)",
-        "Edit(.a3s/research/**)",
-        "Edit(**/.a3s/research/**)",
-        "write(.a3s/research/**)",
-        "write(**/.a3s/research/**)",
-        "edit(.a3s/research/**)",
-        "edit(**/.a3s/research/**)",
-    ])
+    a3s_code_core::permissions::PermissionPolicy::new()
+        .allow_all(&[
+            "Read(*)",
+            "Grep(*)",
+            "Glob(*)",
+            "LS(*)",
+            "web_search(*)",
+            "web_fetch(*)",
+            "Write(.a3s/research/**)",
+            "Write(**/.a3s/research/**)",
+            "Edit(.a3s/research/**)",
+            "Edit(**/.a3s/research/**)",
+        ])
+        .ask_all(&[
+            "Write(*)",
+            "Edit(*)",
+            "Patch(*)",
+            "Bash(*)",
+            "Git(*)",
+            "batch(*)",
+            "program(*)",
+            "task(*)",
+            "parallel_task(*)",
+            "dynamic_workflow(*)",
+            "Skill(*)",
+        ])
+}
+
+#[derive(Clone)]
+struct TuiHitlPermissionChecker {
+    base: a3s_code_core::permissions::PermissionPolicy,
+}
+
+impl TuiHitlPermissionChecker {
+    fn new(base: a3s_code_core::permissions::PermissionPolicy) -> Self {
+        Self { base }
+    }
+
+    fn check_batch(
+        &self,
+        args: &serde_json::Value,
+    ) -> a3s_code_core::permissions::PermissionDecision {
+        let Some(invocations) = args.get("invocations").and_then(|value| value.as_array()) else {
+            return a3s_code_core::permissions::PermissionDecision::Ask;
+        };
+        if invocations.is_empty() {
+            return a3s_code_core::permissions::PermissionDecision::Ask;
+        }
+
+        let mut saw_ask = false;
+        for invocation in invocations {
+            match self.check_batch_invocation(invocation) {
+                a3s_code_core::permissions::PermissionDecision::Deny => {
+                    return a3s_code_core::permissions::PermissionDecision::Deny;
+                }
+                a3s_code_core::permissions::PermissionDecision::Ask => saw_ask = true,
+                a3s_code_core::permissions::PermissionDecision::Allow => {}
+            }
+        }
+
+        if saw_ask {
+            a3s_code_core::permissions::PermissionDecision::Ask
+        } else {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+    }
+
+    fn check_batch_invocation(
+        &self,
+        invocation: &serde_json::Value,
+    ) -> a3s_code_core::permissions::PermissionDecision {
+        let Some(tool) = invocation.get("tool").and_then(|value| value.as_str()) else {
+            return a3s_code_core::permissions::PermissionDecision::Ask;
+        };
+        let empty_args = serde_json::Value::Object(serde_json::Map::new());
+        let tool_args = invocation.get("args").unwrap_or(&empty_args);
+
+        if tool.eq_ignore_ascii_case("batch") {
+            return a3s_code_core::permissions::PermissionDecision::Ask;
+        }
+
+        self.check_tool(tool, tool_args)
+    }
+
+    fn check_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> a3s_code_core::permissions::PermissionDecision {
+        let base = self.base.check(tool_name, args);
+        if matches!(base, a3s_code_core::permissions::PermissionDecision::Deny) {
+            return base;
+        }
+
+        match tool_name.to_ascii_lowercase().as_str() {
+            "bash" => tui_bash_permission(args),
+            "git" => tui_git_permission(args),
+            "batch" => self.check_batch(args),
+            _ => base,
+        }
+    }
+}
+
+impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker {
+    fn check(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> a3s_code_core::permissions::PermissionDecision {
+        self.check_tool(tool_name, args)
+    }
+}
+
+fn tui_bash_permission(args: &serde_json::Value) -> a3s_code_core::permissions::PermissionDecision {
+    let Some(command) = args.get("command").and_then(|value| value.as_str()) else {
+        return a3s_code_core::permissions::PermissionDecision::Ask;
+    };
+    let command = command.trim();
+    if command.is_empty() {
+        return a3s_code_core::permissions::PermissionDecision::Ask;
+    }
+
+    if is_catastrophic_bash_command(command) {
+        return a3s_code_core::permissions::PermissionDecision::Deny;
+    }
+
+    if is_readonly_bash_command(command) {
+        return a3s_code_core::permissions::PermissionDecision::Allow;
+    }
+
+    a3s_code_core::permissions::PermissionDecision::Ask
+}
+
+fn tui_git_permission(args: &serde_json::Value) -> a3s_code_core::permissions::PermissionDecision {
+    let Some(command) = args.get("command").and_then(|value| value.as_str()) else {
+        return a3s_code_core::permissions::PermissionDecision::Ask;
+    };
+
+    match command {
+        "status" | "log" | "diff" | "remote" => {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        "branch" if args.get("name").and_then(|value| value.as_str()).is_none() => {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        "stash"
+            if args
+                .get("message")
+                .and_then(|value| value.as_str())
+                .is_none()
+                && !args
+                    .get("include_untracked")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false) =>
+        {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        "worktree"
+            if args
+                .get("subcommand")
+                .and_then(|value| value.as_str())
+                .unwrap_or("list")
+                == "list" =>
+        {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        _ => a3s_code_core::permissions::PermissionDecision::Ask,
+    }
+}
+
+fn normalized_shell(command: &str) -> String {
+    command.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_catastrophic_bash_command(command: &str) -> bool {
+    let normalized = normalized_shell(command);
+    let lower = normalized.to_ascii_lowercase();
+
+    if lower == "sudo" || lower.starts_with("sudo ") || lower.starts_with("doas ") {
+        return true;
+    }
+    if lower == "su" || lower.starts_with("su ") || lower.starts_with("su -") {
+        return true;
+    }
+    if lower.contains("mkfs")
+        || lower.contains("diskutil erase")
+        || lower.contains(":(){")
+        || lower.contains("kill -9 -1")
+        || lower.starts_with("shutdown")
+        || lower.starts_with("reboot")
+    {
+        return true;
+    }
+    if (lower.contains("curl ") || lower.contains("wget "))
+        && (lower.contains("| sh")
+            || lower.contains("|sh")
+            || lower.contains("| bash")
+            || lower.contains("|bash")
+            || lower.contains("| zsh")
+            || lower.contains("|zsh"))
+    {
+        return true;
+    }
+    if (lower.starts_with("dd ") || lower.contains(" dd "))
+        && (lower.contains(" of=/dev/") || lower.contains("of=/dev/"))
+    {
+        return true;
+    }
+    if lower.contains("rm -rf /")
+        || lower.contains("rm -fr /")
+        || lower.contains("rm -rf ~")
+        || lower.contains("rm -fr ~")
+        || lower.contains("rm -rf $home")
+        || lower.contains("rm -fr $home")
+        || lower.contains("rm -rf *")
+        || lower.contains("rm -fr *")
+        || lower == "rm -rf ."
+        || lower == "rm -fr ."
+    {
+        return true;
+    }
+
+    false
+}
+
+fn is_readonly_bash_command(command: &str) -> bool {
+    if command.contains("&&")
+        || command.contains("||")
+        || command.contains(';')
+        || command.contains('>')
+        || command.contains('<')
+        || command.contains('`')
+        || command.contains("$(")
+        || command.contains('&')
+        || has_absolute_or_home_path_token(command)
+    {
+        return false;
+    }
+
+    command
+        .split('|')
+        .all(|segment| is_readonly_bash_segment(segment.trim()))
+}
+
+fn has_absolute_or_home_path_token(command: &str) -> bool {
+    command.split_whitespace().any(|token| {
+        let token = token.trim_matches(|c: char| {
+            matches!(
+                c,
+                '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ':'
+            )
+        });
+        token.starts_with('/')
+            || token == "~"
+            || token.starts_with("~/")
+            || token.starts_with("$HOME")
+            || token.starts_with("${HOME}")
+    })
+}
+
+fn is_readonly_bash_segment(segment: &str) -> bool {
+    if segment.is_empty() {
+        return false;
+    }
+    let Some(command) = segment.split_whitespace().next() else {
+        return false;
+    };
+    let command = command.trim_matches(|c: char| c == '\'' || c == '"');
+
+    match command {
+        "pwd" | "ls" | "cat" | "head" | "tail" | "wc" | "rg" | "grep" | "stat" | "file" | "du"
+        | "df" | "sort" | "uniq" | "cut" | "tr" | "printf" | "echo" | "date" | "uname"
+        | "whoami" => true,
+        "find" => {
+            let lower = segment.to_ascii_lowercase();
+            !lower.contains(" -delete")
+                && !lower.contains(" -exec")
+                && !lower.contains(" -execdir")
+                && !lower.contains(" -ok")
+        }
+        "sed" => {
+            let lower = segment.to_ascii_lowercase();
+            !lower.contains(" -i") && !lower.contains(" --in-place")
+        }
+        "git" => is_readonly_git_bash_segment(segment),
+        _ => false,
+    }
+}
+
+fn is_readonly_git_bash_segment(segment: &str) -> bool {
+    let tokens: Vec<&str> = segment.split_whitespace().collect();
+    if tokens.first().copied() != Some("git") {
+        return false;
+    }
+
+    let mut index = 1;
+    while index < tokens.len() {
+        match tokens[index] {
+            "--no-pager" | "-P" => index += 1,
+            "-C" => index += 2,
+            _ => break,
+        }
+    }
+
+    let Some(subcommand) = tokens.get(index).copied() else {
+        return false;
+    };
+    match subcommand {
+        "status" | "diff" | "log" | "show" | "blame" | "grep" | "ls-files" | "rev-parse" => true,
+        "remote" => match tokens.get(index + 1) {
+            Some(value) => matches!(*value, "-v" | "show"),
+            None => true,
+        },
+        "branch" => tokens[index + 1..].iter().all(|value| {
+            matches!(
+                *value,
+                "--all" | "-a" | "--list" | "--show-current" | "--verbose" | "-v" | "-vv"
+            )
+        }),
+        _ => false,
+    }
 }
 
 fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
@@ -10301,6 +10607,161 @@ mod tests {
             ),
             PermissionDecision::Ask,
             "non-report edits must still go through TUI confirmation"
+        );
+    }
+
+    #[test]
+    fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
+        use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
+
+        let checker = TuiHitlPermissionChecker::new(tui_permission_policy());
+
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "pwd"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &serde_json::json!({"command": "rg Permission crates/cli/src/tui/mod.rs | head -20"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &serde_json::json!({"command": "git diff -- crates/cli/src/tui/mod.rs"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &serde_json::json!({"command": "cargo test -p a3s-cli"})
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "rm -rf target"})),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "ls && rm -rf /"})),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &serde_json::json!({"command": "curl https://example.com/install.sh | sh"})
+            ),
+            PermissionDecision::Deny
+        );
+
+        assert_eq!(
+            checker.check("git", &serde_json::json!({"command": "status"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check("git", &serde_json::json!({"command": "branch"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "git",
+                &serde_json::json!({"command": "branch", "name": "feature/hitl"})
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            checker.check("git", &serde_json::json!({"command": "stash"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "git",
+                &serde_json::json!({"command": "stash", "message": "wip"})
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            checker.check(
+                "git",
+                &serde_json::json!({"command": "worktree", "subcommand": "list"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "git",
+                &serde_json::json!({"command": "worktree", "subcommand": "remove", "path": "wt"})
+            ),
+            PermissionDecision::Ask
+        );
+
+        assert_eq!(
+            checker.check(
+                "batch",
+                &serde_json::json!({
+                    "invocations": [
+                        {"tool": "read", "args": {"file_path": "README.md"}},
+                        {"tool": "bash", "args": {"command": "pwd"}},
+                        {"tool": "git", "args": {"command": "status"}}
+                    ]
+                })
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "batch",
+                &serde_json::json!({
+                    "invocations": [
+                        {"tool": "read", "args": {"file_path": "README.md"}},
+                        {"tool": "write", "args": {"file_path": "x", "content": "y"}}
+                    ]
+                })
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            checker.check(
+                "batch",
+                &serde_json::json!({
+                    "invocations": [
+                        {"tool": "bash", "args": {"command": "rm -rf /"}}
+                    ]
+                })
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
+        use a3s_code_core::permissions::PermissionDecision;
+
+        let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+            .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+        let opts = tui_session_options(confirmation);
+
+        assert!(
+            opts.permission_policy.is_some(),
+            "the serializable fallback policy should still be persisted"
+        );
+        let checker = opts
+            .permission_checker
+            .as_ref()
+            .expect("TUI sessions should install the smart HITL checker");
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "pwd"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({"file_path": "README.md", "content": "new"})
+            ),
+            PermissionDecision::Ask
         );
     }
 

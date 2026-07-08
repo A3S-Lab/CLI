@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.6] - 2026-07-08
+
+### Changed
+
+- Made the A3S Code TUI default HITL policy risk-aware: read-only inspection,
+  web research, safe git reads, and read-only batch calls can proceed without
+  prompting, while writes, state-changing commands, delegated work, and unknown
+  tools still require confirmation.
+
+### Fixed
+
+- Denied catastrophic shell patterns such as privilege escalation, destructive
+  root/home removals, device writes, and `curl|sh` installer pipelines before
+  they reach the approval prompt.
+- Stabilized the DeepResearch CLI local workflow e2e test fixture so child
+  evidence prompts no longer consume scripted report-synthesis responses.
+
 ## [0.7.5] - 2026-07-07
 
 ### Fixed

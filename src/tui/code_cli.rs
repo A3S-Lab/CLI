@@ -2179,8 +2179,12 @@ mod tests {
                     r#"{"intent":"GeneralPurpose","requires_planning":false,"goal":{"description":"DeepResearch child task","success_criteria":["evidence returned"]},"execution_plan":{"complexity":"Simple","steps":[],"required_tools":[]},"optimized_input":"DeepResearch child task"}"#,
                 );
             }
-            if last.contains("Deep-research track for:")
-                && !last.contains("DynamicWorkflowRuntime")
+            let trimmed = last.trim_start();
+            let lower = trimmed.to_ascii_lowercase();
+            if lower.contains("deep-research evidence track for:")
+                && !lower.contains("dynamicworkflowruntime output:")
+                && !lower.contains("dynamicworkflowruntime metadata:")
+                && !lower.contains("complete only the missing report work")
                 && !last.contains("DeepResearch verification layer")
             {
                 return text_response(
