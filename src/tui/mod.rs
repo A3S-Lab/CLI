@@ -505,6 +505,24 @@ fn ctx_warn_tier(pct: usize, warned: u8) -> (u8, Option<u8>) {
     (tier, (tier > warned).then_some(tier))
 }
 
+fn compact_error_display(kind: &str, error: &str) -> String {
+    const MAX_LEN: usize = 120;
+    let detail = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut message = if detail.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}: {detail}")
+    };
+    if message.len() > MAX_LEN {
+        message.truncate(MAX_LEN.saturating_sub(3));
+        while !message.is_char_boundary(message.len()) {
+            message.pop();
+        }
+        message.push_str("...");
+    }
+    message
+}
+
 fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option<(String, String)> {
     match name {
         "dynamic_workflow" => {
@@ -4368,7 +4386,7 @@ type SharedManifestRx =
 type StreamJoin = tokio::task::JoinHandle<()>;
 type HostToolAbort = tokio::task::AbortHandle;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum State {
     Idle,
     Streaming,
@@ -4478,8 +4496,8 @@ enum Msg {
     CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text.
     AutoReview(String),
-    /// `/compact` produced this conversation summary; reseed a fresh session.
-    Compacted(String),
+    /// `/compact` finished through the core compaction pipeline.
+    Compacted(Result<Option<Vec<a3s_code_core::Message>>, String>),
     /// Startup update check completed with the latest published version (if any).
     UpdateCheck(Option<String>),
 }
@@ -4977,6 +4995,49 @@ fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
         .unwrap_or(now)
 }
 
+fn should_run_inactivity_review(
+    state: State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    history_len: usize,
+    last_auto_review_history_len: usize,
+    auto_reviewed: bool,
+) -> bool {
+    !auto_reviewed
+        && state == State::Idle
+        && idle_for > Duration::from_secs(300)
+        && has_successful_llm_history
+        && history_len > last_auto_review_history_len
+}
+
+fn should_check_inactivity_review_history(
+    state: State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    auto_reviewed: bool,
+) -> bool {
+    !auto_reviewed
+        && state == State::Idle
+        && idle_for > Duration::from_secs(300)
+        && has_successful_llm_history
+}
+
+fn has_successful_llm_history(history: &[a3s_code_core::Message]) -> bool {
+    history
+        .iter()
+        .any(|m| m.role == "assistant" && !m.text().trim().is_empty())
+}
+
+fn compacted_summary_text(history: &[a3s_code_core::Message]) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .map(|message| message.text())
+        .find(|text| text.contains("Context Summary"))
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
 fn touch_workspace_file_path_for_manifest(
     manifest: &LocalWorkspaceManifest,
     workspace: &str,
@@ -5322,6 +5383,13 @@ struct App {
     last_activity: Instant,
     /// True once the idle conversation has been auto-reviewed (until next input).
     auto_reviewed: bool,
+    /// True once this session has completed at least one LLM turn that wrote
+    /// conversation history.
+    has_successful_llm_history: bool,
+    /// Conversation-history length at the last inactivity review. UI-only
+    /// transcript lines do not change this, so they cannot trigger another
+    /// review.
+    last_auto_review_history_len: usize,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
     /// Deep-research mode: a leading `?` turns the input into a deep-research
@@ -5414,8 +5482,6 @@ struct App {
     ultracode_synthesis_used: bool,
     /// Project instructions (CLAUDE.md/AGENT.md), injected into the system prompt.
     instructions: Option<String>,
-    /// Summary of earlier conversation after a manual `/compact` (reseed).
-    compact_summary: Option<String>,
     /// Shared in-memory workspace file manifest, refreshed by a background watcher.
     workspace_manifest: Arc<LocalWorkspaceManifest>,
     workspace_manifest_rx: SharedManifestRx,
@@ -6181,42 +6247,57 @@ impl Model for App {
                 }
                 // Inactivity auto-review: after a quiet stretch with a real
                 // conversation, summarise it once as a side note (Claude-style).
-                if !self.auto_reviewed
-                    && self.state == State::Idle
-                    && !self.messages.is_empty()
-                    && self.last_activity.elapsed() > Duration::from_secs(300)
-                {
-                    self.auto_reviewed = true;
-                    let agent = self.agent.clone();
-                    let workspace = self.cwd.clone();
+                if should_check_inactivity_review_history(
+                    self.state,
+                    self.last_activity.elapsed(),
+                    self.has_successful_llm_history,
+                    self.auto_reviewed,
+                ) {
                     let history = self.session.history();
-                    let review = cmd::cmd(move || async move {
-                        let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                            .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                        let prompt = "Briefly review this conversation so far: summarise the \
+                    if should_run_inactivity_review(
+                        self.state,
+                        self.last_activity.elapsed(),
+                        self.has_successful_llm_history,
+                        history.len(),
+                        self.last_auto_review_history_len,
+                        self.auto_reviewed,
+                    ) {
+                        self.auto_reviewed = true;
+                        self.last_auto_review_history_len = history.len();
+                        let agent = self.agent.clone();
+                        let workspace = self.cwd.clone();
+                        let review = cmd::cmd(move || async move {
+                            let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                                .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+                            let prompt = "Briefly review this conversation so far: summarise the \
                              key decisions and what's done, then list any open threads or next \
                              steps. Keep it to a few lines.";
-                        let mut answer = String::new();
-                        if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf)))
-                        {
-                            if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await {
-                                while let Some(ev) = rx.recv().await {
-                                    match ev {
-                                        AgentEvent::TextDelta { text } => answer.push_str(&text),
-                                        AgentEvent::End { text, .. } => {
-                                            if answer.trim().is_empty() {
-                                                answer = text;
+                            let mut answer = String::new();
+                            if let Ok(sess) =
+                                agent.session(workspace, Some(tui_session_options(conf)))
+                            {
+                                if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await
+                                {
+                                    while let Some(ev) = rx.recv().await {
+                                        match ev {
+                                            AgentEvent::TextDelta { text } => {
+                                                answer.push_str(&text)
                                             }
-                                            break;
+                                            AgentEvent::End { text, .. } => {
+                                                if answer.trim().is_empty() {
+                                                    answer = text;
+                                                }
+                                                break;
+                                            }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
-                        }
-                        Msg::AutoReview(answer)
-                    });
-                    return Some(cmd::batch(vec![banner_tick(), review]));
+                            Msg::AutoReview(answer)
+                        });
+                        return Some(cmd::batch(vec![banner_tick(), review]));
+                    }
                 }
                 // Keep the OS access token fresh: refresh proactively before it
                 // expires so the agent's $A3S_OS_TOKEN never goes stale mid-session.
@@ -6250,46 +6331,42 @@ impl Model for App {
                 }
             }
 
-            Msg::Compacted(summary) => {
+            Msg::Compacted(result) => {
                 self.compacting = None;
-                if summary.trim().is_empty() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render("  compaction failed (empty summary)"),
-                    );
-                    return None;
-                }
-                // Reseed a FRESH session (new id, no history) carrying just the
-                // summary in its system prompt — that's the actual compaction.
-                self.compact_summary = Some(summary.trim().to_string());
-                self.session_id = new_session_id();
-                let model = self.model.clone();
-                match self.rebuild_session(model.as_deref()) {
-                    Ok((s, _)) => {
-                        self.replace_session(s);
-                        self.messages.clear();
-                        self.output_tokens = 0;
-                        self.last_prompt_tokens = 0;
-                        self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
+                let compacted = match result {
+                    Ok(Some(compacted)) => compacted,
+                    Ok(None) => {
+                        self.push_line(
+                            &Style::new().fg(TN_GRAY).render("  nothing to compact yet"),
+                        );
+                        return None;
+                    }
+                    Err(message) => {
                         self.push_line(
                             &Style::new()
-                                .fg(TN_GREEN)
-                                .bold()
-                                .render("  ✦ context compacted — continuing from this summary:"),
+                                .fg(TN_RED)
+                                .render(&format!("  compaction failed: {message}")),
                         );
-                        self.push_line(&gutter(
-                            TN_CYAN,
-                            self.compact_summary.as_deref().unwrap_or(""),
-                        ));
-                        self.rebuild_viewport();
+                        return None;
                     }
-                    Err(e) => self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  compaction failed: {e}")),
-                    ),
+                };
+                self.messages.clear();
+                self.output_tokens = 0;
+                self.last_prompt_tokens = 0;
+                self.ctx_warned_tier = 0; // compacted window: re-arm fill warnings
+                self.has_successful_llm_history = has_successful_llm_history(&compacted);
+                self.last_auto_review_history_len = compacted.len();
+                self.auto_reviewed = false;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GREEN)
+                        .bold()
+                        .render("  ✦ context compacted — continuing from this summary:"),
+                );
+                if let Some(summary) = compacted_summary_text(&compacted) {
+                    self.push_line(&gutter(TN_CYAN, &summary));
                 }
+                self.rebuild_viewport();
             }
 
             Msg::UpdateCheck(latest) => {
@@ -8256,10 +8333,12 @@ impl App {
                 match self.rebuild_session(model.as_deref()) {
                     Ok((s, _)) => {
                         self.replace_session(s);
-                        self.compact_summary = None;
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
                         self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
+                        self.has_successful_llm_history = false;
+                        self.last_auto_review_history_len = 0;
+                        self.auto_reviewed = false;
                     }
                     Err(_) => self.session_id = prev_id,
                 }
@@ -8301,46 +8380,14 @@ impl App {
                     return None;
                 }
                 self.compacting = Some(Instant::now()); // progress bar + input lock
-                let agent = self.agent.clone();
-                let workspace = self.cwd.clone();
-                // Re-compacting must subsume the PRIOR summary — it lives in the
-                // system prompt, not in `history`, so without this everything
-                // before the last /compact would be dropped from the new summary.
-                let prompt = match &self.compact_summary {
-                    Some(prev) => format!(
-                        "An earlier part of this conversation was already condensed into this \
-                         summary:\n\n{prev}\n\nProduce a SINGLE updated summary that fully \
-                         incorporates the summary above AND the conversation history below, so a \
-                         fresh session can continue seamlessly: the goal, key decisions, \
-                         files/commands touched, current state, and the immediate next steps. Be \
-                         thorough but compact."
-                    ),
-                    None => "Summarize this conversation so a fresh session can continue \
-                         seamlessly: the goal, key decisions, files/commands touched, current \
-                         state, and the immediate next steps. Be thorough but compact."
-                        .to_string(),
-                };
+                let session = self.session.clone();
                 return Some(cmd::cmd(move || async move {
-                    let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                        .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                    let mut summary = String::new();
-                    if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf))) {
-                        if let Ok((mut rx, _j)) = sess.stream(&prompt, Some(&history)).await {
-                            while let Some(ev) = rx.recv().await {
-                                match ev {
-                                    AgentEvent::TextDelta { text } => summary.push_str(&text),
-                                    AgentEvent::End { text, .. } => {
-                                        if summary.trim().is_empty() {
-                                            summary = text;
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    Msg::Compacted(summary)
+                    Msg::Compacted(
+                        session
+                            .compact_history(None)
+                            .await
+                            .map_err(|e| compact_error_display("compact failed", &e.to_string())),
+                    )
                 }));
             }
             "/help" => {
@@ -9579,6 +9626,10 @@ impl App {
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
+                if has_successful_llm_history(&self.session.history()) {
+                    self.has_successful_llm_history = true;
+                    self.auto_reviewed = false;
+                }
                 // Count the turn, idle, then continue /loop or drain the queue.
                 // A captured sleep report's save runs alongside.
                 return match (sleep_save, self.complete_turn()) {
@@ -10746,6 +10797,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     // Seed the transcript with any resumed conversation (user + assistant text).
     let resumed = session.history();
+    let has_resumed_successful_llm_history = has_successful_llm_history(&resumed);
     let mut initial_messages: Vec<String> = resumed
         .iter()
         .filter_map(|m| {
@@ -10869,6 +10921,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         quit_armed: None,
         last_activity: Instant::now(),
         auto_reviewed: false,
+        has_successful_llm_history: has_resumed_successful_llm_history,
+        last_auto_review_history_len: 0,
         shell_mode: false,
         research_mode: false,
         review_pending: false,
@@ -10913,7 +10967,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         gradient_until: None,
         gradient_frame: 0,
         effort_anim: None,
-        compact_summary: None,
         btw: None,
         viewport: Viewport::new(width.saturating_sub(1), height.saturating_sub(7)),
         textarea: Textarea::new()
@@ -11312,6 +11365,121 @@ mod tests {
                 "duplicate_tool_call_threshold: Some({TUI_DUPLICATE_TOOL_CALL_THRESHOLD})"
             )),
             "{dbg}"
+        );
+    }
+
+    #[test]
+    fn inactivity_review_requires_successful_llm_history() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            false,
+            0,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_history_is_checked_only_after_cheap_guards() {
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            false,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Streaming,
+            Duration::from_secs(301),
+            true,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(300),
+            true,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            true,
+        ));
+        assert!(should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_runs_after_successful_history_is_idle() {
+        assert!(should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_waits_for_new_history_after_review() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            2,
+            false,
+        ));
+        assert!(should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            4,
+            2,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_keeps_existing_idle_boundary() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(300),
+            true,
+            2,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn successful_llm_history_requires_non_empty_assistant_message() {
+        assert!(!has_successful_llm_history(&[]));
+        assert!(!has_successful_llm_history(&[Message::user("hello")]));
+        assert!(!has_successful_llm_history(&[Message::assistant("   ")]));
+        assert!(has_successful_llm_history(&[
+            Message::user("hello"),
+            Message::assistant("hi"),
+        ]));
+    }
+
+    #[test]
+    fn compacted_summary_text_uses_core_summary_message() {
+        let history = vec![
+            Message::user("initial"),
+            Message::user("## Context Summary\n\nolder work condensed"),
+            Message::assistant("latest reply"),
+        ];
+
+        assert_eq!(
+            compacted_summary_text(&history).as_deref(),
+            Some("## Context Summary\n\nolder work condensed")
         );
     }
 
@@ -14956,6 +15124,25 @@ mod tests {
                 "{cmd} is registered but not mapped to a handler category"
             );
         }
+    }
+
+    #[test]
+    fn compact_error_display_is_classified_and_short() {
+        let long = "provider returned 400 bad request with a very long JSON body: ".to_string()
+            + &"x".repeat(240);
+
+        let display = compact_error_display("stream setup failed", &long);
+
+        assert!(display.starts_with("stream setup failed: provider returned 400"));
+        assert!(display.len() <= 120, "{display}");
+        assert!(display.ends_with("..."), "{display}");
+    }
+
+    #[test]
+    fn compact_error_display_collapses_whitespace() {
+        let display = compact_error_display("llm failed", "first line\n\nsecond\tline");
+
+        assert_eq!(display, "llm failed: first line second line");
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

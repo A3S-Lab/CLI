@@ -573,16 +573,13 @@ impl App {
                 .with_max_continuation_turns(budget.max_continuation_turns),
             &self.workspace_manifest,
         );
-        // Keep project instructions (CLAUDE.md) + any /compact summary across
-        // model/effort/compact rebuilds, injected into the system prompt. When
-        // signed in, also steer the model to the progressive-API skill for OS
-        // questions (else "OS" reads as the local operating system → `whoami`).
+        // Keep project instructions (CLAUDE.md) across model/effort rebuilds,
+        // injected into the system prompt. When signed in, also steer the model
+        // to the progressive-API skill for OS questions (else "OS" reads as the
+        // local operating system → `whoami`).
         let mut extra_parts: Vec<String> = Vec::new();
         if let Some(i) = &self.instructions {
             extra_parts.push(i.clone());
-        }
-        if let Some(s) = &self.compact_summary {
-            extra_parts.push(format!("# Earlier conversation (compacted)\n\n{s}"));
         }
         if let Some(s) = &self.os_session {
             extra_parts.push(os_platform_guide(&s.address));
