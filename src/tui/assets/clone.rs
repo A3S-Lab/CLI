@@ -15,6 +15,7 @@ pub(crate) async fn clone_asset_source(
     if !looks_like_git_url(&url) {
         return Err("expected a git URL".to_string());
     }
+    let root = absolute_clone_root(root)?;
     let name = source_name_from_git_url(&url);
     let path = unique_clone_path(&root.join(name));
     tokio::fs::create_dir_all(&root)
@@ -24,6 +25,7 @@ pub(crate) async fn clone_asset_source(
         .arg("clone")
         .arg(&url)
         .arg(&path)
+        .current_dir(&root)
         .output()
         .await
         .map_err(|e| format!("git clone failed to start: {e}"))?;
@@ -38,6 +40,15 @@ pub(crate) async fn clone_asset_source(
         ));
     }
     Ok(AssetCloneResult { family, url, path })
+}
+
+fn absolute_clone_root(root: std::path::PathBuf) -> Result<std::path::PathBuf, String> {
+    if root.is_absolute() {
+        return Ok(root);
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(&root))
+        .map_err(|e| format!("could not resolve clone root {}: {e}", root.display()))
 }
 
 fn looks_like_git_url(url: &str) -> bool {
