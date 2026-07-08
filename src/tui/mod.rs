@@ -11,6 +11,7 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -123,6 +124,7 @@ const DEEP_RESEARCH_SCRIPT_TIMEOUT_MS: u64 =
     DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS + DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS + 60 * 1000;
 const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
+const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
 
 /// Terminal-safe mapping of the DESIGN.md Geist/Vercel palette.
@@ -1561,12 +1563,15 @@ fn deep_research_report_contract() -> &'static str {
     "Report artifact contract (mandatory final step unless the user explicitly forbids files):\n\
      - Create a Markdown report at `.a3s/research/<slug>/report.md` and an HTML page at \
        `.a3s/research/<slug>/index.html`.\n\
-     - Before designing the HTML, check the workspace root for `DESIGN.md`; if it exists, read it \
-       and follow its UI/UX, layout, typography, palette, interaction, and copy constraints.\n\
-     - The standalone HTML page must be polished, responsive, and source-backed: no external build \
-       step, include the answer, citations/sources, evidence notes, confidence/caveats, and next actions.\n\
-     - Do not finish until both files exist and are non-empty. If tools are available, verify the \
-       files after writing them.\n\
+     - Use a clean standalone HTML layout without external build steps. Do not search the workspace \
+       for design/style files, run shell/glob/read calls solely for styling, or narrate artifact \
+       creation or verification checks in the final answer or report.\n\
+     - The standalone HTML page must be polished, responsive, and source-backed: include the answer, \
+       citations/sources, evidence notes, confidence/caveats, and next actions.\n\
+     - Write only the required report artifacts unless a tool error requires a targeted correction; \
+       the host validates file existence, source traceability, and HTML completeness.\n\
+     - The final answer must contain the research answer and the required marker only. Do not list \
+       directory creation, file write, shell, or verification steps.\n\
      - End the final answer with one plain line exactly like \
      `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`. Do not put this marker in a code fence. \
        The marker must point to `index.html`, not `report.md` or another HTML filename. \
@@ -1701,7 +1706,7 @@ fn deep_research_prompt_workflow_output(workflow_output: &str) -> String {
         Ok(value) => value,
         Err(_) => {
             if deep_research_output_has_internal_leak(workflow_output) {
-                return "Workflow output was non-JSON and contained internal tool/workflow logs; raw text withheld from synthesis.".to_string();
+                return "Research evidence was non-JSON and contained internal tool logs; raw text withheld from synthesis.".to_string();
             }
             return deep_research_truncate_chars(
                 &workflow_output
@@ -1722,7 +1727,7 @@ fn deep_research_tool_card_output(workflow_output: &str) -> String {
     workflow_evidence_summary(workflow_output)
         .unwrap_or_else(|| {
             if deep_research_output_has_internal_leak(workflow_output) {
-                "Dynamic workflow returned internal diagnostic logs; raw output withheld from the tool card.".to_string()
+                "Evidence collection returned internal diagnostic logs; raw output withheld from the tool card.".to_string()
             } else {
                 deep_research_truncate_chars(workflow_output, 1200)
             }
@@ -1745,10 +1750,13 @@ fn deep_research_sanitize_workflow_metadata(metadata: &serde_json::Value) -> ser
 fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json::Value {
     let mut digest = serde_json::Map::new();
     copy_json_field(&mut digest, value, "query");
-    copy_json_field(&mut digest, value, "mode");
+    digest.insert(
+        "collection_status".to_string(),
+        serde_json::Value::String(deep_research_collection_status(value).to_string()),
+    );
     if let Some(runtime_error) = value.get("runtime_error") {
         digest.insert(
-            "runtime_error".to_string(),
+            "collection_error".to_string(),
             serde_json::Value::String(deep_research_error_or_digest_text(runtime_error, 1000)),
         );
     }
@@ -1758,7 +1766,6 @@ fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json
             let mut compact = serde_json::Map::new();
             for key in [
                 "algorithm",
-                "tool",
                 "status",
                 "max_rounds",
                 "completed_rounds",
@@ -1784,7 +1791,7 @@ fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json
                 deep_research_compact_rounds(research.get("rounds")),
             );
             compact.insert(
-                "structured_evidence".to_string(),
+                "evidence_items".to_string(),
                 serde_json::Value::Array(deep_research_collect_structured_evidence(
                     research.get("runtime_output").unwrap_or(
                         research
@@ -1814,33 +1821,48 @@ fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json
     serde_json::Value::Object(digest)
 }
 
+fn deep_research_collection_status(value: &serde_json::Value) -> &'static str {
+    let mode = value
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if mode.contains("failed") || value.get("error").is_some() {
+        "failed"
+    } else if value.get("runtime_error").is_some() || mode.contains("fallback") {
+        "degraded"
+    } else {
+        "completed"
+    }
+}
+
 fn deep_research_workflow_metadata_digest(metadata: &serde_json::Value) -> serde_json::Value {
     let sanitized = deep_research_sanitize_workflow_metadata(metadata);
     let Some(workflow) = sanitized.get("dynamic_workflow") else {
-        return sanitized;
+        let evidence_items = deep_research_collect_structured_evidence(&sanitized);
+        return if evidence_items.is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "research_run": { "evidence_items": evidence_items } })
+        };
     };
     let mut dynamic = serde_json::Map::new();
-    copy_json_field(&mut dynamic, workflow, "run_id");
     copy_json_field(&mut dynamic, workflow, "status");
     copy_json_field(&mut dynamic, workflow, "last_sequence");
-    copy_json_field(&mut dynamic, workflow, "source_hash");
 
     if let Some(steps) = workflow
         .pointer("/snapshot/steps")
         .and_then(serde_json::Value::as_object)
     {
         let mut compact_steps = Vec::new();
-        for (step_id, step) in steps {
+        for (index, step) in steps.values().enumerate() {
             let mut compact = serde_json::Map::new();
             compact.insert(
-                "step_id".to_string(),
-                serde_json::Value::String(step_id.clone()),
+                "step".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(index + 1)),
             );
-            copy_json_field(&mut compact, step, "step_name");
             copy_json_field(&mut compact, step, "status");
             copy_json_field(&mut compact, step, "attempt");
             if let Some(output) = step.get("output") {
-                copy_json_field(&mut compact, output, "tool");
                 if let Some(metadata) = output.get("metadata") {
                     compact.insert(
                         "counts".to_string(),
@@ -1859,11 +1881,11 @@ fn deep_research_workflow_metadata_digest(metadata: &serde_json::Value) -> serde
         dynamic.insert("steps".to_string(), serde_json::Value::Array(compact_steps));
     }
     dynamic.insert(
-        "structured_evidence".to_string(),
+        "evidence_items".to_string(),
         serde_json::Value::Array(deep_research_collect_structured_evidence(&sanitized)),
     );
 
-    serde_json::json!({ "dynamic_workflow": dynamic })
+    serde_json::json!({ "research_run": dynamic })
 }
 
 fn deep_research_sanitize_parallel_task_values(value: &mut serde_json::Value) {
@@ -2480,7 +2502,7 @@ fn deep_research_synthesis_prompt(
          local HTML report opened by the `A3S_RESEARCH_VIEW` marker."
             .to_string()
     } else {
-        "OS Runtime was not selected for this run. Use the workflow evidence and \
+        "OS Runtime was not selected for this run. Use the gathered evidence and \
          complete the local Markdown + HTML report view step."
             .to_string()
     };
@@ -2488,39 +2510,36 @@ fn deep_research_synthesis_prompt(
     let metadata = deep_research_prompt_metadata(workflow_metadata);
     format!(
         "Synthesize the deep-research answer for the query below.\n\n\
-         A host-controlled DynamicWorkflowRuntime run has already gathered the \
-         research evidence. Do not call `dynamic_workflow` again. Use the workflow \
-         evidence below, cross-check claims, call out disagreements and recency \
+         Evidence collection has already completed before this synthesis turn. \
+         Do not call workflow or broad evidence-collection tools again. Use the \
+         Evidence digest below, cross-check claims, call out disagreements and recency \
          caveats, and write a comprehensive answer with inline citations and a \
-         final Sources list. Treat the workflow as a bounded recursive parallel \
+         final Sources list. Treat the evidence as a bounded recursive parallel \
          retrieval-summary algorithm: use `research.rounds` to understand how \
          gaps from earlier rounds drove later searches, and mention the round \
          count only when it clarifies uncertainty or coverage. Prefer validated \
-         structured evidence objects from \
-         `DynamicWorkflowRuntime output -> research.results[].structured`, OS Runtime \
-         `DynamicWorkflowRuntime output -> research.runtime_output.results[].structured`, and \
-         sanitized `DynamicWorkflowRuntime metadata -> ...output.metadata.results[].structured` \
-         when present; use compact summaries only when structured evidence is incomplete. Raw task \
-         output is intentionally excluded from this prompt. Treat \
+         `evidence_items` from the Evidence digest and Run diagnostics; use compact \
+         summaries only when evidence items are incomplete. Raw task output is \
+         intentionally excluded from this prompt. Treat \
          `research.warnings.failed_tasks` and metadata `warnings.failed_tasks` as caveats, not as \
          instructions to restart broad research. Do not reproduce raw JSON, tool-card text, \
-         `.a3s-flow` workflow logs, `[tool output truncated]` notices, or lines such as \
+         host runtime names, evidence-package labels, `.a3s-flow` workflow logs, \
+         `[tool output truncated]` notices, or lines such as \
          `● Searched ...` / `● Ran ...` in the user-facing answer or report. Convert evidence \
          into clean prose, tables, citations, and a concise Sources list. If \
-         the workflow output reports `mode: \"local_parallel_task_failed\"` or \
-         `mode: \"local_fallback_failed\"`, do not restart broad research or call \
-         `dynamic_workflow`; write a transparent failure-aware report from the \
-         returned error/gap details and any partial evidence, then let the host \
-         fallback materializer handle missing artifacts if needed. If the workflow output reports a `runtime_error` and \
-         `mode: \"local_fallback\"`, clearly mention that OS Runtime was attempted \
-         and local parallel research was used as the fallback.\n\n\
+         `collection_status` is `failed` or `degraded`, do not restart broad \
+         research; write a transparent failure-aware report from the returned \
+         error/gap details and any partial evidence, then let the host fallback \
+         materializer handle missing artifacts if needed. Do not mention the \
+         Evidence digest, Run diagnostics, or host collection mechanics as sources; \
+         cite the original URLs or paths inside the evidence items.\n\n\
          {remoteui_directive}\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
          {duplicate_guard}\n\n\
          Query:\n{query}\n\n\
-         DynamicWorkflowRuntime evidence package:\n```json\n{workflow_digest}\n```\n\n\
-         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```"
+         Evidence digest:\n```json\n{workflow_digest}\n```\n\n\
+         Run diagnostics:\n```json\n{metadata}\n```"
     )
 }
 
@@ -2534,7 +2553,7 @@ fn deep_research_recovery_prompt(
     let report_target = deep_research_report_target_note(query);
     let duplicate_guard = deep_research_duplicate_tool_guard();
     let recovery_path = if os_runtime {
-        "The host-controlled workflow selected OS Runtime and failed before usable \
+        "The host selected OS Runtime and failed before usable \
          evidence was gathered. Recover with local web_search/web_fetch or the \
          signed-in `runtime` tool only if it is clearly available and useful; if \
          the runtime worker or endpoint is unavailable, explain the failure and \
@@ -2553,11 +2572,12 @@ fn deep_research_recovery_prompt(
     };
     format!(
         "Recover and complete the deep-research task for the query below.\n\n\
-         The host-controlled DynamicWorkflowRuntime preflight failed. Do not call \
-         `dynamic_workflow` again in this recovery turn. {recovery_path}\n\n\
+         The host evidence preflight failed before usable synthesis evidence was \
+         gathered. Do not call workflow or broad evidence-collection tools again \
+         unless the recovery path explicitly says to use local research tools. {recovery_path}\n\n\
          Query:\n{query}\n\n\
-         DynamicWorkflowRuntime error:\n```text\n{workflow_error}\n```\n\n\
-         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```\n\n\
+         Evidence collection error:\n```text\n{workflow_error}\n```\n\n\
+         Run diagnostics:\n```json\n{metadata}\n```\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
          {duplicate_guard}\n\n\
@@ -2581,8 +2601,8 @@ fn deep_research_repair_prompt(
          useful OS Runtime evidence, but the required user-facing deliverable is \
          still the local Markdown + HTML report artifact pair."
     } else {
-        "OS Runtime was not selected. Use the local workflow evidence already \
-         gathered by the host-controlled workflow."
+        "OS Runtime was not selected. Use the local evidence already gathered by \
+         the host."
     };
     let metadata = deep_research_prompt_metadata(workflow_metadata);
     let workflow_digest = deep_research_prompt_workflow_output(workflow_output);
@@ -2594,18 +2614,22 @@ fn deep_research_repair_prompt(
     format!(
         "Repair the DeepResearch report artifact step for the query below.\n\n\
          The previous synthesis did not produce a valid completed report marker \
-         and artifact pair. Do not call `dynamic_workflow` again, do not restart \
-         broad research, and do not write ordinary workspace files. Use only the \
-         gathered evidence and prior synthesis below to create or correct the \
+         and artifact pair. Do not call workflow or broad evidence-collection \
+         tools again, do not restart broad research, and do not write ordinary \
+         workspace files. Use only the gathered evidence and prior synthesis below \
+         to create or correct the \
          required report artifacts under `.a3s/research/<slug>/`. Remove any raw JSON, \
-         tool-card text, `.a3s-flow` workflow logs, `[tool output truncated]` notices, \
+         tool-card text, host runtime names, evidence-package labels, `.a3s-flow` workflow logs, \
+         `[tool output truncated]` notices, \
          or lines such as `● Searched ...` / `● Ran ...`; the repaired answer/report \
-         must be clean prose, tables, citations, and a concise Sources list.\n\n\
+         must be clean prose, tables, citations, and a concise Sources list. Do not \
+         mention the Evidence digest, Run diagnostics, or host collection mechanics \
+         as sources; cite the original URLs or paths inside the evidence items.\n\n\
          {runtime_note}\n\n\
          Query:\n{query}\n\n\
          Previous synthesis text:\n```text\n{prior}\n```\n\n\
-         DynamicWorkflowRuntime evidence package:\n```json\n{workflow_digest}\n```\n\n\
-         DynamicWorkflowRuntime diagnostic package:\n```json\n{metadata}\n```\n\n\
+         Evidence digest:\n```json\n{workflow_digest}\n```\n\n\
+         Run diagnostics:\n```json\n{metadata}\n```\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
          {duplicate_guard}\n\n\
@@ -2685,12 +2709,20 @@ fn research_report_view_spec(output: &str, workspace: &Path) -> Option<remote_ui
     remote_ui::local_file_view(&artifacts.html).ok()
 }
 
-fn research_report_view_spec_for_query(
+fn deep_research_report_view_spec_for_query(
     output: &str,
     workspace: &Path,
     query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
 ) -> Option<remote_ui::ViewSpec> {
-    let artifacts = research_report_artifacts_from_output_for_query(output, workspace, query)?;
+    let artifacts = deep_research_report_artifacts_from_output_for_query(
+        output,
+        workspace,
+        query,
+        workflow_output,
+        workflow_metadata,
+    )?;
     remote_ui::local_file_view(&artifacts.html).ok()
 }
 
@@ -2700,12 +2732,21 @@ fn deep_research_report_is_missing(
     query: Option<&str>,
     review_text: &str,
     workspace: &Path,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
 ) -> bool {
     if !deep_research_active || report_already_ready {
         return false;
     }
     match query {
-        Some(query) => research_report_view_spec_for_query(review_text, workspace, query).is_none(),
+        Some(query) => deep_research_report_view_spec_for_query(
+            review_text,
+            workspace,
+            query,
+            workflow_output,
+            workflow_metadata,
+        )
+        .is_none(),
         None => research_report_view_spec(review_text, workspace).is_none(),
     }
 }
@@ -2735,6 +2776,7 @@ fn arm_deep_research_report_repair(loop_remaining: &mut usize, repair_used: &mut
 
 #[derive(Debug)]
 enum DeepResearchReportRecovery {
+    CompletedMaterialized { artifacts: ResearchReportArtifacts },
     RepairPassArmed,
     FallbackMaterialized { artifacts: ResearchReportArtifacts },
     Missing(String),
@@ -2745,18 +2787,29 @@ fn recover_missing_deep_research_report(
     query: Option<&str>,
     review_text: &str,
     workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
     loop_remaining: &mut usize,
     repair_used: &mut bool,
 ) -> DeepResearchReportRecovery {
-    if arm_deep_research_report_repair(loop_remaining, repair_used) {
-        return DeepResearchReportRecovery::RepairPassArmed;
-    }
-
     let Some(query) = query else {
         return DeepResearchReportRecovery::Missing(
             "DeepResearch ended without a valid local HTML report marker".to_string(),
         );
     };
+
+    if let Some(artifacts) = materialize_deep_research_completed_report_from_markdown(
+        workspace,
+        query,
+        workflow_output,
+        workflow_metadata,
+    ) {
+        *loop_remaining = 0;
+        return DeepResearchReportRecovery::CompletedMaterialized { artifacts };
+    }
+
+    if arm_deep_research_report_repair(loop_remaining, repair_used) {
+        return DeepResearchReportRecovery::RepairPassArmed;
+    }
 
     match materialize_deep_research_fallback_draft(workspace, query, review_text, workflow_output) {
         Ok(artifacts) => {
@@ -2783,6 +2836,185 @@ fn research_report_artifacts_from_output_for_query(
 ) -> Option<ResearchReportArtifacts> {
     let expected_slug = deep_research_report_slug(query);
     research_report_artifacts_from_output_with_slug(output, workspace, Some(&expected_slug))
+}
+
+fn deep_research_report_artifacts_from_output_for_query(
+    output: &str,
+    workspace: &Path,
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Option<ResearchReportArtifacts> {
+    let artifacts = research_report_artifacts_from_output_for_query(output, workspace, query)?;
+    deep_research_report_sources_trace_workflow(&artifacts, workflow_output, workflow_metadata)
+        .then_some(artifacts)
+}
+
+fn clean_deep_research_final_text_from_artifacts(
+    artifacts: &ResearchReportArtifacts,
+    workspace: &Path,
+) -> Option<String> {
+    let markdown = read_small_utf8_file(&artifacts.markdown)?;
+    if deep_research_output_has_internal_leak(&markdown) {
+        return None;
+    }
+    let root = workspace.canonicalize().ok()?;
+    let rel_html = artifacts.html.strip_prefix(&root).ok()?.to_string_lossy();
+    let rel_html = rel_html.replace('\\', "/");
+    let body = markdown.trim();
+    if body.is_empty() {
+        return None;
+    }
+    Some(format!("{body}\n\n{RESEARCH_VIEW_MARKER} {rel_html}"))
+}
+
+fn materialize_deep_research_completed_report_from_markdown(
+    workspace: &Path,
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Option<ResearchReportArtifacts> {
+    let root = workspace.canonicalize().ok()?;
+    let slug = deep_research_report_slug(query);
+    let report_dir = root.join(".a3s").join("research").join(&slug);
+    let markdown_path = report_dir.join("report.md");
+    let markdown = read_small_utf8_file(&markdown_path)?;
+    if looks_like_deep_research_fallback_draft(&markdown)
+        || is_deep_research_model_failure_text(&markdown)
+        || deep_research_output_has_internal_leak(&markdown)
+        || visible_char_count(markdown.trim()) < 120
+    {
+        return None;
+    }
+
+    std::fs::create_dir_all(&report_dir).ok()?;
+    let html = deep_research_completed_report_html(query, &markdown);
+    std::fs::write(report_dir.join("index.html"), html).ok()?;
+
+    let rel_html = format!(".a3s/research/{slug}/index.html");
+    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
+    deep_research_report_sources_trace_workflow(&artifacts, workflow_output, workflow_metadata)
+        .then_some(artifacts)
+}
+
+fn deep_research_completed_report_html(query: &str, markdown: &str) -> String {
+    let title = deep_research_markdown_report_title(markdown, query);
+    let body = deep_research_markdown_to_html_fragment(markdown);
+    format!(
+        "<!doctype html>\n\
+         <html lang=\"en\">\n\
+         <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+         <title>{title}</title>\
+         <style>\
+         :root{{color-scheme:light dark}}\
+         body{{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.62;background:#f8fafc;color:#111827}}\
+         main{{max-width:960px;margin:0 auto;padding:36px 22px 56px}}\
+         article{{background:#fff;border:1px solid #d1d5db;border-radius:8px;padding:28px}}\
+         h1{{font-size:2rem;line-height:1.15;margin:0 0 18px}}\
+         h2{{font-size:1.25rem;margin:28px 0 10px;border-top:1px solid #e5e7eb;padding-top:18px}}\
+         h3{{font-size:1.05rem;margin:22px 0 8px}}\
+         p,li{{font-size:1rem}}\
+         a{{color:#0f766e}}\
+         code{{background:#f3f4f6;border-radius:4px;padding:0 4px}}\
+         pre{{white-space:pre-wrap;word-break:break-word;background:#111827;color:#f9fafb;border-radius:6px;padding:14px;overflow:auto}}\
+         ul{{padding-left:22px}}\
+         @media (prefers-color-scheme:dark){{body{{background:#0b0f14;color:#e5e7eb}}article{{background:#111827;border-color:#374151}}h2{{border-color:#374151}}code{{background:#1f2937}}a{{color:#5eead4}}}}\
+         </style></head>\n\
+         <body><main><article>{body}</article></main></body></html>\n",
+        title = html_escape(&title),
+        body = body,
+    )
+}
+
+fn deep_research_markdown_report_title(markdown: &str, query: &str) -> String {
+    markdown
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("# "))
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or(query)
+        .to_string()
+}
+
+fn deep_research_markdown_to_html_fragment(markdown: &str) -> String {
+    let mut html = String::new();
+    let mut in_code = false;
+    let mut in_list = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_list {
+                html.push_str("</ul>");
+                in_list = false;
+            }
+            if in_code {
+                html.push_str("</code></pre>");
+            } else {
+                html.push_str("<pre><code>");
+            }
+            in_code = !in_code;
+            continue;
+        }
+
+        if in_code {
+            html.push_str(&html_escape(line));
+            html.push('\n');
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if in_list {
+                html.push_str("</ul>");
+                in_list = false;
+            }
+            continue;
+        }
+
+        if let Some((level, text)) = markdown_heading(trimmed) {
+            if in_list {
+                html.push_str("</ul>");
+                in_list = false;
+            }
+            html.push_str(&format!("<h{level}>{}</h{level}>", html_escape(text)));
+            continue;
+        }
+
+        if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            if !in_list {
+                html.push_str("<ul>");
+                in_list = true;
+            }
+            html.push_str(&format!("<li>{}</li>", html_escape(item.trim())));
+            continue;
+        }
+
+        if in_list {
+            html.push_str("</ul>");
+            in_list = false;
+        }
+        html.push_str(&format!("<p>{}</p>", html_escape(trimmed)));
+    }
+
+    if in_code {
+        html.push_str("</code></pre>");
+    }
+    if in_list {
+        html.push_str("</ul>");
+    }
+    html
+}
+
+fn markdown_heading(line: &str) -> Option<(usize, &str)> {
+    let hashes = line.chars().take_while(|ch| *ch == '#').count();
+    if !(1..=3).contains(&hashes) {
+        return None;
+    }
+    let text = line.get(hashes..)?.strip_prefix(' ')?.trim();
+    (!text.is_empty()).then_some((hashes, text))
 }
 
 fn research_report_artifacts_from_output_with_slug(
@@ -2892,6 +3124,74 @@ fn completed_research_report_artifacts(artifacts: &ResearchReportArtifacts) -> b
         && !deep_research_output_has_internal_leak(&html)
         && complete_html_document(&html)
         && has_research_report_substance(&markdown, &html)
+}
+
+fn deep_research_report_sources_trace_workflow(
+    artifacts: &ResearchReportArtifacts,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let anchors = deep_research_workflow_source_anchors(workflow_output, workflow_metadata);
+    if anchors.is_empty() {
+        return true;
+    }
+
+    let markdown = read_small_utf8_file(&artifacts.markdown);
+    let html = read_small_utf8_file(&artifacts.html);
+    let (Some(markdown), Some(html)) = (markdown, html) else {
+        return false;
+    };
+    let report_text =
+        normalize_research_source_text(&format!("{}\n{}", markdown, strip_html_tags(&html)));
+    anchors
+        .iter()
+        .any(|anchor| report_text_contains_source_anchor(&report_text, anchor))
+}
+
+fn deep_research_workflow_source_anchors(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Vec<String> {
+    let mut anchors = Vec::new();
+    let mut seen = HashSet::new();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(workflow_output) {
+        let digest = deep_research_workflow_output_digest(&value);
+        collect_deep_research_source_anchors(&digest, &mut anchors, &mut seen);
+    }
+    if let Some(metadata) = workflow_metadata {
+        let digest = deep_research_workflow_metadata_digest(metadata);
+        collect_deep_research_source_anchors(&digest, &mut anchors, &mut seen);
+    }
+    anchors
+}
+
+fn collect_deep_research_source_anchors(
+    value: &serde_json::Value,
+    anchors: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if key == "url_or_path" {
+                    if let Some(anchor) = value
+                        .as_str()
+                        .and_then(normalize_research_source_anchor)
+                        .filter(|anchor| seen.insert(anchor.clone()))
+                    {
+                        anchors.push(anchor);
+                    }
+                }
+                collect_deep_research_source_anchors(value, anchors, seen);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_deep_research_source_anchors(item, anchors, seen);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn read_small_utf8_file(path: &Path) -> Option<String> {
@@ -3006,7 +3306,40 @@ fn deep_research_output_has_internal_leak(text: &str) -> bool {
         "dynamicworkflowruntime metadata:",
         "dynamicworkflowruntime evidence package:",
         "dynamicworkflowruntime diagnostic package:",
+        "dynamicworkflowruntime structured evidence",
+        "provided dynamicworkflowruntime",
+        "evidence digest:",
+        "run diagnostics:",
+        "provided evidence digest",
+        "provided run diagnostics",
+        "workflow runtime/evidence-package",
         "workflow evidence\n\n```text",
+        "created the target report directory",
+        "created the report directory",
+        "created `.a3s/research",
+        "created .a3s/research",
+        "created the markdown report",
+        "created the standalone",
+        "markdown report written",
+        "markdown report written to",
+        "wrote the markdown report",
+        "wrote the standalone",
+        "wrote the html report",
+        "wrote the standalone responsive html artifact",
+        "verifying the two required report artifacts",
+        "targeted verification passed",
+        "report.md exists",
+        "index.html exists",
+        "written and verified successfully",
+        "batch verification was unavailable",
+        "file-read access is blocked",
+        "file-read tooling is currently blocked",
+        "unable to verify the two required files",
+        "targeted verification could not be performed",
+        "verification could not be performed",
+        "remaining unverified contract items",
+        "step 2 complete",
+        "step 3 complete",
         "● searched",
         "● ran",
         "● read ",
@@ -3065,6 +3398,48 @@ fn has_report_source_anchor(text: &str) -> bool {
             ".pdf",
         ],
     )
+}
+
+fn normalize_research_source_anchor(value: &str) -> Option<String> {
+    let normalized = normalize_research_source_text(value)
+        .trim_matches(|ch: char| {
+            matches!(
+                ch,
+                '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}'
+            )
+        })
+        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')' | ']'))
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    if normalized.len() < 4
+        || normalized.starts_with("a3s://")
+        || normalized.contains(".a3s-flow/dynamic-workflows")
+        || deep_research_output_has_internal_leak(&normalized)
+    {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn normalize_research_source_text(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn report_text_contains_source_anchor(report_text: &str, anchor: &str) -> bool {
+    if report_text.contains(anchor) {
+        return true;
+    }
+    anchor
+        .strip_suffix('/')
+        .filter(|value| value.len() >= 4)
+        .is_some_and(|value| report_text.contains(value))
 }
 
 fn visible_char_count(text: &str) -> usize {
@@ -3221,8 +3596,8 @@ fn deep_research_fallback_evidence(workflow_output: &str) -> String {
         "{}".to_string()
     } else if deep_research_output_has_internal_leak(&evidence) {
         serde_json::json!({
-            "status": "internal_workflow_logs_withheld",
-            "note": "A3S Code captured workflow diagnostics, but raw tool/workflow logs are not written into DeepResearch fallback artifacts."
+            "status": "internal_logs_withheld",
+            "note": "A3S Code captured diagnostics, but raw tool logs are not written into DeepResearch fallback artifacts."
         })
         .to_string()
     } else {
@@ -3263,10 +3638,7 @@ fn deep_research_fallback_artifact_note(answer_text: &str) -> String {
 
 fn workflow_evidence_summary(workflow_output: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(workflow_output).ok()?;
-    let mode = value
-        .get("mode")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("workflow");
+    let status = deep_research_collection_status(&value);
     let metadata = value
         .pointer("/research/metadata")
         .or_else(|| value.pointer("/metadata"));
@@ -3286,7 +3658,7 @@ fn workflow_evidence_summary(workflow_output: &str) -> Option<String> {
         (None, None) => "delegated research evidence".to_string(),
     };
     let mut summary = format!(
-        "The host workflow completed in `{mode}` mode and captured {count_text}. A sanitized evidence digest is preserved below."
+        "The evidence collection phase ended with {status} status and captured {count_text}. A sanitized evidence digest is preserved below."
     );
     if workflow_output.contains("README.md") {
         summary.push_str(" The evidence includes `README.md` as a cited local source.");
@@ -3845,11 +4217,21 @@ fn with_recent_workspace_context(
 }
 
 fn tui_session_options(confirmation: a3s_code_core::hitl::ConfirmationPolicy) -> SessionOptions {
+    tui_session_options_with_gate(confirmation, DeepResearchReportToolGate::default())
+}
+
+fn tui_session_options_with_gate(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+) -> SessionOptions {
     let permission_policy = tui_permission_policy();
     SessionOptions::new()
         .with_confirmation_policy(confirmation)
         .with_permission_policy(permission_policy.clone())
-        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(permission_policy)))
+        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(
+            permission_policy,
+            deep_research_report_tool_gate,
+        )))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
 }
@@ -3888,14 +4270,36 @@ fn tui_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
         ])
 }
 
+#[derive(Clone, Default)]
+struct DeepResearchReportToolGate {
+    report_only: Arc<AtomicBool>,
+}
+
+impl DeepResearchReportToolGate {
+    fn set_report_only(&self, enabled: bool) {
+        self.report_only.store(enabled, Ordering::SeqCst);
+    }
+
+    fn report_only(&self) -> bool {
+        self.report_only.load(Ordering::SeqCst)
+    }
+}
+
 #[derive(Clone)]
 struct TuiHitlPermissionChecker {
     base: a3s_code_core::permissions::PermissionPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
 }
 
 impl TuiHitlPermissionChecker {
-    fn new(base: a3s_code_core::permissions::PermissionPolicy) -> Self {
-        Self { base }
+    fn new(
+        base: a3s_code_core::permissions::PermissionPolicy,
+        deep_research_report_tool_gate: DeepResearchReportToolGate,
+    ) -> Self {
+        Self {
+            base,
+            deep_research_report_tool_gate,
+        }
     }
 
     fn check_batch(
@@ -3949,6 +4353,10 @@ impl TuiHitlPermissionChecker {
         tool_name: &str,
         args: &serde_json::Value,
     ) -> a3s_code_core::permissions::PermissionDecision {
+        if self.deep_research_report_tool_gate.report_only() {
+            return deep_research_report_phase_tool_permission(tool_name, args);
+        }
+
         let base = self.base.check(tool_name, args);
         if matches!(base, a3s_code_core::permissions::PermissionDecision::Deny) {
             return base;
@@ -3961,6 +4369,30 @@ impl TuiHitlPermissionChecker {
             _ => base,
         }
     }
+}
+
+fn deep_research_report_phase_tool_permission(
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> a3s_code_core::permissions::PermissionDecision {
+    match tool_name.to_ascii_lowercase().as_str() {
+        "write" | "edit" if is_deep_research_report_artifact_tool_args(args) => {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        _ => a3s_code_core::permissions::PermissionDecision::Deny,
+    }
+}
+
+fn is_deep_research_report_artifact_tool_args(args: &serde_json::Value) -> bool {
+    args.get("file_path")
+        .or_else(|| args.get("path"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(is_deep_research_report_artifact_path)
+}
+
+fn is_deep_research_report_artifact_path(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized.starts_with(".a3s/research/") || normalized.contains("/.a3s/research/")
 }
 
 impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker {
@@ -4339,8 +4771,8 @@ impl DeepResearchLoop {
             "DeepResearch verification layer {next_layer}/{} for:\n{}\n\n\
              Check the existing answer and `.a3s/research/<slug>/index.html` report. \
              Do not restart broad research or call `dynamic_workflow` again unless a \
-             critical factual gap remains. If the answer, citations, HTML report, \
-             DESIGN.md alignment (when `DESIGN.md` exists), and `{RESEARCH_VIEW_MARKER}` \
+             critical factual gap remains. If the answer, citations, source traceability, HTML report, \
+             and `{RESEARCH_VIEW_MARKER}` \
              marker are already complete, reply exactly DONE. Otherwise make only the \
              missing correction, update the report files, and finish with \
              `{RESEARCH_VIEW_MARKER} .a3s/research/<slug>/index.html`.\n\n\
@@ -4461,6 +4893,7 @@ struct App {
     agent: Arc<Agent>,
     store: Arc<dyn a3s_code_core::store::SessionStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
     /// This session's id (for model-switch resume + the exit hint).
     session_id: String,
     /// "provider/model" ids from the config, for the /model picker.
@@ -7842,6 +8275,7 @@ impl App {
         self.deep_research_report_ready = false;
         self.pending_deep_research_report_repair_prompt = None;
         self.pending_deep_research_report_view = None;
+        self.deep_research_report_tool_gate.set_report_only(false);
         if let Some(expectation) = runtime_expectation {
             self.runtime_expectation = Some(expectation);
         }
@@ -7976,6 +8410,7 @@ impl App {
             );
             deep_research_recovery_prompt(&query, os_runtime, &output, metadata.as_ref())
         };
+        self.deep_research_report_tool_gate.set_report_only(true);
         self.start_stream_inner_with_runtime(
             prompt,
             format!("🔬 synthesize {query}"),
@@ -8342,6 +8777,7 @@ impl App {
         self.deep_research_report_ready = false;
         self.pending_deep_research_report_repair_prompt = None;
         self.pending_deep_research_report_view = None;
+        self.deep_research_report_tool_gate.set_report_only(false);
         if let Some(prev) = self.autonomy_restore.take() {
             self.mode = prev;
             self.push_line(
@@ -8360,6 +8796,11 @@ impl App {
                 self.mark_assistant_text(&text);
                 self.got_delta = true;
                 self.turn_text.push_str(&text);
+                if self.deep_research_loop.is_some()
+                    && self.deep_research_report_tool_gate.report_only()
+                {
+                    return None;
+                }
                 self.streaming.push(&text);
                 self.update_viewport_with_stream();
             }
@@ -8612,7 +9053,7 @@ impl App {
             AgentEvent::End {
                 text, usage, meta, ..
             } => {
-                let review_text = if text.is_empty() {
+                let mut review_text = if text.is_empty() {
                     self.turn_text.clone()
                 } else {
                     text.clone()
@@ -8620,26 +9061,69 @@ impl App {
                 let deep_research_query = self
                     .deep_research_loop
                     .as_ref()
-                    .map(|state| state.query.as_str());
+                    .map(|state| state.query.clone());
+                let deep_research_buffered_output = self.deep_research_loop.is_some()
+                    && self.deep_research_report_tool_gate.report_only();
+                let workflow_output_for_validation = self
+                    .deep_research_workflow_output
+                    .clone()
+                    .unwrap_or_default();
+                let workflow_metadata_for_validation = self.deep_research_workflow_metadata.clone();
+                let deep_research_artifacts = deep_research_query.as_deref().and_then(|query| {
+                    deep_research_report_artifacts_from_output_for_query(
+                        &review_text,
+                        Path::new(&self.cwd),
+                        query,
+                        &workflow_output_for_validation,
+                        workflow_metadata_for_validation.as_ref(),
+                    )
+                });
+                if self.deep_research_loop.is_some()
+                    && deep_research_output_has_internal_leak(&review_text)
+                {
+                    if let Some(clean_text) =
+                        deep_research_artifacts.as_ref().and_then(|artifacts| {
+                            clean_deep_research_final_text_from_artifacts(
+                                artifacts,
+                                Path::new(&self.cwd),
+                            )
+                        })
+                    {
+                        review_text = clean_text;
+                        self.streaming.clear();
+                        self.turn_text.clear();
+                        self.streaming.push(&review_text);
+                        self.turn_text.push_str(&review_text);
+                        self.mark_assistant_text(&review_text);
+                    }
+                }
                 let deep_research_dirty_output = self.deep_research_loop.is_some()
                     && deep_research_output_has_internal_leak(&review_text);
+                if deep_research_buffered_output
+                    && !deep_research_dirty_output
+                    && !review_text.trim().is_empty()
+                {
+                    self.streaming.clear();
+                    self.turn_text.clear();
+                    self.streaming.push(&review_text);
+                    self.turn_text.push_str(&review_text);
+                    self.mark_assistant_text(&review_text);
+                }
                 let deep_research_missing_report = deep_research_report_is_missing(
                     self.deep_research_loop.is_some(),
                     self.deep_research_report_ready,
-                    deep_research_query,
+                    deep_research_query.as_deref(),
                     &review_text,
                     Path::new(&self.cwd),
+                    &workflow_output_for_validation,
+                    workflow_metadata_for_validation.as_ref(),
                 ) || deep_research_dirty_output;
                 // /loop: stop once the agent signals completion (the word DONE).
                 // Not during /sleep: its completion signal is the a3s-sleep
                 // report itself, and consolidation narration ("what was done
                 // today") would false-trigger this and end the run early.
                 if self.loop_remaining > 0 && !self.sleep_pending && !deep_research_missing_report {
-                    let r = if text.is_empty() {
-                        self.streaming.raw_content().to_string()
-                    } else {
-                        text.clone()
-                    };
+                    let r = review_text.clone();
                     if r.split(|c: char| !c.is_alphabetic())
                         .any(|w| w.eq_ignore_ascii_case("done"))
                     {
@@ -8690,9 +9174,20 @@ impl App {
                         fallback_query.as_deref(),
                         &review_text,
                         &workflow_output,
+                        workflow_metadata.as_ref(),
                         &mut self.loop_remaining,
                         &mut self.deep_research_report_repair_used,
                     ) {
+                        DeepResearchReportRecovery::CompletedMaterialized { artifacts } => {
+                            if let Ok(spec) = remote_ui::local_file_view(&artifacts.html) {
+                                self.deep_research_report_ready = true;
+                                self.pending_deep_research_report_view = Some(spec);
+                            }
+                            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                                "  ⚠ DeepResearch HTML report was missing; rebuilt validated view at {}",
+                                artifacts.html.display()
+                            )));
+                        }
                         DeepResearchReportRecovery::RepairPassArmed => {
                             self.pending_deep_research_report_repair_prompt =
                                 deep_research_report_repair_prompt_from_state(
@@ -8950,7 +9445,17 @@ impl App {
         let spec = self
             .deep_research_loop
             .as_ref()
-            .and_then(|state| research_report_view_spec_for_query(output, workspace, &state.query))
+            .and_then(|state| {
+                deep_research_report_view_spec_for_query(
+                    output,
+                    workspace,
+                    &state.query,
+                    self.deep_research_workflow_output
+                        .as_deref()
+                        .unwrap_or_default(),
+                    self.deep_research_workflow_metadata.as_ref(),
+                )
+            })
             .or_else(|| {
                 self.deep_research_loop
                     .is_none()
@@ -9323,7 +9828,11 @@ fn approval_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
 
 /// Headless probe of the same `session.stream()` / `AgentEvent` path the TUI
 /// uses, auto-approving tool calls. Drives the integration without a TTY.
-async fn run_smoke(session: Arc<AgentSession>, os_available: bool) -> anyhow::Result<()> {
+async fn run_smoke(
+    session: Arc<AgentSession>,
+    os_available: bool,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+) -> anyhow::Result<()> {
     let prompt = std::env::var("A3S_CODE_TUI_PROMPT")
         .unwrap_or_else(|_| "Reply with exactly one short sentence: what is 2 + 2?".to_string());
     if let Some(query) = prompt.trim().strip_prefix('?') {
@@ -9331,7 +9840,13 @@ async fn run_smoke(session: Arc<AgentSession>, os_available: bool) -> anyhow::Re
         if query.is_empty() {
             anyhow::bail!("A3S_CODE_TUI_PROMPT starts with `?` but has no DeepResearch query");
         }
-        return run_smoke_deep_research(session, query, os_available).await;
+        return run_smoke_deep_research(
+            session,
+            query,
+            os_available,
+            deep_research_report_tool_gate,
+        )
+        .await;
     }
     eprintln!("[smoke] prompt: {prompt}");
     let _ = stream_smoke_prompt(session.as_ref(), prompt.as_str()).await?;
@@ -9379,7 +9894,11 @@ async fn stream_smoke_prompt_inner(
                 _ = deadline.as_mut() => {
                     let (timeout_ms, phase) = timeout.expect("deadline implies timeout");
                     abort.abort();
-                    let _ = join.await;
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                        join,
+                    )
+                    .await;
                     let message = format!(
                         "DeepResearch {phase} model call timed out after {timeout_ms} ms."
                     );
@@ -9396,7 +9915,9 @@ async fn stream_smoke_prompt_inner(
         match event {
             AgentEvent::TextDelta { text } => {
                 streamed.push_str(&text);
-                print!("{text}");
+                if stop_on_report.is_none() {
+                    print!("{text}");
+                }
                 if stop_on_report.is_some_and(|(workspace, query)| {
                     research_report_artifacts_from_output_for_query(&streamed, workspace, query)
                         .is_some()
@@ -9424,7 +9945,8 @@ async fn stream_smoke_prompt_inner(
                 let _ = session.confirm_tool_use(&tool_id, true, None).await;
             }
             AgentEvent::End { text, .. } => {
-                if streamed.trim().is_empty() && !text.trim().is_empty() {
+                if stop_on_report.is_none() && streamed.trim().is_empty() && !text.trim().is_empty()
+                {
                     print!("{text}");
                 }
                 end_text = text;
@@ -9443,7 +9965,8 @@ async fn stream_smoke_prompt_inner(
     }
     // Let the stream task finish (incl. auto-save/persist) before we exit.
     if stopped_after_report {
-        let _ = join.await;
+        let _ =
+            tokio::time::timeout(Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS), join).await;
     } else {
         tokio::time::timeout(std::time::Duration::from_secs(30), join)
             .await
@@ -9462,6 +9985,7 @@ async fn run_smoke_deep_research(
     session: Arc<AgentSession>,
     query: String,
     os_available: bool,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?;
     let os_runtime = should_use_os_runtime_for_deep_research(&query, os_available);
@@ -9503,6 +10027,7 @@ async fn run_smoke_deep_research(
         deep_research_recovery_prompt(&query, os_runtime, &workflow_output, metadata.as_ref())
     };
     eprintln!("[smoke] deepresearch synthesis");
+    deep_research_report_tool_gate.set_report_only(true);
     let mut final_text = stream_smoke_prompt_until_report(
         session.as_ref(),
         prompt.as_str(),
@@ -9512,11 +10037,41 @@ async fn run_smoke_deep_research(
         "synthesis",
     )
     .await?;
-    let mut artifacts =
-        research_report_artifacts_from_output_for_query(&final_text, &workspace, &query);
+    let mut artifacts = deep_research_report_artifacts_from_output_for_query(
+        &final_text,
+        &workspace,
+        &query,
+        &workflow_output,
+        metadata.as_ref(),
+    );
 
+    if deep_research_output_has_internal_leak(&final_text) {
+        if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
+            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+        }) {
+            final_text = clean_text;
+        }
+    }
     if artifacts.is_none() {
-        eprintln!("[smoke] deepresearch report missing; running repair pass");
+        artifacts = materialize_deep_research_completed_report_from_markdown(
+            &workspace,
+            &query,
+            &workflow_output,
+            metadata.as_ref(),
+        );
+        if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
+            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+        }) {
+            final_text = clean_text;
+        }
+    }
+
+    if artifacts.is_none() || deep_research_output_has_internal_leak(&final_text) {
+        if deep_research_output_has_internal_leak(&final_text) {
+            eprintln!("[smoke] deepresearch report contained internal/tool-status text; running repair pass");
+        } else {
+            eprintln!("[smoke] deepresearch report missing; running repair pass");
+        }
         let repair = deep_research_repair_prompt(
             &query,
             os_runtime,
@@ -9533,12 +10088,38 @@ async fn run_smoke_deep_research(
             "repair",
         )
         .await?;
-        artifacts =
-            research_report_artifacts_from_output_for_query(&final_text, &workspace, &query);
+        artifacts = deep_research_report_artifacts_from_output_for_query(
+            &final_text,
+            &workspace,
+            &query,
+            &workflow_output,
+            metadata.as_ref(),
+        );
+        if deep_research_output_has_internal_leak(&final_text) {
+            if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
+                clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            }) {
+                final_text = clean_text;
+            }
+        }
+        if artifacts.is_none() {
+            artifacts = materialize_deep_research_completed_report_from_markdown(
+                &workspace,
+                &query,
+                &workflow_output,
+                metadata.as_ref(),
+            );
+            if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
+                clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            }) {
+                final_text = clean_text;
+            }
+        }
     }
 
     if artifacts.is_none() {
         eprintln!("[smoke] deepresearch report missing; materializing host fallback draft");
+        deep_research_report_tool_gate.set_report_only(false);
         let fallback_artifacts = materialize_deep_research_fallback_draft(
             &workspace,
             &query,
@@ -9554,6 +10135,10 @@ async fn run_smoke_deep_research(
             "DeepResearch smoke did not produce the required report artifacts: expected `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`"
         )
     })?;
+    deep_research_report_tool_gate.set_report_only(false);
+    if !final_text.trim().is_empty() && !deep_research_output_has_internal_leak(&final_text) {
+        println!("{final_text}");
+    }
     eprintln!("[smoke] report.md: {}", artifacts.markdown.display());
     eprintln!("[smoke] index.html: {}", artifacts.html.display());
     Ok(())
@@ -9700,6 +10285,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         Some(context_limit),
         BudgetWorkload::Interactive,
     );
+    let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -9737,24 +10323,27 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         session_id.as_str(),
         apply_launch_model_options(
             with_instr(with_recent_workspace_context(
-                tui_session_options(confirmation.clone())
-                    .with_session_store(store.clone())
-                    .with_workspace_backend(workspace_services.clone())
-                    .with_skill_dirs(claude_dirs.clone())
-                    .with_auto_save(true)
-                    .with_auto_compact(true)
-                    // Scaled to the model's real window — the core triggers off a
-                    // fixed 200k, so a flat 0.85 would put the trigger past a
-                    // smaller window and auto-compact would never fire (see
-                    // `auto_compact_threshold_for`).
-                    .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
-                    .with_file_memory(memory_dir())
-                    .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                    .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                    .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                    .with_auto_delegation_enabled(true)
-                    .with_auto_parallel_delegation(true)
-                    .with_manual_delegation_enabled(true),
+                tui_session_options_with_gate(
+                    confirmation.clone(),
+                    deep_research_report_tool_gate.clone(),
+                )
+                .with_session_store(store.clone())
+                .with_workspace_backend(workspace_services.clone())
+                .with_skill_dirs(claude_dirs.clone())
+                .with_auto_save(true)
+                .with_auto_compact(true)
+                // Scaled to the model's real window — the core triggers off a
+                // fixed 200k, so a flat 0.85 would put the trigger past a
+                // smaller window and auto-compact would never fire (see
+                // `auto_compact_threshold_for`).
+                .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
+                .with_file_memory(memory_dir())
+                .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
+                .with_max_tool_rounds(initial_budget.max_tool_rounds)
+                .with_max_continuation_turns(initial_budget.max_continuation_turns)
+                .with_auto_delegation_enabled(true)
+                .with_auto_parallel_delegation(true)
+                .with_manual_delegation_enabled(true),
                 &workspace_manifest,
             )),
             launch_model.as_deref(),
@@ -9766,21 +10355,24 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             workspace.clone(),
             Some(apply_launch_model_options(
                 with_instr(with_recent_workspace_context(
-                    tui_session_options(confirmation.clone())
-                        .with_session_store(store.clone())
-                        .with_session_id(session_id.as_str())
-                        .with_workspace_backend(workspace_services.clone())
-                        .with_skill_dirs(claude_dirs.clone())
-                        .with_auto_save(true)
-                        .with_auto_compact(true)
-                        .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
-                        .with_file_memory(memory_dir())
-                        .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                        .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                        .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                        .with_auto_delegation_enabled(true)
-                        .with_auto_parallel_delegation(true)
-                        .with_manual_delegation_enabled(true),
+                    tui_session_options_with_gate(
+                        confirmation.clone(),
+                        deep_research_report_tool_gate.clone(),
+                    )
+                    .with_session_store(store.clone())
+                    .with_session_id(session_id.as_str())
+                    .with_workspace_backend(workspace_services.clone())
+                    .with_skill_dirs(claude_dirs.clone())
+                    .with_auto_save(true)
+                    .with_auto_compact(true)
+                    .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
+                    .with_file_memory(memory_dir())
+                    .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
+                    .with_max_tool_rounds(initial_budget.max_tool_rounds)
+                    .with_max_continuation_turns(initial_budget.max_continuation_turns)
+                    .with_auto_delegation_enabled(true)
+                    .with_auto_parallel_delegation(true)
+                    .with_manual_delegation_enabled(true),
                     &workspace_manifest,
                 )),
                 launch_model.as_deref(),
@@ -9857,7 +10449,12 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // the TUI depends on) without taking over the terminal. Useful for CI/probes
     // and for validating a model/config end-to-end.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
-        return run_smoke(session, os_session.is_some()).await;
+        return run_smoke(
+            session,
+            os_session.is_some(),
+            deep_research_report_tool_gate,
+        )
+        .await;
     }
 
     let keymap = Keymap::new()
@@ -9892,6 +10489,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         agent: agent.clone(),
         store: store.clone(),
         confirmation,
+        deep_research_report_tool_gate,
         session_id: session_id.clone(),
         models,
         model_ctx,
@@ -10784,12 +11382,15 @@ mod tests {
         );
         assert!(p.contains(".a3s/research/<slug>/"), "{p}");
         assert!(p.contains("standalone HTML"), "{p}");
-        assert!(p.contains("DESIGN.md"), "{p}");
+        assert!(p.contains("source traceability"), "{p}");
+        assert!(p.contains("Do not search the workspace"), "{p}");
+        assert!(p.contains("creation or verification checks"), "{p}");
+        assert!(p.contains("Do not list"), "{p}");
         assert!(p.contains(RESEARCH_VIEW_MARKER), "{p}");
         assert!(p.contains("RemoteUI automatically"), "{p}");
         assert!(p.contains("Never print it for"), "{p}");
         assert!(p.contains("fallback draft"), "{p}");
-        assert!(p.contains("both files exist and are non-empty"), "{p}");
+        assert!(p.contains("host validates file existence"), "{p}");
         assert!(p.contains("sibling `report.md`"), "{p}");
         assert!(p.contains("Do not repeat an identical grep"), "{p}");
     }
@@ -10874,7 +11475,7 @@ mod tests {
         assert!(prompt.contains("Do not restart broad research"), "{prompt}");
         assert!(prompt.contains("reply exactly DONE"), "{prompt}");
         assert!(prompt.contains(RESEARCH_VIEW_MARKER), "{prompt}");
-        assert!(prompt.contains("DESIGN.md"), "{prompt}");
+        assert!(prompt.contains("source traceability"), "{prompt}");
         assert!(
             prompt.contains("Do not repeat an identical grep"),
             "{prompt}"
@@ -11046,6 +11647,18 @@ mod tests {
                 .is_none(),
             "DeepResearch report markers must reject artifacts that contain internal tool logs"
         );
+        assert!(deep_research_output_has_internal_leak(
+            "Report generated from provided DynamicWorkflowRuntime structured evidence."
+        ));
+        assert!(deep_research_output_has_internal_leak(
+            "Targeted verification passed: report.md exists and index.html exists."
+        ));
+        assert!(deep_research_output_has_internal_leak(
+            "Step 2 complete: Markdown report written to .a3s/research/example/report.md."
+        ));
+        assert!(deep_research_output_has_internal_leak(
+            "Targeted verification could not be performed because file-read tooling is currently blocked; remaining unverified contract items are listed below."
+        ));
 
         assert!(research_report_view_spec(
             "A3S_RESEARCH_VIEW: .a3s/research/rust-async/report.md",
@@ -11127,6 +11740,142 @@ mod tests {
     }
 
     #[test]
+    fn deep_research_completed_report_sources_must_trace_workflow_evidence() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-research-source-trace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let report_dir = root.join(".a3s/research/source-trace");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        let marker = "done\nA3S_RESEARCH_VIEW: .a3s/research/source-trace/index.html";
+        let workflow_output = serde_json::json!({
+            "mode": "local_parallel_task",
+            "research": {
+                "results": [{
+                    "structured": {
+                        "summary": "Workflow evidence names the traceable source.",
+                        "sources": [{
+                            "title": "Workflow Source",
+                            "url_or_path": "https://example.com/workflow-source",
+                            "quote_or_fact": "The evidence source that the report must cite."
+                        }],
+                        "key_evidence": ["traceable source"],
+                        "contradictions": [],
+                        "confidence": "high",
+                        "gaps": []
+                    }
+                }]
+            }
+        })
+        .to_string();
+
+        std::fs::write(
+            report_dir.join("report.md"),
+            "# Source Trace\n\n## Findings\n\nThis report has polished analysis, conclusions, and confidence notes, but it cites an unrelated source instead of the gathered evidence.\n\n## Sources\n\n- https://example.com/fabricated-source\n\n## Confidence\n\nConfidence is low because source traceability should fail.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            report_dir.join("index.html"),
+            "<!doctype html><html><body><h1>Source Trace</h1><section><h2>Findings</h2><p>This report has polished analysis, conclusions, caveats, and confidence notes, but it cites an unrelated source.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/fabricated-source. Confidence is low.</p></section></body></html>",
+        )
+        .unwrap();
+        assert!(
+            deep_research_report_artifacts_from_output_for_query(
+                marker,
+                &root,
+                "source trace",
+                &workflow_output,
+                None,
+            )
+            .is_none(),
+            "DeepResearch reports must cite at least one source from workflow evidence when evidence sources exist"
+        );
+
+        std::fs::write(
+            report_dir.join("report.md"),
+            "# Source Trace\n\n## Findings\n\nThis report has polished analysis, conclusions, caveats, and confidence notes anchored to the gathered workflow source.\n\n## Sources\n\n- https://example.com/workflow-source\n\n## Confidence\n\nConfidence is medium because the source traceability check can match the workflow evidence source.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            report_dir.join("index.html"),
+            "<!doctype html><html><body><h1>Source Trace</h1><section><h2>Findings</h2><p>This report has polished analysis, conclusions, caveats, and confidence notes anchored to gathered workflow evidence.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/workflow-source. Confidence is medium.</p></section></body></html>",
+        )
+        .unwrap();
+        assert!(
+            deep_research_report_artifacts_from_output_for_query(
+                marker,
+                &root,
+                "source trace",
+                &workflow_output,
+                None,
+            )
+            .is_some(),
+            "DeepResearch reports should pass when at least one report source traces workflow evidence"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deep_research_clean_final_text_can_reuse_valid_report_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-research-clean-final-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let report_dir = root.join(".a3s/research/clean-final");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(
+            report_dir.join("report.md"),
+            "# Clean Final\n\n## Findings\n\nThis source-backed report gives the final answer, cites the gathered source, and avoids narrating artifact operations.\n\n## Sources\n\n- https://example.com/source\n\n## Confidence\n\nConfidence is high because source traceability is explicit.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            report_dir.join("index.html"),
+            "<!doctype html><html><body><h1>Clean Final</h1><section><h2>Findings</h2><p>This source-backed report gives the final answer, cites the gathered source, and avoids artifact-operation narration.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/source. Confidence is high.</p></section></body></html>",
+        )
+        .unwrap();
+        let workflow_output = serde_json::json!({
+            "research": {
+                "results": [{
+                    "structured": {
+                        "summary": "source-backed",
+                        "sources": [{
+                            "url_or_path": "https://example.com/source",
+                            "quote_or_fact": "source trace"
+                        }],
+                        "confidence": "high"
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let dirty_output = "Step 2 complete: Markdown report written.\nTargeted verification could not be performed because file-read tooling is currently blocked.\nA3S_RESEARCH_VIEW: .a3s/research/clean-final/index.html";
+        assert!(deep_research_output_has_internal_leak(dirty_output));
+        let artifacts = deep_research_report_artifacts_from_output_for_query(
+            dirty_output,
+            &root,
+            "clean final",
+            &workflow_output,
+            None,
+        )
+        .expect("valid report files should still be discoverable from a dirty final marker");
+        let clean = clean_deep_research_final_text_from_artifacts(&artifacts, &root)
+            .expect("host should be able to rebuild clean final text from report.md");
+        assert!(!deep_research_output_has_internal_leak(&clean), "{clean}");
+        assert!(clean.contains("A3S_RESEARCH_VIEW: .a3s/research/clean-final/index.html"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn deep_research_report_view_open_is_deferred_until_workflow_finishes() {
         assert_eq!(
             research_report_view_action(true),
@@ -11157,7 +11906,9 @@ mod tests {
             false,
             Some("complete"),
             "DONE without report artifacts",
-            &root
+            &root,
+            "",
+            None
         ));
         assert!(
             !deep_research_report_is_missing(
@@ -11165,7 +11916,9 @@ mod tests {
                 false,
                 None,
                 "DONE without report artifacts",
-                &root
+                &root,
+                "",
+                None
             ),
             "non-DeepResearch turns must not arm report repair"
         );
@@ -11175,7 +11928,9 @@ mod tests {
                 true,
                 Some("complete"),
                 "DONE without report artifacts",
-                &root
+                &root,
+                "",
+                None
             ),
             "a later verification DONE must not re-arm repair after a report was captured"
         );
@@ -11213,6 +11968,8 @@ mod tests {
                 Some("complete"),
                 "A3S_RESEARCH_VIEW: .a3s/research/complete/index.html",
                 &root,
+                "",
+                None,
             ),
             "valid markdown/html artifact pair should let TUI finish"
         );
@@ -11223,8 +11980,83 @@ mod tests {
                 Some("different query"),
                 "A3S_RESEARCH_VIEW: .a3s/research/complete/index.html",
                 &root,
+                "",
+                None,
             ),
             "DeepResearch must not finish by pointing at a report slug from another query"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn deep_research_tui_missing_html_can_complete_from_valid_markdown_report() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-research-tui-markdown-complete-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let report_dir = root.join(".a3s/research/completed-markdown-only");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(
+            report_dir.join("report.md"),
+            "# Completed Markdown Only\n\n## Findings\n\nThis report has enough source-backed analysis to answer the query and should be completed into an HTML RemoteUI artifact by the host when the model stalls before writing HTML.\n\n## Sources\n\n- https://example.com/source\n\n## Confidence\n\nConfidence is high because the cited source traces directly to gathered evidence.\n",
+        )
+        .unwrap();
+        let workflow_output = serde_json::json!({
+            "research": {
+                "results": [{
+                    "structured": {
+                        "summary": "source-backed",
+                        "sources": [{
+                            "url_or_path": "https://example.com/source",
+                            "quote_or_fact": "source trace"
+                        }],
+                        "confidence": "high"
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let mut loop_remaining = 0;
+        let mut repair_used = false;
+        let recovery = recover_missing_deep_research_report(
+            &root,
+            Some("completed markdown only"),
+            "Synthesis timed out before writing HTML.",
+            &workflow_output,
+            None,
+            &mut loop_remaining,
+            &mut repair_used,
+        );
+        let artifacts = match recovery {
+            DeepResearchReportRecovery::CompletedMaterialized { artifacts } => artifacts,
+            other => panic!("expected completed report materialization, got {other:?}"),
+        };
+
+        assert_eq!(loop_remaining, 0);
+        assert!(
+            !repair_used,
+            "valid markdown should avoid an unnecessary repair pass"
+        );
+        assert!(artifacts.markdown.is_file());
+        assert!(artifacts.html.is_file());
+        let html = std::fs::read_to_string(&artifacts.html).unwrap();
+        assert!(html.contains("<html"), "{html}");
+        assert!(html.contains("https://example.com/source"), "{html}");
+        assert!(
+            deep_research_report_artifacts_from_output_for_query(
+                "A3S_RESEARCH_VIEW: .a3s/research/completed-markdown-only/index.html",
+                &root,
+                "completed markdown only",
+                &workflow_output,
+                None,
+            )
+            .is_some(),
+            "host-completed report must pass normal report validation"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -11249,6 +12081,7 @@ mod tests {
             Some("TUI fallback report"),
             "Synthesis without marker",
             r#"{"mode":"local_parallel_task","research":"evidence"}"#,
+            None,
             &mut loop_remaining,
             &mut repair_used,
         );
@@ -11261,6 +12094,7 @@ mod tests {
             Some("TUI fallback report"),
             "Repair still forgot the marker",
             r#"{"mode":"local_parallel_task","research":"evidence"}"#,
+            None,
             &mut loop_remaining,
             &mut repair_used,
         );
@@ -11274,7 +12108,8 @@ mod tests {
         assert!(artifacts.html.is_file());
         let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
         assert!(markdown.contains("Repair still forgot the marker"));
-        assert!(markdown.contains("local_parallel_task"));
+        assert!(markdown.contains("collection_status"));
+        assert!(!markdown.contains("local_parallel_task"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -11307,7 +12142,8 @@ mod tests {
         let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
         assert!(markdown.contains("# DeepResearch Fallback Draft"));
         assert!(markdown.contains("not a completed DeepResearch report"));
-        assert!(markdown.contains("local_parallel_task"));
+        assert!(markdown.contains("collection_status"));
+        assert!(!markdown.contains("local_parallel_task"));
         assert!(!markdown.contains(RESEARCH_VIEW_MARKER));
         let html = std::fs::read_to_string(&artifacts.html).unwrap();
         assert!(html.contains("DeepResearch Fallback Draft"));
@@ -11584,36 +12420,22 @@ mod tests {
         );
 
         assert!(
-            prompt.contains("Do not call `dynamic_workflow` again"),
+            prompt.contains("Do not call workflow or broad evidence-collection tools again"),
             "{prompt}"
         );
         assert!(prompt.contains("rust async runtimes"), "{prompt}");
+        assert!(prompt.contains("Evidence digest"), "{prompt}");
+        assert!(prompt.contains("Run diagnostics"), "{prompt}");
+        assert!(!prompt.contains("DynamicWorkflowRuntime"), "{prompt}");
+        assert!(!prompt.contains("dynamic_workflow"), "{prompt}");
         assert!(
-            prompt.contains("DynamicWorkflowRuntime evidence package"),
-            "{prompt}"
-        );
-        assert!(
-            prompt.contains("DynamicWorkflowRuntime diagnostic package"),
-            "{prompt}"
-        );
-        assert!(prompt.contains("\"mode\": \"os_runtime\""), "{prompt}");
-        assert!(
-            !prompt.contains("DynamicWorkflowRuntime output:"),
-            "{prompt}"
-        );
-        assert!(
-            !prompt.contains("DynamicWorkflowRuntime metadata:"),
+            prompt.contains("\"collection_status\": \"completed\""),
             "{prompt}"
         );
         assert!(prompt.contains("OS Runtime was selected"), "{prompt}");
-        assert!(prompt.contains("results[].structured"), "{prompt}");
+        assert!(prompt.contains("evidence_items"), "{prompt}");
         assert!(prompt.contains("bounded recursive parallel"), "{prompt}");
         assert!(prompt.contains("research.rounds"), "{prompt}");
-        assert!(
-            prompt.contains("research.runtime_output.results[].structured"),
-            "{prompt}"
-        );
-        assert!(prompt.contains("research.results[].structured"), "{prompt}");
         assert!(prompt.contains("warnings.failed_tasks"), "{prompt}");
         assert!(
             prompt.contains("Raw task output is intentionally excluded"),
@@ -11628,12 +12450,9 @@ mod tests {
             prompt.contains("A3S_RESEARCH_VIEW: .a3s/research/rust-async-runtimes/index.html"),
             "{prompt}"
         );
-        assert!(prompt.contains("DESIGN.md"), "{prompt}");
+        assert!(prompt.contains("source traceability"), "{prompt}");
         assert!(prompt.contains(RESEARCH_VIEW_MARKER), "{prompt}");
-        assert!(
-            prompt.contains("both files exist and are non-empty"),
-            "{prompt}"
-        );
+        assert!(prompt.contains("host validates file existence"), "{prompt}");
         assert!(
             prompt.contains("opens the HTML in RemoteUI automatically"),
             "{prompt}"
@@ -11723,6 +12542,8 @@ mod tests {
             !prompt.contains("successful raw output should be redundant"),
             "{prompt}"
         );
+        assert!(!prompt.contains("parallel_task"), "{prompt}");
+        assert!(!prompt.contains("dynamic_workflow"), "{prompt}");
     }
 
     #[test]
@@ -11741,7 +12562,7 @@ mod tests {
         let prompt = deep_research_repair_prompt(
             "compare async runtimes",
             false,
-            r#"{"mode":"local_parallel_task","evidence":["source-backed"]}"#,
+            r#"{"mode":"local_parallel_task","research":{"results":[{"structured":{"summary":"source-backed","sources":[{"url_or_path":"https://example.com/async","quote_or_fact":"evidence"}],"confidence":"high"}}]}}"#,
             Some(&metadata),
             "Previous answer without a report marker.",
         );
@@ -11751,12 +12572,15 @@ mod tests {
             prompt.contains("Previous answer without a report marker"),
             "{prompt}"
         );
-        assert!(prompt.contains("local_parallel_task"), "{prompt}");
-        assert!(prompt.contains("local_research"), "{prompt}");
+        assert!(prompt.contains("source-backed"), "{prompt}");
+        assert!(prompt.contains("https://example.com/async"), "{prompt}");
         assert!(
-            prompt.contains("Do not call `dynamic_workflow` again"),
+            prompt.contains("Do not call workflow or broad evidence-collection"),
             "{prompt}"
         );
+        assert!(!prompt.contains("local_parallel_task"), "{prompt}");
+        assert!(!prompt.contains("local_research"), "{prompt}");
+        assert!(!prompt.contains("dynamic_workflow"), "{prompt}");
         assert!(
             prompt.contains("host expects report slug `compare-async-runtimes`"),
             "{prompt}"
@@ -11801,7 +12625,7 @@ mod tests {
 
         let prompt = deep_research_report_repair_prompt_from_state(
             Some(&loop_state),
-            r#"{"mode":"os_runtime","evidence":["runtime-backed"]}"#,
+            r#"{"mode":"os_runtime","research":{"results":[{"structured":{"summary":"runtime-backed","sources":[{"url_or_path":"https://example.com/runtime","quote_or_fact":"evidence"}],"confidence":"medium"}}]}}"#,
             Some(&metadata),
             "Prior synthesis forgot report artifacts.",
         )
@@ -11810,7 +12634,9 @@ mod tests {
         assert!(prompt.contains("runtime market scan"), "{prompt}");
         assert!(prompt.contains("OS Runtime was selected"), "{prompt}");
         assert!(prompt.contains("runtime-backed"), "{prompt}");
-        assert!(prompt.contains("runtime_research"), "{prompt}");
+        assert!(prompt.contains("https://example.com/runtime"), "{prompt}");
+        assert!(!prompt.contains("runtime_research"), "{prompt}");
+        assert!(!prompt.contains("dynamic_workflow"), "{prompt}");
         assert!(
             prompt.contains("Prior synthesis forgot report artifacts"),
             "{prompt}"
@@ -12035,7 +12861,10 @@ mod tests {
     fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
         use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
-        let checker = TuiHitlPermissionChecker::new(tui_permission_policy());
+        let checker = TuiHitlPermissionChecker::new(
+            tui_permission_policy(),
+            DeepResearchReportToolGate::default(),
+        );
 
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": "pwd"})),
@@ -12154,6 +12983,52 @@ mod tests {
                 })
             ),
             PermissionDecision::Deny
+        );
+    }
+
+    #[test]
+    fn deep_research_report_gate_denies_non_report_tools() {
+        use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
+
+        let gate = DeepResearchReportToolGate::default();
+        gate.set_report_only(true);
+        let checker = TuiHitlPermissionChecker::new(tui_permission_policy(), gate);
+
+        assert_eq!(
+            checker.check(
+                "bash",
+                &serde_json::json!({"command": "mkdir -p .a3s/research/x"})
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            checker.check("web_search", &serde_json::json!({"query": "rust stable"})),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({
+                    "file_path": ".a3s/research/rust-stable/report.md",
+                    "content": "# Report"
+                })
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "edit",
+                &serde_json::json!({
+                    "file_path": "/tmp/workspace/.a3s/research/rust-stable/index.html",
+                    "old_string": "old",
+                    "new_string": "new"
+                })
+            ),
+            PermissionDecision::Allow
         );
     }
 

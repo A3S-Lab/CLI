@@ -635,7 +635,7 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
     }
     let workspace = std::env::current_dir()?;
     let workspace_text = workspace.to_string_lossy().to_string();
-    let session = build_deepresearch_session(&workspace_text).await?;
+    let (session, report_tool_gate) = build_deepresearch_session(&workspace_text).await?;
     let os_runtime = match opts.runtime_mode {
         DeepResearchRuntimeMode::Local => false,
         DeepResearchRuntimeMode::Os => false,
@@ -661,6 +661,7 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
         &workflow_output,
         exit_code,
         metadata.as_ref(),
+        &report_tool_gate,
     )
     .await?;
 
@@ -700,6 +701,7 @@ async fn synthesize_deepresearch_report(
     workflow_output: &str,
     exit_code: i32,
     metadata: Option<&serde_json::Value>,
+    report_tool_gate: &super::DeepResearchReportToolGate,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     eprintln!("deepresearch: synthesizing report artifacts…");
     let prompt = if exit_code == 0 {
@@ -707,6 +709,7 @@ async fn synthesize_deepresearch_report(
     } else {
         super::deep_research_recovery_prompt(query, os_runtime, workflow_output, metadata)
     };
+    report_tool_gate.set_report_only(true);
     let (mut final_text, synthesis_completed) = send_deepresearch_text(
         session,
         &prompt,
@@ -714,9 +717,39 @@ async fn synthesize_deepresearch_report(
         "synthesis",
     )
     .await;
-    let mut artifacts =
-        super::research_report_artifacts_from_output_for_query(&final_text, workspace, query);
+    let mut artifacts = super::deep_research_report_artifacts_from_output_for_query(
+        &final_text,
+        workspace,
+        query,
+        workflow_output,
+        metadata,
+    );
     let mut status = DeepResearchReportStatus::Completed;
+
+    if super::deep_research_output_has_internal_leak(&final_text) {
+        if let Some(artifacts) = artifacts.as_ref() {
+            if let Some(clean_text) =
+                super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
+            {
+                final_text = clean_text;
+            }
+        }
+    }
+    if artifacts.is_none() {
+        artifacts = super::materialize_deep_research_completed_report_from_markdown(
+            workspace,
+            query,
+            workflow_output,
+            metadata,
+        );
+        if let Some(artifacts) = artifacts.as_ref() {
+            if let Some(clean_text) =
+                super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
+            {
+                final_text = clean_text;
+            }
+        }
+    }
 
     if (artifacts.is_none() || super::deep_research_output_has_internal_leak(&final_text))
         && synthesis_completed
@@ -737,8 +770,37 @@ async fn synthesize_deepresearch_report(
         )
         .await;
         final_text = repair_text;
-        artifacts =
-            super::research_report_artifacts_from_output_for_query(&final_text, workspace, query);
+        artifacts = super::deep_research_report_artifacts_from_output_for_query(
+            &final_text,
+            workspace,
+            query,
+            workflow_output,
+            metadata,
+        );
+        if super::deep_research_output_has_internal_leak(&final_text) {
+            if let Some(artifacts) = artifacts.as_ref() {
+                if let Some(clean_text) =
+                    super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
+                {
+                    final_text = clean_text;
+                }
+            }
+        }
+        if artifacts.is_none() {
+            artifacts = super::materialize_deep_research_completed_report_from_markdown(
+                workspace,
+                query,
+                workflow_output,
+                metadata,
+            );
+            if let Some(artifacts) = artifacts.as_ref() {
+                if let Some(clean_text) =
+                    super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
+                {
+                    final_text = clean_text;
+                }
+            }
+        }
         if !repair_completed {
             eprintln!("deepresearch: repair pass did not complete, using host fallback…");
         }
@@ -748,6 +810,7 @@ async fn synthesize_deepresearch_report(
         eprintln!(
             "deepresearch: report artifacts still missing, materializing host fallback draft…"
         );
+        report_tool_gate.set_report_only(false);
         let fallback_artifacts = super::materialize_deep_research_fallback_draft(
             workspace,
             query,
@@ -773,6 +836,7 @@ async fn synthesize_deepresearch_report(
             "DeepResearch did not produce the required report artifacts: expected `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`, plus sibling report.md"
         )
     })?;
+    report_tool_gate.set_report_only(false);
     Ok(DeepResearchReportSynthesis {
         text: final_text,
         artifacts,
@@ -841,15 +905,23 @@ fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::Permissio
     policy
 }
 
-async fn build_deepresearch_session(workspace: &str) -> anyhow::Result<AgentSession> {
+async fn build_deepresearch_session(
+    workspace: &str,
+) -> anyhow::Result<(AgentSession, super::DeepResearchReportToolGate)> {
     let (config_path, _) = load_code_config()?;
     let agent = Agent::new(config_path.clone())
         .await
         .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?;
     let budget = super::deep_research_default_budget();
+    let permission_policy = deepresearch_cli_permission_policy();
+    let report_tool_gate = super::DeepResearchReportToolGate::default();
     let opts = SessionOptions::new()
         .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
-        .with_permission_policy(deepresearch_cli_permission_policy())
+        .with_permission_policy(permission_policy.clone())
+        .with_permission_checker(std::sync::Arc::new(super::TuiHitlPermissionChecker::new(
+            permission_policy,
+            report_tool_gate.clone(),
+        )))
         .with_tool_timeout(super::TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(super::TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
         .with_file_memory(config::memory_dir())
@@ -861,7 +933,7 @@ async fn build_deepresearch_session(workspace: &str) -> anyhow::Result<AgentSess
         .with_manual_delegation_enabled(true);
     let session = agent.session(workspace.to_string(), Some(opts))?;
     session.register_dynamic_workflow_runtime();
-    Ok(session)
+    Ok((session, report_tool_gate))
 }
 
 async fn run_deepresearch_workflow(
@@ -2485,15 +2557,20 @@ mod tests {
             text_response("Synthesis recovered after a denied workspace write but did not write report files."),
             text_response("Repair also did not write report files."),
         ]));
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+        let permission_policy = deepresearch_cli_permission_policy();
         let opts = SessionOptions::new()
             .with_llm_client(llm)
-            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_permission_policy(permission_policy.clone())
+            .with_permission_checker(Arc::new(super::super::TuiHitlPermissionChecker::new(
+                permission_policy,
+                report_tool_gate.clone(),
+            )))
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-
         let synthesis = synthesize_deepresearch_report(
             &session,
             &workspace,
@@ -2502,6 +2579,7 @@ mod tests {
             r#"{"mode":"local_parallel_task","research":"evidence after denied write"}"#,
             0,
             None,
+            &report_tool_gate,
         )
         .await
         .expect("host fallback should materialize after denied non-report write");
@@ -2572,12 +2650,18 @@ mod tests {
                 }),
             ),
             text_response(
-                "Repair complete.\nA3S_RESEARCH_VIEW: .a3s/research/local-test/index.html",
+                "Step 2 complete: Markdown report written.\nTargeted verification could not be performed because file-read tooling is currently blocked.\nA3S_RESEARCH_VIEW: .a3s/research/local-test/index.html",
             ),
         ]));
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+        let permission_policy = deepresearch_cli_permission_policy();
         let opts = SessionOptions::new()
             .with_llm_client(llm)
-            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_permission_policy(permission_policy.clone())
+            .with_permission_checker(Arc::new(super::super::TuiHitlPermissionChecker::new(
+                permission_policy,
+                report_tool_gate.clone(),
+            )))
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(6);
         let session = agent
@@ -2592,6 +2676,7 @@ mod tests {
             r#"{"mode":"local_parallel_task","research":"evidence"}"#,
             0,
             None,
+            &report_tool_gate,
         )
         .await
         .unwrap_or_else(|error| {
@@ -2613,6 +2698,15 @@ mod tests {
         assert!(
             final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/local-test/index.html"),
             "{final_text}"
+        );
+        assert!(
+            final_text.contains("# Local Test"),
+            "dirty repair text should be rebuilt from validated report.md: {final_text}"
+        );
+        assert!(
+            !final_text.contains("Step 2 complete")
+                && !final_text.contains("Targeted verification could not be performed"),
+            "internal repair narration must not survive final synthesis text: {final_text}"
         );
         assert_eq!(
             artifacts.markdown,
@@ -2657,6 +2751,7 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
         let synthesis = synthesize_deepresearch_report(
             &session,
@@ -2666,6 +2761,7 @@ mod tests {
             r#"{"mode":"local_parallel_task","research":"fallback evidence"}"#,
             0,
             None,
+            &report_tool_gate,
         )
         .await
         .expect("host fallback should materialize draft artifacts");
@@ -2737,6 +2833,7 @@ mod tests {
                 Some(opts.with_llm_client(llm)),
             )
             .unwrap();
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
         let synthesis = synthesize_deepresearch_report(
             &session,
@@ -2746,6 +2843,7 @@ mod tests {
             r#"{"mode":"local_parallel_task","research":{"metadata":{"success_count":1,"task_count":1},"output":"● Searched web\n⎿ [tool output truncated]"}}"#,
             0,
             None,
+            &report_tool_gate,
         )
         .await
         .expect("host fallback should materialize when synthesis remains dirty");
@@ -2800,7 +2898,7 @@ mod tests {
                 "write",
                 serde_json::json!({
                     "file_path": ".a3s/research/local-workflow-e2e/report.md",
-                    "content": "# Local Workflow E2E\n\n## Findings\n\nThe workflow produced deterministic evidence and completed fan-out before synthesis, giving the report enough source-backed material to explain the result.\n\n## Sources\n\n- https://example.com/local-workflow-e2e\n\n## Confidence\n\nConfidence is high for this test because the evidence path is deterministic and verified by workflow metadata.\n",
+                    "content": "# Local Workflow E2E\n\n## Findings\n\nThe workflow produced deterministic evidence and completed fan-out before synthesis, giving the report enough source-backed material to explain the result.\n\n## Sources\n\n- https://example.com/research\n\n## Confidence\n\nConfidence is high for this test because the evidence path is deterministic and verified by workflow metadata.\n",
                 }),
             ),
             tool_call_response(
@@ -2808,7 +2906,7 @@ mod tests {
                 "write",
                 serde_json::json!({
                     "file_path": ".a3s/research/local-workflow-e2e/index.html",
-                    "content": "<!doctype html><html><body><h1>Local Workflow E2E</h1><section><h2>Findings</h2><p>The workflow produced deterministic evidence and completed fan-out before synthesis.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/local-workflow-e2e. Confidence is high for this deterministic test.</p></section></body></html>",
+                    "content": "<!doctype html><html><body><h1>Local Workflow E2E</h1><section><h2>Findings</h2><p>The workflow produced deterministic evidence and completed fan-out before synthesis.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/research. Confidence is high for this deterministic test.</p></section></body></html>",
                 }),
             ),
             text_response(
@@ -2889,6 +2987,7 @@ mod tests {
                 ["metadata"]["results"][0]["structured"]["summary"],
             "Structured DeepResearch track evidence confirms local fan-out completed before synthesis."
         );
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
         let synthesis = synthesize_deepresearch_report(
             &session,
@@ -2898,6 +2997,7 @@ mod tests {
             &workflow.output,
             workflow.exit_code,
             workflow.metadata.as_ref(),
+            &report_tool_gate,
         )
         .await
         .unwrap();

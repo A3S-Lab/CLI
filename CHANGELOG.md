@@ -24,6 +24,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transcripts, `.a3s-flow` paths, truncated tool-output artifact notices, and
   raw failure diagnostics are withheld from prompts, fallback drafts, final
   report artifacts, and RemoteUI auto-open validation.
+- Removed internal runtime/workflow labels from DeepResearch synthesis and
+  repair prompts so reports cite original evidence sources instead of host
+  implementation details.
+- Added a DeepResearch report-phase tool gate: once evidence collection ends,
+  synthesis and repair turns can only write or edit `.a3s/research/**` report
+  artifacts, and verified reports can be host-cleaned into a final answer when
+  the model's text contains artifact-operation narration.
+- Added DeepResearch source-trace validation: when gathered workflow evidence
+  contains source URLs or local paths, completed Markdown/HTML reports must cite
+  at least one of those sources before RemoteUI can open them as final reports.
+- Added host-side DeepResearch report completion: if synthesis produces a clean,
+  source-traceable `report.md` but stalls before writing `index.html`, the host
+  can materialize the HTML view and still validate it before RemoteUI opens.
 
 ## [0.7.6] - 2026-07-08
 
