@@ -59,6 +59,7 @@ pub(crate) struct RuntimeProjection {
     tool_log: Vec<ToolCallRecord>,
     subagents: BTreeMap<String, SubagentRun>,
     subagent_order: Vec<String>,
+    subagent_task: Option<String>,
 }
 
 impl RuntimeProjection {
@@ -68,6 +69,20 @@ impl RuntimeProjection {
         self.latest_tool_id = None;
         self.subagents.clear();
         self.subagent_order.clear();
+        self.subagent_task = None;
+    }
+
+    pub(crate) fn finish_turn_entities(&mut self, now: Instant) {
+        self.tools.clear();
+        self.tool_order.clear();
+        self.latest_tool_id = None;
+        for run in self.subagents.values_mut() {
+            if !run.done {
+                run.done = true;
+                run.success = Some(false);
+                run.ended = Some(now);
+            }
+        }
     }
 
     pub(crate) fn clear_live_tools(&mut self) {
@@ -99,6 +114,17 @@ impl RuntimeProjection {
             .iter()
             .filter_map(|id| self.subagents.get(id))
             .collect()
+    }
+
+    pub(crate) fn set_subagent_task(&mut self, task: impl Into<String>) {
+        let task = task.into();
+        if !task.trim().is_empty() {
+            self.subagent_task = Some(task);
+        }
+    }
+
+    pub(crate) fn subagent_task(&self) -> Option<&str> {
+        self.subagent_task.as_deref()
     }
 
     pub(crate) fn live_tool(&self) -> Option<&ToolRun> {
@@ -395,5 +421,39 @@ mod tests {
                 .saturating_duration_since(runs[0].started),
             std::time::Duration::from_secs(8)
         );
+    }
+
+    #[test]
+    fn finish_turn_entities_keeps_completed_subagent_summary() {
+        let mut projection = RuntimeProjection::default();
+        let start = Instant::now();
+        let finish = start + std::time::Duration::from_secs(4);
+
+        projection.set_subagent_task("DeepResearch market map");
+        projection.start_tool("tool".into(), "parallel_task".into());
+        projection.start_subagent("a".into(), "researcher".into(), "inspect".into(), start);
+        projection.start_subagent("b".into(), "reviewer".into(), "audit".into(), start);
+        projection.end_subagent("a".into(), "researcher".into(), true, finish);
+
+        projection.finish_turn_entities(finish);
+
+        assert_eq!(projection.active_tool_count(), 0);
+        assert_eq!(projection.active_subagent_count(), 0);
+        let runs = projection.subagents();
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].done);
+        assert_eq!(runs[0].success, Some(true));
+        assert!(runs[1].done);
+        assert_eq!(runs[1].success, Some(false));
+        assert_eq!(runs[1].ended, Some(finish));
+        assert_eq!(projection.subagent_task(), Some("DeepResearch market map"));
+    }
+
+    #[test]
+    fn clear_turn_entities_resets_subagent_task_title() {
+        let mut projection = RuntimeProjection::default();
+        projection.set_subagent_task("DeepResearch market map");
+        projection.clear_turn_entities();
+        assert_eq!(projection.subagent_task(), None);
     }
 }

@@ -7,11 +7,19 @@
 //! token into localStorage (from `A3S_OS_TOKEN`, which the TUI exports) and loads
 //! the page authenticated. Plain links still go to the user's browser.
 
+use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
+static LOCAL_FILE_SERVER: OnceLock<std::io::Result<LocalFileServer>> = OnceLock::new();
+static LOCAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 
 /// A `viewUrl` (+ optional size / embeddable hint) extracted from a tool result.
@@ -28,6 +36,213 @@ pub(crate) struct ViewSpec {
 pub(crate) enum OpenedWith {
     Webview,
     Browser,
+}
+
+/// Build a trusted local-file view after the caller has decided this path is
+/// safe to surface. Generic tool output must still flow through `find_view_url`,
+/// which intentionally rejects `file://` URLs.
+pub(crate) fn local_file_view(path: &Path) -> std::io::Result<ViewSpec> {
+    let path = path.canonicalize()?;
+    let url = local_file_server()?.register(path)?;
+    Ok(ViewSpec {
+        url,
+        width: Some(1200),
+        height: Some(820),
+        embeddable: true,
+    })
+}
+
+#[derive(Debug)]
+struct LocalFileServer {
+    origin: String,
+    files: std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
+}
+
+impl Clone for LocalFileServer {
+    fn clone(&self) -> Self {
+        Self {
+            origin: self.origin.clone(),
+            files: self.files.clone(),
+        }
+    }
+}
+
+impl LocalFileServer {
+    fn start() -> std::io::Result<Self> {
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let port = listener.local_addr()?.port();
+        let files = std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let thread_files = files.clone();
+        thread::Builder::new()
+            .name("a3s-local-remoteui".to_string())
+            .spawn(move || serve_local_files(listener, thread_files))
+            .map_err(|err| std::io::Error::new(err.kind(), err.to_string()))?;
+        Ok(Self {
+            origin: format!("http://127.0.0.1:{port}"),
+            files,
+        })
+    }
+
+    fn register(&self, path: PathBuf) -> std::io::Result<String> {
+        let id = format!(
+            "{:x}-{}",
+            current_unix_nanos(),
+            LOCAL_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        self.files
+            .lock()
+            .map_err(|_| std::io::Error::other("local RemoteUI file registry poisoned"))?
+            .insert(id.clone(), path.clone());
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("index.html");
+        Ok(format!(
+            "{}/a3s-local-view/{}/{}",
+            self.origin,
+            id,
+            percent_encode_file_url_path(name)
+        ))
+    }
+}
+
+fn local_file_server() -> std::io::Result<LocalFileServer> {
+    match LOCAL_FILE_SERVER.get_or_init(LocalFileServer::start) {
+        Ok(server) => Ok(server.clone()),
+        Err(err) => Err(std::io::Error::new(err.kind(), err.to_string())),
+    }
+}
+
+fn serve_local_files(
+    listener: TcpListener,
+    files: std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
+) {
+    for stream in listener.incoming().flatten() {
+        let _ = handle_local_file_request(stream, &files);
+    }
+}
+
+fn handle_local_file_request(
+    mut stream: TcpStream,
+    files: &std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
+) -> std::io::Result<()> {
+    let request = read_http_request_head(&mut stream)?;
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| {
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some("GET"), Some(path)) => Some(path),
+                _ => None,
+            }
+        })
+        .unwrap_or("/");
+    let id = path
+        .strip_prefix("/a3s-local-view/")
+        .and_then(|rest| rest.split('/').next())
+        .filter(|id| !id.is_empty());
+    let Some(id) = id else {
+        return write_local_file_response(
+            &mut stream,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found",
+        );
+    };
+    let file = files.lock().ok().and_then(|map| map.get(id).cloned());
+    let Some(file) = file else {
+        return write_local_file_response(
+            &mut stream,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found",
+        );
+    };
+    let Ok(bytes) = std::fs::read(&file) else {
+        return write_local_file_response(
+            &mut stream,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found",
+        );
+    };
+    write_local_file_response(&mut stream, 200, content_type_for(&file), &bytes)
+}
+
+fn read_http_request_head(stream: &mut TcpStream) -> std::io::Result<String> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut request = Vec::with_capacity(1024);
+    let mut buf = [0_u8; 1024];
+    while request.len() < 8192 {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                request.extend_from_slice(&buf[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(String::from_utf8_lossy(&request).into_owned())
+}
+
+fn write_local_file_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        404 => "Not Found",
+        _ => "Error",
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(body)?;
+    stream.flush()?;
+    let _ = stream.shutdown(Shutdown::Write);
+    Ok(())
+}
+
+fn content_type_for(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        _ => "application/octet-stream",
+    }
+}
+
+fn current_unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
 }
 
 /// Find a renderable view in a tool's JSON output. Prefers the current `view`
@@ -62,6 +277,30 @@ fn absolutize(url: &str, origin: Option<&str>) -> Option<String> {
     } else {
         None
     }
+}
+
+fn percent_encode_file_url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.as_bytes() {
+        let safe = matches!(
+            b,
+            b'A'..=b'Z'
+                | b'a'..=b'z'
+                | b'0'..=b'9'
+                | b'-'
+                | b'_'
+                | b'.'
+                | b'~'
+                | b'/'
+                | b':'
+        );
+        if safe {
+            out.push(*b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", *b));
+        }
+    }
+    out
 }
 
 fn find_in(value: &serde_json::Value, origin: Option<&str>) -> Option<ViewSpec> {
@@ -377,6 +616,46 @@ mod tests {
         .is_none());
         assert!(find_view_url(r#"{"data":{"items":[1,2]}}"#, None).is_none());
         assert!(find_view_url("not json", None).is_none());
+    }
+
+    #[test]
+    fn trusted_local_file_view_uses_local_http_server() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-local-view-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("report with space.html");
+        std::fs::write(&path, "<!doctype html>").unwrap();
+
+        let spec = local_file_view(&path).unwrap();
+        assert!(spec.url.starts_with("http://127.0.0.1:"), "{spec:?}");
+        assert!(spec.url.contains("/a3s-local-view/"), "{spec:?}");
+        assert!(spec.url.ends_with("report%20with%20space.html"), "{spec:?}");
+        assert_eq!((spec.width, spec.height), (Some(1200), Some(820)));
+        assert!(spec.embeddable);
+        let response = fetch_local_test_url(&spec.url);
+        assert!(response.contains("<!doctype html"), "{response}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fetch_local_test_url(url: &str) -> String {
+        let rest = url.strip_prefix("http://127.0.0.1:").unwrap();
+        let (port, path) = rest.split_once('/').unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap();
+        write!(
+            stream,
+            "GET /{path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        response
     }
 
     #[test]

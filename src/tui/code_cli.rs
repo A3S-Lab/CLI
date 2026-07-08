@@ -1,13 +1,36 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
+use std::sync::Arc;
 
 use a3s_code_core::config::{CodeConfig, OsConfig};
+use a3s_code_core::{Agent, AgentSession, SessionOptions, ToolCallResult};
 
-use super::{asset_clone, config, kbutil, memutil, panels, remote_ui};
+use crate::config;
+
+use super::{asset_clone, kbutil, memutil, panels, remote_ui};
 
 const TOP_LEVEL_COMMANDS: &[&str] = &[
-    "agent", "mcp", "skill", "flow", "okf", "login", "logout", "auth", "config", "dirs", "models",
-    "model", "kb", "ctx", "memory", "mem", "top", "view", "serve",
+    "agent",
+    "mcp",
+    "skill",
+    "flow",
+    "okf",
+    "deepresearch",
+    "deep-research",
+    "login",
+    "logout",
+    "auth",
+    "config",
+    "dirs",
+    "models",
+    "model",
+    "kb",
+    "ctx",
+    "memory",
+    "mem",
+    "top",
+    "serve",
 ];
 
 pub(crate) fn is_code_cli_command(args: &[String]) -> bool {
@@ -34,6 +57,8 @@ pub(crate) fn code_cli_usage_text() -> String {
         "  a3s code dirs                    print local asset and memory roots".to_string(),
         "  a3s code models                  list configured and account-backed models".to_string(),
         "  a3s code serve                   start local API and Shu Xiao'an web UI".to_string(),
+        "  a3s code deepresearch <query>    run DeepResearch and write .md/.html report artifacts"
+            .to_string(),
         "  a3s code <family> local [query]  list local assets for a family".to_string(),
         "  a3s code <family> clone <url>    clone an asset source into the configured root"
             .to_string(),
@@ -45,7 +70,7 @@ pub(crate) fn code_cli_usage_text() -> String {
         "lifecycle commands:".to_string(),
         "  a3s code agent publish agentic|application|tool [package]".to_string(),
         "  a3s code agent run|deploy|open|logs|status [kind] [package]".to_string(),
-        "  a3s code mcp publish|deploy|debug|test|open|logs|status [path]".to_string(),
+        "  a3s code mcp publish|run|test|deploy|open|logs|status [path]".to_string(),
         "  a3s code skill publish|deploy|open|status [path]".to_string(),
         "  a3s code flow publish|run|deploy|open|logs|status [file]".to_string(),
         "  a3s code okf publish|deploy|status [path]".to_string(),
@@ -58,7 +83,6 @@ pub(crate) fn code_cli_usage_text() -> String {
         "  a3s code ctx search <query>      search local ctx history".to_string(),
         "  a3s code memory list [query]     list long-term memory entries".to_string(),
         "  a3s code top [--json]            alias for a3s top".to_string(),
-        "  a3s code view <url> [--width N] [--height N]".to_string(),
     ]
     .join("\n")
         + "\n"
@@ -84,12 +108,12 @@ pub(crate) async fn run_code_cli(args: Vec<String>) -> anyhow::Result<()> {
             Ok(())
         }
         Some("models" | "model") => run_models(&args[1..]).await,
+        Some("deepresearch" | "deep-research") => run_deepresearch(&args[1..]).await,
         Some("kb") => run_kb(&args[1..]),
         Some("ctx") => run_ctx(&args[1..]).await,
         Some("memory" | "mem") => run_memory(&args[1..]),
         Some("top") => crate::top::run(args[1..].to_vec()).await,
-        Some("view") => run_view(&args[1..]).await,
-        Some("serve") => super::code_serve::run(&args[1..]).await,
+        Some("serve") => crate::api::run(&args[1..]).await,
         Some(other) => anyhow::bail!(
             "unknown a3s code subcommand `{other}`; expected one of {}",
             TOP_LEVEL_COMMANDS.join(", ")
@@ -133,8 +157,13 @@ async fn run_agent(args: &[String]) -> anyhow::Result<()> {
             .await
         }
         "run" => {
-            let path = single_path_arg("agent run", &args[1..])?;
-            run_agent_os(panels::agent::AgentOsAction::Run, path.as_deref(), false).await
+            let (kind, path) = parse_agent_kind_path(command, &args[1..])?;
+            run_agent_os(
+                panels::agent::AgentOsAction::Run(kind),
+                path.as_deref(),
+                false,
+            )
+            .await
         }
         "deploy" => {
             let path = single_path_arg("agent deploy", &args[1..])?;
@@ -180,7 +209,7 @@ async fn run_mcp(args: &[String]) -> anyhow::Result<()> {
             println!("{}", panels::mcp::mcp_review_prompt(&dev));
             Ok(())
         }
-        "publish" | "deploy" | "debug" | "test" | "open" | "logs" | "status" => {
+        "publish" | "run" | "test" | "deploy" | "open" | "logs" | "status" => {
             let path = single_path_arg(&format!("mcp {command}"), &args[1..])?;
             let action = parse_mcp_action(command)?;
             run_mcp_os(action, path.as_deref(), command == "open").await
@@ -483,7 +512,9 @@ async fn run_models(args: &[String]) -> anyhow::Result<()> {
         None | Some("list") => {}
         Some("-h" | "--help" | "help") => {
             println!("a3s code models");
-            println!("  lists config.acl models, local Claude/Codex account models, and OS gateway models when signed in");
+            println!(
+                "  lists config.acl models, local Claude/Codex account models, and OS gateway models when signed in"
+            );
             return Ok(());
         }
         Some(other) => anyhow::bail!("unknown models command `{other}`; expected list"),
@@ -547,6 +578,313 @@ async fn run_models(args: &[String]) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepResearchRuntimeMode {
+    Auto,
+    Local,
+    Os,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeepResearchCliOptions {
+    query: String,
+    runtime_mode: DeepResearchRuntimeMode,
+}
+
+fn parse_deepresearch_args(args: &[String]) -> anyhow::Result<DeepResearchCliOptions> {
+    let mut runtime_mode = DeepResearchRuntimeMode::Auto;
+    let mut query_parts = Vec::new();
+    for arg in args {
+        match arg.as_str() {
+            "--local" => runtime_mode = DeepResearchRuntimeMode::Local,
+            "--os" => runtime_mode = DeepResearchRuntimeMode::Os,
+            "-h" | "--help" | "help" => {
+                anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+            }
+            value if value.starts_with('-') => {
+                anyhow::bail!("unknown a3s code deepresearch option `{value}`")
+            }
+            value => query_parts.push(value.to_string()),
+        }
+    }
+    let query = query_parts.join(" ").trim().to_string();
+    if query.is_empty() {
+        anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+    }
+    Ok(DeepResearchCliOptions {
+        query,
+        runtime_mode,
+    })
+}
+
+async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
+    if matches!(
+        args.first().map(String::as_str),
+        Some("-h" | "--help" | "help")
+    ) {
+        print_deepresearch_help();
+        return Ok(());
+    }
+    let opts = parse_deepresearch_args(args)?;
+    if opts.runtime_mode == DeepResearchRuntimeMode::Os {
+        anyhow::bail!(
+            "--os is temporarily disabled for DeepResearch; OS Runtime support should use Function-as-a-Service instead of remote tool-call fan-out"
+        );
+    }
+    let workspace = std::env::current_dir()?;
+    let workspace_text = workspace.to_string_lossy().to_string();
+    let session = build_deepresearch_session(&workspace_text).await?;
+    let os_runtime = match opts.runtime_mode {
+        DeepResearchRuntimeMode::Local => false,
+        DeepResearchRuntimeMode::Os => false,
+        DeepResearchRuntimeMode::Auto => false,
+    };
+
+    eprintln!(
+        "deepresearch: gathering evidence via {} workflow…",
+        if os_runtime { "OS Runtime" } else { "local" }
+    );
+    let workflow_args = super::deep_research_workflow_args(&opts.query, os_runtime);
+    let workflow = run_deepresearch_workflow(&session, workflow_args.clone()).await;
+    let (workflow_output, exit_code, metadata) = match workflow {
+        Ok(result) => (result.output, result.exit_code, result.metadata),
+        Err(error) => (error, 1, None),
+    };
+
+    let synthesis = synthesize_deepresearch_report(
+        &session,
+        &workspace,
+        &opts.query,
+        os_runtime,
+        &workflow_output,
+        exit_code,
+        metadata.as_ref(),
+    )
+    .await?;
+
+    print!("{}", synthesis.text);
+    if !synthesis.text.ends_with('\n') {
+        println!();
+    }
+    println!("report.md: {}", synthesis.artifacts.markdown.display());
+    println!("index.html: {}", synthesis.artifacts.html.display());
+    if synthesis.status == DeepResearchReportStatus::FallbackDraft {
+        anyhow::bail!(
+            "DeepResearch did not complete; fallback draft written at {}",
+            synthesis.artifacts.html.display()
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepResearchReportStatus {
+    Completed,
+    FallbackDraft,
+}
+
+#[derive(Debug)]
+struct DeepResearchReportSynthesis {
+    text: String,
+    artifacts: super::ResearchReportArtifacts,
+    status: DeepResearchReportStatus,
+}
+
+async fn synthesize_deepresearch_report(
+    session: &AgentSession,
+    workspace: &Path,
+    query: &str,
+    os_runtime: bool,
+    workflow_output: &str,
+    exit_code: i32,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<DeepResearchReportSynthesis> {
+    eprintln!("deepresearch: synthesizing report artifacts…");
+    let prompt = if exit_code == 0 {
+        super::deep_research_synthesis_prompt(query, os_runtime, workflow_output, metadata)
+    } else {
+        super::deep_research_recovery_prompt(query, os_runtime, workflow_output, metadata)
+    };
+    let (mut final_text, synthesis_completed) = send_deepresearch_text(
+        session,
+        &prompt,
+        super::DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
+        "synthesis",
+    )
+    .await;
+    let mut artifacts =
+        super::research_report_artifacts_from_output_for_query(&final_text, workspace, query);
+    let mut status = DeepResearchReportStatus::Completed;
+
+    if artifacts.is_none() && synthesis_completed {
+        eprintln!("deepresearch: report marker/artifacts missing, running focused repair pass…");
+        let repair = super::deep_research_repair_prompt(
+            query,
+            os_runtime,
+            workflow_output,
+            metadata,
+            &final_text,
+        );
+        let (repair_text, repair_completed) = send_deepresearch_text(
+            session,
+            &repair,
+            super::DEEP_RESEARCH_REPAIR_TIMEOUT_MS,
+            "repair",
+        )
+        .await;
+        final_text = repair_text;
+        artifacts =
+            super::research_report_artifacts_from_output_for_query(&final_text, workspace, query);
+        if !repair_completed {
+            eprintln!("deepresearch: repair pass did not complete, using host fallback…");
+        }
+    }
+
+    if artifacts.is_none() {
+        eprintln!(
+            "deepresearch: report artifacts still missing, materializing host fallback draft…"
+        );
+        let fallback_artifacts = super::materialize_deep_research_fallback_draft(
+            workspace,
+            query,
+            &final_text,
+            workflow_output,
+        )
+        .map_err(anyhow::Error::msg)?;
+        if !final_text.ends_with('\n') {
+            final_text.push('\n');
+        }
+        final_text.push_str(&format!(
+            "DeepResearch fallback draft written at {}\n",
+            fallback_artifacts.html.display()
+        ));
+        artifacts = Some(fallback_artifacts);
+        status = DeepResearchReportStatus::FallbackDraft;
+    }
+
+    let artifacts = artifacts.ok_or_else(|| {
+        anyhow::anyhow!(
+            "DeepResearch did not produce the required report artifacts: expected `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`, plus sibling report.md"
+        )
+    })?;
+    Ok(DeepResearchReportSynthesis {
+        text: final_text,
+        artifacts,
+        status,
+    })
+}
+
+async fn send_deepresearch_text(
+    session: &AgentSession,
+    prompt: &str,
+    timeout_ms: u64,
+    phase: &str,
+) -> (String, bool) {
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        session.send(prompt, Some(&[])),
+    )
+    .await
+    {
+        Ok(Ok(result)) => (result.text, true),
+        Ok(Err(error)) => (
+            format!("DeepResearch {phase} model call failed: {error}"),
+            false,
+        ),
+        Err(_) => (
+            format!("DeepResearch {phase} model call timed out after {timeout_ms} ms."),
+            false,
+        ),
+    }
+}
+
+fn print_deepresearch_help() {
+    println!("a3s code deepresearch [--local|--os] <query>");
+    println!("  run DeepResearch from the CLI and write:");
+    println!("    .a3s/research/<slug>/report.md");
+    println!("    .a3s/research/<slug>/index.html");
+    println!("  --local  force local parallel_task research");
+    println!("  --os     temporarily disabled; future OS Runtime support should use FaaS");
+}
+
+fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
+    let mut policy = a3s_code_core::permissions::PermissionPolicy::new()
+        .deny_all(&[
+            "Write(/**)",
+            "Edit(/**)",
+            "Write(**/../**)",
+            "Edit(**/../**)",
+        ])
+        .allow_all(&[
+            "Read(*)",
+            "Grep(*)",
+            "Glob(*)",
+            "LS(*)",
+            "read(*)",
+            "grep(*)",
+            "glob(*)",
+            "ls(*)",
+            "web_search(*)",
+            "web_fetch(*)",
+            "Write(.a3s/research/**)",
+            "Edit(.a3s/research/**)",
+            "write(.a3s/research/**)",
+            "edit(.a3s/research/**)",
+        ]);
+    policy.default_decision = a3s_code_core::permissions::PermissionDecision::Deny;
+    policy
+}
+
+async fn build_deepresearch_session(workspace: &str) -> anyhow::Result<AgentSession> {
+    let (config_path, _) = load_code_config()?;
+    let agent = Agent::new(config_path.clone())
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?;
+    let budget = super::deep_research_default_budget();
+    let opts = SessionOptions::new()
+        .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
+        .with_permission_policy(deepresearch_cli_permission_policy())
+        .with_tool_timeout(super::TOOL_EXEC_TIMEOUT_MS)
+        .with_duplicate_tool_call_threshold(super::TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
+        .with_file_memory(config::memory_dir())
+        .with_max_parallel_tasks(budget.max_parallel_tasks)
+        .with_max_tool_rounds(budget.max_tool_rounds)
+        .with_max_continuation_turns(budget.max_continuation_turns)
+        .with_auto_delegation_enabled(true)
+        .with_auto_parallel_delegation(true)
+        .with_manual_delegation_enabled(true);
+    let session = agent.session(workspace.to_string(), Some(opts))?;
+    session.register_dynamic_workflow_runtime();
+    Ok(session)
+}
+
+async fn run_deepresearch_workflow(
+    session: &AgentSession,
+    args: serde_json::Value,
+) -> Result<ToolCallResult, String> {
+    let (mut progress_rx, workflow_join) = session.tool_with_events("dynamic_workflow", args);
+    let workflow_abort = workflow_join.abort_handle();
+    let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
+    let timeout_ms = super::DEEP_RESEARCH_SCRIPT_TIMEOUT_MS + 30_000;
+    let result = match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        workflow_join,
+    )
+    .await
+    {
+        Ok(Ok(result)) => result.map_err(|err| err.to_string()),
+        Ok(Err(err)) => Err(err.to_string()),
+        Err(_) => {
+            workflow_abort.abort();
+            Err(format!(
+                "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
+            ))
+        }
+    };
+    progress_drain.abort();
+    result
 }
 
 fn run_kb(args: &[String]) -> anyhow::Result<()> {
@@ -659,23 +997,6 @@ fn run_memory(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
     }
-}
-
-async fn run_view(args: &[String]) -> anyhow::Result<()> {
-    if matches!(
-        args.first().map(String::as_str),
-        Some("-h" | "--help" | "help")
-    ) {
-        println!("a3s code view <url> [--width N] [--height N]");
-        println!("  opens an explicit OS RemoteUI/viewUrl in a3s-webview or the system browser");
-        return Ok(());
-    }
-    let spec = parse_view_spec(args)?;
-    let _ = current_os_session_if_configured().await;
-    let opened = remote_ui::open_window(&spec)
-        .map_err(|e| anyhow::anyhow!("could not open RemoteUI view: {e}"))?;
-    println!("opened: {:?}", opened);
-    Ok(())
 }
 
 fn optional_single_arg(command: &str, args: &[String]) -> anyhow::Result<Option<String>> {
@@ -1036,61 +1357,6 @@ fn memory_content(data: &memutil::MemPanelData, entry: &memutil::MemEntry) -> St
         .unwrap_or_else(|| entry.content_lower.clone())
 }
 
-fn parse_view_spec(args: &[String]) -> anyhow::Result<remote_ui::ViewSpec> {
-    if args.is_empty() {
-        anyhow::bail!("usage: a3s code view <url> [--width N] [--height N]");
-    }
-    let url = args[0].clone();
-    if !url.starts_with("http://") && !url.starts_with("https://") {
-        anyhow::bail!("RemoteUI url must start with http:// or https://");
-    }
-    let mut width = None;
-    let mut height = None;
-    let mut i = 1usize;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--width" => {
-                width = Some(parse_u32_option("--width", args.get(i + 1))?);
-                i += 2;
-            }
-            "--height" => {
-                height = Some(parse_u32_option("--height", args.get(i + 1))?);
-                i += 2;
-            }
-            "--size" => {
-                let value = args
-                    .get(i + 1)
-                    .ok_or_else(|| anyhow::anyhow!("--size requires WIDTHxHEIGHT"))?;
-                let (w, h) = value
-                    .split_once('x')
-                    .or_else(|| value.split_once('X'))
-                    .ok_or_else(|| anyhow::anyhow!("--size expects WIDTHxHEIGHT"))?;
-                width = Some(w.parse().map_err(|_| anyhow::anyhow!("invalid width"))?);
-                height = Some(h.parse().map_err(|_| anyhow::anyhow!("invalid height"))?);
-                i += 2;
-            }
-            other => anyhow::bail!("unknown view option `{other}`"),
-        }
-    }
-    Ok(remote_ui::ViewSpec {
-        url,
-        width,
-        height,
-        embeddable: width.is_some() || height.is_some(),
-    })
-}
-
-fn parse_u32_option(name: &str, value: Option<&String>) -> anyhow::Result<u32> {
-    let value = value.ok_or_else(|| anyhow::anyhow!("{name} requires a value"))?;
-    let parsed: u32 = value
-        .parse()
-        .map_err(|_| anyhow::anyhow!("{name} must be a positive integer"))?;
-    if parsed == 0 {
-        anyhow::bail!("{name} must be greater than zero");
-    }
-    Ok(parsed)
-}
-
 async fn clone_asset(family: &'static str, url: String, root: PathBuf) -> anyhow::Result<()> {
     let result = asset_clone::clone_asset_source(family, url, root)
         .await
@@ -1237,20 +1503,17 @@ async fn run_flow_os(
     open_requested: bool,
 ) -> anyhow::Result<()> {
     let flow = resolve_flow_file(path_arg.map(str::to_string))?;
-    let design = if matches!(
-        action,
-        panels::flow::FlowOsAction::Open
-            | panels::flow::FlowOsAction::Logs
-            | panels::flow::FlowOsAction::Status
-    ) {
-        String::new()
-    } else {
-        read_flow_design(&flow.path)?
-    };
+    let design = read_flow_design(&flow.path)?;
     let session = load_os_session().await?;
-    let result = panels::flow::publish_flow_to_os(session, flow.rel, design, action)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let result = panels::flow::publish_flow_to_os_with_local_path(
+        session,
+        flow.rel,
+        Some(flow.path.clone()),
+        design,
+        action,
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     println!(
         "flow {}: {} ({})",
         result.action.label(),
@@ -1575,6 +1838,10 @@ fn parse_agent_kind_path(
         return Ok((default, None));
     };
     if is_agent_kind(first) {
+        if command == "run" {
+            let kind = panels::agent::AgentOsKind::parse(first).map_err(anyhow::Error::msg)?;
+            return Ok((kind, args.get(1).cloned()));
+        }
         let parsed = panels::agent::parse_agent_subcommand(&format!("{command} {first}"))
             .ok_or_else(|| anyhow::anyhow!("usage: a3s code agent {command} [kind] [package]"))?
             .map_err(anyhow::Error::msg)?;
@@ -1811,7 +2078,7 @@ fn print_family_help(family: &str) {
             println!("  publish agentic|application|tool [package]");
             println!("  run|deploy|open|logs|status [agentic|application|tool] [package]");
         }
-        "mcp" => println!("  publish|deploy|debug|test|open|logs|status [path]"),
+        "mcp" => println!("  publish|run|test|deploy|open|logs|status [path]"),
         "skill" => println!("  publish|deploy|open|status [path]"),
         "flow" => println!("  publish|run|deploy|open|logs|status [file]"),
         "okf" => println!("  publish|deploy|status [path]"),
@@ -1826,6 +2093,224 @@ fn unknown_family_command(family: &str, command: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::llm::{
+        ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
+    };
+    use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
+    use async_trait::async_trait;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    struct ScriptedLlmClient {
+        responses: Mutex<VecDeque<LlmResponse>>,
+    }
+
+    #[async_trait]
+    impl LlmClient for ScriptedLlmClient {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> {
+            Ok(self.response_for_messages(messages, system, tools))
+        }
+
+        async fn complete_streaming(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+            _cancel_token: CancellationToken,
+        ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+            let response = self.response_for_messages(messages, system, tools);
+            let (tx, rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::Done(response)).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    impl ScriptedLlmClient {
+        fn new(responses: Vec<LlmResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+
+        fn response_for_messages(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+        ) -> LlmResponse {
+            if tools.iter().any(|tool| tool.name == "emit_step_output") {
+                return tool_call_response(
+                    "toolu_emit_step_output",
+                    "emit_step_output",
+                    serde_json::json!({
+                        "summary": "Structured DeepResearch track evidence confirms local fan-out completed before synthesis.",
+                        "sources": [{
+                            "title": "Example research source",
+                            "url_or_path": "https://example.com/research",
+                            "date": "2026-07-08",
+                            "quote_or_fact": "Local DeepResearch fan-out completed before synthesis.",
+                            "reliability": "deterministic test evidence"
+                        }],
+                        "key_evidence": [
+                            "Local parallel_task fan-out produced deterministic evidence."
+                        ],
+                        "contradictions": [],
+                        "confidence": "high for deterministic test evidence",
+                        "gaps": []
+                    }),
+                );
+            }
+            let last = message_text(messages.last());
+            if system.is_some_and(|system| system.contains("pre-analysis assistant"))
+                || last.contains("ONLY the JSON object")
+            {
+                return text_response(
+                    r#"{"intent":"GeneralPurpose","requires_planning":false,"goal":{"description":"DeepResearch child task","success_criteria":["evidence returned"]},"execution_plan":{"complexity":"Simple","steps":[],"required_tools":[]},"optimized_input":"DeepResearch child task"}"#,
+                );
+            }
+            if last.contains("Deep-research track for:")
+                && !last.contains("DynamicWorkflowRuntime")
+                && !last.contains("DeepResearch verification layer")
+            {
+                return text_response(
+                    "Track evidence: https://example.com/research confirms the local \
+                     DeepResearch fan-out completed before synthesis.",
+                );
+            }
+            self.next_response()
+        }
+
+        fn next_response(&self) -> LlmResponse {
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| text_response("DONE"))
+        }
+    }
+
+    fn message_text(message: Option<&Message>) -> String {
+        message
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    fn text_response(text: impl Into<String>) -> LlmResponse {
+        LlmResponse {
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::Text { text: text.into() }],
+                reasoning_content: None,
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some("stop".into()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        }
+    }
+
+    fn tool_call_response(id: &str, name: &str, input: serde_json::Value) -> LlmResponse {
+        LlmResponse {
+            message: Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: name.into(),
+                    input,
+                }],
+                reasoning_content: None,
+            },
+            usage: TokenUsage::default(),
+            stop_reason: Some("tool_use".into()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        }
+    }
+
+    struct StructuredRuntimeTool {
+        seen_args: std::sync::Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for StructuredRuntimeTool {
+        fn name(&self) -> &str {
+            "runtime"
+        }
+
+        fn description(&self) -> &str {
+            "Returns completed structured runtime output for DeepResearch tests."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            self.seen_args.lock().unwrap().push(args.clone());
+            let structured = serde_json::json!({
+                "summary": "Runtime structured evidence confirms OS fan-out completed before synthesis.",
+                "sources": [{
+                    "title": "Runtime Evidence",
+                    "url_or_path": "https://example.com/runtime-evidence",
+                    "date": "2026-07-08",
+                    "quote_or_fact": "OS Runtime returned a schema-shaped evidence object.",
+                    "reliability": "deterministic test fixture"
+                }],
+                "key_evidence": ["OS Runtime results are normalized into structured evidence."],
+                "contradictions": [],
+                "confidence": "high",
+                "gaps": []
+            });
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "batchId": "batch-structured",
+                    "results": [{
+                        "invocationId": "inv-1",
+                        "state": "completed",
+                        "output": structured.to_string(),
+                        "error": null
+                    }]
+                })
+                .to_string(),
+            ))
+        }
+    }
+
+    fn test_config(path: &std::path::Path) {
+        std::fs::write(
+            path,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n\
+             memory {\n  llmExtraction = false\n}\n",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn recognizes_code_cli_top_level_commands_without_capturing_prompts() {
@@ -1837,8 +2322,11 @@ mod tests {
         assert!(is_code_cli_command(&["ctx".into()]));
         assert!(is_code_cli_command(&["memory".into()]));
         assert!(is_code_cli_command(&["top".into()]));
-        assert!(is_code_cli_command(&["view".into()]));
+        assert!(is_code_cli_command(&["deepresearch".into()]));
+        assert!(is_code_cli_command(&["deep-research".into()]));
         assert!(is_code_cli_command(&["--help".into()]));
+        assert!(!is_code_cli_command(&["view".into()]));
+        assert!(!is_code_cli_command(&["research".into(), "this".into()]));
         assert!(!is_code_cli_command(&["resume".into(), "abc".into()]));
         assert!(!is_code_cli_command(&["some-prompt".into()]));
     }
@@ -1848,18 +2336,603 @@ mod tests {
         let text = code_cli_usage_text();
         assert!(text.contains("a3s code <family> local"));
         assert!(text.contains("a3s code agent publish agentic|application|tool"));
-        assert!(text.contains("a3s code mcp publish|deploy|debug|test"));
+        assert!(text.contains("a3s code mcp publish|run|test|deploy"));
         assert!(text.contains("families: agent, mcp, skill, flow, okf"));
         assert!(text.contains("a3s code login [token]"));
+        assert!(text.contains("a3s code deepresearch <query>"));
         assert!(text.contains("a3s code kb stats|add|import|search|vault"));
         assert!(text.contains("a3s code ctx search <query>"));
-        assert!(text.contains("a3s code view <url>"));
+        assert!(!text.contains("a3s code view <url>"));
+    }
+
+    #[test]
+    fn parses_deepresearch_cli_options() {
+        let opts = parse_deepresearch_args(&["--local".into(), "rust".into(), "async".into()])
+            .expect("local deepresearch args");
+        assert_eq!(opts.query, "rust async");
+        assert_eq!(opts.runtime_mode, DeepResearchRuntimeMode::Local);
+
+        let opts = parse_deepresearch_args(&["--os".into(), "market".into()])
+            .expect("os deepresearch args");
+        assert_eq!(opts.query, "market");
+        assert_eq!(opts.runtime_mode, DeepResearchRuntimeMode::Os);
+
+        let opts = parse_deepresearch_args(&["compare".into(), "runtimes".into()])
+            .expect("auto deepresearch args");
+        assert_eq!(opts.query, "compare runtimes");
+        assert_eq!(opts.runtime_mode, DeepResearchRuntimeMode::Auto);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_os_mode_is_temporarily_disabled() {
+        let err = run_deepresearch(&["--os".into(), "market".into()])
+            .await
+            .expect_err("--os should be disabled before touching OS Runtime");
+        let message = err.to_string();
+        assert!(message.contains("temporarily disabled"), "{message}");
+        assert!(message.contains("Function-as-a-Service"), "{message}");
+    }
+
+    #[test]
+    fn deepresearch_cli_policy_only_allows_report_artifact_writes() {
+        use a3s_code_core::permissions::PermissionDecision;
+
+        let policy = deepresearch_cli_permission_policy();
+
+        assert_eq!(
+            policy.check(
+                "write",
+                &serde_json::json!({
+                    "file_path": ".a3s/research/local-test/report.md",
+                    "content": "# Report"
+                })
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check(
+                "Write",
+                &serde_json::json!({
+                    "file_path": ".a3s/research/local-test/index.html",
+                    "content": "<!doctype html><html><body></body></html>"
+                })
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check("web_search", &serde_json::json!({"query": "a3s"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "ls -la"})),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            policy.check(
+                "write",
+                &serde_json::json!({"file_path": "README.md", "content": "oops"})
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            policy.check(
+                "write",
+                &serde_json::json!({
+                    "file_path": "/tmp/workspace/.a3s/research/local-test/index.html",
+                    "content": "ambiguous absolute path"
+                })
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            policy.check(
+                "write",
+                &serde_json::json!({
+                    "file_path": ".a3s/research/local-test/../../README.md",
+                    "content": "path traversal"
+                })
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            policy.check(
+                "edit",
+                &serde_json::json!({
+                    "file_path": ".a3s/research/local-test/..\\..\\README.md",
+                    "old_string": "before",
+                    "new_string": "after"
+                })
+            ),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            policy.check("bash", &serde_json::json!({"command": "rm -rf target"})),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_synthesis_denies_non_report_writes_before_fallback() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-denied-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![
+            tool_call_response(
+                "toolu_write_readme",
+                "write",
+                serde_json::json!({
+                    "file_path": "README.md",
+                    "content": "DeepResearch should not write ordinary workspace files.",
+                }),
+            ),
+            text_response("Synthesis recovered after a denied workspace write but did not write report files."),
+            text_response("Repair also did not write report files."),
+        ]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(4);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "denied write fallback",
+            false,
+            r#"{"mode":"local_parallel_task","research":"evidence after denied write"}"#,
+            0,
+            None,
+        )
+        .await
+        .expect("host fallback should materialize after denied non-report write");
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            status,
+        } = synthesis;
+
+        assert_eq!(status, DeepResearchReportStatus::FallbackDraft);
+        assert!(
+            !workspace.join("README.md").exists(),
+            "DeepResearch CLI policy must block non-report writes"
+        );
+        assert!(
+            final_text.contains("DeepResearch fallback draft written at"),
+            "{final_text}"
+        );
+        assert!(!final_text.contains("A3S_RESEARCH_VIEW"), "{final_text}");
+        assert_eq!(
+            artifacts.markdown,
+            workspace
+                .join(".a3s/research/denied-write-fallback/report.md")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            artifacts.html,
+            workspace
+                .join(".a3s/research/denied-write-fallback/index.html")
+                .canonicalize()
+                .unwrap()
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_repair_pass_writes_required_markdown_and_html_artifacts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-artifacts-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![
+            text_response("Initial synthesis without a report marker."),
+            tool_call_response(
+                "toolu_write_markdown",
+                "write",
+                serde_json::json!({
+                    "file_path": ".a3s/research/local-test/report.md",
+                    "content": "# Local Test\n\n## Findings\n\nThis source-backed markdown report summarizes the gathered DeepResearch evidence, explains the main finding, and records caveats for review.\n\n## Sources\n\n- https://example.com/research\n\n## Confidence\n\nConfidence is medium because this deterministic test evidence is compact but traceable.\n",
+                }),
+            ),
+            tool_call_response(
+                "toolu_write_html",
+                "write",
+                serde_json::json!({
+                    "file_path": ".a3s/research/local-test/index.html",
+                    "content": "<!doctype html><html><body><h1>Local Test</h1><section><h2>Findings</h2><p>This source-backed report summarizes gathered DeepResearch evidence, caveats, and the main finding for review.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/research. Confidence is medium.</p></section></body></html>",
+                }),
+            ),
+            text_response(
+                "Repair complete.\nA3S_RESEARCH_VIEW: .a3s/research/local-test/index.html",
+            ),
+        ]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "local test",
+            false,
+            r#"{"mode":"local_parallel_task","research":"evidence"}"#,
+            0,
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            let markdown = workspace.join(".a3s/research/local-test/report.md");
+            let html = workspace.join(".a3s/research/local-test/index.html");
+            panic!(
+                "{error}; markdown_exists={}; html_exists={}",
+                markdown.exists(),
+                html.exists()
+            )
+        });
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            status,
+        } = synthesis;
+
+        assert_eq!(status, DeepResearchReportStatus::Completed);
+        assert!(
+            final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/local-test/index.html"),
+            "{final_text}"
+        );
+        assert_eq!(
+            artifacts.markdown,
+            workspace
+                .join(".a3s/research/local-test/report.md")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            artifacts.html,
+            workspace
+                .join(".a3s/research/local-test/index.html")
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(std::fs::metadata(&artifacts.markdown).unwrap().len() > 0);
+        assert!(std::fs::metadata(&artifacts.html).unwrap().len() > 0);
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_materializes_fallback_artifacts_when_model_never_writes_report() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-fallback-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![
+            text_response("Initial synthesis without report files."),
+            text_response("Repair also forgot to write the report files."),
+        ]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "fallback only",
+            false,
+            r#"{"mode":"local_parallel_task","research":"fallback evidence"}"#,
+            0,
+            None,
+        )
+        .await
+        .expect("host fallback should materialize draft artifacts");
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            status,
+        } = synthesis;
+
+        assert_eq!(status, DeepResearchReportStatus::FallbackDraft);
+        assert!(
+            final_text.contains("DeepResearch fallback draft written at"),
+            "{final_text}"
+        );
+        assert!(!final_text.contains("A3S_RESEARCH_VIEW"), "{final_text}");
+        assert_eq!(
+            artifacts.markdown,
+            workspace
+                .join(".a3s/research/fallback-only/report.md")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            artifacts.html,
+            workspace
+                .join(".a3s/research/fallback-only/index.html")
+                .canonicalize()
+                .unwrap()
+        );
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(markdown.contains("Repair also forgot"));
+        assert!(markdown.contains("fallback evidence"));
+        assert!(markdown.contains("DeepResearch Fallback Draft"));
+        assert!(!markdown.contains("A3S_RESEARCH_VIEW"));
+        let html = std::fs::read_to_string(&artifacts.html).unwrap();
+        assert!(html.contains("DeepResearch Fallback Draft"));
+        assert!(html.contains("fallback evidence"));
+        assert!(!html.contains("A3S_RESEARCH_VIEW"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_local_workflow_to_report_artifacts_e2e() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-e2e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![
+            text_response("Initial synthesis without a report marker."),
+            tool_call_response(
+                "toolu_write_markdown",
+                "write",
+                serde_json::json!({
+                    "file_path": ".a3s/research/local-workflow-e2e/report.md",
+                    "content": "# Local Workflow E2E\n\n## Findings\n\nThe workflow produced deterministic evidence and completed fan-out before synthesis, giving the report enough source-backed material to explain the result.\n\n## Sources\n\n- https://example.com/local-workflow-e2e\n\n## Confidence\n\nConfidence is high for this test because the evidence path is deterministic and verified by workflow metadata.\n",
+                }),
+            ),
+            tool_call_response(
+                "toolu_write_html",
+                "write",
+                serde_json::json!({
+                    "file_path": ".a3s/research/local-workflow-e2e/index.html",
+                    "content": "<!doctype html><html><body><h1>Local Workflow E2E</h1><section><h2>Findings</h2><p>The workflow produced deterministic evidence and completed fan-out before synthesis.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/local-workflow-e2e. Confidence is high for this deterministic test.</p></section></body></html>",
+                }),
+            ),
+            text_response(
+                "Report complete.\nA3S_RESEARCH_VIEW: .a3s/research/local-workflow-e2e/index.html",
+            ),
+        ]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        session.register_dynamic_workflow_runtime();
+
+        let mut workflow_args =
+            super::super::deep_research_workflow_args("local workflow e2e", false);
+        workflow_args["input"]["tracks"] = serde_json::json!([
+            {
+                "title": "Local evidence",
+                "focus": "Inspect local workflow evidence for the report."
+            },
+            {
+                "title": "Source confidence",
+                "focus": "Check source confidence and caveats independently."
+            },
+            {
+                "title": "Sequential synthesis",
+                "focus": "This should not run as a parallel child.",
+                "parallelizable": false
+            }
+        ]);
+        let workflow = run_deepresearch_workflow(&session, workflow_args)
+            .await
+            .expect("local DeepResearch workflow should complete");
+        assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
+        assert!(
+            workflow.output.contains("local_parallel_task"),
+            "{}",
+            workflow.output
+        );
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        assert_eq!(metadata["dynamic_workflow"]["status"], "Completed");
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["status"],
+            "completed"
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]["tool"],
+            "parallel_task"
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["task_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["result_count"],
+            serde_json::json!(2)
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["results"][0]["structured"]["summary"],
+            "Structured DeepResearch track evidence confirms local fan-out completed before synthesis."
+        );
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "local workflow e2e",
+            false,
+            &workflow.output,
+            workflow.exit_code,
+            workflow.metadata.as_ref(),
+        )
+        .await
+        .unwrap();
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            status,
+        } = synthesis;
+
+        assert_eq!(status, DeepResearchReportStatus::Completed);
+        assert!(
+            final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/local-workflow-e2e/index.html"),
+            "{final_text}"
+        );
+        assert_eq!(
+            artifacts.markdown,
+            workspace
+                .join(".a3s/research/local-workflow-e2e/report.md")
+                .canonicalize()
+                .unwrap()
+        );
+        assert_eq!(
+            artifacts.html,
+            workspace
+                .join(".a3s/research/local-workflow-e2e/index.html")
+                .canonicalize()
+                .unwrap()
+        );
+        assert!(std::fs::read_to_string(&artifacts.markdown)
+            .unwrap()
+            .contains("workflow produced deterministic evidence"));
+        assert!(std::fs::read_to_string(&artifacts.html)
+            .unwrap()
+            .contains("Local Workflow E2E"));
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_workflow_forces_local_when_os_runtime_requested() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-runtime-disabled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(4);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        session.register_dynamic_workflow_runtime();
+        let seen_args = std::sync::Arc::new(Mutex::new(Vec::new()));
+        session.register_dynamic_tool(Arc::new(StructuredRuntimeTool {
+            seen_args: std::sync::Arc::clone(&seen_args),
+        }));
+
+        let args = super::super::deep_research_workflow_args("runtime disabled", true);
+        let budget = super::super::deep_research_default_budget();
+        assert_eq!(args["input"]["os_runtime"], false);
+        assert_eq!(args["allowed_tools"], serde_json::json!([]));
+        assert_eq!(
+            args["input"]["local_max_parallel_tasks"],
+            serde_json::json!(budget.max_parallel_tasks)
+        );
+        let workflow = run_deepresearch_workflow(&session, args)
+            .await
+            .expect("DeepResearch workflow should stay local even if runtime was requested");
+
+        assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
+        assert_eq!(output["mode"], "local_parallel_task");
+        assert_eq!(
+            output["research"]["metadata"]["results"][0]["structured"]["summary"],
+            "Structured DeepResearch track evidence confirms local fan-out completed before synthesis."
+        );
+        assert_eq!(
+            seen_args.lock().unwrap().len(),
+            0,
+            "DeepResearch must not call the OS Runtime tool-call fan-out path"
+        );
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["status"],
+            "completed"
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["task_count"],
+            serde_json::json!(4)
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["result_count"],
+            serde_json::json!(4)
+        );
+        assert!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]
+                .get("runtime_preflight")
+                .is_none()
+                && metadata["dynamic_workflow"]["snapshot"]["steps"]
+                    .get("runtime_research")
+                    .is_none(),
+            "runtime tool-call fan-out steps should not be scheduled"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[test]
     fn parses_agent_kind_and_path_without_losing_default_kind() {
         let (kind, path) = parse_agent_kind_path("open", &[]).unwrap();
         assert_eq!(kind, panels::agent::AgentOsKind::Agentic);
+        assert_eq!(path, None);
+
+        let (kind, path) =
+            parse_agent_kind_path("open", &["application".into()]).expect("kind without path");
+        assert_eq!(kind, panels::agent::AgentOsKind::Application);
         assert_eq!(path, None);
 
         let (kind, path) = parse_agent_kind_path("open", &["tool".into(), "agents/tooler".into()])
@@ -1871,6 +2944,297 @@ mod tests {
             .expect("path only uses default kind");
         assert_eq!(kind, panels::agent::AgentOsKind::Agentic);
         assert_eq!(path.as_deref(), Some("agents/reviewer"));
+
+        assert!(
+            parse_agent_kind_path("open", &["unknown-kind".into(), "agents/reviewer".into()])
+                .is_err()
+        );
+        assert!(parse_agent_kind_path(
+            "open",
+            &["agentic".into(), "agents/reviewer".into(), "extra".into()]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn parses_agent_lifecycle_publish_and_path_shapes() {
+        let (kind, path) = parse_agent_publish_args(&["agentic".into()]).unwrap();
+        assert_eq!(kind, panels::agent::AgentOsKind::Agentic);
+        assert_eq!(path, None);
+
+        let (kind, path) =
+            parse_agent_publish_args(&["application".into(), "agents/portal".into()]).unwrap();
+        assert_eq!(kind, panels::agent::AgentOsKind::Application);
+        assert_eq!(path.as_deref(), Some("agents/portal"));
+
+        let (kind, path) =
+            parse_agent_publish_args(&["tool".into(), "agents/sql-checker".into()]).unwrap();
+        assert_eq!(kind, panels::agent::AgentOsKind::Tool);
+        assert_eq!(path.as_deref(), Some("agents/sql-checker"));
+
+        assert!(parse_agent_publish_args(&[]).is_err());
+        assert!(parse_agent_publish_args(&["agents/reviewer".into()]).is_err());
+        assert!(parse_agent_publish_args(&["service".into()]).is_err());
+        assert!(parse_agent_publish_args(&[
+            "agentic".into(),
+            "agents/reviewer".into(),
+            "extra".into()
+        ])
+        .is_err());
+
+        let (run_kind, run_path) = parse_agent_kind_path("run", &[]).unwrap();
+        assert_eq!(run_kind, panels::agent::AgentOsKind::Agentic);
+        assert_eq!(run_path, None);
+
+        let (run_kind, run_path) =
+            parse_agent_kind_path("run", &["tool".into(), "agents/sql-checker".into()]).unwrap();
+        assert_eq!(run_kind, panels::agent::AgentOsKind::Tool);
+        assert_eq!(run_path.as_deref(), Some("agents/sql-checker"));
+
+        assert_eq!(
+            parse_agent_kind_path("run", &["agents/reviewer".into()])
+                .unwrap()
+                .1
+                .as_deref(),
+            Some("agents/reviewer")
+        );
+        assert!(parse_agent_kind_path("run", &["agents/reviewer".into(), "extra".into()]).is_err());
+        assert!(
+            single_path_arg("agent deploy", &["agents/portal".into(), "extra".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn parses_lifecycle_asset_cli_actions_to_os_actions() {
+        let mcp = [
+            ("publish", panels::mcp::McpOsAction::Publish),
+            ("run", panels::mcp::McpOsAction::Run),
+            ("deploy", panels::mcp::McpOsAction::Deploy),
+            ("test", panels::mcp::McpOsAction::Test),
+            ("open", panels::mcp::McpOsAction::Open),
+            ("logs", panels::mcp::McpOsAction::Logs),
+            ("status", panels::mcp::McpOsAction::Status),
+        ];
+        for (command, expected) in mcp {
+            assert_eq!(parse_mcp_action(command).unwrap(), expected, "{command}");
+        }
+        for command in ["debug", "invoke", "batch", "activity", "review"] {
+            assert!(parse_mcp_action(command).is_err(), "{command}");
+        }
+
+        let skill = [
+            ("publish", panels::skill::SkillOsAction::Publish),
+            ("deploy", panels::skill::SkillOsAction::Deploy),
+            ("open", panels::skill::SkillOsAction::Open),
+            ("status", panels::skill::SkillOsAction::Status),
+        ];
+        for (command, expected) in skill {
+            assert_eq!(parse_skill_action(command).unwrap(), expected, "{command}");
+        }
+        for command in ["run", "debug", "test", "logs", "activity", "review"] {
+            assert!(parse_skill_action(command).is_err(), "{command}");
+        }
+
+        let flow = [
+            ("publish", panels::flow::FlowOsAction::Publish),
+            ("run", panels::flow::FlowOsAction::Run),
+            ("deploy", panels::flow::FlowOsAction::Deploy),
+            ("open", panels::flow::FlowOsAction::Open),
+            ("logs", panels::flow::FlowOsAction::Logs),
+            ("status", panels::flow::FlowOsAction::Status),
+        ];
+        for (command, expected) in flow {
+            assert_eq!(parse_flow_action(command).unwrap(), expected, "{command}");
+        }
+        for command in ["debug", "test", "activity", "review", "view"] {
+            assert!(parse_flow_action(command).is_err(), "{command}");
+        }
+
+        let okf = [
+            ("publish", panels::okf::OkfOsAction::Publish),
+            ("deploy", panels::okf::OkfOsAction::Deploy),
+            ("status", panels::okf::OkfOsAction::Status),
+        ];
+        for (command, expected) in okf {
+            assert_eq!(parse_okf_action(command).unwrap(), expected, "{command}");
+        }
+        for command in ["run", "debug", "test", "open", "logs", "activity", "review"] {
+            assert!(parse_okf_action(command).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn usage_lists_all_asset_lifecycle_command_families() {
+        let text = code_cli_usage_text();
+        for line in [
+            "a3s code agent publish agentic|application|tool [package]",
+            "a3s code agent run|deploy|open|logs|status [kind] [package]",
+            "a3s code mcp publish|run|test|deploy|open|logs|status [path]",
+            "a3s code skill publish|deploy|open|status [path]",
+            "a3s code flow publish|run|deploy|open|logs|status [file]",
+            "a3s code okf publish|deploy|status [path]",
+        ] {
+            assert!(text.contains(line), "missing usage line: {line}\n{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn code_cli_asset_lifecycle_commands_use_os_api_from_cli_entrypoint() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_cli_lifecycle_os_mock(captured.clone()).await;
+        let root = temp_dir("code-cli-lifecycle-os");
+        let env = CliLifecycleEnv::new(&root, &origin);
+
+        run_code_cli(vec![
+            "agent".into(),
+            "publish".into(),
+            "agentic".into(),
+            env.agent_package.display().to_string(),
+        ])
+        .await
+        .expect("agent publish should run through CLI entrypoint");
+        run_code_cli(vec![
+            "mcp".into(),
+            "publish".into(),
+            env.mcp_package.display().to_string(),
+        ])
+        .await
+        .expect("mcp publish should run through CLI entrypoint");
+        run_code_cli(vec![
+            "skill".into(),
+            "publish".into(),
+            env.skill_package.display().to_string(),
+        ])
+        .await
+        .expect("skill publish should run through CLI entrypoint");
+        run_code_cli(vec![
+            "flow".into(),
+            "publish".into(),
+            env.flow_file.display().to_string(),
+        ])
+        .await
+        .expect("flow publish should run through CLI entrypoint");
+        run_code_cli(vec![
+            "okf".into(),
+            "publish".into(),
+            env.okf_package.display().to_string(),
+        ])
+        .await
+        .expect("okf publish should run through CLI entrypoint");
+
+        let requests = captured.lock().unwrap().clone();
+        let joined = requests.join("\n---\n");
+        for expected in [
+            r#""category":"agent""#,
+            r#""agentKind":"agentic""#,
+            r#""category":"mcp""#,
+            r#""category":"skill""#,
+            r#""category":"workflow""#,
+            r#""category":"knowledge""#,
+            r#""path":"agent.md""#,
+            r#""path":"server.js""#,
+            r#""path":"SKILL.md""#,
+            r#""path":"flow.json""#,
+            r#""path":"README.md""#,
+            r#""path":".a3s/asset.acl""#,
+        ] {
+            assert!(
+                joined.contains(expected),
+                "missing `{expected}` in:\n{joined}"
+            );
+        }
+        for forbidden in [
+            "agent.runtime-binding.json",
+            "mcp.runtime-binding.json",
+            "skill.runtime-binding.json",
+            "knowledge.runtime-binding.json",
+            "runtime-binding.json",
+            "debug",
+            "/runtime/functions/mcp-asset-1/run",
+            "/runtime/functions/mcp-asset-1/batch",
+            "/run-mcp",
+        ] {
+            assert!(
+                !joined.contains(forbidden),
+                "unexpected legacy/config fragment `{forbidden}` in:\n{joined}"
+            );
+        }
+
+        drop(env);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn code_cli_rejects_removed_mcp_debug_and_invoke_without_os_requests() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_cli_lifecycle_os_mock(captured.clone()).await;
+        let root = temp_dir("code-cli-lifecycle-rejects");
+        let env = CliLifecycleEnv::new(&root, &origin);
+
+        for command in ["debug", "invoke"] {
+            let err = run_code_cli(vec![
+                "mcp".into(),
+                command.into(),
+                env.mcp_package.display().to_string(),
+            ])
+            .await
+            .expect_err("removed MCP command should be rejected at CLI entrypoint");
+            assert!(
+                err.to_string().contains("unknown a3s code mcp command"),
+                "{command}: {err}"
+            );
+        }
+
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "removed MCP commands must not call OS"
+        );
+        drop(env);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn code_cli_mcp_run_requires_mcp_runner_without_runtime_function_fallback() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_cli_lifecycle_os_mock(captured.clone()).await;
+        let root = temp_dir("code-cli-mcp-run-no-fallback");
+        let env = CliLifecycleEnv::new(&root, &origin);
+
+        let err = run_code_cli(vec![
+            "mcp".into(),
+            "run".into(),
+            env.mcp_package.display().to_string(),
+        ])
+        .await
+        .expect_err("mcp run should not fall back to Runtime Function run");
+        assert!(
+            err.to_string()
+                .contains("did not expose a runnable MCP capability"),
+            "{err}"
+        );
+
+        let requests = captured.lock().unwrap().clone();
+        let joined = requests.join("\n---\n");
+        assert!(joined.contains(r#""category":"mcp""#), "{joined}");
+        assert!(
+            !joined.contains("/runtime/functions/mcp-asset-1/run"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("/runtime/functions/mcp-asset-1/batch"),
+            "{joined}"
+        );
+        drop(env);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1884,28 +3248,6 @@ mod tests {
             runtime_asset_query("workflow", "flow-demo", "failed"),
             "category:workflow flow-demo failed"
         );
-    }
-
-    #[test]
-    fn parses_view_spec_with_size_without_accepting_relative_urls() {
-        let spec = parse_view_spec(&[
-            "https://os.example/view".into(),
-            "--size".into(),
-            "1024x768".into(),
-        ])
-        .expect("sized view");
-        assert_eq!(spec.url, "https://os.example/view");
-        assert_eq!((spec.width, spec.height), (Some(1024), Some(768)));
-        assert!(spec.embeddable);
-
-        assert!(parse_view_spec(&["/admin/view".into()]).is_err());
-        assert!(parse_view_spec(&["https://os.example/view".into(), "--width".into()]).is_err());
-        assert!(parse_view_spec(&[
-            "https://os.example/view".into(),
-            "--height".into(),
-            "0".into()
-        ])
-        .is_err());
     }
 
     #[test]
@@ -1986,25 +3328,21 @@ mod tests {
     }
 
     #[test]
-    fn resolves_okf_package_from_manifest_file_path() {
+    fn resolves_okf_package_from_visible_readme_path() {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = temp_dir("code-cli-okf");
         let workspace = dir.join("workspace");
-        let package = workspace.join(".a3s/okf/ops");
-        std::fs::create_dir_all(&package).unwrap();
-        let manifest = package.join("package.okf.json");
-        std::fs::write(
-            &manifest,
-            r#"{"name":"ops-knowledge","description":"Operations knowledge"}"#,
-        )
-        .unwrap();
+        let package = workspace.join("okf/ops");
+        std::fs::create_dir_all(package.join("sources")).unwrap();
+        let readme = package.join("README.md");
+        std::fs::write(&readme, "# ops-knowledge\n\nOperations knowledge\n").unwrap();
         let old_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&workspace).unwrap();
 
-        let dev = resolve_okf_dev(Some(manifest.to_string_lossy().to_string()))
-            .expect("manifest file should resolve to package dir");
+        let dev = resolve_okf_dev(Some(readme.to_string_lossy().to_string()))
+            .expect("README path should resolve to package dir");
         let dev_path = std::fs::canonicalize(&dev.path).unwrap();
         let package_path = std::fs::canonicalize(&package).unwrap();
 
@@ -2014,6 +3352,357 @@ mod tests {
         assert_eq!(dev.name, "ops-knowledge");
         assert_eq!(dev.rel, "ops");
         assert_eq!(dev_path, package_path);
+    }
+
+    struct CliLifecycleEnv {
+        root: PathBuf,
+        agent_package: PathBuf,
+        mcp_package: PathBuf,
+        skill_package: PathBuf,
+        flow_file: PathBuf,
+        okf_package: PathBuf,
+        old_cwd: PathBuf,
+        old_env: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl CliLifecycleEnv {
+        fn new(root: &Path, origin: &str) -> Self {
+            let workspace = root.join("workspace");
+            let home = root.join("home");
+            let agent_root = root.join("agents");
+            let mcp_root = root.join("mcps");
+            let skill_root = root.join("skills");
+            let flow_root = root.join("flows");
+            let memory_root = root.join("memory");
+            let agent_package = agent_root.join("reviewer");
+            let mcp_package = mcp_root.join("weather");
+            let skill_package = skill_root.join("sql-checker");
+            let flow_package = flow_root.join("daily-digest");
+            let flow_file = flow_package.join("flow.json");
+            let okf_package = workspace.join("okf").join("ops-runbook");
+            for dir in [
+                &workspace,
+                &home,
+                &agent_package,
+                &mcp_package,
+                &skill_package,
+                &flow_package,
+                &okf_package,
+                &memory_root,
+            ] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::create_dir_all(agent_package.join(".a3s")).unwrap();
+            std::fs::create_dir_all(mcp_package.join(".a3s")).unwrap();
+            std::fs::create_dir_all(skill_package.join(".a3s")).unwrap();
+            std::fs::create_dir_all(flow_package.join(".a3s")).unwrap();
+            std::fs::create_dir_all(okf_package.join(".a3s")).unwrap();
+            std::fs::create_dir_all(okf_package.join("sources")).unwrap();
+            for dir in ["prompts", "workflows", "examples", "eval", "tests"] {
+                std::fs::create_dir_all(agent_package.join(dir)).unwrap();
+            }
+
+            std::fs::write(
+                agent_package.join("agent.md"),
+                "---\nname: reviewer\ndescription: Review code changes carefully\nprompt: Review the target carefully.\n---\nReview code.\n",
+            )
+            .unwrap();
+            std::fs::write(agent_package.join("README.md"), "# reviewer\n").unwrap();
+            std::fs::write(
+                agent_package.join("prompts/system.md"),
+                "Review the target carefully.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                agent_package.join("workflows/operating-procedure.md"),
+                "Inspect, plan, execute, and report.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                agent_package.join("examples/example-input.md"),
+                "Review this diff.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                agent_package.join("examples/example-output.md"),
+                "Review complete.\n",
+            )
+            .unwrap();
+            std::fs::write(agent_package.join("eval/smoke.md"), "Smoke eval.\n").unwrap();
+            std::fs::write(agent_package.join("tests/smoke.md"), "Smoke test.\n").unwrap();
+            std::fs::write(
+                agent_package.join(".a3s/asset.acl"),
+                "category = \"agent\"\n",
+            )
+            .unwrap();
+
+            std::fs::write(
+                mcp_package.join("README.md"),
+                "# weather\n\nWeather MCP tools\n",
+            )
+            .unwrap();
+            std::fs::write(mcp_package.join("server.js"), "process.stdin.resume();\n").unwrap();
+            std::fs::write(mcp_package.join(".a3s/asset.acl"), "category = \"mcp\"\n").unwrap();
+
+            std::fs::write(
+                skill_package.join("SKILL.md"),
+                "---\nname: sql-checker\ndescription: Check SQL safely\nkind: instruction\n---\nCheck SQL for risky patterns.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                skill_package.join(".a3s/asset.acl"),
+                "category = \"skill\"\n",
+            )
+            .unwrap();
+
+            std::fs::write(
+                &flow_file,
+                r#"{"version":"a3s.workflow.design.v1","name":"daily-digest","description":"Daily digest","nodes":[{"id":"start","kind":"start"},{"id":"end","kind":"end"}],"edges":[{"id":"e1","sourceNodeID":"start","targetNodeID":"end"}]}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                flow_package.join(".a3s/asset.acl"),
+                "category = \"workflow\"\n",
+            )
+            .unwrap();
+
+            std::fs::write(
+                okf_package.join("README.md"),
+                "# ops-runbook\n\nOperations response knowledge\n",
+            )
+            .unwrap();
+            std::fs::write(
+                okf_package.join("sources/overview.md"),
+                "# Operations\n\nRestart and escalation notes.\n",
+            )
+            .unwrap();
+            std::fs::write(
+                okf_package.join(".a3s/asset.acl"),
+                "category = \"knowledge\"\n",
+            )
+            .unwrap();
+
+            let config = root.join("config.acl");
+            write_lifecycle_config(&config, origin);
+            write_lifecycle_auth_store(&home, origin);
+
+            let keys = vec![
+                "HOME",
+                "A3S_CONFIG_FILE",
+                "A3S_AGENT_DIR",
+                "A3S_MCP_DIR",
+                "A3S_SKILL_DIR",
+                "A3S_FLOW_DIR",
+                "A3S_MEMORY_DIR",
+                crate::a3s_os::OS_ENV_BASE_URL,
+                crate::a3s_os::OS_ENV_TOKEN,
+                crate::a3s_os::OS_ENV_REFRESH_TOKEN,
+            ];
+            let old_env = keys
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect::<Vec<_>>();
+            let old_cwd = std::env::current_dir().unwrap();
+
+            std::env::set_var("HOME", &home);
+            std::env::set_var("A3S_CONFIG_FILE", &config);
+            std::env::set_var("A3S_AGENT_DIR", &agent_root);
+            std::env::set_var("A3S_MCP_DIR", &mcp_root);
+            std::env::set_var("A3S_SKILL_DIR", &skill_root);
+            std::env::set_var("A3S_FLOW_DIR", &flow_root);
+            std::env::set_var("A3S_MEMORY_DIR", &memory_root);
+            std::env::remove_var(crate::a3s_os::OS_ENV_BASE_URL);
+            std::env::remove_var(crate::a3s_os::OS_ENV_TOKEN);
+            std::env::remove_var(crate::a3s_os::OS_ENV_REFRESH_TOKEN);
+            std::env::set_current_dir(&workspace).unwrap();
+
+            Self {
+                root: root.to_path_buf(),
+                agent_package,
+                mcp_package,
+                skill_package,
+                flow_file,
+                okf_package,
+                old_cwd,
+                old_env,
+            }
+        }
+    }
+
+    impl Drop for CliLifecycleEnv {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.old_cwd);
+            for (key, value) in self.old_env.drain(..) {
+                restore_env(key, value);
+            }
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn write_lifecycle_config(path: &Path, origin: &str) {
+        std::fs::write(
+            path,
+            format!(
+                "default_model = \"openai/x\"\n\
+                 os = \"{origin}\"\n\
+                 providers \"openai\" {{\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+                 models \"x\" {{ name = \"x\" }}\n}}\n\
+                 memory {{\n  llmExtraction = false\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_lifecycle_auth_store(home: &Path, origin: &str) {
+        let store = home.join(".a3s").join("os-auth.json");
+        std::fs::create_dir_all(store.parent().unwrap()).unwrap();
+        std::fs::write(
+            store,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "sessions": [{
+                    "address": origin,
+                    "access_token": "token",
+                    "token_type": "Bearer",
+                    "login_at_ms": 1
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn spawn_cli_lifecycle_os_mock(captured: std::sync::Arc<Mutex<Vec<String>>>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let captured = captured.clone();
+                tokio::spawn(async move {
+                    let request = read_http_request(&mut sock).await;
+                    let line = request.lines().next().unwrap_or("").to_string();
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                    captured.lock().unwrap().push(format!("{line}\n{body}"));
+                    let (status, payload) = cli_lifecycle_mock_response(&line, &body);
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.flush().await;
+                });
+            }
+        });
+        origin
+    }
+
+    async fn read_http_request(sock: &mut tokio::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut tmp = [0_u8; 8192];
+        let mut expected_len = None;
+        loop {
+            let Ok(n) = sock.read(&mut tmp).await else {
+                break;
+            };
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&tmp[..n]);
+            if expected_len.is_none() {
+                expected_len = expected_http_request_len(&buf);
+            }
+            if expected_len.is_some_and(|len| buf.len() >= len) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    fn expected_http_request_len(buf: &[u8]) -> Option<usize> {
+        let header_end = buf.windows(4).position(|window| window == b"\r\n\r\n")? + 4;
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_len = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        Some(header_end + content_len)
+    }
+
+    fn cli_lifecycle_mock_response(line: &str, body: &str) -> (&'static str, String) {
+        if line.starts_with("GET /api/v1/assets?") {
+            return ("200 OK", r#"{"data":{"items":[]}}"#.to_string());
+        }
+        if line.starts_with("PATCH /api/v1/assets/") {
+            return ("200 OK", r#"{"data":{"ok":true}}"#.to_string());
+        }
+        if line.starts_with("POST /api/v1/assets HTTP/1.1") {
+            let (id, name) = if body.contains(r#""category":"agent""#) {
+                ("asset-agentic-1", "agentic-reviewer")
+            } else if body.contains(r#""category":"mcp""#) {
+                ("mcp-asset-1", "mcp-weather")
+            } else if body.contains(r#""category":"skill""#) {
+                ("skill-asset-1", "skill-sql-checker")
+            } else if body.contains(r#""category":"workflow""#) {
+                ("workflow-asset-1", "flow-daily-digest")
+            } else if body.contains(r#""category":"knowledge""#) {
+                ("knowledge-asset-1", "knowledge-ops-runbook")
+            } else {
+                return (
+                    "422 Unprocessable Entity",
+                    r#"{"code":422,"message":"unknown category"}"#.to_string(),
+                );
+            };
+            return (
+                "200 OK",
+                format!(
+                    r#"{{"data":{{"id":"{id}","name":"{name}","ownerName":"admin","defaultBranch":"main"}}}}"#
+                ),
+            );
+        }
+        if line.contains("/repository/files ") {
+            return ("200 OK", r#"{"data":{"ok":true}}"#.to_string());
+        }
+        if line.contains("/agent-config/validate ") {
+            return (
+                "200 OK",
+                r#"{"code":200,"data":{"valid":true,"diagnostics":[]}}"#.to_string(),
+            );
+        }
+        if line.contains("/agent-config ") {
+            return (
+                "200 OK",
+                r#"{"code":200,"data":{"configured":true}}"#.to_string(),
+            );
+        }
+        if line.contains("/runtime-binding/validate ") {
+            return (
+                "200 OK",
+                r#"{"code":200,"data":{"configured":true,"valid":true,"requiredSecrets":[],"missingSecrets":[],"expiredSecrets":[],"issues":[]}}"#.to_string(),
+            );
+        }
+        if line.contains("/runtime-binding ") {
+            return (
+                "200 OK",
+                r#"{"code":200,"data":{"configured":true}}"#.to_string(),
+            );
+        }
+        if line.starts_with("POST /api/v1/kernel/capabilities ") {
+            return (
+                "404 Not Found",
+                r#"{"code":404,"message":"capabilities unavailable in mock"}"#.to_string(),
+            );
+        }
+        (
+            "404 Not Found",
+            format!(r#"{{"code":404,"message":"unhandled mock request: {line}"}}"#),
+        )
     }
 
     fn temp_dir(name: &str) -> PathBuf {

@@ -8,7 +8,6 @@
 pub(crate) enum LifecycleStage {
     Create,
     Develop,
-    Debug,
     Test,
     Run,
     Publish,
@@ -46,10 +45,227 @@ pub(crate) struct AssetLifecycle {
     pub(crate) stages: &'static [LifecycleStage],
 }
 
+pub(crate) const ASSET_ACL_PATH: &str = ".a3s/asset.acl";
+
+pub(crate) struct AssetAclDocument<'a> {
+    pub(crate) category: &'a str,
+    pub(crate) kind: Option<&'a str>,
+    pub(crate) name: &'a str,
+    pub(crate) description: &'a str,
+    pub(crate) local_path: Option<&'a str>,
+    pub(crate) service: OsService,
+    pub(crate) runtime: RuntimeBindingIntent,
+    pub(crate) source: &'a [(&'a str, &'a str)],
+    pub(crate) metadata: &'a [(&'a str, &'a str)],
+}
+
+pub(crate) fn render_asset_acl(doc: AssetAclDocument<'_>) -> String {
+    let mut out = String::new();
+    out.push_str("version = \"a3s.asset.v1\"\n");
+    out.push_str(&format!("category = {}\n", acl_string(doc.category)));
+    if let Some(kind) = doc.kind {
+        out.push_str(&format!("kind = {}\n", acl_string(kind)));
+    }
+    out.push_str(&format!("name = {}\n", acl_string(doc.name)));
+    out.push_str(&format!("description = {}\n", acl_string(doc.description)));
+    if let Some(local_path) = doc.local_path {
+        out.push_str(&format!("local_path = {}\n", acl_string(local_path)));
+    }
+    out.push_str(&format!(
+        "service = {}\n",
+        acl_string(service_label(doc.service))
+    ));
+    out.push_str("created_by = \"a3s-code-tui\"\n\n");
+
+    out.push_str("source {\n");
+    for (key, value) in doc.source {
+        out.push_str(&format!("  {} = {}\n", acl_key(key), acl_string(value)));
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("metadata {\n");
+    out.push_str(&format!(
+        "  asset_acl_path = {}\n",
+        acl_string(ASSET_ACL_PATH)
+    ));
+    for (key, value) in doc.metadata {
+        out.push_str(&format!("  {} = {}\n", acl_key(key), acl_string(value)));
+    }
+    out.push_str("}\n\n");
+
+    out.push_str("runtime {\n");
+    out.push_str(&format!("  kind = {}\n", acl_string(doc.runtime.kind)));
+    out.push_str(&format!(
+        "  isolation = {}\n",
+        acl_string(doc.runtime.isolation)
+    ));
+    out.push_str(&format!(
+        "  runtime_kind = {}\n",
+        acl_string(doc.runtime.runtime_kind)
+    ));
+    if let Some(protocol) = doc.runtime.protocol {
+        out.push_str(&format!("  protocol = {}\n", acl_string(protocol)));
+    }
+    if let Some(agent_kind) = doc.runtime.agent_kind {
+        out.push_str(&format!("  agent_kind = {}\n", acl_string(agent_kind)));
+    }
+    out.push_str("}\n");
+    out
+}
+
+pub(crate) fn write_asset_acl(
+    asset_root_or_file: &std::path::Path,
+    content: &str,
+) -> Result<(), String> {
+    let asset_root = if asset_root_or_file.is_file() {
+        asset_root_or_file
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+    } else {
+        asset_root_or_file
+    };
+    let path = asset_root.join(ASSET_ACL_PATH);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+pub(crate) fn scaffold_name(description: &str, fallback: &str) -> String {
+    let lower = description.to_ascii_lowercase();
+    if let Some(start) = lower.find("name it exactly") {
+        let after = &description[start + "name it exactly".len()..];
+        let raw = after
+            .trim()
+            .trim_start_matches([':', '=', '"', '\'', '`', ' '])
+            .split(['.', '\n', ';'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['"', '\'', '`']);
+        let slug = super::asset_naming::asset_slug(raw);
+        if slug != "asset" {
+            return truncate_slug(slug);
+        }
+    }
+
+    let words = description
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let slug = super::asset_naming::asset_slug(if words.trim().is_empty() {
+        fallback
+    } else {
+        &words
+    });
+    truncate_slug(slug)
+}
+
+pub(crate) fn scaffold_description(description: &str, name: &str, fallback: &str) -> String {
+    let mut text = description.trim();
+    let lower = description.to_ascii_lowercase();
+    if let Some(start) = lower.find("name it exactly") {
+        let after = &description[start + "name it exactly".len()..];
+        if let Some(dot) = after.find('.') {
+            text = after[dot + 1..].trim();
+        }
+    }
+    let text = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.trim().trim_end_matches('.');
+    if text.is_empty() {
+        format!("{fallback} for {name}")
+    } else {
+        text.replace('"', "'").chars().take(180).collect()
+    }
+}
+
+pub(crate) fn unique_asset_dir(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let base = if name.trim().is_empty() {
+        "asset"
+    } else {
+        name
+    };
+    let first = root.join(base);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2.. {
+        let candidate = root.join(format!("{base}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search should always find a free path")
+}
+
+pub(crate) fn normalized_rel(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+pub(crate) fn write_scaffold_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
+pub(crate) fn write_scaffold_json(
+    path: impl AsRef<std::path::Path>,
+    value: &serde_json::Value,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
+    write_scaffold_file(path.as_ref(), &bytes)
+}
+
+fn truncate_slug(slug: String) -> String {
+    const MAX_LEN: usize = 48;
+    if slug.chars().count() <= MAX_LEN {
+        return slug;
+    }
+    let mut out = slug.chars().take(MAX_LEN).collect::<String>();
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "asset".to_string()
+    } else {
+        out
+    }
+}
+
+fn acl_key(key: &str) -> String {
+    key.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn acl_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 pub(crate) const MCP_STAGES: &[LifecycleStage] = &[
     LifecycleStage::Create,
     LifecycleStage::Develop,
-    LifecycleStage::Debug,
+    LifecycleStage::Run,
     LifecycleStage::Test,
     LifecycleStage::Publish,
     LifecycleStage::Deploy,
@@ -256,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_metadata_does_not_claim_unsupported_debug_or_deploy_surfaces() {
+    fn lifecycle_metadata_does_not_claim_unsupported_run_or_deploy_surfaces() {
         let lifecycle = |family: &str| {
             ASSET_LIFECYCLES
                 .iter()
@@ -264,19 +480,6 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing lifecycle row for {family}"))
         };
 
-        for family in [
-            "agentic agent",
-            "application agent",
-            "skill",
-            "OKF knowledge package",
-            "tool agent",
-            "workflow flow",
-        ] {
-            assert!(
-                !lifecycle(family).stages.contains(&LifecycleStage::Debug),
-                "{family} should not claim a direct debug stage"
-            );
-        }
         for family in ["agentic agent", "tool agent"] {
             assert!(
                 !lifecycle(family).stages.contains(&LifecycleStage::Deploy),
@@ -286,8 +489,8 @@ mod tests {
         assert!(
             lifecycle("MCP server")
                 .stages
-                .contains(&LifecycleStage::Debug),
-            "MCP servers expose direct debug through /mcp debug"
+                .contains(&LifecycleStage::Run),
+            "MCP servers expose direct run through /mcp run"
         );
         assert!(
             lifecycle("MCP server")
@@ -304,7 +507,6 @@ mod tests {
         for family in [
             "application agent",
             "tool agent",
-            "MCP server",
             "skill",
             "OKF knowledge package",
         ] {
@@ -494,7 +696,7 @@ mod tests {
             "review",
             "activity",
             "publish",
-            "debug",
+            "run",
             "test",
             "deploy",
             "open",
@@ -502,14 +704,16 @@ mod tests {
             "status",
         ] {
             assert!(
-                panels::mcp::parse_mcp_subcommand(input).is_some(),
+                matches!(panels::mcp::parse_mcp_subcommand(input), Some(Ok(_))),
                 "/mcp should parse lifecycle subcommand `{input}`"
             );
         }
-        assert!(
-            matches!(panels::mcp::parse_mcp_subcommand("run"), Some(Err(_))),
-            "/mcp should reject run instead of creating a prototype"
-        );
+        for input in ["debug", "invoke"] {
+            assert!(
+                matches!(panels::mcp::parse_mcp_subcommand(input), Some(Err(_))),
+                "/mcp should reject {input} instead of creating a prototype"
+            );
+        }
         assert!(
             matches!(panels::mcp::parse_mcp_subcommand("ps"), Some(Err(_))),
             "/mcp should reject legacy ps and point to activity"

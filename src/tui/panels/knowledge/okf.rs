@@ -3,13 +3,12 @@
 //! OKF packages are team digital assets backed by OS Knowledge service. The
 //! personal local knowledge base stays in the sibling `/kb` module.
 
+use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const KNOWLEDGE_MANIFEST_PATH: &str = ".a3s/knowledge.asset.json";
-const KNOWLEDGE_RUNTIME_BINDING_PATH: &str = ".a3s/knowledge.runtime-binding.json";
 const OKF_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,9 +132,10 @@ pub(crate) fn parse_okf_command(rest: &str) -> OkfCommand {
                 OkfCommand::Usage("usage: /okf publish")
             }
         }
-        "run" | "debug" => OkfCommand::Usage(
+        "run" => OkfCommand::Usage(
             "OKF packages are not runnable assets; use /okf publish or /okf deploy",
         ),
+        "debug" => OkfCommand::Usage("unknown /okf command `debug`"),
         "deploy" => {
             if tail.is_empty() {
                 OkfCommand::Deploy
@@ -153,9 +153,7 @@ pub(crate) fn parse_okf_command(rest: &str) -> OkfCommand {
         "logs" => {
             OkfCommand::Usage("OKF packages do not expose logs; use /okf status or /okf activity")
         }
-        "os" | "open" | "view" | "remote" | "inspect" => {
-            OkfCommand::Usage("usage: /okf status")
-        }
+        "os" | "open" | "view" | "remote" | "inspect" => OkfCommand::Usage("usage: /okf status"),
         "dashboard" => OkfCommand::Usage("usage: /okf list [query] · /okf status"),
         "add" | "import" | "search" | "vault" => OkfCommand::Usage(
             "personal knowledge-base commands use /kb add/import/search/vault; OKF packages use /okf review/publish/deploy/status",
@@ -178,7 +176,7 @@ fn looks_path_like(s: &str) -> bool {
 }
 
 pub(crate) fn okf_package_dir(cwd: &str) -> std::path::PathBuf {
-    std::path::Path::new(cwd).join(".a3s").join("okf")
+    std::path::Path::new(cwd).join("okf")
 }
 
 pub(crate) fn list_okf_packages(root: &std::path::Path) -> Vec<OkfPackageAsset> {
@@ -211,10 +209,8 @@ fn collect_okf_package_dirs(
 }
 
 fn is_okf_package_dir(path: &std::path::Path) -> bool {
-    path.join("package.okf.json").is_file()
-        || path.join(".a3s/knowledge.asset.json").is_file()
-        || path.join("README.md").is_file()
-            && (path.join("sources").is_dir() || path.join("wiki").is_dir())
+    path.join("README.md").is_file()
+        && (path.join("sources").is_dir() || path.join("wiki").is_dir())
 }
 
 pub(crate) fn okf_package_asset_from_dir(
@@ -247,41 +243,11 @@ fn okf_package_asset(root: &std::path::Path, path: &std::path::Path) -> OkfPacka
 }
 
 fn okf_package_metadata(path: &std::path::Path) -> Option<(String, String)> {
-    for rel in ["package.okf.json", ".a3s/knowledge.asset.json"] {
-        let file = path.join(rel);
-        let Ok(body) = std::fs::read_to_string(file) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
-            continue;
-        };
-        let name = json_str_any(&value, &["name", "title", "id", "slug"]).unwrap_or_else(|| {
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("knowledge-package")
-                .to_string()
-        });
-        let description = json_str_any(&value, &["description", "summary", "purpose"])
-            .unwrap_or_else(|| "OKF knowledge package".to_string());
-        return Some((name, description));
-    }
     readme_metadata(&path.join("README.md")).or_else(|| {
         path.file_name()
             .and_then(|n| n.to_str())
             .map(|name| (name.to_string(), "OKF knowledge package".to_string()))
     })
-}
-
-fn json_str_any(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    for key in keys {
-        if let Some(s) = value.get(*key).and_then(|v| v.as_str()) {
-            let trimmed = s.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    None
 }
 
 fn readme_metadata(path: &std::path::Path) -> Option<(String, String)> {
@@ -308,6 +274,86 @@ fn readme_metadata(path: &std::path::Path) -> Option<(String, String)> {
     })
 }
 
+pub(crate) fn scaffold_okf_package(
+    description: &str,
+    root: &std::path::Path,
+) -> Result<OkfDevSession, String> {
+    let name = asset_lifecycle::scaffold_name(description, "knowledge-package");
+    let package = asset_lifecycle::unique_asset_dir(root, &name);
+    let final_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let description =
+        asset_lifecycle::scaffold_description(description, &final_name, "OKF knowledge package");
+
+    for dir in [".a3s", "sources", "wiki/concepts", "eval"] {
+        std::fs::create_dir_all(package.join(dir))
+            .map_err(|e| format!("could not create {}: {e}", package.join(dir).display()))?;
+    }
+
+    let rel = asset_lifecycle::normalized_rel(root, &package);
+    let dev = OkfDevSession {
+        name: final_name.clone(),
+        description: description.clone(),
+        rel,
+        path: package.clone(),
+        root: root.to_path_buf(),
+    };
+    let asset_name = knowledge_asset_name(&dev.name);
+    let asset_acl = knowledge_asset_acl(&dev, &asset_name);
+
+    asset_lifecycle::write_scaffold_file(
+        &package.join("README.md"),
+        okf_scaffold_readme(&dev.name, &dev.description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("sources/overview.md"),
+        format!("# Source Overview\n\n{}\n", dev.description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("wiki/index.md"),
+        format!("# {}\n\n{}\n", dev.name, dev.description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("wiki/concepts/example.md"),
+        "# Example Concept\n\nDescribe the first concept this OKF package teaches.\n".as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("eval/smoke.md"),
+        okf_scaffold_eval().as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join(asset_lifecycle::ASSET_ACL_PATH),
+        asset_acl.as_bytes(),
+    )?;
+
+    Ok(dev)
+}
+
+fn okf_scaffold_readme(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         {description}.\n\n\
+         ## Source\n\n\
+         - `sources/`, `wiki/`, and `eval/` contain knowledge content and checks.\n\
+         - `.a3s/` contains only `asset.acl`.\n\n\
+         ## Lifecycle\n\n\
+         - `a3s code okf publish .`\n\
+         - `a3s code okf deploy .`\n\
+         - `a3s code okf status .`\n"
+    )
+}
+
+fn okf_scaffold_eval() -> &'static str {
+    "# OKF Smoke Evaluation\n\n\
+     1. Confirm `README.md` states the package scope and source provenance.\n\
+     2. Confirm `wiki/index.md` links to the primary concept pages.\n\
+     3. Confirm `.a3s/asset.acl` points to the visible knowledge sources.\n"
+}
+
+#[cfg(test)]
 pub(crate) fn okf_package_gen_prompt(description: &str, cwd: &str) -> String {
     let dir = okf_package_dir(cwd);
     let dir = dir.display();
@@ -315,17 +361,19 @@ pub(crate) fn okf_package_gen_prompt(description: &str, cwd: &str) -> String {
         "Create a local OKF knowledge package prototype from the description below and save it \
          under {dir}. This is a local authoring task: do not open OS, RemoteUI, or a browser.\n\
          Description: {description}\n\
-         Create {dir}/<kebab-case-name>/ with at least README.md, package.okf.json, \
-         sources/, wiki/index.md, wiki/concepts/example.md, eval/smoke.md, \
-         .a3s/knowledge.asset.json, and .a3s/knowledge.runtime-binding.json. \
+         Create {dir}/<kebab-case-name>/ with at least README.md, sources/, \
+         wiki/index.md, wiki/concepts/example.md, eval/smoke.md, and .a3s/asset.acl. \
+         The package-local `.a3s/` directory is metadata-only. Do NOT put README, \
+         sources, wiki, eval, or other knowledge source files under `.a3s/`. Do NOT create \
+         extra generated JSON config files; keep package configuration in `.a3s/asset.acl`. \
          The package should be ready for OKF create/develop/publish/deploy plus \
          status/activity inspection: describe source provenance, \
          concept schema, validation/evaluation checks, index/update expectations, and how OS \
          Knowledge service indexing/evaluation should consume it later. Use service=Knowledge \
          service, runtimeIntent.kind=knowledge, runtime.kind=a3s-knowledge-service, protocol=okf, \
-         isolation=serving, and operations index/evaluate/report. Validate JSON files with \
-         python3 -m json.tool, then report the saved package path and tell the user `/okf` \
-         selects OKF packages while `/kb vault` browses the local personal knowledge base."
+         isolation=serving, and operations index/evaluate/report. Then stop using tools immediately and give a concise final \
+         answer with the saved package path and the note that `/okf` selects OKF packages while \
+         `/kb vault` browses the local personal knowledge base."
     )
 }
 
@@ -337,11 +385,11 @@ pub(crate) fn okf_dev_prompt(session: &OkfDevSession, request: &str) -> String {
          Package path: {path}\n\
          Package root: {root}\n\n\
          User request:\n{request}\n\n\
-         Work on this local OKF package iteratively. Read package.okf.json, README.md, sources/, \
+         Work on this local OKF package iteratively. Read README.md, sources/, \
          wiki/, and eval/ before editing when they exist. Keep source provenance, concept schema, \
-         generated concept pages, evaluation notes, and `.a3s/knowledge.asset.json` consistent. \
+         generated concept pages, evaluation notes, and `.a3s/asset.acl` consistent. \
          Do not open OS, RemoteUI, or browser pages for this local package-development turn. \
-         Validate changed JSON and end with a concise summary plus the next lifecycle step.\n\n\
+         Validate changed Markdown/content files and end with a concise summary plus the next lifecycle step.\n\n\
          The TUI remains in OKF-development mode for `{name}` after this turn; the user can press \
          Esc or run `/okf off` to return to normal mode.",
         name = session.name.as_str(),
@@ -551,7 +599,7 @@ fn collect_knowledge_source_files_inner(
         if path.is_dir() {
             if matches!(
                 name.as_str(),
-                ".git" | "target" | "node_modules" | ".venv" | "__pycache__"
+                ".a3s" | ".git" | "target" | "node_modules" | ".venv" | "__pycache__"
             ) {
                 continue;
             }
@@ -572,7 +620,16 @@ fn collect_knowledge_source_files_inner(
             .map(|part| part.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        if rel == KNOWLEDGE_MANIFEST_PATH || rel == KNOWLEDGE_RUNTIME_BINDING_PATH {
+        if rel.starts_with(".a3s/") {
+            continue;
+        }
+        if matches!(
+            rel.as_str(),
+            "package.okf.json"
+                | "knowledge.asset.json"
+                | "knowledge.runtime-binding.json"
+                | "runtime-binding.json"
+        ) {
             continue;
         }
         out.push(KnowledgeSourceFile { path: rel, bytes });
@@ -587,8 +644,7 @@ fn knowledge_manifest_json(dev: &OkfDevSession, asset_name: &str) -> serde_json:
         "name": asset_name,
         "packageName": dev.name.as_str(),
         "description": dev.description.as_str(),
-        "packagePath": "package.okf.json",
-        "runtimeBindingPath": KNOWLEDGE_RUNTIME_BINDING_PATH,
+        "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         "localPath": dev.rel.as_str(),
         "service": "Knowledge service",
         "createdBy": "a3s-code-tui",
@@ -611,8 +667,7 @@ fn knowledge_runtime_binding_json(dev: &OkfDevSession, asset_name: &str) -> serd
         "target": {
             "kind": "asset",
             "ref": "main",
-            "packagePath": "package.okf.json",
-            "manifestPath": KNOWLEDGE_MANIFEST_PATH,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         },
         "runtime": {
             "kind": "a3s-knowledge-service",
@@ -629,8 +684,36 @@ fn knowledge_runtime_binding_json(dev: &OkfDevSession, asset_name: &str) -> serd
             "assetName": asset_name,
             "packageName": dev.name.as_str(),
             "description": dev.description.as_str(),
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localPath": dev.rel.as_str(),
         },
+    })
+}
+
+fn knowledge_asset_acl(dev: &OkfDevSession, asset_name: &str) -> String {
+    let source = [
+        ("readme_path", "README.md"),
+        ("sources_path", "sources"),
+        ("wiki_path", "wiki"),
+        ("eval_path", "eval"),
+    ];
+    let metadata: [(&str, &str); 0] = [];
+    asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
+        category: "knowledge",
+        kind: Some("knowledge"),
+        name: asset_name,
+        description: dev.description.as_str(),
+        local_path: Some(dev.rel.as_str()),
+        service: asset_lifecycle::OsService::KnowledgeService,
+        runtime: asset_lifecycle::RuntimeBindingIntent {
+            kind: "knowledge",
+            isolation: "serving",
+            runtime_kind: "a3s-knowledge-service",
+            protocol: Some("okf"),
+            agent_kind: None,
+        },
+        source: &source,
+        metadata: &metadata,
     })
 }
 
@@ -808,8 +891,9 @@ async fn upload_knowledge_package(
     token: &str,
     asset_id: &str,
     source_files: &[KnowledgeSourceFile],
-    manifest: &serde_json::Value,
-    runtime_binding: &serde_json::Value,
+    asset_acl: &str,
+    _manifest: &serde_json::Value,
+    _runtime_binding: &serde_json::Value,
 ) -> Result<(), String> {
     use base64::Engine;
 
@@ -821,16 +905,8 @@ async fn upload_knowledge_package(
         }));
     }
     files.push(serde_json::json!({
-        "path": KNOWLEDGE_MANIFEST_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?
-        ),
-    }));
-    files.push(serde_json::json!({
-        "path": KNOWLEDGE_RUNTIME_BINDING_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(runtime_binding).map_err(|e| e.to_string())?
-        ),
+        "path": asset_lifecycle::ASSET_ACL_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(asset_acl.as_bytes()),
     }));
 
     let resp = http()?
@@ -942,7 +1018,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -964,7 +1040,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding validation failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1059,17 +1135,35 @@ fn knowledge_progressive_params(
     })
 }
 
-fn knowledge_progressive_score(text: &str, operation: &str) -> i32 {
+fn knowledge_progressive_score(action: OkfOsAction, text: &str, operation: &str) -> i32 {
     let combined = format!("{text} {operation}").to_ascii_lowercase();
+    let operation = operation.to_ascii_lowercase();
+    if operation.contains("createasset")
+        || operation.contains("listasset")
+        || operation.contains("deployability")
+        || operation.contains("diagnose")
+        || operation.contains("acknowledge")
+        || operation.contains("marketplace")
+        || operation.contains("assetpackage")
+    {
+        return 0;
+    }
     let mut score = 0;
     if combined.contains("knowledge") || combined.contains("okf") {
         score += 10;
     }
-    if combined.contains("index") || combined.contains("evaluate") || combined.contains("report") {
-        score += 6;
-    }
-    if combined.contains("run") || combined.contains("deploy") || combined.contains("execute") {
-        score += 3;
+    match action {
+        OkfOsAction::Deploy => {
+            if operation.contains("deploy")
+                || operation.contains("ingest")
+                || operation.contains("index")
+            {
+                score += 8;
+            } else {
+                return 0;
+            }
+        }
+        OkfOsAction::Publish | OkfOsAction::Status => return 0,
     }
     if combined.contains("view") || combined.contains("remoteui") || combined.contains("shaped") {
         score += 3;
@@ -1106,7 +1200,7 @@ async fn try_knowledge_progressive_action(
         token,
         query,
         knowledge_progressive_params(asset, package_name, action),
-        knowledge_progressive_score,
+        |text, operation| knowledge_progressive_score(action, text, operation),
     )
     .await?;
     let fallback = knowledge_view_spec(knowledge_service_view_url(origin, &asset.id));
@@ -1166,11 +1260,14 @@ pub(crate) async fn publish_okf_to_os(
     let source_files = collect_knowledge_source_files(&dev.path)?;
     let manifest = knowledge_manifest_json(&dev, &asset_name);
     let runtime_binding = knowledge_runtime_binding_json(&dev, &asset_name);
+    let asset_acl = knowledge_asset_acl(&dev, &asset_name);
+    asset_lifecycle::write_asset_acl(&dev.path, &asset_acl)?;
     upload_knowledge_package(
         &origin,
         &session.access_token,
         &asset.id,
         &source_files,
+        &asset_acl,
         &manifest,
         &runtime_binding,
     )
@@ -1254,14 +1351,36 @@ impl App {
                     return None;
                 }
                 self.textarea.clear();
-                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                    "  ⌁ drafting an OKF knowledge package → {}",
-                    okf_package_dir(&self.cwd).display()
-                )));
-                self.engage_autonomy(8);
-                let prompt = okf_package_gen_prompt(&description, &self.cwd);
-                let display = format!("⌁ okf: {}", truncate(&description, 60));
-                self.start_stream_inner(prompt, display, true, true, false)
+                let root = okf_package_dir(&self.cwd);
+                match scaffold_okf_package(&description, &root) {
+                    Ok(dev) => {
+                        self.agent_dev = None;
+                        self.mcp_dev = None;
+                        self.skill_dev = None;
+                        self.okf_dev = Some(dev.clone());
+                        self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                            "  ⌁ scaffolded OKF package → {}",
+                            dev.path.display()
+                        )));
+                        self.push_line(&gutter(
+                            TN_CYAN,
+                            &format!(
+                                "⌁ okf dev: {} ({}) · Esc or /okf off returns to normal mode",
+                                dev.name, dev.rel
+                            ),
+                        ));
+                        self.relayout();
+                        None
+                    }
+                    Err(e) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  /okf scaffold failed: {e}")),
+                        );
+                        None
+                    }
+                }
             }
             OkfCommand::Usage(usage) => {
                 self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  {usage}")));
@@ -1607,14 +1726,14 @@ impl App {
                 if result.open_view {
                     self.push_line(&gutter(
                         ACCENT,
-                        &remote_view_button("Knowledge service · click or /view reopens"),
+                        &remote_view_button("Knowledge service · click to reopen"),
                     ));
                     self.open_remote_view(&result.view);
                 } else {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GRAY)
-                            .render("  /view opens the related OS knowledge asset view"),
+                            .render("  Open view opens the related OS knowledge asset view"),
                     );
                 }
             }
@@ -1632,7 +1751,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1641,16 +1759,23 @@ mod tests {
     fn okf_generation_prompt_uses_capability_scoped_lifecycle() {
         let prompt = okf_package_gen_prompt("ops knowledge", "/tmp/work");
 
-        assert!(prompt.contains("/tmp/work/.a3s/okf"), "{prompt}");
+        assert!(prompt.contains("/tmp/work/okf"), "{prompt}");
         let old_root = [".a3s", "kb", "packages"].join("/");
         assert!(!prompt.contains(&old_root), "{prompt}");
         assert!(prompt.contains("create/develop/publish/deploy"), "{prompt}");
         assert!(prompt.contains("status/activity inspection"), "{prompt}");
-        assert!(prompt.contains(".a3s/knowledge.asset.json"), "{prompt}");
+        assert!(prompt.contains(".a3s/asset.acl"), "{prompt}");
+        assert!(prompt.contains("Do NOT create"), "{prompt}");
         assert!(
-            prompt.contains(".a3s/knowledge.runtime-binding.json"),
+            prompt.contains("extra generated JSON config files"),
             "{prompt}"
         );
+        assert!(
+            prompt.contains("keep package configuration in `.a3s/asset.acl`"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("metadata-only"), "{prompt}");
+        assert!(prompt.contains("Do NOT put README"), "{prompt}");
         assert!(prompt.contains("runtimeIntent.kind=knowledge"), "{prompt}");
         assert!(
             prompt.contains("runtime.kind=a3s-knowledge-service"),
@@ -1665,9 +1790,62 @@ mod tests {
     }
 
     #[test]
+    fn scaffold_okf_package_creates_sources_outside_metadata_acl() {
+        let root =
+            std::env::temp_dir().join(format!("a3s-code-okf-scaffold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let dev = scaffold_okf_package(
+            "Name it exactly outage-runbook. It stores outage response guidance.",
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(dev.name, "outage-runbook");
+        for rel in [
+            "README.md",
+            "sources/overview.md",
+            "wiki/index.md",
+            "wiki/concepts/example.md",
+            "eval/smoke.md",
+            ".a3s/asset.acl",
+        ] {
+            assert!(dev.path.join(rel).is_file(), "missing {rel}");
+        }
+        for rel in [
+            "package.okf.json",
+            "knowledge.asset.json",
+            "knowledge.runtime-binding.json",
+            ".a3s/knowledge.asset.json",
+            ".a3s/knowledge.runtime-binding.json",
+        ] {
+            assert!(!dev.path.join(rel).exists(), "unexpected {rel}");
+        }
+        assert!(!dev.path.join(".a3s/wiki/index.md").exists());
+        let source_files = collect_knowledge_source_files(&dev.path).unwrap();
+        let paths = source_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(!paths.contains(&"package.okf.json"), "{paths:?}");
+        assert!(paths.contains(&"wiki/index.md"), "{paths:?}");
+        assert!(
+            paths.iter().all(|path| !path.starts_with(".a3s/")),
+            "{paths:?}"
+        );
+        let asset_acl =
+            std::fs::read_to_string(dev.path.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
+        assert!(asset_acl.contains("category = \"knowledge\""));
+        assert!(asset_acl.contains("readme_path = \"README.md\""));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn okf_package_dir_is_separate_from_personal_kb_vault() {
         let root = okf_package_dir("/tmp/work");
-        assert_eq!(root, std::path::PathBuf::from("/tmp/work/.a3s/okf"));
+        assert_eq!(root, std::path::PathBuf::from("/tmp/work/okf"));
         assert!(!root.starts_with(kbutil::kb_dir("/tmp/work")));
     }
 
@@ -1676,9 +1854,9 @@ mod tests {
         let session = OkfDevSession {
             name: "ops-knowledge".into(),
             description: "Operations knowledge package".into(),
-            rel: "ops/package.okf.json".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/okf/ops/package.okf.json"),
-            root: std::path::PathBuf::from("/Users/x/.a3s/okf/ops"),
+            rel: "ops".into(),
+            path: std::path::PathBuf::from("/Users/x/okf/ops"),
+            root: std::path::PathBuf::from("/Users/x/okf/ops"),
         };
         let prompt = okf_lifecycle_prompt("deploy", &session, true);
 
@@ -1716,9 +1894,7 @@ mod tests {
         ));
         assert!(matches!(
             parse_okf_command("debug now"),
-            OkfCommand::Usage(
-                "OKF packages are not runnable assets; use /okf publish or /okf deploy"
-            )
+            OkfCommand::Usage("unknown /okf command `debug`")
         ));
         assert!(matches!(
             parse_okf_command("logs"),
@@ -1770,12 +1946,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("ops/sources")).unwrap();
         std::fs::write(
-            root.join("ops/package.okf.json"),
-            r#"{"name":"ops-runbook","description":"Operations runbook"}"#,
+            root.join("ops/README.md"),
+            "# ops-runbook\n\nOperations runbook\n",
         )
         .unwrap();
         std::fs::create_dir_all(root.join(".hidden")).unwrap();
-        std::fs::write(root.join(".hidden/package.okf.json"), "{}").unwrap();
+        std::fs::write(root.join(".hidden/README.md"), "# hidden\n").unwrap();
 
         let packages = list_okf_packages(&root);
         assert_eq!(packages.len(), 1);
@@ -1788,7 +1964,7 @@ mod tests {
     #[test]
     fn okf_picker_lines_use_bounded_shared_menu_rows() {
         let root = std::path::PathBuf::from(
-            "/Users/example/.a3s/okf/a/path/that/is/far/too/long/for/a/picker/header",
+            "/Users/example/okf/a/path/that/is/far/too/long/for/a/picker/header",
         );
         let packages = vec![
             OkfPackageAsset {
@@ -1847,7 +2023,7 @@ mod tests {
     #[test]
     fn okf_picker_header_and_hint_fit_fixed_width() {
         let root = std::path::PathBuf::from(
-            "/Users/example/.a3s/okf/a/path/that/is/far/too/long/for/a/picker/header",
+            "/Users/example/okf/a/path/that/is/far/too/long/for/a/picker/header",
         );
         let header = okf_picker_header(9, &root, 40);
         let hint = okf_picker_hint(40);
@@ -1922,8 +2098,8 @@ mod tests {
             name: "ops-runbook".into(),
             description: "Operations runbook".into(),
             rel: "ops".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/okf/ops"),
-            root: std::path::PathBuf::from("/Users/x/.a3s/okf"),
+            path: std::path::PathBuf::from("/Users/x/okf/ops"),
+            root: std::path::PathBuf::from("/Users/x/okf"),
         };
         let prompt = okf_dev_prompt(&session, "add an incident concept");
         assert!(prompt.contains("ops-runbook"));
@@ -1937,8 +2113,8 @@ mod tests {
             name: "ops-runbook".into(),
             description: "Operations runbook".into(),
             rel: "ops".into(),
-            path: std::path::PathBuf::from("/Users/x/.a3s/okf/ops"),
-            root: std::path::PathBuf::from("/Users/x/.a3s/okf"),
+            path: std::path::PathBuf::from("/Users/x/okf/ops"),
+            root: std::path::PathBuf::from("/Users/x/okf"),
         };
         let manifest = knowledge_manifest_json(&dev, "knowledge-ops-runbook");
         let binding = knowledge_runtime_binding_json(&dev, "knowledge-ops-runbook");
@@ -1994,12 +2170,14 @@ mod tests {
         assert_eq!(params["input"]["packageName"], "ops-runbook");
         assert!(
             knowledge_progressive_score(
+                OkfOsAction::Deploy,
                 "Knowledge service OKF index evaluate report shaped RemoteUI ViewLink",
                 "KnowledgePackageController_runIndex"
             ) > 0
         );
         assert_eq!(
             knowledge_progressive_score(
+                OkfOsAction::Deploy,
                 "Function as a Service batch MCP tools shaped view",
                 "FunctionController_batch"
             ),
@@ -2007,30 +2185,52 @@ mod tests {
         );
         assert_eq!(
             knowledge_progressive_score(
+                OkfOsAction::Deploy,
                 "Workflow as a Service designer ViewLink",
                 "WorkflowDesignerController_open"
             ),
             0
         );
+        assert_eq!(
+            knowledge_progressive_score(
+                OkfOsAction::Deploy,
+                "Knowledge service deploy OKF package shaped ViewLink",
+                "createAsset",
+            ),
+            0,
+            "generic asset create must not drive /okf deploy"
+        );
+        assert_eq!(
+            knowledge_progressive_score(
+                OkfOsAction::Deploy,
+                "Knowledge service diagnostics",
+                "AssetDiagnoseController_acknowledgeReport",
+            ),
+            0,
+            "diagnosis acknowledgement must not drive /okf deploy"
+        );
     }
 
     #[test]
-    fn knowledge_source_upload_skips_generated_metadata() {
+    fn knowledge_source_upload_collects_only_visible_sources() {
         let root = std::env::temp_dir().join(format!("a3s-kb-source-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("ops/.a3s")).unwrap();
         std::fs::create_dir_all(root.join("ops/wiki")).unwrap();
-        std::fs::write(root.join("ops/package.okf.json"), "{}").unwrap();
+        std::fs::write(root.join("ops/README.md"), "# Operations\n").unwrap();
         std::fs::write(root.join("ops/wiki/index.md"), "concept").unwrap();
-        std::fs::write(root.join("ops/.a3s/knowledge.asset.json"), "{}").unwrap();
-        std::fs::write(root.join("ops/.a3s/knowledge.runtime-binding.json"), "{}").unwrap();
+        std::fs::write(
+            root.join("ops/.a3s/asset.acl"),
+            "version = \"a3s.asset.v1\"",
+        )
+        .unwrap();
 
         let files = collect_knowledge_source_files(&root.join("ops")).unwrap();
         let paths = files
             .iter()
             .map(|file| file.path.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(paths, vec!["package.okf.json", "wiki/index.md"]);
+        assert_eq!(paths, vec!["README.md", "wiki/index.md"]);
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2041,8 +2241,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("ops/wiki")).unwrap();
         std::fs::write(
-            root.join("ops/package.okf.json"),
-            r#"{"name":"ops-runbook","description":"Operations runbook"}"#,
+            root.join("ops/README.md"),
+            "# ops-runbook\n\nOperations runbook\n",
         )
         .unwrap();
         std::fs::write(root.join("ops/wiki/index.md"), "# Operations").unwrap();
@@ -2118,26 +2318,22 @@ mod tests {
         );
         let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
         let files = upload_json["files"].as_array().unwrap();
-        assert!(files.iter().any(|file| file["path"] == "package.okf.json"));
+        assert!(files.iter().any(|file| file["path"] == "README.md"));
         assert!(files.iter().any(|file| file["path"] == "wiki/index.md"));
         assert!(files
             .iter()
-            .any(|file| file["path"] == KNOWLEDGE_MANIFEST_PATH));
-        assert!(files
-            .iter()
-            .any(|file| file["path"] == KNOWLEDGE_RUNTIME_BINDING_PATH));
-        let binding_file = files
-            .iter()
-            .find(|file| file["path"] == KNOWLEDGE_RUNTIME_BINDING_PATH)
-            .expect("runtime binding uploaded");
-        let binding_b64 = binding_file["contentBase64"].as_str().unwrap();
-        let binding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(binding_b64)
-            .unwrap();
-        let binding_json: serde_json::Value = serde_json::from_slice(&binding_bytes).unwrap();
-        assert_eq!(binding_json["kind"], "knowledge");
-        assert_eq!(binding_json["runtime"]["kind"], "a3s-knowledge-service");
-        assert_eq!(binding_json["runtime"]["protocol"], "okf");
+            .any(|file| file["path"] == asset_lifecycle::ASSET_ACL_PATH));
+        for forbidden in [
+            "package.okf.json",
+            "knowledge.asset.json",
+            "knowledge.runtime-binding.json",
+            "runtime-binding.json",
+        ] {
+            assert!(
+                files.iter().all(|file| file["path"] != forbidden),
+                "repository upload should not include {forbidden}"
+            );
+        }
 
         let synced = request_body(
             &requests,
@@ -2147,6 +2343,88 @@ mod tests {
         assert_eq!(synced_json["kind"], "service");
         assert_eq!(synced_json["runtime"]["sharedRuntime"], "node-20");
         assert!(synced_json["runtime"].get("protocol").is_none());
+        let local_asset_acl = root.join("ops").join(asset_lifecycle::ASSET_ACL_PATH);
+        assert!(local_asset_acl.is_file(), "missing local asset.acl");
+        let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
+        assert!(local_asset_acl_body.contains("category = \"knowledge\""));
+        assert!(local_asset_acl_body.contains("readme_path = \"README.md\""));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deploy_okf_to_os_uses_progressive_knowledge_service_view_when_available() {
+        let root = std::env::temp_dir().join(format!("a3s-kb-deploy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ops/wiki")).unwrap();
+        std::fs::write(
+            root.join("ops/README.md"),
+            "# ops-runbook\n\nOperations runbook\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("ops/wiki/index.md"), "# Operations").unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_kb_publish_mock(captured.clone()).await;
+        let session = crate::a3s_os::StoredOsSession {
+            address: origin.clone(),
+            access_token: "token".into(),
+            refresh_token: None,
+            token_type: Some("Bearer".into()),
+            expires_at_ms: None,
+            account_label: None,
+            login_at_ms: 1,
+        };
+        let dev = OkfDevSession {
+            name: "ops-runbook".into(),
+            description: "Operations runbook".into(),
+            rel: "ops".into(),
+            path: root.join("ops"),
+            root: root.clone(),
+        };
+
+        let result = publish_okf_to_os(session, dev, OkfOsAction::Deploy)
+            .await
+            .expect("OKF deploy should use OS Knowledge service");
+
+        assert_eq!(result.action, OkfOsAction::Deploy);
+        assert_eq!(result.asset_name, "knowledge-ops-runbook");
+        assert_eq!(
+            result.view.url,
+            format!("{origin}/admin/knowledge/knowledge-asset-1/deploy?embed=1")
+        );
+        assert!(
+            result.note.contains("progressive capabilities")
+                && result.note.contains("runtime binding was synced"),
+            "{}",
+            result.note
+        );
+
+        let requests = captured.lock().unwrap().clone();
+        let joined = requests.join("\n");
+        assert!(
+            joined.contains("POST /api/v1/assets/knowledge-asset-1/repository/files HTTP/1.1"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("PUT /api/v1/assets/knowledge-asset-1/runtime-binding HTTP/1.1"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("POST /api/v1/kernel/capabilities HTTP/1.1"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains(r#""action":"search""#)
+                && joined.contains("Knowledge service deploy OKF package shaped ViewLink"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains(r#""action":"execute""#)
+                && joined.contains(r#""shaped":true"#)
+                && joined.contains("KnowledgePackageController_deploy")
+                && joined.contains(r#""packageName":"ops-runbook""#),
+            "{joined}"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2189,6 +2467,36 @@ mod tests {
     }
 
     fn kb_publish_mock_response(line: &str, body: &str) -> (&'static str, &'static str) {
+        if line.starts_with("POST /api/v1/kernel/capabilities HTTP/1.1") {
+            if body.contains(r#""action":"search""#)
+                && body.contains("Knowledge service deploy OKF package shaped ViewLink")
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"results":[{"module":"knowledge","operation":"KnowledgePackageController_deploy","description":"Knowledge service deploy OKF package shaped ViewLink"}]}}"#,
+                );
+            }
+            if body.contains(r#""action":"describe""#)
+                && body.contains("KnowledgePackageController_deploy")
+            {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"operation":{"name":"KnowledgePackageController_deploy","inputSchema":{"body":{"properties":{"assetId":{"type":"string"},"packageName":{"type":"string"},"input":{"type":"object"},"idempotencyKey":{"type":"string"}}}}}}}"#,
+                );
+            }
+            if body.contains(r#""action":"execute""#)
+                && body.contains(r#""shaped":true"#)
+                && body.contains("KnowledgePackageController_deploy")
+                && body.contains(r#""assetId":"knowledge-asset-1""#)
+                && body.contains(r#""packageName":"ops-runbook""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"deploymentId":"knowledge-deploy-1"},"view":{"url":"/admin/knowledge/knowledge-asset-1/deploy?embed=1","width":1280,"height":860}}"#,
+                );
+            }
+            return ("404 Not Found", r#"{"code":404,"message":"not found"}"#);
+        }
         if line.starts_with("GET /api/v1/assets?") {
             return ("200 OK", r#"{"data":{"items":[]}}"#);
         }
@@ -2211,10 +2519,12 @@ mod tests {
             );
         }
         if line.starts_with("POST /api/v1/assets/knowledge-asset-1/repository/files HTTP/1.1") {
-            if body.contains(KNOWLEDGE_MANIFEST_PATH)
-                && body.contains(KNOWLEDGE_RUNTIME_BINDING_PATH)
-                && body.contains("package.okf.json")
+            if body.contains("README.md")
                 && body.contains("wiki/index.md")
+                && body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && !body.contains("package.okf.json")
+                && !body.contains("knowledge.asset.json")
+                && !body.contains("knowledge.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }

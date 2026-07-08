@@ -22,6 +22,7 @@
 //!   the finished subset is still returned (`partial: true` + `batchId`).
 
 use a3s_code_core::tools::{Tool, ToolContext, ToolOutput, ToolStreamEvent};
+use a3s_code_core::AgentEvent;
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -39,6 +40,14 @@ const POLL_CAP: Duration = Duration::from_millis(6000);
 /// Consecutive poll failures tolerated before giving up — one flaky HTTP tick
 /// must not abandon an entire running batch.
 const MAX_POLL_FAILURES: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BatchProgress {
+    done: u64,
+    running: u64,
+    queued: u64,
+    pending: u64,
+}
 
 pub(crate) struct RuntimeTool {
     /// OS origin (`scheme://host[:port]`), derived from the login session address.
@@ -225,6 +234,7 @@ impl RuntimeTool {
         progress(format!(
             "{n} parallel subtasks submitted (batch {batch_id})\n"
         ));
+        emit_runtime_subagent_starts(ctx, &batch_id, &invocation_ids, &tasks);
 
         // 2. Poll until every member is terminal or the budget expires — with
         //    exponential backoff, live progress, and transient-failure tolerance.
@@ -248,11 +258,13 @@ impl RuntimeTool {
             match poll {
                 Ok(bd) => {
                     consecutive_failures = 0;
-                    let counts = bd.get("counts").cloned().unwrap_or_else(|| json!({}));
-                    let c = |k: &str| counts.get(k).and_then(Value::as_u64).unwrap_or(0);
-                    let (queued, running) = (c("queued"), c("running"));
-                    let done = c("succeeded") + c("failed") + c("canceled") + c("unknown");
-                    let pending = queued + running;
+                    let batch_progress = batch_progress(&bd, n);
+                    let (done, running, queued, pending) = (
+                        batch_progress.done,
+                        batch_progress.running,
+                        batch_progress.queued,
+                        batch_progress.pending,
+                    );
                     // Emit progress only when the picture changes (no spam).
                     let report =
                         format!("⏳ {done}/{n} done · {running} running · {queued} queued\n");
@@ -312,6 +324,7 @@ impl RuntimeTool {
             }
         });
         let results: Vec<Value> = futures::future::join_all(fetches).await;
+        emit_runtime_subagent_ends(ctx, &invocation_ids, &results);
 
         let mut summary = json!({
             "batchId": batch_id,
@@ -372,6 +385,241 @@ impl RuntimeTool {
             }
         )
     }
+}
+
+fn emit_runtime_subagent_starts(
+    ctx: &ToolContext,
+    batch_id: &str,
+    invocation_ids: &[String],
+    tasks: &[Value],
+) {
+    let Some(tx) = &ctx.agent_event_tx else {
+        return;
+    };
+    let started_ms = epoch_ms();
+    for (idx, invocation_id) in invocation_ids.iter().enumerate() {
+        let _ = tx.send(AgentEvent::SubagentStart {
+            task_id: runtime_subagent_task_id(invocation_id),
+            session_id: format!("runtime-{batch_id}-{idx}"),
+            parent_session_id: ctx.session_id.clone().unwrap_or_default(),
+            agent: "runtime".to_string(),
+            description: runtime_task_description(idx, tasks.get(idx)),
+            started_ms,
+        });
+    }
+}
+
+fn emit_runtime_subagent_ends(ctx: &ToolContext, invocation_ids: &[String], results: &[Value]) {
+    let Some(tx) = &ctx.agent_event_tx else {
+        return;
+    };
+    let finished_ms = epoch_ms();
+    for (idx, invocation_id) in invocation_ids.iter().enumerate() {
+        let result = results.get(idx).cloned().unwrap_or_else(|| json!({}));
+        let state = result
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let success = matches!(state, "succeeded" | "completed" | "success");
+        let output = result
+            .get("output")
+            .filter(|value| !value.is_null())
+            .or_else(|| result.get("error").filter(|value| !value.is_null()))
+            .cloned()
+            .unwrap_or(result);
+        let output = value_to_compact_string(&output);
+        let _ = tx.send(AgentEvent::SubagentEnd {
+            task_id: runtime_subagent_task_id(invocation_id),
+            session_id: format!("runtime-invocation-{invocation_id}"),
+            agent: "runtime".to_string(),
+            output,
+            success,
+            finished_ms,
+        });
+    }
+}
+
+fn batch_progress(batch: &Value, expected_count: usize) -> BatchProgress {
+    let expected = expected_count as u64;
+    if let Some(counts) = batch.get("counts").and_then(Value::as_object) {
+        let count = |keys: &[&str]| {
+            keys.iter()
+                .filter_map(|key| counts.get(*key).and_then(Value::as_u64))
+                .sum::<u64>()
+        };
+        let queued = count(&["queued", "pending", "created", "scheduled"]);
+        let running = count(&["running", "in_progress", "processing", "active"]);
+        let done = count(&[
+            "succeeded",
+            "success",
+            "completed",
+            "done",
+            "failed",
+            "errored",
+            "error",
+            "canceled",
+            "cancelled",
+            "unknown",
+        ]);
+        let observed = done + queued + running;
+        let missing = expected.saturating_sub(observed);
+        let queued = queued + missing;
+        let pending = queued + running;
+        return BatchProgress {
+            done,
+            running,
+            queued,
+            pending,
+        };
+    }
+
+    if let Some(items) = batch_member_items(batch) {
+        let mut done = 0u64;
+        let mut running = 0u64;
+        let mut queued = 0u64;
+        let mut unknown = 0u64;
+        for item in items {
+            match batch_item_state(item).as_deref() {
+                Some(state) if is_terminal_runtime_state(state) => done += 1,
+                Some(state) if is_queued_runtime_state(state) => queued += 1,
+                Some(state) if is_running_runtime_state(state) => running += 1,
+                _ => unknown += 1,
+            }
+        }
+        let observed = done + running + queued + unknown;
+        let missing = expected.saturating_sub(observed);
+        queued += unknown + missing;
+        return BatchProgress {
+            done,
+            running,
+            queued,
+            pending: queued + running,
+        };
+    }
+
+    if let Some(state) = batch_item_state(batch) {
+        if is_terminal_runtime_state(&state) {
+            return BatchProgress {
+                done: expected,
+                running: 0,
+                queued: 0,
+                pending: 0,
+            };
+        }
+        if is_running_runtime_state(&state) {
+            return BatchProgress {
+                done: 0,
+                running: expected,
+                queued: 0,
+                pending: expected,
+            };
+        }
+        if is_queued_runtime_state(&state) {
+            return BatchProgress {
+                done: 0,
+                running: 0,
+                queued: expected,
+                pending: expected,
+            };
+        }
+    }
+
+    BatchProgress {
+        done: 0,
+        running: 0,
+        queued: expected,
+        pending: expected,
+    }
+}
+
+fn batch_member_items(batch: &Value) -> Option<&Vec<Value>> {
+    for key in ["invocations", "items", "results", "tasks", "members"] {
+        if let Some(items) = batch.get(key).and_then(Value::as_array) {
+            return Some(items);
+        }
+    }
+    None
+}
+
+fn batch_item_state(value: &Value) -> Option<String> {
+    value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .or_else(|| value.pointer("/result/status"))
+        .or_else(|| value.pointer("/result/state"))
+        .or_else(|| value.pointer("/execution/status"))
+        .or_else(|| value.pointer("/execution/state"))
+        .and_then(Value::as_str)
+        .map(|state| state.trim().to_ascii_lowercase())
+}
+
+fn is_terminal_runtime_state(state: &str) -> bool {
+    matches!(
+        state,
+        "succeeded"
+            | "success"
+            | "completed"
+            | "complete"
+            | "done"
+            | "failed"
+            | "failure"
+            | "errored"
+            | "error"
+            | "canceled"
+            | "cancelled"
+            | "unknown"
+    )
+}
+
+fn is_running_runtime_state(state: &str) -> bool {
+    matches!(
+        state,
+        "running" | "in_progress" | "processing" | "active" | "started" | "executing"
+    )
+}
+
+fn is_queued_runtime_state(state: &str) -> bool {
+    matches!(
+        state,
+        "queued" | "pending" | "created" | "scheduled" | "submitted" | "waiting"
+    )
+}
+
+fn runtime_subagent_task_id(invocation_id: &str) -> String {
+    format!("runtime-{invocation_id}")
+}
+
+fn runtime_task_description(idx: usize, task: Option<&Value>) -> String {
+    let Some(task) = task else {
+        return format!("Runtime task {}", idx + 1);
+    };
+    if let Some(title) = task.get("title").and_then(Value::as_str) {
+        return truncate(title, 80);
+    }
+    if let Some(focus) = task.get("focus").and_then(Value::as_str) {
+        return truncate(focus, 80);
+    }
+    if let Some(query) = task.get("query").and_then(Value::as_str) {
+        return truncate(query, 80);
+    }
+    if let Some(text) = task.as_str() {
+        return truncate(text, 80);
+    }
+    truncate(&value_to_compact_string(task), 80)
+}
+
+fn value_to_compact_string(value: &Value) -> String {
+    value
+        .as_str()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()))
+}
+
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 /// A canonical hyphenated UUID (the only `ref` form the OS batch API accepts).
@@ -508,10 +756,20 @@ mod tests {
             let i = s.poll_idx.min(s.poll_plan.len().saturating_sub(1));
             s.poll_idx += 1;
             return match s.poll_plan.get(i).cloned().flatten() {
-                Some(counts) => (
-                    "200 OK",
-                    env(&format!(r#"{{"batchId":"batch-1","counts":{counts}}}"#)),
-                ),
+                Some(payload) => {
+                    let trimmed = payload.trim();
+                    let data = if poll_payload_is_counts(trimmed) {
+                        format!(r#"{{"batchId":"batch-1","counts":{trimmed}}}"#)
+                    } else {
+                        let inner = trimmed.trim_start_matches('{').trim_end_matches('}');
+                        if inner.contains(r#""batchId""#) {
+                            format!("{{{inner}}}")
+                        } else {
+                            format!(r#"{{"batchId":"batch-1",{inner}}}"#)
+                        }
+                    };
+                    ("200 OK", env(&data))
+                }
                 None => ("500 Internal Server Error", "boom".to_string()),
             };
         }
@@ -536,6 +794,15 @@ mod tests {
             );
         }
         ("404 Not Found", "{}".to_string())
+    }
+
+    fn poll_payload_is_counts(payload: &str) -> bool {
+        payload.contains(r#""queued":"#)
+            || payload.contains(r#""running":"#)
+            || payload.contains(r#""succeeded":"#)
+            || payload.contains(r#""failed":"#)
+            || payload.contains(r#""canceled":"#)
+            || payload.contains(r#""cancelled":"#)
     }
 
     fn fast_tool(origin: String) -> RuntimeTool {
@@ -563,6 +830,19 @@ mod tests {
         (ctx, rx)
     }
 
+    fn ctx_with_progress_and_agent_events() -> (
+        ToolContext,
+        tokio::sync::mpsc::Receiver<ToolStreamEvent>,
+        tokio::sync::broadcast::Receiver<AgentEvent>,
+    ) {
+        let (tool_tx, tool_rx) = tokio::sync::mpsc::channel(64);
+        let (agent_tx, agent_rx) = tokio::sync::broadcast::channel(64);
+        let ctx = ToolContext::new(std::env::temp_dir())
+            .with_event_tx(tool_tx)
+            .with_agent_event_tx(agent_tx);
+        (ctx, tool_rx, agent_rx)
+    }
+
     #[tokio::test]
     async fn full_flow_streams_progress_and_aggregates() {
         // Two live ticks then terminal — exercises backoff + change-only progress.
@@ -573,7 +853,7 @@ mod tests {
         ]);
         let origin = spawn_mock(st.clone()).await;
         let tool = fast_tool(origin);
-        let (ctx, mut rx) = ctx_with_progress();
+        let (ctx, mut rx, mut agent_rx) = ctx_with_progress_and_agent_events();
         let out = tool
             .execute(
                 &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
@@ -617,6 +897,29 @@ mod tests {
             agg.get("partial").is_none(),
             "terminal batch is not partial"
         );
+
+        let mut starts = Vec::new();
+        let mut ends = Vec::new();
+        while let Ok(event) = agent_rx.try_recv() {
+            match event {
+                AgentEvent::SubagentStart {
+                    task_id,
+                    agent,
+                    description,
+                    ..
+                } => starts.push((task_id, agent, description)),
+                AgentEvent::SubagentEnd { task_id, agent, .. } => ends.push((task_id, agent)),
+                _ => {}
+            }
+        }
+        assert_eq!(starts.len(), 2, "{starts:?}");
+        assert_eq!(ends.len(), 2, "{ends:?}");
+        assert_eq!(starts[0].0, "runtime-inv-1");
+        assert_eq!(starts[0].1, "runtime");
+        assert_eq!(starts[0].2, "a");
+        assert_eq!(starts[1].0, "runtime-inv-2");
+        assert_eq!(ends[0].0, "runtime-inv-1");
+        assert_eq!(ends[1].0, "runtime-inv-2");
     }
 
     #[tokio::test]
@@ -688,6 +991,67 @@ mod tests {
         assert!(agg["note"].as_str().unwrap().contains("batch-1"));
         assert_eq!(agg["results"][0]["output"]["answer"], "alpha"); // finished one kept
         assert_eq!(agg["results"][1]["state"], "unknown"); // unfinished: no result yet
+    }
+
+    #[tokio::test]
+    async fn poll_without_counts_does_not_finish_until_status_is_terminal() {
+        let st = state(vec![
+            Some(r#"{"status":"running"}"#),
+            Some(r#"{"status":"running"}"#),
+            Some(r#"{"status":"completed"}"#),
+        ]);
+        let origin = spawn_mock(st.clone()).await;
+        let tool = fast_tool(origin);
+        let (ctx, _rx) = ctx_with_progress();
+        let out = tool
+            .execute(
+                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(out.success, "{}", out.content);
+        assert_eq!(
+            st.lock().unwrap().poll_idx,
+            3,
+            "missing counts must not make the first poll look terminal"
+        );
+        let agg: Value = serde_json::from_str(&out.content).unwrap();
+        assert!(
+            agg.get("partial").is_none(),
+            "terminal status should not be marked partial"
+        );
+    }
+
+    #[tokio::test]
+    async fn incomplete_counts_do_not_finish_until_expected_task_count_is_terminal() {
+        let st = state(vec![
+            Some(r#"{"queued":0,"running":0,"succeeded":1,"failed":0}"#),
+            Some(r#"{"queued":0,"running":0,"succeeded":2,"failed":0}"#),
+        ]);
+        let origin = spawn_mock(st.clone()).await;
+        let tool = fast_tool(origin);
+        let (ctx, _rx) = ctx_with_progress();
+        let out = tool
+            .execute(
+                &json!({ "tasks": ["a", "b"], "worker": "57989959-0b1d-41da-974c-31ad8101df37" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+
+        assert!(out.success, "{}", out.content);
+        assert_eq!(
+            st.lock().unwrap().poll_idx,
+            2,
+            "counts with fewer terminal tasks than submitted must keep polling"
+        );
+        let agg: Value = serde_json::from_str(&out.content).unwrap();
+        assert!(
+            agg.get("partial").is_none(),
+            "eventual full counts should not be marked partial"
+        );
     }
 
     #[tokio::test]

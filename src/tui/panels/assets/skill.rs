@@ -3,15 +3,14 @@
 //! Skills are team digital assets too: a short description should be enough to
 //! create a local authoring prototype with Function as a Service binding intent.
 //! They can be reviewed, published, and deployed, but they are not direct run or
-//! debug targets in the TUI.
+//! execution targets in the TUI.
 
+use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const SKILL_MANIFEST_PATH: &str = ".a3s/skill.asset.json";
-const SKILL_RUNTIME_BINDING_PATH: &str = ".a3s/skill.runtime-binding.json";
 const SKILL_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
@@ -130,9 +129,10 @@ pub(crate) fn parse_skill_subcommand(input: &str) -> Option<Result<SkillSubcomma
             }
             Some(Ok(SkillSubcommand::Publish))
         }
-        "run" | "debug" => Some(Err(
+        "run" => Some(Err(
             "skills are not runnable assets; use /skill publish or /skill deploy".to_string(),
         )),
+        "debug" => Some(Err("unknown /skill command `debug`".to_string())),
         "deploy" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /skill deploy".to_string()));
@@ -174,6 +174,11 @@ fn list_skill_assets_inner(
     dir: &std::path::Path,
     out: &mut Vec<SkillAsset>,
 ) {
+    let entrypoint = dir.join("SKILL.md");
+    if entrypoint.is_file() {
+        out.push(skill_asset_from_file(root, &entrypoint));
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -181,11 +186,6 @@ fn list_skill_assets_inner(
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            let skill = path.join("SKILL.md");
-            if skill.is_file() {
-                out.push(skill_asset_from_file(root, &skill));
-                continue;
-            }
             if !name.starts_with('.') {
                 list_skill_assets_inner(root, &path, out);
             }
@@ -237,6 +237,100 @@ pub(crate) fn skill_dev_session_from_file(
     }
 }
 
+pub(crate) fn scaffold_skill_asset(
+    description: &str,
+    root: &std::path::Path,
+) -> Result<SkillDevSession, String> {
+    let name = asset_lifecycle::scaffold_name(description, "skill");
+    let package = asset_lifecycle::unique_asset_dir(root, &name);
+    let final_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let description =
+        asset_lifecycle::scaffold_description(description, &final_name, "Local skill asset");
+
+    std::fs::create_dir_all(package.join(".a3s"))
+        .map_err(|e| format!("could not create {}: {e}", package.join(".a3s").display()))?;
+    for dir in ["examples", "tests"] {
+        std::fs::create_dir_all(package.join(dir))
+            .map_err(|e| format!("could not create {}: {e}", package.join(dir).display()))?;
+    }
+
+    let skill_md = format!(
+        "---\n\
+         name: {name}\n\
+         description: {description_json}\n\
+         kind: instruction\n\
+         allowed-tools: \"Read(*), Grep(*), Glob(*)\"\n\
+         ---\n\n\
+         # {name}\n\n\
+         Use this skill when the user asks for: {description}.\n\n\
+         ## Workflow\n\n\
+         1. Read the relevant input and restate the task boundary.\n\
+         2. Apply the checklist in this package.\n\
+         3. Return concise, evidence-backed output.\n\n\
+         ## Success Criteria\n\n\
+         - The response is scoped to the requested task.\n\
+         - Assumptions and missing evidence are stated plainly.\n",
+        name = final_name,
+        description = description,
+        description_json = serde_json::to_string(&description)
+            .unwrap_or_else(|_| "\"Local skill asset\"".to_string()),
+    );
+    let skill_path = package.join("SKILL.md");
+    asset_lifecycle::write_scaffold_file(&skill_path, skill_md.as_bytes())?;
+    let dev = skill_dev_session_from_file(root, &skill_path);
+    let asset_name = skill_asset_name(&dev.name);
+    let asset_acl = skill_asset_acl(&dev, &asset_name);
+
+    asset_lifecycle::write_scaffold_file(
+        &package.join("README.md"),
+        skill_scaffold_readme(&final_name, &description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("examples/example-input.md"),
+        format!("# Example Input\n\n{description}\n").as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("examples/example-output.md"),
+        b"# Example Output\n\nA concise result with evidence and assumptions.\n",
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("tests/smoke.md"),
+        skill_scaffold_tests().as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join(asset_lifecycle::ASSET_ACL_PATH),
+        asset_acl.as_bytes(),
+    )?;
+
+    Ok(dev)
+}
+
+fn skill_scaffold_readme(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         {description}.\n\n\
+         ## Source\n\n\
+         - `SKILL.md` is the skill source entrypoint.\n\
+         - `examples/` and `tests/` contain reusable fixtures.\n\
+         - `.a3s/` contains only `asset.acl`.\n\n\
+         ## Lifecycle\n\n\
+         - `a3s code skill publish .`\n\
+         - `a3s code skill deploy .`\n\
+         - `a3s code skill status .`\n"
+    )
+}
+
+fn skill_scaffold_tests() -> &'static str {
+    "# Skill Smoke Checklist\n\n\
+     1. Confirm `SKILL.md` has valid YAML frontmatter with `kind: instruction`.\n\
+     2. Confirm `.a3s/asset.acl` has `definition_path = \"SKILL.md\"`.\n\
+     3. Run `/reload` before using the skill in the TUI.\n"
+}
+
 fn skill_meta(body: &str) -> Option<(String, String)> {
     let rest = body.trim_start().strip_prefix("---")?;
     let end = rest.find("\n---")?;
@@ -255,27 +349,43 @@ fn skill_meta(body: &str) -> Option<(String, String)> {
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn skill_gen_prompt(description: &str, dir: &str) -> String {
     format!(
         "Create a local A3S skill asset prototype from the description below and save it under \
          {dir}. This is a local authoring task: do not open OS, RemoteUI, or a browser.\n\
          Description: {description}\n\
          IMPORTANT: {dir} is OUTSIDE this session's workspace by default, so path-scoped file \
-         tools may reject it. Use non-interactive bash commands with full quoted paths. Never run \
-         a command that waits on stdin.\n\
+         tools will reject writes there. Use the `bash` tool for ALL file creation and edits under \
+         {dir}; do not use path-scoped write/edit tools for this task. Use non-interactive bash \
+         commands with full quoted paths. Never run a command that waits on stdin.\n\
          Create {dir}/<kebab-case-name>/ with at least:\n\
-         - SKILL.md using valid YAML frontmatter with name, description, kind, and allowed-tools.\n\
+         - SKILL.md using valid YAML frontmatter. Use this exact frontmatter shape for a normal \
+         skill:\n\
+           ---\n\
+           name: <kebab-case-name>\n\
+           description: <one-line trigger/purpose>\n\
+           kind: instruction\n\
+           allowed-tools: \"Read(*), Grep(*), Glob(*)\"\n\
+           ---\n\
+           Do NOT use `kind: skill`; valid kind values are only `instruction`, `persona`, or \
+           `tool`, and normal reusable skills should be `instruction`. Do not invent semantic \
+           tool names such as `generate_object`; allowed-tools must be concrete tool permission \
+           patterns.\n\
          - README.md explaining the skill contract, expected inputs, outputs, and examples.\n\
          - examples/example-input.md and examples/example-output.md.\n\
          - tests/smoke.md with a short manual verification checklist.\n\
-         - .a3s/skill.asset.json with category=skill, service=Function as a Service, \
-         runtimeIntent.kind=tool, isolation=serving, and agentKind=tool.\n\
-         - .a3s/skill.runtime-binding.json with kind=tool, isolation=serving, \
-         runtime.kind=a3s-function-service, protocol=skill, and agentKind=tool.\n\
+         - .a3s/asset.acl as the unified asset manifest for this skill.\n\
+         The package-local `.a3s/` directory is metadata-only. Do NOT put `SKILL.md`, README, \
+         examples, tests, or other skill source files under `.a3s/`.\n\
+         Do NOT create extra generated JSON config files; keep package configuration in \
+         `.a3s/asset.acl`. Runtime configuration is synced through OS Function as a Service \
+         APIs during publish/deploy, not stored in the asset repository.\n\
          Keep the first version small and usable: one clear trigger, one workflow, conservative \
-         tool scope, explicit success criteria, and no secrets. Validate JSON files with \
-         python3 -m json.tool, then report the saved project path and tell the user `/reload` \
-         makes the new skill available in the TUI."
+         tool scope, explicit success criteria, and no secrets. Confirm SKILL.md contains \
+         `kind: instruction`, then stop using \
+         tools immediately and give a concise final answer with the saved project path and the \
+         note that `/reload` makes the new skill available in the TUI."
     )
 }
 
@@ -479,10 +589,6 @@ fn collect_skill_source_files_inner(
         if !path.is_file() {
             continue;
         }
-        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-        if bytes.len() > 512 * 1024 {
-            continue;
-        }
         let rel = path
             .strip_prefix(root)
             .unwrap_or(&path)
@@ -490,7 +596,16 @@ fn collect_skill_source_files_inner(
             .map(|part| part.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        if rel.starts_with(".a3s/") {
+        if rel.starts_with(".a3s/")
+            || matches!(
+                rel.as_str(),
+                "skill.asset.json" | "skill.runtime-binding.json" | "runtime-binding.json"
+            )
+        {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        if bytes.len() > 512 * 1024 {
             continue;
         }
         out.push(SkillSourceFile { path: rel, bytes });
@@ -506,7 +621,7 @@ fn skill_manifest_json(dev: &SkillDevSession, asset_name: &str) -> serde_json::V
         "skillName": dev.name.as_str(),
         "description": dev.description.as_str(),
         "definitionPath": "SKILL.md",
-        "runtimeBindingPath": SKILL_RUNTIME_BINDING_PATH,
+        "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         "localPath": dev.rel.as_str(),
         "service": "Function as a Service",
         "createdBy": "a3s-code-tui",
@@ -530,6 +645,7 @@ fn skill_runtime_binding_json(dev: &SkillDevSession, asset_name: &str) -> serde_
             "kind": "asset",
             "ref": "main",
             "definitionPath": "SKILL.md",
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         },
         "runtime": {
             "kind": "a3s-function-service",
@@ -546,8 +662,31 @@ fn skill_runtime_binding_json(dev: &SkillDevSession, asset_name: &str) -> serde_
             "assetName": asset_name,
             "skillName": dev.name.as_str(),
             "description": dev.description.as_str(),
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localPath": dev.rel.as_str(),
         },
+    })
+}
+
+fn skill_asset_acl(dev: &SkillDevSession, asset_name: &str) -> String {
+    let source = [("definition_path", "SKILL.md")];
+    let metadata: [(&str, &str); 0] = [];
+    asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
+        category: "skill",
+        kind: Some("tool"),
+        name: asset_name,
+        description: dev.description.as_str(),
+        local_path: Some(dev.rel.as_str()),
+        service: asset_lifecycle::OsService::FunctionAsAService,
+        runtime: asset_lifecycle::RuntimeBindingIntent {
+            kind: "tool",
+            isolation: "serving",
+            runtime_kind: "a3s-function-service",
+            protocol: Some("skill"),
+            agent_kind: Some("tool"),
+        },
+        source: &source,
+        metadata: &metadata,
     })
 }
 
@@ -724,8 +863,9 @@ async fn upload_skill_asset(
     token: &str,
     asset_id: &str,
     source_files: &[SkillSourceFile],
-    manifest: &serde_json::Value,
-    runtime_binding: &serde_json::Value,
+    asset_acl: &str,
+    _manifest: &serde_json::Value,
+    _runtime_binding: &serde_json::Value,
 ) -> Result<(), String> {
     use base64::Engine;
 
@@ -737,16 +877,8 @@ async fn upload_skill_asset(
         }));
     }
     files.push(serde_json::json!({
-        "path": SKILL_MANIFEST_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?
-        ),
-    }));
-    files.push(serde_json::json!({
-        "path": SKILL_RUNTIME_BINDING_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(runtime_binding).map_err(|e| e.to_string())?
-        ),
+        "path": asset_lifecycle::ASSET_ACL_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(asset_acl.as_bytes()),
     }));
 
     let resp = http()?
@@ -858,7 +990,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -880,7 +1012,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding validation failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -997,6 +1129,29 @@ fn skill_progressive_params(
 
 fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -> i32 {
     let combined = format!("{text} {operation}").to_ascii_lowercase();
+    let operation = operation.to_ascii_lowercase();
+    if matches!(action, SkillOsAction::Open | SkillOsAction::Deploy)
+        && (operation.contains("createasset")
+            || operation.contains("listasset")
+            || operation.contains("getasset")
+            || operation.contains("deployability")
+            || operation.contains("diagnose")
+            || operation.contains("acknowledge")
+            || operation.contains("issue")
+            || operation.contains("reopen")
+            || operation.contains("marketplace")
+            || operation.contains("listing")
+            || operation.contains("publishing")
+            || operation.contains("publish")
+            || operation.contains("scaffold")
+            || operation.contains("template")
+            || operation.contains("preview"))
+    {
+        return 0;
+    }
+    if matches!(action, SkillOsAction::Open) && is_mutating_skill_observe_operation(&combined) {
+        return 0;
+    }
     let mut score = 0;
     if combined.contains("function") || combined.contains("faas") {
         score += 8;
@@ -1007,22 +1162,21 @@ fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -
     let mut action_hit = false;
     match action {
         SkillOsAction::Open => {
-            if combined.contains("open")
-                || combined.contains("view")
+            if (operation.contains("open") && !operation.contains("reopen"))
+                || (operation.contains("view") && !operation.contains("preview"))
                 || combined.contains("remoteui")
-                || combined.contains("manage")
-                || combined.contains("asset view")
+                || combined.contains("skill asset view")
             {
                 score += 8;
                 action_hit = true;
             }
         }
         SkillOsAction::Deploy
-            if combined.contains("deploy")
-                || combined.contains("serve")
-                || combined.contains("serving")
-                || combined.contains("release")
-                || combined.contains("binding") =>
+            if operation.contains("deploy")
+                || operation.contains("serve")
+                || operation.contains("serving")
+                || operation.contains("release")
+                || operation.contains("binding") =>
         {
             score += 8;
             action_hit = true;
@@ -1045,6 +1199,35 @@ fn skill_progressive_score(action: SkillOsAction, text: &str, operation: &str) -
     } else {
         0
     }
+}
+
+fn is_mutating_skill_observe_operation(combined: &str) -> bool {
+    let has_safe_observe_hint = combined.contains("open")
+        || combined.contains("view")
+        || combined.contains("get")
+        || combined.contains("list")
+        || combined.contains("inspect")
+        || combined.contains("log");
+    let has_mutating_hint = combined.contains("create")
+        || combined.contains("update")
+        || combined.contains("delete")
+        || combined.contains("apply")
+        || combined.contains("publish")
+        || combined.contains("deploy")
+        || combined.contains("build")
+        || combined.contains("launch")
+        || combined.contains("run")
+        || combined.contains("trigger")
+        || combined.contains("batch")
+        || combined.contains("validate")
+        || combined.contains("acknowledge")
+        || combined.contains("reopen")
+        || combined.contains("close")
+        || combined.contains("resolve")
+        || combined.contains("issue");
+    has_mutating_hint && !has_safe_observe_hint
+        || combined.contains("reopen")
+        || combined.contains("issue")
 }
 
 async fn try_skill_progressive_action(
@@ -1132,11 +1315,14 @@ pub(crate) async fn publish_skill_to_os(
     let source_files = collect_skill_source_files(&asset_root)?;
     let manifest = skill_manifest_json(&dev, &asset_name);
     let runtime_binding = skill_runtime_binding_json(&dev, &asset_name);
+    let asset_acl = skill_asset_acl(&dev, &asset_name);
+    asset_lifecycle::write_asset_acl(&asset_root, &asset_acl)?;
     upload_skill_asset(
         &origin,
         &session.access_token,
         &asset.id,
         &source_files,
+        &asset_acl,
         &manifest,
         &runtime_binding,
     )
@@ -1286,14 +1472,14 @@ impl App {
                 if result.open_view {
                     self.push_line(&gutter(
                         ACCENT,
-                        &remote_view_button("skill Function as a Service · click or /view reopens"),
+                        &remote_view_button("skill Function as a Service · click to reopen"),
                     ));
                     self.open_remote_view(&result.view);
                 } else {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GRAY)
-                            .render("  /view opens the related OS skill asset view"),
+                            .render("  Open view opens the related OS skill asset view"),
                     );
                 }
             }
@@ -1457,7 +1643,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -1467,15 +1652,71 @@ mod tests {
         let prompt = skill_gen_prompt("triage production incidents", "/Users/x/.a3s/skills");
         assert!(prompt.contains("/Users/x/.a3s/skills"));
         assert!(prompt.contains("SKILL.md"));
+        assert!(prompt.contains(".a3s/asset.acl"));
+        assert!(prompt.contains("kind: instruction"));
+        assert!(prompt.contains("valid kind values are only `instruction`, `persona`, or `tool`"));
+        assert!(prompt.contains("Do NOT use `kind: skill`"));
+        assert!(prompt.contains("metadata-only"));
+        assert!(prompt.contains("Do NOT put `SKILL.md`"));
+        assert!(prompt.contains("Do not invent semantic tool names such as `generate_object`"));
         assert!(prompt.contains("Function as a Service"));
-        assert!(prompt.contains("runtimeIntent.kind=tool"));
-        assert!(prompt.contains("isolation=serving"));
-        assert!(prompt.contains("runtime.kind=a3s-function-service"));
-        assert!(prompt.contains("protocol=skill"));
-        assert!(prompt.contains("agentKind=tool"));
+        assert!(prompt.contains("Do NOT create extra generated JSON config files"));
+        assert!(prompt.contains("keep package configuration in `.a3s/asset.acl`"));
         assert!(!prompt.contains("runnable"));
         assert!(!prompt.contains("run/debug"));
         assert!(prompt.contains("/reload"));
+    }
+
+    #[test]
+    fn scaffold_skill_asset_creates_source_at_root_and_metadata_acl() {
+        let root =
+            std::env::temp_dir().join(format!("a3s-code-skill-scaffold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let dev = scaffold_skill_asset(
+            "Name it exactly incident-brief. It summarizes incident notes.",
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(dev.name, "incident-brief");
+        let package = dev.path.parent().unwrap();
+        for rel in [
+            "README.md",
+            "SKILL.md",
+            "examples/example-input.md",
+            "examples/example-output.md",
+            "tests/smoke.md",
+            ".a3s/asset.acl",
+        ] {
+            assert!(package.join(rel).is_file(), "missing {rel}");
+        }
+        for rel in [
+            "skill.asset.json",
+            "skill.runtime-binding.json",
+            ".a3s/skill.asset.json",
+            ".a3s/skill.runtime-binding.json",
+        ] {
+            assert!(!package.join(rel).exists(), "unexpected {rel}");
+        }
+        assert!(!package.join(".a3s/SKILL.md").exists());
+        let source_files = collect_skill_source_files(package).unwrap();
+        let paths = source_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"SKILL.md"), "{paths:?}");
+        assert!(
+            paths.iter().all(|path| !path.starts_with(".a3s/")),
+            "{paths:?}"
+        );
+        let asset_acl =
+            std::fs::read_to_string(package.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
+        assert!(asset_acl.contains("category = \"skill\""));
+        assert!(asset_acl.contains("definition_path = \"SKILL.md\""));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1514,7 +1755,10 @@ mod tests {
         );
         assert!(parse_skill_subcommand("ps").unwrap().is_err());
         assert!(parse_skill_subcommand("run").unwrap().is_err());
-        assert!(parse_skill_subcommand("debug").unwrap().is_err());
+        assert_eq!(
+            parse_skill_subcommand("debug").unwrap().unwrap_err(),
+            "unknown /skill command `debug`"
+        );
         assert!(parse_skill_subcommand("logs").unwrap().is_err());
         assert!(parse_skill_subcommand("jobs").unwrap().is_err());
         assert!(parse_skill_subcommand("inspect").unwrap().is_err());
@@ -1682,9 +1926,19 @@ mod tests {
                         "description": "Function as a Service skill asset metadata"
                     },
                     {
+                        "module": "marketplace",
+                        "operation": "SkillListingController_getSkillPublishingCandidate",
+                        "description": "Function as a Service deploy skill asset shaped ViewLink"
+                    },
+                    {
                         "module": "functions",
                         "operation": "SkillFunctionController_openView",
                         "description": "Function as a Service skill RemoteUI ViewLink open"
+                    },
+                    {
+                        "module": "issues",
+                        "operation": "IssueController_reopenIssue",
+                        "description": "Reopen issue workflow for a skill support ticket"
                     },
                     {
                         "module": "workflows",
@@ -1706,11 +1960,40 @@ mod tests {
             "asset metadata without an open/view hint should not drive /skill open: {candidates:?}"
         );
         assert!(
+            candidates.iter().all(|candidate| candidate.operation
+                != "SkillListingController_getSkillPublishingCandidate"),
+            "marketplace publishing candidates must not drive /skill open: {candidates:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.operation != "IssueController_reopenIssue"),
+            "issue reopen must not drive /skill open: {candidates:?}"
+        );
+        assert!(
             skill_progressive_score(
                 SkillOsAction::Open,
                 "Function as a Service Skill RemoteUI ViewLink OPEN",
                 "SkillFunctionController_openView"
             ) > 0
+        );
+        assert_eq!(
+            skill_progressive_score(
+                SkillOsAction::Open,
+                "Function as a Service skill asset repository preview",
+                "AssetCrudController_getScaffoldTemplatePreview"
+            ),
+            0,
+            "/skill open must not choose scaffold/template preview operations"
+        );
+        assert_eq!(
+            skill_progressive_score(
+                SkillOsAction::Open,
+                "Function as a Service skill issue reopen shaped ViewLink",
+                "IssueController_reopenIssue"
+            ),
+            0,
+            "/skill open must not choose issue reopen operations"
         );
         assert!(
             skill_progressive_score(
@@ -1866,22 +2149,19 @@ mod tests {
         let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
         let files = upload_json["files"].as_array().unwrap();
         assert!(files.iter().any(|file| file["path"] == "SKILL.md"));
-        assert!(files.iter().any(|file| file["path"] == SKILL_MANIFEST_PATH));
         assert!(files
             .iter()
-            .any(|file| file["path"] == SKILL_RUNTIME_BINDING_PATH));
-        let binding_file = files
-            .iter()
-            .find(|file| file["path"] == SKILL_RUNTIME_BINDING_PATH)
-            .expect("runtime binding uploaded");
-        let binding_b64 = binding_file["contentBase64"].as_str().unwrap();
-        let binding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(binding_b64)
-            .unwrap();
-        let binding_json: serde_json::Value = serde_json::from_slice(&binding_bytes).unwrap();
-        assert_eq!(binding_json["kind"], "tool");
-        assert_eq!(binding_json["runtime"]["kind"], "a3s-function-service");
-        assert_eq!(binding_json["runtime"]["protocol"], "skill");
+            .any(|file| file["path"] == asset_lifecycle::ASSET_ACL_PATH));
+        for forbidden in [
+            "skill.asset.json",
+            "skill.runtime-binding.json",
+            "runtime-binding.json",
+        ] {
+            assert!(
+                files.iter().all(|file| file["path"] != forbidden),
+                "repository upload should not include {forbidden}"
+            );
+        }
 
         let synced = request_body(
             &requests,
@@ -1891,6 +2171,11 @@ mod tests {
         assert_eq!(synced_json["kind"], "tool");
         assert_eq!(synced_json["runtime"]["sharedRuntime"], "node-20");
         assert!(synced_json["runtime"].get("protocol").is_none());
+        let local_asset_acl = root.join("ops").join(asset_lifecycle::ASSET_ACL_PATH);
+        assert!(local_asset_acl.is_file(), "missing local asset.acl");
+        let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
+        assert!(local_asset_acl_body.contains("category = \"skill\""));
+        assert!(local_asset_acl_body.contains("definition_path = \"SKILL.md\""));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1969,16 +2254,20 @@ mod tests {
     fn lists_skill_assets_from_skill_md_dirs() {
         let root = std::env::temp_dir().join(format!("a3s-skill-panel-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("ops")).unwrap();
+        std::fs::create_dir_all(root.join("ops/examples")).unwrap();
         std::fs::write(
             root.join("ops/SKILL.md"),
             "---\nname: ops-triage\ndescription: Triage incidents\n---\nBody\n",
         )
         .unwrap();
+        std::fs::write(root.join("ops/examples/input.md"), "incident").unwrap();
         let skills = list_skill_assets(&root);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "ops-triage");
         assert_eq!(skills[0].description, "Triage incidents");
+        let package_skills = list_skill_assets(&root.join("ops"));
+        assert_eq!(package_skills.len(), 1);
+        assert_eq!(package_skills[0].rel, "SKILL.md");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2072,9 +2361,10 @@ mod tests {
             );
         }
         if line.starts_with("POST /api/v1/assets/skill-asset-1/repository/files HTTP/1.1") {
-            if body.contains(SKILL_MANIFEST_PATH)
-                && body.contains(SKILL_RUNTIME_BINDING_PATH)
-                && body.contains("SKILL.md")
+            if body.contains("SKILL.md")
+                && body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && !body.contains("skill.asset.json")
+                && !body.contains("skill.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }

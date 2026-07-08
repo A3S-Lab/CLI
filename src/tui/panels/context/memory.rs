@@ -372,8 +372,7 @@ impl App {
             out.push(format!("{left}{sep}{right}"));
         }
 
-        let hint =
-            "  ↑↓/jk select · g/G top/bottom · PgUp/PgDn scroll · c ctx source · f forget candidate · r refresh · Esc close";
+        let hint = "  ↑↓/jk select · g/G top/bottom · PgUp/PgDn scroll · c ctx source · f forget candidate · r refresh · Esc close";
         while out.len() + 1 < h {
             out.push(String::new());
         }

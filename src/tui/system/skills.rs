@@ -155,7 +155,7 @@ pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     if project_a3s.is_dir() {
         dirs.push(project_a3s);
     }
-    let configured_a3s = super::config::skill_dir();
+    let configured_a3s = crate::config::skill_dir();
     if configured_a3s.is_dir() {
         dirs.push(configured_a3s);
     }

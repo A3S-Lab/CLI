@@ -8,17 +8,15 @@
 //! editing constraints so the current TUI session can iteratively improve the
 //! agent package.
 //!
-//! `/agent <natural language>` asks the agent to draft a local Markdown agent
-//! package under `agent_dir()`.
+//! `/agent <natural language>` scaffolds a complete local A3S Code agent package
+//! under `agent_dir()`.
 
+use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const AGENT_MANIFEST_PATH: &str = ".a3s/agent.asset.json";
-const AGENT_CONFIG_PATH: &str = ".a3s/agent.config.json";
-const AGENT_RUNTIME_BINDING_PATH: &str = ".a3s/agent.runtime-binding.json";
 const AGENT_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
@@ -66,6 +64,15 @@ pub(crate) enum AgentOsKind {
 }
 
 impl AgentOsKind {
+    pub(crate) fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "agentic" => Ok(Self::Agentic),
+            "application" => Ok(Self::Application),
+            "tool" => Ok(Self::Tool),
+            _ => Err(format!("unknown agent kind `{value}`")),
+        }
+    }
+
     pub(crate) fn agent_kind(self) -> &'static str {
         match self {
             Self::Agentic => "agentic",
@@ -135,7 +142,7 @@ impl AgentOsKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AgentOsAction {
     Publish(AgentOsKind),
-    Run,
+    Run(AgentOsKind),
     Deploy,
     Open(AgentOsKind),
     Logs(AgentOsKind),
@@ -146,7 +153,7 @@ impl AgentOsAction {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Publish(_) => "publish",
-            Self::Run => "run",
+            Self::Run(_) => "run",
             Self::Deploy => "deploy",
             Self::Open(_) => "open",
             Self::Logs(_) => "logs",
@@ -157,7 +164,7 @@ impl AgentOsAction {
     pub(crate) fn target_kind(self) -> AgentOsKind {
         match self {
             Self::Publish(kind) | Self::Open(kind) | Self::Logs(kind) | Self::Status(kind) => kind,
-            Self::Run => AgentOsKind::Agentic,
+            Self::Run(kind) => kind,
             Self::Deploy => AgentOsKind::Application,
         }
     }
@@ -262,10 +269,9 @@ pub(crate) fn parse_agent_subcommand(input: &str) -> Option<Result<AgentSubcomma
             }
             Some(Ok(AgentSubcommand::Run))
         }
-        "debug" | "test" | "invoke" | "batch" => Some(Err(
-            "agent assets use /agent run; tool agents publish through /agent publish tool"
-                .to_string(),
-        )),
+        "debug" | "test" | "invoke" | "batch" => {
+            Some(Err(format!("unknown /agent command `{head}`")))
+        }
         "deploy" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /agent deploy".to_string()));
@@ -324,12 +330,7 @@ fn parse_optional_agent_os_kind(
 }
 
 fn parse_agent_os_kind(value: &str, usage: &'static str) -> Result<AgentOsKind, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "agentic" => Ok(AgentOsKind::Agentic),
-        "application" => Ok(AgentOsKind::Application),
-        "tool" => Ok(AgentOsKind::Tool),
-        _ => Err(usage.to_string()),
-    }
+    AgentOsKind::parse(value).map_err(|_| usage.to_string())
 }
 
 /// List local agent packages recursively, skipping dotfiles and dot-directories.
@@ -574,20 +575,26 @@ fn agent_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
-/// Directive for `/agent <description>`: create a local Markdown agent package.
+/// Test fixture for the legacy LLM asset-generation contract.
+#[cfg(test)]
 pub(crate) fn agent_gen_prompt(description: &str, dir: &str) -> String {
     format!(
-        "Create one local A3S agent asset prototype from the description below and save it under \
-         {dir}. This is a SMALL asset-folder task: do it directly in this turn — do NOT \
+        "Create one complete local A3S Code agent package from the description below and save it \
+         under {dir}. This is a SMALL asset-folder task: do it directly in this turn — do NOT \
          plan, delegate, or fan out subagents.\n\
          Description: {description}\n\
          IMPORTANT: {dir} is OUTSIDE this session's workspace, so the path-scoped file \
-         tools will reject it — use the `bash` tool (`mkdir -p {dir}`, then write the \
-         files with heredocs).\n\
-         Create {dir}/<kebab-case-agent-name>/ with a Markdown definition plus OS asset \
-         metadata. The entrypoint file MUST be Markdown with YAML frontmatter, because a3s-code can load \
-         `.md`, `.yaml`, and `.yml` agents but Markdown gives VibeCoding a readable \
-         prompt body. Use this exact shape:\n\
+         tools will reject it — use the `bash` tool for ALL file creation and edits under \
+         {dir}. Prefer one heredoc script that creates the package directory and all required \
+         files in the first tool call. The script must be non-interactive and bounded: use only \
+         mkdir/cat heredocs/test/sed/find and `python3 -m json.tool` for JSON checks. Do NOT run \
+         the generated agent, do NOT start services, do NOT install dependencies, and do NOT run \
+         cargo/npm/pip/git/a3s commands. Never run a command that waits on stdin.\n\
+         Create {dir}/<kebab-case-agent-name>/ as a complete A3S Code framework package. \
+         The entrypoint file MUST be {dir}/<kebab-case-agent-name>/agent.md with YAML \
+         frontmatter, because a3s-code loads `.md`, `.yaml`, and `.yml` agent definitions \
+         and Markdown keeps the agent's system prompt readable. Use this exact frontmatter \
+         shape:\n\
          ---\n\
          name: <kebab-case-agent-name>\n\
          description: <one-line trigger/purpose>\n\
@@ -595,25 +602,325 @@ pub(crate) fn agent_gen_prompt(description: &str, dir: &str) -> String {
          max_steps: 30\n\
          ---\n\
          <system prompt for the agent>\n\
+         Do NOT stop at only agent.md. The package MUST include these files:\n\
+         - README.md explaining purpose, trigger, inputs, outputs, local development, \
+         publish/run/deploy lifecycle, and safety constraints.\n\
+         - agent.md as the A3S Code entrypoint definition.\n\
+         - prompts/system.md with the expanded system prompt used by agent.md.\n\
+         - workflows/operating-procedure.md with step-by-step run workflow, failure handling, \
+         and completion criteria.\n\
+         - examples/example-input.md and examples/example-output.md.\n\
+         - eval/smoke.md with manual evaluation cases and expected pass criteria.\n\
+         - tests/smoke.md with a lightweight local verification checklist.\n\
+         - .a3s/asset.acl. Default to agentKind=agentic unless the description clearly asks \
+         for an application or tool agent.\n\
+         The package-local `.a3s/` directory is metadata-only. Do NOT put `agent.md`, \
+         prompts, workflows, examples, evals, tests, or other source files under `.a3s/`.\n\
+         Do NOT create extra generated JSON config files; keep package configuration in \
+         `.a3s/asset.acl`. Runtime configuration is synced through OS APIs during \
+         publish/run/deploy, not stored in the asset repository.\n\
          Rules: make `name` kebab-case and stable; keep `description` one line and \
-         action-oriented; choose a conservative tools list (omit tools that are not \
-         needed); write a practical system prompt with scope, workflow, and success \
-         criteria; do not include secrets.\n\
-         Also create .a3s/agent.asset.json, .a3s/agent.config.json, and \
-         .a3s/agent.runtime-binding.json. Default to agentKind=agentic unless the \
-         description clearly asks for an application or tool agent. For agentic/application \
-         agents use service=Agent as a Service, runtimeIntent.kind=agent, \
-         runtime.kind=a3s-agent-service, and isolation=serving for agentic or container for \
-         application. For tool agents use service=Function as a Service, runtimeIntent.kind=tool, \
-         runtime.kind=a3s-function-service, protocol=agent-tool, isolation=serving, and \
-         agentKind=tool.\n\
-         Save the entry definition as {dir}/<kebab-case-agent-name>/agent.md \
-         (if that folder exists, append -2, -3, …). Validate JSON files with \
-         `python3 -m json.tool` and validate the definition with `test -s \"$FILE\" && sed -n '1,40p' \"$FILE\"` \
-         (always pass the file path — never run a command that waits on stdin). Then \
-         report the saved path and tell the user `/agent` starts local interactive \
-         development for it."
+         action-oriented; choose a conservative tools list (omit tools that are not needed); \
+         write a practical system prompt with scope, workflow, safety boundaries, examples, \
+         and success criteria; do not include secrets. If the folder exists, append -2, -3, … \
+         to the folder name. Validate the definition with `test -s \"$FILE\" && sed -n '1,80p' \"$FILE\"` (always pass the file \
+         path). Do not execute tests/smoke.md; it is a checklist artifact. After validation \
+         succeeds, stop using tools immediately and give a concise final answer with the saved \
+         package path and the note that `/agent` starts local interactive development for the \
+         complete package."
     )
+}
+
+pub(crate) fn scaffold_agent_package(
+    description: &str,
+    root: &std::path::Path,
+) -> Result<AgentDevSession, String> {
+    let name = agent_scaffold_name(description);
+    let package = unique_agent_package_dir(root, &name);
+    let final_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let description = agent_scaffold_description(description, &final_name);
+    let kind = agent_scaffold_kind(description.as_str());
+    let system_prompt = agent_scaffold_system_prompt(&final_name, &description);
+
+    std::fs::create_dir_all(package.join(".a3s"))
+        .map_err(|e| format!("could not create {}: {e}", package.join(".a3s").display()))?;
+    for dir in ["prompts", "workflows", "examples", "eval", "tests"] {
+        std::fs::create_dir_all(package.join(dir))
+            .map_err(|e| format!("could not create {}: {e}", package.join(dir).display()))?;
+    }
+
+    let agent_md = format!(
+        "---\n\
+         name: {name}\n\
+         description: {description}\n\
+         tools: Read, Grep, Glob, Bash\n\
+         max_steps: 30\n\
+         ---\n\n\
+         {system_prompt}\n",
+        name = final_name,
+        description = yaml_string(&description),
+    );
+    let agent_path = package.join("agent.md");
+    write_agent_scaffold_file(&agent_path, agent_md.as_bytes())?;
+    write_agent_scaffold_file(&package.join("prompts/system.md"), system_prompt.as_bytes())?;
+    write_agent_scaffold_file(
+        &package.join("README.md"),
+        agent_scaffold_readme(&final_name, &description).as_bytes(),
+    )?;
+    write_agent_scaffold_file(
+        &package.join("workflows/operating-procedure.md"),
+        agent_scaffold_workflow(&description).as_bytes(),
+    )?;
+    write_agent_scaffold_file(
+        &package.join("examples/example-input.md"),
+        agent_scaffold_example_input(&description).as_bytes(),
+    )?;
+    write_agent_scaffold_file(
+        &package.join("examples/example-output.md"),
+        agent_scaffold_example_output().as_bytes(),
+    )?;
+    write_agent_scaffold_file(
+        &package.join("eval/smoke.md"),
+        agent_scaffold_eval().as_bytes(),
+    )?;
+    write_agent_scaffold_file(
+        &package.join("tests/smoke.md"),
+        agent_scaffold_tests().as_bytes(),
+    )?;
+    let def = parse_agent_definition(&agent_path, &agent_md)
+        .map_err(|e| format!("generated agent.md is invalid: {e}"))?;
+    let local_rel = normalized_rel(root, &package);
+    let package_source_path = agent_package_source_path(&local_rel);
+    let asset_source_path = agent_asset_source_path(&local_rel, "agent.md");
+    let asset_acl = agent_asset_acl(
+        kind,
+        &def,
+        &local_rel,
+        &package_source_path,
+        "agent.md",
+        &asset_source_path,
+    );
+    write_agent_scaffold_file(
+        &package.join(asset_lifecycle::ASSET_ACL_PATH),
+        asset_acl.as_bytes(),
+    )?;
+    agent_dev_session_from_file(root, &agent_path)
+}
+
+fn agent_scaffold_name(description: &str) -> String {
+    let lower = description.to_ascii_lowercase();
+    if let Some(start) = lower.find("name it exactly") {
+        let after = &description[start + "name it exactly".len()..];
+        let raw = after
+            .trim()
+            .trim_start_matches([':', '=', '"', '\'', '`', ' '])
+            .split(['.', '\n', ';'])
+            .next()
+            .unwrap_or("")
+            .trim()
+            .trim_matches(['"', '\'', '`']);
+        let slug = asset_slug(raw);
+        if slug != "asset" {
+            return slug;
+        }
+    }
+
+    let words = description
+        .split_whitespace()
+        .filter(|word| !word.eq_ignore_ascii_case("agent"))
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ");
+    truncate_agent_slug(asset_slug(if words.trim().is_empty() {
+        description
+    } else {
+        &words
+    }))
+}
+
+fn truncate_agent_slug(slug: String) -> String {
+    const MAX_LEN: usize = 48;
+    if slug.chars().count() <= MAX_LEN {
+        return slug;
+    }
+    let mut out = slug.chars().take(MAX_LEN).collect::<String>();
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "agent".to_string()
+    } else {
+        out
+    }
+}
+
+fn unique_agent_package_dir(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let base = if name.trim().is_empty() {
+        "agent"
+    } else {
+        name
+    };
+    let first = root.join(base);
+    if !first.exists() {
+        return first;
+    }
+    for suffix in 2.. {
+        let candidate = root.join(format!("{base}-{suffix}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    unreachable!("unbounded suffix search should always find a free path")
+}
+
+fn agent_scaffold_description(description: &str, name: &str) -> String {
+    let mut text = description.trim();
+    let lower = description.to_ascii_lowercase();
+    if let Some(start) = lower.find("name it exactly") {
+        let after = &description[start + "name it exactly".len()..];
+        if let Some(dot) = after.find('.') {
+            text = after[dot + 1..].trim();
+        }
+    }
+    let text = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = text.trim().trim_end_matches('.');
+    if text.is_empty() {
+        format!("A3S Code agent package for {name}")
+    } else {
+        truncate(&text.replace('"', "'"), 180)
+    }
+}
+
+fn agent_scaffold_kind(description: &str) -> AgentOsKind {
+    let lower = description.to_ascii_lowercase();
+    if lower.contains("agentkind=tool")
+        || lower.contains("tool agent")
+        || lower.contains("tool-kind")
+        || lower.contains("function as a service")
+    {
+        AgentOsKind::Tool
+    } else if lower.contains("agentkind=application")
+        || lower.contains("application agent")
+        || lower.contains("app agent")
+    {
+        AgentOsKind::Application
+    } else {
+        AgentOsKind::Agentic
+    }
+}
+
+fn agent_scaffold_system_prompt(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         You are `{name}`, an A3S Code agent created for this purpose: {description}.\n\n\
+         ## Operating Scope\n\
+         - Stay focused on the user's requested task and the package resources in this directory.\n\
+         - Prefer reading relevant files before making claims or edits.\n\
+         - Use tools conservatively and explain blockers with concrete evidence.\n\n\
+         ## Workflow\n\
+         1. Restate the task in one sentence when the scope is ambiguous.\n\
+         2. Gather the smallest useful context from the workspace or user input.\n\
+         3. Produce concise, actionable output with file paths, commands, or findings when relevant.\n\
+         4. Verify important claims before finalizing.\n\n\
+         ## Safety\n\
+         - Do not expose secrets or credentials.\n\
+         - Do not run destructive commands unless the user explicitly asks and the risk is clear.\n\
+         - Keep network and shell usage bounded.\n\n\
+         ## Completion Criteria\n\
+         - The answer directly addresses the task.\n\
+         - Any assumptions, skipped checks, or follow-up risks are named plainly."
+    )
+}
+
+fn agent_scaffold_readme(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         {description}.\n\n\
+         ## Package Layout\n\n\
+         - `agent.md` is the A3S Code entrypoint.\n\
+         - `prompts/system.md` contains the expanded system prompt.\n\
+         - `workflows/operating-procedure.md` defines the run workflow.\n\
+         - `examples/` contains sample input and output.\n\
+         - `eval/smoke.md` and `tests/smoke.md` define lightweight checks.\n\
+         - `.a3s/` contains only `asset.acl`.\n\n\
+         ## Lifecycle\n\n\
+         - `a3s code agent review agents/{name}/agent.md`\n\
+         - `a3s code agent publish agentic agents/{name}/agent.md`\n\
+         - `a3s code agent run agents/{name}/agent.md`\n\
+         - `a3s code agent status agentic agents/{name}/agent.md`\n\n\
+         ## Safety\n\n\
+         Keep secrets out of this package. Review tool permissions before publishing."
+    )
+}
+
+fn agent_scaffold_workflow(description: &str) -> String {
+    format!(
+        "# Operating Procedure\n\n\
+         Purpose: {description}.\n\n\
+         1. Inspect the user's input and determine whether the request is in scope.\n\
+         2. Gather only the context needed for the task.\n\
+         3. Execute the task using the allowed A3S Code tools.\n\
+         4. Validate outputs against the success criteria in `agent.md`.\n\
+         5. Return a concise result with evidence and next steps.\n\n\
+         ## Failure Handling\n\n\
+         - If required context is missing, ask for the smallest clarifying input.\n\
+         - If a tool is unavailable, explain the missing capability and continue with a safe fallback.\n\
+         - If the task is out of scope, decline that part and provide the closest safe alternative."
+    )
+}
+
+fn agent_scaffold_example_input(description: &str) -> String {
+    format!(
+        "# Example Input\n\n\
+         User task: {description}.\n\n\
+         Provide the files, diff, prompt, or structured input that the agent should process."
+    )
+}
+
+fn agent_scaffold_example_output() -> &'static str {
+    "# Example Output\n\n\
+     Summary: the requested task was handled.\n\n\
+     Findings:\n\
+     - `path/or/item`: concise evidence-backed observation.\n\n\
+     Next step: run the smoke checklist before publishing."
+}
+
+fn agent_scaffold_eval() -> &'static str {
+    "# Smoke Evaluation\n\n\
+     - The agent definition parses as valid A3S Code Markdown.\n\
+     - The agent states its scope and completion criteria.\n\
+     - The examples match the intended task.\n\
+     - `.a3s/asset.acl` points to the visible source path."
+}
+
+fn agent_scaffold_tests() -> &'static str {
+    "# Local Smoke Checklist\n\n\
+     1. Open `agent.md` and confirm the frontmatter has `name`, `description`, `tools`, and `max_steps`.\n\
+     2. Confirm `prompts/system.md` matches the prompt in `agent.md`.\n\
+     3. Confirm `.a3s/asset.acl` points to `agent.md`.\n\
+     4. Run `/agent review` in A3S Code before publishing.\n\
+     5. Publish with the lifecycle command that matches the target kind."
+}
+
+fn yaml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn write_agent_scaffold_file(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(path, bytes).map_err(|e| format!("could not write {}: {e}", path.display()))
 }
 
 fn agent_description(def: &a3s_code_core::subagent::AgentDefinition) -> String {
@@ -666,13 +973,77 @@ pub(crate) fn agent_dev_session_from_file(
 }
 
 fn agent_package_source_path(rel: &str) -> String {
-    let clean = rel.trim_start_matches('/').replace('\\', "/");
-    format!(".a3s/agents/{clean}")
+    let _ = rel;
+    ".".to_string()
 }
 
 fn agent_asset_source_path(package_rel: &str, definition_rel: &str) -> String {
+    let package = agent_package_source_path(package_rel);
     let definition = definition_rel.trim_start_matches('/').replace('\\', "/");
-    format!("{}/{}", agent_package_source_path(package_rel), definition)
+    if package == "." {
+        definition
+    } else {
+        format!("{package}/{definition}")
+    }
+}
+
+fn agent_asset_acl(
+    kind: AgentOsKind,
+    def: &a3s_code_core::subagent::AgentDefinition,
+    local_rel: &str,
+    package_source_path: &str,
+    definition_rel: &str,
+    asset_source_path: &str,
+) -> String {
+    let service = match kind {
+        AgentOsKind::Agentic | AgentOsKind::Application => {
+            asset_lifecycle::OsService::AgentAsAService
+        }
+        AgentOsKind::Tool => asset_lifecycle::OsService::FunctionAsAService,
+    };
+    let runtime = asset_lifecycle::RuntimeBindingIntent {
+        kind: if matches!(kind, AgentOsKind::Tool) {
+            "tool"
+        } else {
+            "agent"
+        },
+        isolation: kind.runtime_isolation(),
+        runtime_kind: kind.runtime_kind(),
+        protocol: kind.runtime_protocol(),
+        agent_kind: Some(kind.agent_kind()),
+    };
+    let source = [
+        ("package_path", package_source_path),
+        ("entrypoint", definition_rel),
+        ("definition_path", asset_source_path),
+    ];
+    let metadata: [(&str, &str); 0] = [];
+    let description = agent_description(def);
+    let mut acl = asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
+        category: "agent",
+        kind: Some(kind.agent_kind()),
+        name: def.name.as_str(),
+        description: &description,
+        local_path: Some(local_rel),
+        service,
+        runtime,
+        source: &source,
+        metadata: &metadata,
+    });
+    acl.push_str("\n");
+    acl.push_str(&agent_contract_acl_block(kind));
+    acl
+}
+
+fn agent_contract_acl_block(kind: AgentOsKind) -> String {
+    match kind {
+        AgentOsKind::Tool => {
+            "contract {\n  protocol = \"http+sse\"\n  port = 29653\n  health = \"/healthz\"\n  manifest = \"/api/agent/manifest\"\n  run = \"/api/agent/run\"\n  stream = \"/api/agent/stream\"\n  timeout_sec = 60\n}\n".to_string()
+        }
+        AgentOsKind::Agentic | AgentOsKind::Application => {
+            "contract {\n  protocol = \"http+sse\"\n  port = 29653\n  health = \"/healthz\"\n  manifest = \"/api/agent/manifest\"\n  session_create = \"/api/agent/sessions\"\n  session_message = \"/api/agent/sessions/{sessionId}/messages\"\n  session_events = \"/api/agent/sessions/{sessionId}/events\"\n  session_result = \"/api/agent/sessions/{sessionId}/result\"\n  session_close = \"/api/agent/sessions/{sessionId}\"\n  timeout_sec = 300\n}\n".to_string()
+        }
+    }
 }
 
 fn path_segment(value: &str) -> String {
@@ -739,8 +1110,6 @@ pub(crate) fn agent_manifest_json(
     package_source_path: &str,
     definition_rel: &str,
     asset_source_path: &str,
-    config_path: &str,
-    runtime_binding_path: &str,
 ) -> serde_json::Value {
     let mut runtime_intent = serde_json::json!({
         "kind": if matches!(kind, AgentOsKind::Tool) { "tool" } else { "agent" },
@@ -760,14 +1129,39 @@ pub(crate) fn agent_manifest_json(
         "packagePath": package_source_path,
         "entrypoint": definition_rel,
         "definitionPath": asset_source_path,
-        "configPath": config_path,
-        "runtimeBindingPath": runtime_binding_path,
+        "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         "localPath": local_rel,
         "service": kind.service_label(),
         "runtimeIntent": runtime_intent,
         "createdBy": "a3s-code-tui",
         "definition": def,
     })
+}
+
+pub(crate) fn agent_contract_json(kind: AgentOsKind) -> serde_json::Value {
+    match kind {
+        AgentOsKind::Tool => serde_json::json!({
+            "protocol": "http+sse",
+            "port": 29653,
+            "health": "/healthz",
+            "manifest": "/api/agent/manifest",
+            "run": "/api/agent/run",
+            "stream": "/api/agent/stream",
+            "timeoutSec": 60,
+        }),
+        AgentOsKind::Agentic | AgentOsKind::Application => serde_json::json!({
+            "protocol": "http+sse",
+            "port": 29653,
+            "health": "/healthz",
+            "manifest": "/api/agent/manifest",
+            "sessionCreate": "/api/agent/sessions",
+            "sessionMessage": "/api/agent/sessions/{sessionId}/messages",
+            "sessionEvents": "/api/agent/sessions/{sessionId}/events",
+            "sessionResult": "/api/agent/sessions/{sessionId}/result",
+            "sessionClose": "/api/agent/sessions/{sessionId}",
+            "timeoutSec": 300,
+        }),
+    }
 }
 
 pub(crate) fn agent_config_json(
@@ -777,7 +1171,6 @@ pub(crate) fn agent_config_json(
     package_source_path: &str,
     definition_rel: &str,
     asset_source_path: &str,
-    runtime_binding_path: &str,
 ) -> serde_json::Value {
     let prompt = def
         .prompt
@@ -809,7 +1202,7 @@ pub(crate) fn agent_config_json(
             "packagePath": package_source_path,
             "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
-            "runtimeBindingPath": runtime_binding_path,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localPath": local_rel,
         },
         "safetyPolicy": {
@@ -835,7 +1228,6 @@ pub(crate) fn agent_runtime_binding_json(
     package_source_path: &str,
     definition_rel: &str,
     asset_source_path: &str,
-    config_path: &str,
 ) -> serde_json::Value {
     let resources = if matches!(kind, AgentOsKind::Application) {
         serde_json::json!({ "replicas": 1 })
@@ -861,7 +1253,7 @@ pub(crate) fn agent_runtime_binding_json(
             "packagePath": package_source_path,
             "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
-            "configPath": config_path,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         },
         "runtime": runtime,
         "env": [],
@@ -879,9 +1271,28 @@ pub(crate) fn agent_runtime_binding_json(
             "packagePath": package_source_path,
             "entrypoint": definition_rel,
             "definitionPath": asset_source_path,
-            "configPath": config_path,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localPath": local_rel,
         },
+    })
+}
+
+fn declared_agent_kind(package_path: &std::path::Path) -> Option<AgentOsKind> {
+    let acl = std::fs::read_to_string(package_path.join(asset_lifecycle::ASSET_ACL_PATH)).ok()?;
+    acl.lines().find_map(|line| {
+        let line = line.trim();
+        let value = line
+            .strip_prefix("kind =")
+            .or_else(|| line.strip_prefix("agent_kind ="))?
+            .trim()
+            .trim_matches('"')
+            .trim();
+        match value {
+            "agentic" => Some(AgentOsKind::Agentic),
+            "application" => Some(AgentOsKind::Application),
+            "tool" => Some(AgentOsKind::Tool),
+            _ => None,
+        }
     })
 }
 
@@ -943,6 +1354,85 @@ fn response_message(body: &serde_json::Value) -> &str {
 
 fn envelope_data(body: &serde_json::Value) -> &serde_json::Value {
     body.get("data").unwrap_or(body)
+}
+
+fn function_run_failure_message(text: &str) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let data = envelope_data(&body);
+    let status = json_str_at(
+        data,
+        &[
+            "/status",
+            "status",
+            "/state",
+            "state",
+            "/result/status",
+            "/result/state",
+            "/execution/status",
+            "/execution/state",
+        ],
+    )
+    .map(str::to_ascii_lowercase);
+    let failed_status = status.as_deref().is_some_and(|status| {
+        matches!(
+            status,
+            "failed" | "failure" | "error" | "errored" | "denied" | "permission_denied"
+        )
+    });
+    let success_false = data
+        .get("success")
+        .or_else(|| data.pointer("/result/success"))
+        .and_then(|value| value.as_bool())
+        == Some(false);
+    let error = data
+        .get("error")
+        .or_else(|| data.pointer("/result/error"))
+        .or_else(|| data.pointer("/execution/error"))
+        .filter(|value| !value.is_null());
+    let envelope_failed = envelope_json_is_error(&body);
+    if !failed_status && !success_false && error.is_none() && !envelope_failed {
+        return None;
+    }
+
+    let message = error
+        .and_then(json_failure_text)
+        .or_else(|| {
+            json_str_at(
+                data,
+                &[
+                    "/message",
+                    "message",
+                    "/errorMessage",
+                    "errorMessage",
+                    "/result/message",
+                    "/result/errorMessage",
+                    "/execution/message",
+                    "/execution/errorMessage",
+                ],
+            )
+            .map(str::to_string)
+        })
+        .or_else(|| {
+            body.get("message")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "function run failed".to_string());
+    Some(message)
+}
+
+fn json_failure_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    if let Some(text) = json_str_at(value, &["/message", "message", "/error", "error"]) {
+        return Some(text.to_string());
+    }
+    Some(serde_json::to_string(value).ok()?)
 }
 
 fn json_str_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -1065,6 +1555,7 @@ async fn ensure_agent_asset(
     kind: AgentOsKind,
     name: &str,
     description: &str,
+    agent_contract: &serde_json::Value,
 ) -> Result<AgentAssetRef, String> {
     let client = http()?;
     if let Some(asset) = lookup_agent_asset(&client, origin, token, kind, name).await? {
@@ -1076,6 +1567,7 @@ async fn ensure_agent_asset(
         "agentKind": kind.agent_kind(),
         "runtimeKind": kind.runtime_kind(),
         "createdBy": "a3s-code-tui",
+        "agentContract": agent_contract,
     });
     if let Some(protocol) = kind.runtime_protocol() {
         metadata["protocol"] = serde_json::json!(protocol);
@@ -1109,6 +1601,47 @@ async fn ensure_agent_asset(
         Ok(asset)
     } else {
         fetch_agent_asset(&client, origin, token, &asset.id, name).await
+    }
+}
+
+async fn sync_agent_contract_metadata(
+    client: &reqwest::Client,
+    origin: &str,
+    token: &str,
+    asset_id: &str,
+    kind: AgentOsKind,
+    agent_contract: &serde_json::Value,
+) -> Result<(), String> {
+    let mut metadata = serde_json::json!({
+        "service": kind.service_label(),
+        "agentKind": kind.agent_kind(),
+        "runtimeKind": kind.runtime_kind(),
+        "updatedBy": "a3s-code-tui",
+        "agentContract": agent_contract,
+    });
+    if let Some(protocol) = kind.runtime_protocol() {
+        metadata["protocol"] = serde_json::json!(protocol);
+    }
+    let resp = client
+        .patch(format!(
+            "{}/api/v1/assets/{}",
+            origin.trim_end_matches('/'),
+            path_segment(asset_id)
+        ))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "metadata": metadata }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    if status.is_success() && !envelope_json_is_error(&body) {
+        Ok(())
+    } else {
+        Err(format!(
+            "sync agent contract metadata failed ({status}): {}",
+            response_message(&body)
+        ))
     }
 }
 
@@ -1158,16 +1691,13 @@ pub(crate) async fn upload_agent_definition(
     token: &str,
     asset_id: &str,
     package_files: Vec<AgentRepositoryFile>,
-    manifest: &serde_json::Value,
-    config: &serde_json::Value,
-    runtime_binding: &serde_json::Value,
+    asset_acl: &str,
+    _manifest: &serde_json::Value,
+    _config: &serde_json::Value,
+    _runtime_binding: &serde_json::Value,
 ) -> Result<(), String> {
     use base64::Engine;
 
-    let manifest_bytes = serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?;
-    let config_bytes = serde_json::to_vec_pretty(config).map_err(|e| e.to_string())?;
-    let runtime_binding_bytes =
-        serde_json::to_vec_pretty(runtime_binding).map_err(|e| e.to_string())?;
     let mut files = package_files
         .into_iter()
         .map(|file| {
@@ -1178,16 +1708,8 @@ pub(crate) async fn upload_agent_definition(
         })
         .collect::<Vec<_>>();
     files.push(serde_json::json!({
-        "path": AGENT_MANIFEST_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(manifest_bytes),
-    }));
-    files.push(serde_json::json!({
-        "path": AGENT_CONFIG_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(config_bytes),
-    }));
-    files.push(serde_json::json!({
-        "path": AGENT_RUNTIME_BINDING_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(runtime_binding_bytes),
+        "path": asset_lifecycle::ASSET_ACL_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(asset_acl.as_bytes()),
     }));
     let resp = http()?
         .post(format!(
@@ -1216,16 +1738,9 @@ pub(crate) async fn upload_agent_definition(
 }
 
 fn collect_agent_package_files(dev: &AgentDevSession) -> Result<Vec<AgentRepositoryFile>, String> {
-    let package_source_path = agent_package_source_path(&dev.rel);
-    if dev.package_path.is_file() {
-        let bytes = std::fs::read(&dev.path)
-            .map_err(|e| format!("could not read {}: {e}", dev.path.display()))?;
-        return Ok(vec![AgentRepositoryFile {
-            path: agent_asset_source_path(&dev.rel, &dev.definition_rel),
-            bytes,
-        }]);
-    }
+    validate_agent_framework_package(dev)?;
 
+    let package_source_path = agent_package_source_path(&dev.rel);
     let mut files = Vec::new();
     collect_agent_package_dir(
         &dev.package_path,
@@ -1244,6 +1759,65 @@ fn collect_agent_package_files(dev: &AgentDevSession) -> Result<Vec<AgentReposit
         ));
     }
     Ok(files)
+}
+
+const REQUIRED_AGENT_PROJECT_FILES: &[&str] = &[
+    "README.md",
+    "agent.md",
+    "prompts/system.md",
+    "workflows/operating-procedure.md",
+    "examples/example-input.md",
+    "examples/example-output.md",
+    "eval/smoke.md",
+    "tests/smoke.md",
+];
+
+fn validate_agent_framework_package(dev: &AgentDevSession) -> Result<(), String> {
+    if dev.package_path.is_file() {
+        return Err(format!(
+            "{} is a single agent definition file. Agent assets must be complete A3S Code autonomous-agent project directories with visible source files: {}.",
+            dev.path.display(),
+            REQUIRED_AGENT_PROJECT_FILES.join(", ")
+        ));
+    }
+    if dev.definition_rel != "agent.md" {
+        return Err(format!(
+            "{} uses `{}` as its entrypoint. Agent assets must use a visible `agent.md` entrypoint inside a complete A3S Code project package.",
+            dev.package_path.display(),
+            dev.definition_rel
+        ));
+    }
+
+    let missing = REQUIRED_AGENT_PROJECT_FILES
+        .iter()
+        .copied()
+        .filter(|rel| !dev.package_path.join(rel).is_file())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "{} is not a complete A3S Code autonomous-agent project; missing visible source file(s): {}.",
+            dev.package_path.display(),
+            missing.join(", ")
+        ));
+    }
+
+    let metadata_dir = dev.package_path.join(".a3s");
+    if metadata_dir.is_dir() {
+        for entry in std::fs::read_dir(&metadata_dir)
+            .map_err(|e| format!("could not read {}: {e}", metadata_dir.display()))?
+        {
+            let entry = entry
+                .map_err(|e| format!("could not read {} entry: {e}", metadata_dir.display()))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name != "asset.acl" {
+                return Err(format!(
+                    "{} must be metadata-only; unexpected `.a3s/{name}`. Keep agent source in visible package files and configuration in `.a3s/asset.acl`.",
+                    dev.package_path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_agent_package_dir(
@@ -1278,7 +1852,11 @@ fn collect_agent_package_dir(
         let bytes =
             std::fs::read(&path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
         out.push(AgentRepositoryFile {
-            path: format!("{package_source_path}/{}", rel.replace('\\', "/")),
+            path: if package_source_path == "." {
+                rel.replace('\\', "/")
+            } else {
+                format!("{package_source_path}/{}", rel.replace('\\', "/"))
+            },
             bytes,
         });
     }
@@ -1286,7 +1864,20 @@ fn collect_agent_package_dir(
 }
 
 fn should_skip_agent_package_entry(name: &str, is_dir: bool) -> bool {
-    if matches!(name, ".DS_Store" | ".git" | ".hg" | ".svn") {
+    if matches!(
+        name,
+        ".DS_Store"
+            | ".git"
+            | ".hg"
+            | ".svn"
+            | "agent.asset.json"
+            | "agent.config.json"
+            | "agent.runtime-binding.json"
+            | "runtime-binding.json"
+    ) {
+        return true;
+    }
+    if is_dir && name == ".a3s" {
         return true;
     }
     is_dir
@@ -1573,7 +2164,7 @@ async fn agent_config_validation_status(
             return format!(
                 "agent-config check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1622,7 +2213,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1658,7 +2249,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding validation failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -2017,6 +2608,9 @@ async fn try_agent_operation(
     asset_id: &str,
     action: AgentOsAction,
 ) -> Option<(remote_ui::ViewSpec, String)> {
+    if matches!(action, AgentOsAction::Run(AgentOsKind::Tool)) {
+        return try_agent_rest_operation(client, origin, token, asset_id, action).await;
+    }
     if let Some(result) =
         try_agent_capability_operation(client, origin, token, asset_id, action).await
     {
@@ -2033,12 +2627,16 @@ async fn try_agent_capability_operation(
     action: AgentOsAction,
 ) -> Option<(remote_ui::ViewSpec, String)> {
     let operation = match action {
-        AgentOsAction::Run => "run",
+        AgentOsAction::Run(_) => "run",
         AgentOsAction::Deploy => "deploy",
         _ => return None,
     };
     let query = match action {
-        AgentOsAction::Run => "Agent as a Service run agentic agent asset",
+        AgentOsAction::Run(AgentOsKind::Tool) => "Function as a Service run tool agent asset",
+        AgentOsAction::Run(AgentOsKind::Application) => {
+            "Agent as a Service run application agent asset"
+        }
+        AgentOsAction::Run(AgentOsKind::Agentic) => "Agent as a Service run agentic agent asset",
         AgentOsAction::Deploy => "Agent as a Service application agent build launch deploy asset",
         _ => return None,
     };
@@ -2078,13 +2676,17 @@ async fn try_agent_capability_operation(
             if let Some(spec) = execution.view {
                 return Some((
                     spec,
-                    format!("OS Agent as a Service accepted the {operation} request through progressive capabilities."),
+                    format!(
+                        "OS {} accepted the {operation} request through progressive capabilities.",
+                        action.target_kind().service_label()
+                    ),
                 ));
             }
             return Some((
                 agent_view_spec(agent_asset_url(origin, asset_id)),
                 format!(
-                    "OS Agent as a Service accepted the {operation} request through progressive capabilities; no run-specific RemoteUI view was returned."
+                    "OS {} accepted the {operation} request through progressive capabilities; no run-specific RemoteUI view was returned.",
+                    action.target_kind().service_label()
                 ),
             ));
         }
@@ -2203,6 +2805,11 @@ fn envelope_json_is_error(value: &serde_json::Value) -> bool {
 
 fn agent_progressive_score(text: &str, operation: &str, action: AgentOsAction) -> i32 {
     let combined = format!("{text} {operation}").to_ascii_lowercase();
+    if matches!(action, AgentOsAction::Open(_) | AgentOsAction::Logs(_))
+        && is_mutating_agent_observe_operation(operation)
+    {
+        return 0;
+    }
     let action_hit = match action {
         AgentOsAction::Open(_) => {
             combined.contains("open")
@@ -2230,12 +2837,49 @@ fn agent_progressive_score(text: &str, operation: &str, action: AgentOsAction) -
     {
         return 0;
     }
+    match action {
+        AgentOsAction::Run(AgentOsKind::Tool) => {
+            if !(combined.contains("function") || combined.contains("faas")) {
+                return 0;
+            }
+        }
+        AgentOsAction::Run(AgentOsKind::Agentic | AgentOsKind::Application) => {
+            if combined.contains("function as a service") || combined.contains("faas") {
+                return 0;
+            }
+        }
+        _ => {}
+    }
     let score = capability_operation_score(text, operation, action);
     if score >= 8 {
         score
     } else {
         0
     }
+}
+
+fn is_mutating_agent_observe_operation(operation: &str) -> bool {
+    let operation = operation.to_ascii_lowercase();
+    let has_safe_observe_hint = operation.contains("open")
+        || operation.contains("view")
+        || operation.contains("get")
+        || operation.contains("list")
+        || operation.contains("inspect")
+        || operation.contains("log");
+    let has_mutating_hint = operation.contains("create")
+        || operation.contains("update")
+        || operation.contains("delete")
+        || operation.contains("apply")
+        || operation.contains("publish")
+        || operation.contains("deploy")
+        || operation.contains("build")
+        || operation.contains("launch")
+        || operation.contains("run")
+        || operation.contains("trigger")
+        || operation.contains("batch")
+        || operation.contains("validate")
+        || operation.contains("acknowledge");
+    has_mutating_hint && !has_safe_observe_hint
 }
 
 fn capability_operation_score(text: &str, operation: &str, action: AgentOsAction) -> i32 {
@@ -2249,15 +2893,30 @@ fn capability_operation_score(text: &str, operation: &str, action: AgentOsAction
         score += 6;
     }
     match action {
-        AgentOsAction::Run => {
-            if combined.contains("run") {
-                score += 8;
+        AgentOsAction::Run(kind) => {
+            if !combined.contains("run") {
+                return 0;
             }
-            if combined.contains("start") || combined.contains("invoke") {
-                score += 4;
-            }
-            if combined.contains("agentic") {
-                score += 3;
+            score += 8;
+            match kind {
+                AgentOsKind::Tool => {
+                    if combined.contains("function") || combined.contains("faas") {
+                        score += 7;
+                    }
+                    if combined.contains("tool") {
+                        score += 4;
+                    }
+                }
+                AgentOsKind::Application => {
+                    if combined.contains("application") {
+                        score += 4;
+                    }
+                }
+                AgentOsKind::Agentic => {
+                    if combined.contains("agentic") {
+                        score += 3;
+                    }
+                }
             }
         }
         AgentOsAction::Deploy => {
@@ -2602,13 +3261,16 @@ async fn try_agent_rest_operation(
     action: AgentOsAction,
 ) -> Option<(remote_ui::ViewSpec, String)> {
     let operation = match action {
-        AgentOsAction::Run => "run",
+        AgentOsAction::Run(_) => "run",
         AgentOsAction::Deploy => "deploy",
         _ => return None,
     };
     let id = path_segment(asset_id);
     let urls = match action {
-        AgentOsAction::Run => vec![
+        AgentOsAction::Run(AgentOsKind::Tool) => {
+            vec![format!("{origin}/api/v1/runtime/functions/{id}/run")]
+        }
+        AgentOsAction::Run(_) => vec![
             format!("{origin}/api/v1/agents/{id}/runs"),
             format!("{origin}/api/v1/agents/{id}/run"),
             format!("{origin}/api/v1/assets/{id}/runs"),
@@ -2622,14 +3284,40 @@ async fn try_agent_rest_operation(
     };
     let mut last_error = String::new();
     for url in urls {
-        let resp = client
-            .post(&url)
-            .bearer_auth(token)
-            .json(&serde_json::json!({
+        let body = match action {
+            AgentOsAction::Run(AgentOsKind::Tool) => serde_json::json!({
+                "input": {
+                    "query": "Run the default tool-agent smoke check from a3s code.",
+                    "source": "a3s-code-tui",
+                    "operation": operation,
+                },
+                "config": {
+                    "source": "a3s-code-tui",
+                },
+                "timeoutMs": 60_000,
+            }),
+            _ => serde_json::json!({
                 "source": "a3s-code-tui",
                 "assetId": asset_id,
                 "agentKind": action.target_kind().agent_kind(),
-            }))
+                "input": {
+                    "source": "a3s-code-tui",
+                    "assetId": asset_id,
+                    "agentKind": action.target_kind().agent_kind(),
+                    "operation": operation
+                },
+                "payload": {
+                    "source": "a3s-code-tui",
+                    "assetId": asset_id,
+                    "agentKind": action.target_kind().agent_kind(),
+                    "operation": operation
+                }
+            }),
+        };
+        let resp = client
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
             .send()
             .await;
         let resp = match resp {
@@ -2642,16 +3330,29 @@ async fn try_agent_rest_operation(
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if status.is_success() {
+            if let Some(message) = function_run_failure_message(&text) {
+                return Some((
+                    agent_view_spec(agent_asset_url(origin, asset_id)),
+                    format!(
+                        "OS {} accepted the {operation} request, but the run failed: {message}",
+                        action.target_kind().service_label()
+                    ),
+                ));
+            }
             if let Some(spec) = remote_ui::find_view_url(&text, Some(origin)) {
                 return Some((
                     spec,
-                    format!("OS Agent as a Service accepted the {operation} request."),
+                    format!(
+                        "OS {} accepted the {operation} request.",
+                        action.target_kind().service_label()
+                    ),
                 ));
             }
             return Some((
                 agent_view_spec(agent_asset_url(origin, asset_id)),
                 format!(
-                    "OS Agent as a Service accepted the {operation} request; no RemoteUI view was returned, so the OS asset view was opened."
+                    "OS {} accepted the {operation} request; no RemoteUI view was returned, so the OS asset view was opened.",
+                    action.target_kind().service_label()
                 ),
             ));
         }
@@ -2667,7 +3368,8 @@ async fn try_agent_rest_operation(
         Some((
             agent_view_spec(agent_asset_url(origin, asset_id)),
             format!(
-                "The OS Agent as a Service {operation} endpoint was unavailable ({last_error}); opened the OS asset view instead."
+                "The OS {} {operation} endpoint was unavailable ({last_error}); opened the OS asset view instead.",
+                action.target_kind().service_label()
             ),
         ))
     }
@@ -2692,7 +3394,6 @@ async fn inspect_agent_asset(
         &package_source_path,
         &dev.definition_rel,
         &asset_source_path,
-        AGENT_RUNTIME_BINDING_PATH,
     );
     let Some(asset) = lookup_agent_asset(&client, origin, token, kind, asset_name).await? else {
         return Ok(AgentOsResult {
@@ -2771,6 +3472,12 @@ pub(crate) async fn publish_agent_to_os(
     dev: AgentDevSession,
     action: AgentOsAction,
 ) -> Result<AgentOsResult, String> {
+    let action = match action {
+        AgentOsAction::Run(default_kind) => {
+            AgentOsAction::Run(declared_agent_kind(&dev.package_path).unwrap_or(default_kind))
+        }
+        other => other,
+    };
     let source = std::fs::read_to_string(&dev.path)
         .map_err(|e| format!("could not read {}: {e}", dev.path.display()))?;
     let def = parse_agent_definition(&dev.path, &source).map_err(|e| {
@@ -2781,7 +3488,19 @@ pub(crate) async fn publish_agent_to_os(
     })?;
     let origin = crate::a3s_os::os_origin(&session.address);
     let kind = action.target_kind();
+    if matches!(action, AgentOsAction::Deploy) {
+        if let Some(declared) = declared_agent_kind(&dev.package_path) {
+            if !matches!(declared, AgentOsKind::Application) {
+                return Err(format!(
+                    "`agent deploy` is only for application agents; this package declares {}. Use `agent publish {}` or `agent run` instead.",
+                    declared.label(),
+                    declared.agent_kind()
+                ));
+            }
+        }
+    }
     let asset_name = agent_asset_name(kind, &def.name);
+    let agent_contract = agent_contract_json(kind);
     if matches!(
         action,
         AgentOsAction::Status(_) | AgentOsAction::Open(_) | AgentOsAction::Logs(_)
@@ -2803,6 +3522,7 @@ pub(crate) async fn publish_agent_to_os(
         kind,
         &asset_name,
         &description,
+        &agent_contract,
     )
     .await?;
     let asset_id = asset.id.clone();
@@ -2816,7 +3536,6 @@ pub(crate) async fn publish_agent_to_os(
         &package_source_path,
         &dev.definition_rel,
         &asset_source_path,
-        AGENT_RUNTIME_BINDING_PATH,
     );
     let manifest = agent_manifest_json(
         kind,
@@ -2825,8 +3544,6 @@ pub(crate) async fn publish_agent_to_os(
         &package_source_path,
         &dev.definition_rel,
         &asset_source_path,
-        AGENT_CONFIG_PATH,
-        AGENT_RUNTIME_BINDING_PATH,
     );
     let runtime_binding = agent_runtime_binding_json(
         kind,
@@ -2835,18 +3552,42 @@ pub(crate) async fn publish_agent_to_os(
         &package_source_path,
         &dev.definition_rel,
         &asset_source_path,
-        AGENT_CONFIG_PATH,
     );
-    upload_agent_definition(
+    let asset_acl = agent_asset_acl(
+        kind,
+        &def,
+        &dev.rel,
+        &package_source_path,
+        &dev.definition_rel,
+        &asset_source_path,
+    );
+    asset_lifecycle::write_asset_acl(&dev.package_path, &asset_acl)?;
+    let client = http()?;
+    sync_agent_contract_metadata(
+        &client,
+        &origin,
+        &session.access_token,
+        &asset.id,
+        kind,
+        &agent_contract,
+    )
+    .await?;
+    let upload_error = match upload_agent_definition(
         &origin,
         &session.access_token,
         &asset.id,
         package_files,
+        &asset_acl,
         &manifest,
         &config,
         &runtime_binding,
     )
-    .await?;
+    .await
+    {
+        Ok(()) => None,
+        Err(err) if matches!(action, AgentOsAction::Run(AgentOsKind::Tool)) => Some(err),
+        Err(err) => return Err(err),
+    };
     let config_synced = if kind.uses_agent_config_endpoint() {
         Some(
             sync_agent_config(&origin, &session.access_token, &asset.id, &config)
@@ -2890,8 +3631,7 @@ pub(crate) async fn publish_agent_to_os(
                 note,
             )
         }
-        AgentOsAction::Run | AgentOsAction::Deploy => {
-            let client = http()?;
+        AgentOsAction::Run(_) | AgentOsAction::Deploy => {
             let direct_build = if matches!(action, AgentOsAction::Deploy) {
                 try_application_agent_build(&client, &origin, &session.access_token, &asset).await
             } else {
@@ -2917,10 +3657,15 @@ pub(crate) async fn publish_agent_to_os(
         }
         AgentOsAction::Status(_) => unreachable!("status returns before publish flow"),
     };
-    let note = append_runtime_binding_sync_note(
+    let mut note = append_runtime_binding_sync_note(
         append_agent_config_note(note, kind, config_synced),
         &runtime_binding_synced,
     );
+    if let Some(err) = upload_error {
+        note.push_str(&format!(
+            " Repository upload failed before run ({err}); OS Function as a Service still ran against the existing asset metadata."
+        ));
+    }
 
     Ok(AgentOsResult {
         action,
@@ -3093,7 +3838,7 @@ impl App {
                     self.push_line(&gutter(
                         ACCENT,
                         &remote_view_button(&format!(
-                            "{} · click or /view reopens",
+                            "{} · click to reopen",
                             result.kind.service_label()
                         )),
                     ));
@@ -3102,7 +3847,7 @@ impl App {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GRAY)
-                            .render("  /view opens the related OS asset view"),
+                            .render("  Open view opens the related OS asset view"),
                     );
                 }
             }
@@ -3144,6 +3889,26 @@ impl App {
             agents,
             sel: 0,
         });
+    }
+
+    pub(crate) fn activate_agent_package_path(
+        &mut self,
+        package_path: &std::path::Path,
+    ) -> Option<Cmd<Msg>> {
+        let root = agent_dir();
+        let agents = list_agents(&root);
+        let Some(sel) = agents
+            .iter()
+            .position(|agent| package_path == agent.path || agent.path.starts_with(package_path))
+        else {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  scaffolded package does not contain a recognized agent entrypoint"),
+            );
+            return None;
+        };
+        self.activate_agent_panel_selection(AgentPanel { root, agents, sel }, sel)
     }
 
     /// Keys while the `/agent` picker is open — consumes everything.
@@ -3285,7 +4050,6 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -3296,6 +4060,33 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("a3s-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn write_complete_agent_test_package(
+        package: &std::path::Path,
+        source: &str,
+    ) -> std::path::PathBuf {
+        for dir in ["prompts", "workflows", "examples", "eval", "tests"] {
+            std::fs::create_dir_all(package.join(dir)).unwrap();
+        }
+        let path = package.join("agent.md");
+        std::fs::write(&path, source).unwrap();
+        std::fs::write(package.join("README.md"), "# Test agent\n").unwrap();
+        std::fs::write(
+            package.join("prompts/system.md"),
+            "Use the package source as the agent contract.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            package.join("workflows/operating-procedure.md"),
+            "Inspect, plan, execute, and report.\n",
+        )
+        .unwrap();
+        std::fs::write(package.join("examples/example-input.md"), "Input\n").unwrap();
+        std::fs::write(package.join("examples/example-output.md"), "Output\n").unwrap();
+        std::fs::write(package.join("eval/smoke.md"), "Smoke eval\n").unwrap();
+        std::fs::write(package.join("tests/smoke.md"), "Smoke test\n").unwrap();
+        path
     }
 
     #[test]
@@ -3314,6 +4105,66 @@ mod tests {
         let agents = list_agents(&root);
         let rels: Vec<_> = agents.into_iter().map(|a| a.rel).collect();
         assert_eq!(rels, vec!["alpha", "nested/beta", "zeta"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_agent_package_files_rejects_single_file_agents() {
+        let root = temp_root("agent-single-file");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("reviewer.md");
+        std::fs::write(
+            &path,
+            "---\nname: reviewer\ndescription: Review code changes\n---\nReview.\n",
+        )
+        .unwrap();
+        let dev = AgentDevSession {
+            name: "reviewer".into(),
+            description: "Review code changes".into(),
+            rel: "reviewer".into(),
+            definition_rel: "reviewer.md".into(),
+            path: path.clone(),
+            package_path: path,
+            root: root.clone(),
+        };
+
+        let err = collect_agent_package_files(&dev).expect_err("single-file agents are invalid");
+
+        assert!(
+            err.contains("complete A3S Code autonomous-agent project"),
+            "{err}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_agent_package_files_rejects_bare_agent_md_package() {
+        let root = temp_root("agent-bare-md");
+        let _ = std::fs::remove_dir_all(&root);
+        let package = root.join("reviewer");
+        std::fs::create_dir_all(&package).unwrap();
+        let path = package.join("agent.md");
+        std::fs::write(
+            &path,
+            "---\nname: reviewer\ndescription: Review code changes\n---\nReview.\n",
+        )
+        .unwrap();
+        let dev = AgentDevSession {
+            name: "reviewer".into(),
+            description: "Review code changes".into(),
+            rel: "reviewer".into(),
+            definition_rel: "agent.md".into(),
+            path,
+            package_path: package,
+            root: root.clone(),
+        };
+
+        let err = collect_agent_package_files(&dev).expect_err("bare agent.md package is invalid");
+
+        assert!(err.contains("missing visible source file"), "{err}");
+        assert!(err.contains("README.md"), "{err}");
+        assert!(err.contains("prompts/system.md"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -3474,17 +4325,165 @@ Be precise.
         let p = agent_gen_prompt("review rust diffs", "/Users/x/.a3s/agents");
         assert!(p.contains("review rust diffs"));
         assert!(p.contains("/Users/x/.a3s/agents"));
+        assert!(p.contains("complete local A3S Code agent package"));
         assert!(p.contains("YAML frontmatter"));
         assert!(p.contains("name: <kebab-case-agent-name>"));
-        assert!(p.contains(".a3s/agent.asset.json"));
-        assert!(p.contains(".a3s/agent.config.json"));
-        assert!(p.contains(".a3s/agent.runtime-binding.json"));
-        assert!(p.contains("service=Agent as a Service"));
-        assert!(p.contains("service=Function as a Service"));
-        assert!(p.contains("runtimeIntent.kind=agent"));
-        assert!(p.contains("runtimeIntent.kind=tool"));
+        assert!(p.contains("Do NOT stop at only agent.md"));
+        assert!(p.contains("README.md"));
+        assert!(p.contains("prompts/system.md"));
+        assert!(p.contains("workflows/operating-procedure.md"));
+        assert!(p.contains("examples/example-input.md"));
+        assert!(p.contains("examples/example-output.md"));
+        assert!(p.contains("eval/smoke.md"));
+        assert!(p.contains("tests/smoke.md"));
+        assert!(p.contains(".a3s/asset.acl"));
+        assert!(p.contains("Do NOT create extra generated JSON config files"));
+        assert!(p.contains("keep package configuration in `.a3s/asset.acl`"));
+        assert!(p.contains("metadata-only"));
+        assert!(p.contains("Do NOT put `agent.md`"));
         assert!(p.contains("OUTSIDE this session's workspace") && p.contains("bash"));
-        assert!(p.contains("never run a command that waits on stdin"));
+        assert!(p.contains("Never run a command that waits on stdin"));
+    }
+
+    #[test]
+    fn scaffold_agent_package_creates_complete_framework_package() {
+        let root = temp_root("agent-scaffold");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let dev = scaffold_agent_package(
+            "Name it exactly a3s-e2e-review-agent. It reviews pull-request diffs for risky Rust changes.",
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(dev.name, "a3s-e2e-review-agent");
+        assert_eq!(dev.definition_rel, "agent.md");
+        for rel in [
+            "README.md",
+            "agent.md",
+            "prompts/system.md",
+            "workflows/operating-procedure.md",
+            "examples/example-input.md",
+            "examples/example-output.md",
+            "eval/smoke.md",
+            "tests/smoke.md",
+            ".a3s/asset.acl",
+        ] {
+            assert!(dev.package_path.join(rel).is_file(), "missing {rel}");
+        }
+        assert!(!dev.package_path.join(".a3s/agent.md").exists());
+        assert!(!dev.package_path.join(".a3s/prompts/system.md").exists());
+        for rel in [
+            "agent.asset.json",
+            "agent.config.json",
+            "agent.runtime-binding.json",
+            ".a3s/agent.asset.json",
+            ".a3s/agent.config.json",
+            ".a3s/agent.runtime-binding.json",
+        ] {
+            assert!(!dev.package_path.join(rel).exists(), "unexpected {rel}");
+        }
+        let asset_acl =
+            std::fs::read_to_string(dev.package_path.join(asset_lifecycle::ASSET_ACL_PATH))
+                .unwrap();
+        assert!(asset_acl.contains("version = \"a3s.asset.v1\""));
+        assert!(asset_acl.contains("category = \"agent\""));
+        assert!(asset_acl.contains("definition_path = \"agent.md\""));
+
+        let package_files = collect_agent_package_files(&dev).unwrap();
+        assert!(package_files.iter().any(|file| file.path == "README.md"));
+        assert!(
+            package_files
+                .iter()
+                .all(|file| !file.path.contains("/.a3s/")),
+            "publish source collection should not duplicate generated .a3s metadata"
+        );
+
+        let listed = list_agents(&root);
+        assert!(listed
+            .iter()
+            .any(|agent| agent.rel == "a3s-e2e-review-agent"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scaffold_agent_package_honors_tool_and_application_hints() {
+        let root = temp_root("agent-scaffold-kind");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let tool = scaffold_agent_package(
+            "Name it exactly sql-checker. Build a tool agent for Function as a Service SQL checks.",
+            &root,
+        )
+        .unwrap();
+        let app = scaffold_agent_package(
+            "Name it exactly portal-agent. Build an application agent for a small portal.",
+            &root,
+        )
+        .unwrap();
+
+        let tool_source = std::fs::read_to_string(&tool.path).unwrap();
+        let tool_def = parse_agent_definition(&tool.path, &tool_source).unwrap();
+        let tool_package_source_path = agent_package_source_path(&tool.rel);
+        let tool_asset_source_path = agent_asset_source_path(&tool.rel, &tool.definition_rel);
+        let tool_manifest = agent_manifest_json(
+            AgentOsKind::Tool,
+            &tool_def,
+            &tool.rel,
+            &tool_package_source_path,
+            &tool.definition_rel,
+            &tool_asset_source_path,
+        );
+        let tool_binding = agent_runtime_binding_json(
+            AgentOsKind::Tool,
+            &tool_def,
+            &tool.rel,
+            &tool_package_source_path,
+            &tool.definition_rel,
+            &tool_asset_source_path,
+        );
+        assert_eq!(tool_manifest["agentKind"], "tool");
+        assert_eq!(tool_manifest["service"], "Function as a Service");
+        assert_eq!(tool_manifest["runtimeIntent"]["kind"], "tool");
+        assert_eq!(
+            tool_manifest["runtimeIntent"]["runtimeKind"],
+            "a3s-function-service"
+        );
+        assert_eq!(tool_manifest["runtimeIntent"]["protocol"], "agent-tool");
+        assert_eq!(tool_binding["kind"], "tool");
+        assert_eq!(tool_binding["runtime"]["protocol"], "agent-tool");
+
+        let app_source = std::fs::read_to_string(&app.path).unwrap();
+        let app_def = parse_agent_definition(&app.path, &app_source).unwrap();
+        let app_package_source_path = agent_package_source_path(&app.rel);
+        let app_asset_source_path = agent_asset_source_path(&app.rel, &app.definition_rel);
+        let app_manifest = agent_manifest_json(
+            AgentOsKind::Application,
+            &app_def,
+            &app.rel,
+            &app_package_source_path,
+            &app.definition_rel,
+            &app_asset_source_path,
+        );
+        let app_binding = agent_runtime_binding_json(
+            AgentOsKind::Application,
+            &app_def,
+            &app.rel,
+            &app_package_source_path,
+            &app.definition_rel,
+            &app_asset_source_path,
+        );
+        assert_eq!(app_manifest["agentKind"], "application");
+        assert_eq!(app_manifest["service"], "Agent as a Service");
+        assert_eq!(app_manifest["runtimeIntent"]["kind"], "agent");
+        assert_eq!(app_manifest["runtimeIntent"]["isolation"], "container");
+        assert_eq!(app_binding["kind"], "agent");
+        assert_eq!(app_binding["runtime"]["mode"], "application-deployment");
+        assert_eq!(app_binding["network"]["ingress"], true);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3565,7 +4564,10 @@ Be precise.
             AGENT_PUBLISH_USAGE
         );
         assert!(parse_agent_subcommand("ps").unwrap().is_err());
-        assert!(parse_agent_subcommand("debug").unwrap().is_err());
+        assert_eq!(
+            parse_agent_subcommand("debug").unwrap().unwrap_err(),
+            "unknown /agent command `debug`"
+        );
         assert!(parse_agent_subcommand("jobs").unwrap().is_err());
         assert!(parse_agent_subcommand("inspect").unwrap().is_err());
         for removed in ["view", "remote", "os", "dashboard"] {
@@ -3592,8 +4594,6 @@ Be precise.
             &package_source_path,
             "agent.md",
             &asset_source_path,
-            AGENT_CONFIG_PATH,
-            AGENT_RUNTIME_BINDING_PATH,
         );
         let runtime_binding = agent_runtime_binding_json(
             AgentOsKind::Tool,
@@ -3602,7 +4602,6 @@ Be precise.
             &package_source_path,
             "agent.md",
             &asset_source_path,
-            AGENT_CONFIG_PATH,
         );
 
         assert_eq!(
@@ -3669,8 +4668,6 @@ Be precise.
             &package_source_path,
             "agent.md",
             &asset_source_path,
-            AGENT_CONFIG_PATH,
-            AGENT_RUNTIME_BINDING_PATH,
         );
         let config = agent_config_json(
             AgentOsKind::Application,
@@ -3679,7 +4676,6 @@ Be precise.
             &package_source_path,
             "agent.md",
             &asset_source_path,
-            AGENT_RUNTIME_BINDING_PATH,
         );
         let runtime_binding = agent_runtime_binding_json(
             AgentOsKind::Application,
@@ -3688,7 +4684,6 @@ Be precise.
             &package_source_path,
             "agent.md",
             &asset_source_path,
-            AGENT_CONFIG_PATH,
         );
 
         assert_eq!(
@@ -3703,8 +4698,8 @@ Be precise.
             agent_asset_name(AgentOsKind::Tool, "Review Captain"),
             "agent-tool-review-captain"
         );
-        assert_eq!(package_source_path, ".a3s/agents/review/captain");
-        assert_eq!(asset_source_path, ".a3s/agents/review/captain/agent.md");
+        assert_eq!(package_source_path, ".");
+        assert_eq!(asset_source_path, "agent.md");
         assert_eq!(manifest["category"], "agent");
         assert_eq!(manifest["agentKind"], "application");
         assert_eq!(manifest["service"], "Agent as a Service");
@@ -3715,14 +4710,12 @@ Be precise.
             manifest["runtimeIntent"]["runtimeKind"],
             "a3s-agent-service"
         );
-        assert_eq!(manifest["packagePath"], ".a3s/agents/review/captain");
+        assert_eq!(manifest["packagePath"], ".");
         assert_eq!(manifest["entrypoint"], "agent.md");
-        assert_eq!(
-            manifest["definitionPath"],
-            ".a3s/agents/review/captain/agent.md"
-        );
-        assert_eq!(manifest["configPath"], AGENT_CONFIG_PATH);
-        assert_eq!(manifest["runtimeBindingPath"], AGENT_RUNTIME_BINDING_PATH);
+        assert_eq!(manifest["definitionPath"], "agent.md");
+        assert_eq!(manifest["assetAclPath"], asset_lifecycle::ASSET_ACL_PATH);
+        assert!(manifest.get("configPath").is_none());
+        assert!(manifest.get("runtimeBindingPath").is_none());
         assert_eq!(manifest["definition"]["name"], "Review Captain");
         assert_eq!(
             config["systemPrompt"],
@@ -3732,15 +4725,13 @@ Be precise.
         assert_eq!(config["model"]["modelId"], "gpt-4o");
         assert_eq!(config["maxIterations"], 12);
         assert_eq!(config["runtimePolicy"]["agentKind"], "application");
-        assert_eq!(
-            config["runtimePolicy"]["packagePath"],
-            ".a3s/agents/review/captain"
-        );
+        assert_eq!(config["runtimePolicy"]["packagePath"], ".");
         assert_eq!(config["runtimePolicy"]["entrypoint"], "agent.md");
         assert_eq!(
-            config["runtimePolicy"]["runtimeBindingPath"],
-            AGENT_RUNTIME_BINDING_PATH
+            config["runtimePolicy"]["assetAclPath"],
+            asset_lifecycle::ASSET_ACL_PATH
         );
+        assert!(config["runtimePolicy"].get("runtimeBindingPath").is_none());
         assert!(config["tools"]
             .as_array()
             .unwrap()
@@ -3759,9 +4750,10 @@ Be precise.
         assert_eq!(runtime_binding["runtime"]["agentKind"], "application");
         assert_eq!(runtime_binding["runtime"]["mode"], "application-deployment");
         assert_eq!(runtime_binding["resources"]["replicas"], 1);
+        assert_eq!(runtime_binding["metadata"]["definitionPath"], "agent.md");
         assert_eq!(
-            runtime_binding["metadata"]["definitionPath"],
-            ".a3s/agents/review/captain/agent.md"
+            runtime_binding["metadata"]["assetAclPath"],
+            asset_lifecycle::ASSET_ACL_PATH
         );
         let upsert = agent_runtime_binding_upsert_body(&runtime_binding);
         assert!(upsert.get("version").is_none());
@@ -3783,10 +4775,7 @@ Be precise.
         );
         assert_eq!(upsert["resources"]["replicas"], 1);
         assert_eq!(upsert["network"], serde_json::json!({}));
-        assert_eq!(
-            upsert["metadata"]["definitionPath"],
-            ".a3s/agents/review/captain/agent.md"
-        );
+        assert_eq!(upsert["metadata"]["definitionPath"], "agent.md");
         assert_eq!(
             agent_asset_url("https://os.example.com/", "asset 1?#"),
             "https://os.example.com/admin/assets/asset%201%3F%23?embed=1"
@@ -3892,7 +4881,7 @@ Be precise.
         });
 
         let candidates = os_progressive::operation_candidates(&value, |text, operation| {
-            agent_progressive_score(text, operation, AgentOsAction::Run)
+            agent_progressive_score(text, operation, AgentOsAction::Run(AgentOsKind::Agentic))
         });
 
         assert_eq!(candidates[0].module, "runtimes");
@@ -3910,16 +4899,51 @@ Be precise.
             agent_progressive_score(
                 "Agent as a Service RUN for Agentic Agent assets",
                 "AgentDebugRunController_runAgentic",
-                AgentOsAction::Run,
+                AgentOsAction::Run(AgentOsKind::Agentic),
             ) > 0
         );
         assert_eq!(
             agent_progressive_score(
                 "FUNCTION AS A SERVICE tool agent batch run",
                 "runFunctionBatch",
-                AgentOsAction::Run,
+                AgentOsAction::Run(AgentOsKind::Agentic),
             ),
             0
+        );
+    }
+
+    #[test]
+    fn tool_run_candidate_selection_uses_faas_operations() {
+        let value = serde_json::json!({
+            "data": {
+                "items": [
+                    {
+                        "name": "AgentDebugRunController_runAgentic",
+                        "resource": "runtimes.agent_debug_runs.agentic",
+                        "path": "/api/v1/runtimes/agent-debug-runs/agentic",
+                        "description": "Agent as a Service run for agentic agent assets"
+                    },
+                    {
+                        "module": "functions",
+                        "operation": "runFunctionBatch",
+                        "description": "Function as a Service tool agent run"
+                    }
+                ]
+            }
+        });
+
+        let candidates = os_progressive::operation_candidates(&value, |text, operation| {
+            agent_progressive_score(text, operation, AgentOsAction::Run(AgentOsKind::Tool))
+        });
+
+        assert_eq!(candidates[0].module, "functions");
+        assert_eq!(candidates[0].operation, "runFunctionBatch");
+        assert!(
+            agent_progressive_score(
+                "FUNCTION AS A SERVICE tool agent run",
+                "runFunctionBatch",
+                AgentOsAction::Run(AgentOsKind::Tool),
+            ) > 0
         );
     }
 
@@ -3966,11 +4990,9 @@ Be precise.
             "AgentBuildController_triggerAgentBuild"
         );
         assert!(
-            candidates.iter().all(|candidate| {
-                !candidate
-                    .operation
-                    .contains("ResourceDeploymentController")
-            }),
+            candidates
+                .iter()
+                .all(|candidate| { !candidate.operation.contains("ResourceDeploymentController") }),
             "generic infrastructure deployment operations must not drive /agent deploy: {candidates:?}"
         );
     }
@@ -4037,6 +5059,24 @@ Be precise.
             )
         });
         assert_eq!(app_candidates[0].operation, "AgentController_open");
+        assert_eq!(
+            agent_progressive_score(
+                "Agent as a Service run agentic asset and return ViewLink",
+                "AgentDebugRunController_runAgentic",
+                AgentOsAction::Open(AgentOsKind::Agentic),
+            ),
+            0,
+            "/agent open must not start an agentic run"
+        );
+        assert_eq!(
+            agent_progressive_score(
+                "Agent as a Service apply application configuration and return ViewLink",
+                "AgentConfigurationSessionController_apply",
+                AgentOsAction::Open(AgentOsKind::Application),
+            ),
+            0,
+            "/agent open must not apply application configuration"
+        );
     }
 
     #[test]
@@ -4090,10 +5130,15 @@ Be precise.
         let origin = spawn_capability_mock(captured.clone()).await;
         let client = http().unwrap();
 
-        let (view, note) =
-            try_agent_operation(&client, &origin, "token", "asset-123", AgentOsAction::Run)
-                .await
-                .expect("capabilities run should succeed");
+        let (view, note) = try_agent_operation(
+            &client,
+            &origin,
+            "token",
+            "asset-123",
+            AgentOsAction::Run(AgentOsKind::Agentic),
+        )
+        .await
+        .expect("capabilities run should succeed");
 
         let requests = captured.lock().unwrap().join("\n");
         assert_eq!(
@@ -4121,10 +5166,15 @@ Be precise.
         let origin = spawn_direct_fallback_mock(captured.clone()).await;
         let client = http().unwrap();
 
-        let (view, note) =
-            try_agent_operation(&client, &origin, "token", "asset-123", AgentOsAction::Run)
-                .await
-                .expect("direct streaming fallback should succeed");
+        let (view, note) = try_agent_operation(
+            &client,
+            &origin,
+            "token",
+            "asset-123",
+            AgentOsAction::Run(AgentOsKind::Agentic),
+        )
+        .await
+        .expect("direct streaming fallback should succeed");
 
         assert_eq!(view.url, format!("{origin}/admin/kernel/processes?focus=1"));
         assert!(note.contains("streaming endpoint"), "{note}");
@@ -4360,8 +5410,6 @@ Review the target carefully.
         let root = temp_root("agent-aaas-full");
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("reviewer");
-        std::fs::create_dir_all(package.join("prompts")).unwrap();
-        let path = package.join("agent.md");
         let source = r#"---
 name: reviewer
 description: Review code changes carefully
@@ -4369,7 +5417,7 @@ max_steps: 20
 ---
 Review the target carefully.
 "#;
-        std::fs::write(&path, source).unwrap();
+        let path = write_complete_agent_test_package(&package, source);
         std::fs::write(package.join("prompts/checklist.md"), "- inspect tests\n").unwrap();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_full_agent_os_mock(captured.clone()).await;
@@ -4392,7 +5440,7 @@ Review the target carefully.
             root: root.clone(),
         };
 
-        let result = publish_agent_to_os(session, dev, AgentOsAction::Run)
+        let result = publish_agent_to_os(session, dev, AgentOsAction::Run(AgentOsKind::Agentic))
             .await
             .expect("full /agent run chain should succeed");
 
@@ -4409,6 +5457,11 @@ Review the target carefully.
             "{}",
             result.note
         );
+        let local_asset_acl = package.join(asset_lifecycle::ASSET_ACL_PATH);
+        assert!(local_asset_acl.is_file(), "missing local asset.acl");
+        let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
+        assert!(local_asset_acl_body.contains("category = \"agent\""));
+        assert!(local_asset_acl_body.contains("definition_path = \"agent.md\""));
 
         let requests = captured.lock().unwrap().clone();
         let joined = requests.join("\n");
@@ -4450,6 +5503,17 @@ Review the target carefully.
         assert_eq!(create_json["metadata"]["runtimeKind"], "a3s-agent-service");
         assert!(create_json["metadata"].get("protocol").is_none());
         assert_eq!(create_json["metadata"]["createdBy"], "a3s-code-tui");
+        assert_eq!(
+            create_json["metadata"]["agentContract"]["sessionCreate"],
+            "/api/agent/sessions"
+        );
+
+        let patch = request_body(&requests, "PATCH /api/v1/assets/asset-123 HTTP/1.1");
+        let patch_json: serde_json::Value = serde_json::from_str(&patch).unwrap();
+        assert_eq!(
+            patch_json["metadata"]["agentContract"]["sessionCreate"],
+            "/api/agent/sessions"
+        );
 
         let upload = request_body(
             &requests,
@@ -4457,73 +5521,30 @@ Review the target carefully.
         );
         let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
         let files = upload_json["files"].as_array().unwrap();
+        assert!(files.iter().any(|file| file["path"] == "agent.md"));
         assert!(files
             .iter()
-            .any(|file| file["path"] == ".a3s/agents/reviewer/agent.md"));
+            .any(|file| file["path"] == "prompts/checklist.md"));
         assert!(files
             .iter()
-            .any(|file| file["path"] == ".a3s/agents/reviewer/prompts/checklist.md"));
-        assert!(files
-            .iter()
-            .any(|file| file["path"] == AGENT_RUNTIME_BINDING_PATH));
-        let manifest = files
-            .iter()
-            .find(|file| file["path"] == AGENT_MANIFEST_PATH)
-            .expect("manifest uploaded");
-        let manifest_b64 = manifest["contentBase64"].as_str().unwrap();
-        let manifest_bytes = base64::engine::general_purpose::STANDARD
-            .decode(manifest_b64)
-            .unwrap();
-        let manifest_json: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
-        assert_eq!(manifest_json["agentKind"], "agentic");
-        assert_eq!(manifest_json["definition"]["name"], "reviewer");
-        assert_eq!(manifest_json["packagePath"], ".a3s/agents/reviewer");
-        assert_eq!(manifest_json["entrypoint"], "agent.md");
-        assert_eq!(
-            manifest_json["definitionPath"],
-            ".a3s/agents/reviewer/agent.md"
-        );
-        assert_eq!(manifest_json["configPath"], AGENT_CONFIG_PATH);
-        assert_eq!(
-            manifest_json["runtimeBindingPath"],
-            AGENT_RUNTIME_BINDING_PATH
-        );
-        let config_file = files
-            .iter()
-            .find(|file| file["path"] == AGENT_CONFIG_PATH)
-            .expect("agent config uploaded");
-        let config_b64 = config_file["contentBase64"].as_str().unwrap();
-        let config_bytes = base64::engine::general_purpose::STANDARD
-            .decode(config_b64)
-            .unwrap();
-        let config_json: serde_json::Value = serde_json::from_slice(&config_bytes).unwrap();
-        assert_eq!(config_json["systemPrompt"], "Review the target carefully.");
-        assert_eq!(config_json["runtimePolicy"]["agentKind"], "agentic");
-        assert_eq!(
-            config_json["runtimePolicy"]["runtimeBindingPath"],
-            AGENT_RUNTIME_BINDING_PATH
-        );
-        assert_eq!(config_json["maxIterations"], 20);
-        let binding_file = files
-            .iter()
-            .find(|file| file["path"] == AGENT_RUNTIME_BINDING_PATH)
-            .expect("runtime binding uploaded");
-        let binding_b64 = binding_file["contentBase64"].as_str().unwrap();
-        let binding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(binding_b64)
-            .unwrap();
-        let binding_json: serde_json::Value = serde_json::from_slice(&binding_bytes).unwrap();
-        assert_eq!(binding_json["kind"], "agent");
-        assert_eq!(binding_json["enabled"], true);
-        assert_eq!(binding_json["isolation"], "serving");
-        assert!(binding_json["env"].as_array().is_some());
-        assert_eq!(binding_json["runtime"]["agentKind"], "agentic");
-        assert_eq!(binding_json["runtime"]["mode"], "agentic-run");
-        assert_eq!(binding_json["metadata"]["agentKind"], "agentic");
-        assert_eq!(
-            binding_json["metadata"]["definitionPath"],
-            ".a3s/agents/reviewer/agent.md"
-        );
+            .any(|file| file["path"] == asset_lifecycle::ASSET_ACL_PATH));
+        assert!(files.iter().all(|file| {
+            !file["path"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with(".a3s/agents/")
+        }));
+        for forbidden in [
+            "agent.asset.json",
+            "agent.config.json",
+            "agent.runtime-binding.json",
+            "runtime-binding.json",
+        ] {
+            assert!(
+                files.iter().all(|file| file["path"] != forbidden),
+                "repository upload should not include {forbidden}"
+            );
+        }
 
         let validate = request_body(
             &requests,
@@ -4541,6 +5562,22 @@ Review the target carefully.
         );
         let synced_json: serde_json::Value = serde_json::from_str(&synced).unwrap();
         assert_eq!(synced_json["runtimePolicy"]["agentKind"], "agentic");
+        assert_eq!(
+            synced_json["runtimePolicy"]["assetAclPath"],
+            asset_lifecycle::ASSET_ACL_PATH
+        );
+        assert!(synced_json["runtimePolicy"]
+            .get("runtimeBindingPath")
+            .is_none());
+        let binding = request_body(
+            &requests,
+            "PUT /api/v1/assets/asset-123/runtime-binding HTTP/1.1",
+        );
+        let binding_json: serde_json::Value = serde_json::from_str(&binding).unwrap();
+        assert_eq!(binding_json["kind"], "agent");
+        assert!(binding_json["runtime"].get("agentKind").is_none());
+        assert_eq!(binding_json["metadata"]["definitionPath"], "agent.md");
+        assert!(binding_json["metadata"].get("configPath").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -4550,8 +5587,6 @@ Review the target carefully.
         let root = temp_root("agent-tool-faas");
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("tooler");
-        std::fs::create_dir_all(package.join("schemas")).unwrap();
-        let path = package.join("agent.md");
         let source = r#"---
 name: tooler
 description: Run reusable tool actions
@@ -4559,7 +5594,8 @@ max_steps: 8
 ---
 Run the requested tool action carefully.
 "#;
-        std::fs::write(&path, source).unwrap();
+        let path = write_complete_agent_test_package(&package, source);
+        std::fs::create_dir_all(package.join("schemas")).unwrap();
         std::fs::write(package.join("schemas/input.json"), "{}\n").unwrap();
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_tool_agent_publish_mock(captured.clone()).await;
@@ -4643,6 +5679,17 @@ Run the requested tool action carefully.
         );
         assert_eq!(create_json["metadata"]["protocol"], "agent-tool");
         assert_eq!(create_json["metadata"]["createdBy"], "a3s-code-tui");
+        assert_eq!(
+            create_json["metadata"]["agentContract"]["run"],
+            "/api/agent/run"
+        );
+
+        let patch = request_body(&requests, "PATCH /api/v1/assets/asset-tool HTTP/1.1");
+        let patch_json: serde_json::Value = serde_json::from_str(&patch).unwrap();
+        assert_eq!(
+            patch_json["metadata"]["agentContract"]["run"],
+            "/api/agent/run"
+        );
 
         let upload = request_body(
             &requests,
@@ -4650,25 +5697,24 @@ Run the requested tool action carefully.
         );
         let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
         let files = upload_json["files"].as_array().unwrap();
+        assert!(files.iter().any(|file| file["path"] == "agent.md"));
         assert!(files
             .iter()
-            .any(|file| file["path"] == ".a3s/agents/tooler/agent.md"));
+            .any(|file| file["path"] == "schemas/input.json"));
         assert!(files
             .iter()
-            .any(|file| file["path"] == ".a3s/agents/tooler/schemas/input.json"));
-        let binding_file = files
-            .iter()
-            .find(|file| file["path"] == AGENT_RUNTIME_BINDING_PATH)
-            .expect("runtime binding uploaded");
-        let binding_b64 = binding_file["contentBase64"].as_str().unwrap();
-        let binding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(binding_b64)
-            .unwrap();
-        let binding_json: serde_json::Value = serde_json::from_slice(&binding_bytes).unwrap();
-        assert_eq!(binding_json["kind"], "tool");
-        assert_eq!(binding_json["runtime"]["kind"], "a3s-function-service");
-        assert_eq!(binding_json["runtime"]["protocol"], "agent-tool");
-        assert_eq!(binding_json["runtime"]["agentKind"], "tool");
+            .any(|file| file["path"] == asset_lifecycle::ASSET_ACL_PATH));
+        for forbidden in [
+            "agent.asset.json",
+            "agent.config.json",
+            "agent.runtime-binding.json",
+            "runtime-binding.json",
+        ] {
+            assert!(
+                files.iter().all(|file| file["path"] != forbidden),
+                "repository upload should not include {forbidden}"
+            );
+        }
 
         let synced = request_body(
             &requests,
@@ -4677,8 +5723,58 @@ Run the requested tool action carefully.
         let synced_json: serde_json::Value = serde_json::from_str(&synced).unwrap();
         assert_eq!(synced_json["kind"], "tool");
         assert_eq!(synced_json["runtime"]["kind"], "a3s-function-service");
+        assert!(synced_json["runtime"].get("protocol").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn deploy_rejects_packages_declared_as_tool_or_agentic() {
+        for (decl_key, decl_kind) in [("kind", "tool"), ("agent_kind", "agentic")] {
+            let root = temp_root(&format!("agent-deploy-rejects-{decl_kind}"));
+            let _ = std::fs::remove_dir_all(&root);
+            let package = root.join(decl_kind);
+            std::fs::create_dir_all(package.join(".a3s")).unwrap();
+            let path = package.join("agent.md");
+            std::fs::write(
+                &path,
+                format!("---\nname: {decl_kind}-agent\ndescription: Not an app\n---\nDo work.\n"),
+            )
+            .unwrap();
+            std::fs::write(
+                package.join(asset_lifecycle::ASSET_ACL_PATH),
+                format!(
+                    "version = \"a3s.asset.v1\"\ncategory = \"agent\"\n{decl_key} = \"{decl_kind}\"\n"
+                ),
+            )
+            .unwrap();
+            let dev = AgentDevSession {
+                name: format!("{decl_kind}-agent"),
+                description: "Not an app".into(),
+                rel: decl_kind.into(),
+                definition_rel: "agent.md".into(),
+                path: path.clone(),
+                package_path: package.clone(),
+                root: root.clone(),
+            };
+            let session = crate::a3s_os::StoredOsSession {
+                address: "http://127.0.0.1:9".into(),
+                access_token: "token".into(),
+                refresh_token: None,
+                token_type: Some("Bearer".into()),
+                expires_at_ms: None,
+                account_label: None,
+                login_at_ms: 1,
+            };
+
+            let err = publish_agent_to_os(session, dev, AgentOsAction::Deploy)
+                .await
+                .expect_err("deploy should reject non-application packages before OS calls");
+            assert!(err.contains("only for application agents"), "{err}");
+            assert!(err.contains(decl_kind), "{err}");
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 
     #[tokio::test]
@@ -4687,8 +5783,6 @@ Run the requested tool action carefully.
         let root = temp_root("agent-aaas-build");
         let _ = std::fs::remove_dir_all(&root);
         let package = root.join("reviewer");
-        std::fs::create_dir_all(&package).unwrap();
-        let path = package.join("agent.md");
         let source = r#"---
 name: reviewer
 description: Review code changes carefully
@@ -4696,7 +5790,7 @@ max_steps: 20
 ---
 Review the target carefully.
 "#;
-        std::fs::write(&path, source).unwrap();
+        let path = write_complete_agent_test_package(&package, source);
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_application_build_mock(captured.clone()).await;
         let session = crate::a3s_os::StoredOsSession {
@@ -4776,6 +5870,16 @@ Review the target carefully.
         assert_eq!(create_json["metadata"]["runtimeKind"], "a3s-agent-service");
         assert!(create_json["metadata"].get("protocol").is_none());
         assert_eq!(create_json["metadata"]["createdBy"], "a3s-code-tui");
+        assert_eq!(
+            create_json["metadata"]["agentContract"]["sessionCreate"],
+            "/api/agent/sessions"
+        );
+        let patch = request_body(&requests, "PATCH /api/v1/assets/asset-app HTTP/1.1");
+        let patch_json: serde_json::Value = serde_json::from_str(&patch).unwrap();
+        assert_eq!(
+            patch_json["metadata"]["agentContract"]["sessionCreate"],
+            "/api/agent/sessions"
+        );
         let build = request_body(
             &requests,
             "POST /api/v1/assets/admin/agent-app-reviewer/build/agent HTTP/1.1",
@@ -5235,16 +6339,32 @@ Review the target carefully.
             );
         }
         if line.starts_with("POST /api/v1/assets/asset-123/repository/files HTTP/1.1") {
-            if body.contains(AGENT_MANIFEST_PATH)
-                && body.contains(AGENT_CONFIG_PATH)
-                && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/reviewer/agent.md")
+            if body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && body.contains(r#""path":"agent.md""#)
+                && !body.contains("agent.asset.json")
+                && !body.contains("agent.config.json")
+                && !body.contains("agent.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
             return (
                 "422 Unprocessable Entity",
                 r#"{"message":"bad upload body"}"#,
+            );
+        }
+        if line.starts_with("PATCH /api/v1/assets/asset-123 HTTP/1.1") {
+            if body.contains(r#""agentContract""#)
+                && body.contains(r#""sessionCreate":"/api/agent/sessions""#)
+                && body.contains(r#""updatedBy":"a3s-code-tui""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"id":"asset-123","name":"agentic-reviewer","metadata":{"agentContract":{"sessionCreate":"/api/agent/sessions"}}}}"#,
+                );
+            }
+            return (
+                "422 Unprocessable Entity",
+                r#"{"message":"bad asset metadata patch"}"#,
             );
         }
         if line.starts_with("POST /api/v1/assets/asset-123/agent-config/validate HTTP/1.1") {
@@ -5332,16 +6452,32 @@ Review the target carefully.
             );
         }
         if line.starts_with("POST /api/v1/assets/asset-tool/repository/files HTTP/1.1") {
-            if body.contains(AGENT_MANIFEST_PATH)
-                && body.contains(AGENT_CONFIG_PATH)
-                && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/tooler/agent.md")
+            if body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && body.contains(r#""path":"agent.md""#)
+                && !body.contains("agent.asset.json")
+                && !body.contains("agent.config.json")
+                && !body.contains("agent.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
             return (
                 "422 Unprocessable Entity",
                 r#"{"message":"bad tool agent upload body"}"#,
+            );
+        }
+        if line.starts_with("PATCH /api/v1/assets/asset-tool HTTP/1.1") {
+            if body.contains(r#""agentContract""#)
+                && body.contains(r#""run":"/api/agent/run""#)
+                && body.contains(r#""updatedBy":"a3s-code-tui""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"id":"asset-tool","name":"agent-tool-tooler","metadata":{"agentContract":{"run":"/api/agent/run"}}}}"#,
+                );
+            }
+            return (
+                "422 Unprocessable Entity",
+                r#"{"message":"bad tool agent metadata patch"}"#,
             );
         }
         if line.starts_with("PUT /api/v1/assets/asset-tool/runtime-binding HTTP/1.1") {
@@ -5394,16 +6530,32 @@ Review the target carefully.
             );
         }
         if line.starts_with("POST /api/v1/assets/asset-app/repository/files HTTP/1.1") {
-            if body.contains(AGENT_MANIFEST_PATH)
-                && body.contains(AGENT_CONFIG_PATH)
-                && body.contains(AGENT_RUNTIME_BINDING_PATH)
-                && body.contains(".a3s/agents/reviewer/agent.md")
+            if body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && body.contains(r#""path":"agent.md""#)
+                && !body.contains("agent.asset.json")
+                && !body.contains("agent.config.json")
+                && !body.contains("agent.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }
             return (
                 "422 Unprocessable Entity",
                 r#"{"message":"bad upload body"}"#,
+            );
+        }
+        if line.starts_with("PATCH /api/v1/assets/asset-app HTTP/1.1") {
+            if body.contains(r#""agentContract""#)
+                && body.contains(r#""sessionCreate":"/api/agent/sessions""#)
+                && body.contains(r#""updatedBy":"a3s-code-tui""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"id":"asset-app","name":"agent-app-reviewer","metadata":{"agentContract":{"sessionCreate":"/api/agent/sessions"}}}}"#,
+                );
+            }
+            return (
+                "422 Unprocessable Entity",
+                r#"{"message":"bad app agent metadata patch"}"#,
             );
         }
         if line.starts_with("POST /api/v1/assets/asset-app/agent-config/validate HTTP/1.1") {

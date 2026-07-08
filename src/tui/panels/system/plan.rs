@@ -92,8 +92,9 @@ impl App {
         }
         let width = self.width as usize;
         let task = self
-            .running_task
-            .as_deref()
+            .runtime
+            .subagent_task()
+            .or(self.running_task.as_deref())
             .unwrap_or("parallel agents")
             .trim();
         let theme = agent_chrome_theme();
@@ -124,12 +125,13 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
         return Vec::new();
     }
 
+    let all_done = rows.iter().all(SubagentRow::is_done);
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
-    chrome
+    let mut lines = chrome
         .subagent_tracker(task)
         .slug(workflow_slug(task))
-        .rows(rows)
+        .rows(rows.clone())
         .max_running_rows(4)
         .margin(2)
         .child_indent(5)
@@ -141,7 +143,73 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
         .view(width.min(u16::MAX as usize) as u16)
         .lines()
         .map(str::to_string)
-        .collect()
+        .collect::<Vec<_>>();
+
+    if all_done {
+        lines.extend(
+            rows.iter()
+                .rev()
+                .take(4)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|row| completed_subagent_line(row, width)),
+        );
+    }
+    lines
+}
+
+fn completed_subagent_line(row: &SubagentRow, width: usize) -> String {
+    let mark = if row.is_success() { "✓" } else { "✗" };
+    let left_color = if row.is_success() { TN_GRAY } else { TN_RED };
+    let left = format!(
+        "     {mark} {}  {}",
+        row.agent_value(),
+        row.description_value()
+    );
+    let mut right = row.elapsed_value().unwrap_or("0.0s").to_string();
+    if row.tokens_value() > 0 {
+        right.push_str(&format!(
+            " · ↓ {} tokens",
+            humanize(row.tokens_value() as usize)
+        ));
+    }
+    fixed_width_status_row(&left, left_color, &right, width)
+}
+
+fn fixed_width_status_row(left: &str, left_color: Color, right: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let right = truncate_visible(right, width);
+    let reserved = a3s_tui::style::visible_len(&right).saturating_add(1);
+    let left_width = width.saturating_sub(reserved);
+    let left = truncate_visible(left, left_width);
+    let used = a3s_tui::style::visible_len(&left) + a3s_tui::style::visible_len(&right);
+    let gap = width.saturating_sub(used);
+    format!(
+        "{}{}{}",
+        Style::new().fg(left_color).render(&left),
+        " ".repeat(gap),
+        Style::new().fg(TN_GRAY).render(&right)
+    )
+}
+
+fn truncate_visible(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let w = a3s_tui::style::visible_len(&ch.to_string());
+        if used + w > width {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out
 }
 
 fn task_queue_lines(
@@ -361,6 +429,40 @@ mod tests {
             lines
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 30),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn subagent_tracker_lines_keep_recent_completed_rows_visible() {
+        let lines = subagent_tracker_lines(
+            "DeepResearch runtime comparison",
+            vec![
+                SubagentRow::new("planner", "map sources")
+                    .done(true)
+                    .elapsed("0.8s")
+                    .tokens(900),
+                SubagentRow::new("reviewer", "cross-check claims")
+                    .done(false)
+                    .elapsed("1.4s")
+                    .tokens(1_500),
+            ],
+            72,
+        );
+        let plain = lines
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(lines.len(), 3);
+        assert!(plain.contains("2/2 agents done"), "{plain}");
+        assert!(plain.contains("✓ planner  map sources"), "{plain}");
+        assert!(plain.contains("✗ reviewer  cross-check claims"), "{plain}");
+        assert!(
+            lines
+                .iter()
+                .all(|line| a3s_tui::style::visible_len(line) == 72),
             "{plain}"
         );
     }

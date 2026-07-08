@@ -71,7 +71,10 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
     ),
     ("/loop logs <name>", "open the loop run log"),
     ("/loop <task>", "quick autonomous loop with auto-continue"),
-    ("/agent <description>", "draft a local agent definition"),
+    (
+        "/agent <description>",
+        "scaffold a complete local agent package",
+    ),
     (
         "/agent clone <git-url>",
         "clone an agent asset into agent_dir",
@@ -145,8 +148,8 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "sync the serving MCP runtime binding for OS Function as a Service",
     ),
     (
-        "/mcp debug",
-        "publish and invoke the active MCP asset through OS Function as a Service",
+        "/mcp run",
+        "publish and run the active MCP asset through OS Function as a Service",
     ),
     (
         "/mcp test",
@@ -492,8 +495,8 @@ mod tests {
             "/mcp list [query]",
             "/mcp activity [query]",
             "/mcp publish",
+            "/mcp run",
             "/mcp deploy",
-            "/mcp debug",
             "/mcp test",
             "/mcp open",
             "/mcp logs",
@@ -554,7 +557,7 @@ mod tests {
         }
         assert!(
             agent::parse_agent_subcommand("draft a code reviewer").is_none(),
-            "/agent <description> should stay a freeform draft command"
+            "/agent <description> should stay a freeform scaffold command"
         );
 
         for input in [
@@ -564,8 +567,8 @@ mod tests {
             "list weather",
             "activity failed invocations",
             "publish",
+            "run",
             "deploy",
-            "debug",
             "test",
             "open",
             "logs",
@@ -675,7 +678,8 @@ mod tests {
         assert!(!body.contains("/loop log <name>"));
         let unsupported_asset_forms = [
             ("agent", "debug"),
-            ("mcp", "run"),
+            ("mcp", "debug"),
+            ("mcp", "invoke"),
             ("flow", "debug"),
             ("skill", "run"),
             ("skill", "debug"),

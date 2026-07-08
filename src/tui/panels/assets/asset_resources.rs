@@ -974,7 +974,7 @@ impl App {
         self.last_view = Some(spec.clone());
         self.push_line(&gutter(
             ACCENT,
-            &remote_view_button(&format!("{label} · click or /view reopens")),
+            &remote_view_button(&format!("{label} · click to reopen")),
         ));
         self.open_remote_view(&spec);
     }
@@ -998,7 +998,7 @@ impl App {
         self.last_view = Some(spec.clone());
         self.push_line(&gutter(
             ACCENT,
-            &remote_view_button(&format!("{label} · click or /view reopens")),
+            &remote_view_button(&format!("{label} · click to reopen")),
         ));
         self.open_remote_view(&spec);
     }

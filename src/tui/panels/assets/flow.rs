@@ -4,7 +4,7 @@
 //! Bare `/flow` (login-gated) opens a picker over `flow_dir()` (`~/.a3s/flows`
 //! or the `flow_dir` config key); Enter pushes the picked DAG into an OS
 //! workflow asset (find-or-create by name, then commit it as
-//! `.a3s/workflows/main.design.json` — the designer's canonical load path)
+//! `flow.json` — the visible workflow source)
 //! and opens `/workflow-designer/<asset-id>` in the authenticated
 //! RemoteUI window, where it can be edited and run.
 //!
@@ -18,11 +18,9 @@ use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-/// Canonical, first-probed path where the designer loads/saves a workflow
-/// inside the asset source workspace.
-pub(crate) const DESIGN_DOCUMENT_PATH: &str = ".a3s/workflows/main.design.json";
-const WORKFLOW_MANIFEST_PATH: &str = ".a3s/workflow.asset.json";
-const WORKFLOW_RUNTIME_BINDING_PATH: &str = ".a3s/workflow.runtime-binding.json";
+/// Canonical visible source path where the designer loads/saves a workflow
+/// inside the asset source workspace. `.a3s/` is reserved for `asset.acl`.
+pub(crate) const DESIGN_DOCUMENT_PATH: &str = "flow.json";
 const FLOW_OVERLAY_ROWS_BELOW: usize = 5;
 
 /// `/flow` selection panel: the DAG JSONs under the flows folder + cursor.
@@ -83,8 +81,7 @@ pub(crate) struct FlowOsResult {
     pub(crate) open_view: bool,
 }
 
-/// List workflow `*.json` files under `root`, skipping hidden metadata except
-/// the canonical OS workflow designer document path inside cloned asset sources.
+/// List workflow source documents under `root`, skipping hidden metadata.
 pub(crate) fn list_flows(root: &std::path::Path) -> Vec<String> {
     let mut v = Vec::new();
     list_flows_inner(root, root, &mut v);
@@ -100,14 +97,13 @@ fn list_flows_inner(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
-            if name.starts_with('.') && name != ".a3s" {
+            if name.starts_with('.') {
                 continue;
             }
             list_flows_inner(root, &path, out);
             continue;
         }
-        if !path.is_file() || name.starts_with('.') || !name.to_ascii_lowercase().ends_with(".json")
-        {
+        if !path.is_file() || name != DESIGN_DOCUMENT_PATH {
             continue;
         }
         let rel = path
@@ -117,10 +113,7 @@ fn list_flows_inner(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec
             .map(|part| part.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        if rel.starts_with(".a3s/") && rel != DESIGN_DOCUMENT_PATH {
-            continue;
-        }
-        if rel.contains("/.a3s/") && !rel.ends_with(DESIGN_DOCUMENT_PATH) {
+        if rel.starts_with(".a3s/") || rel.contains("/.a3s/") {
             continue;
         }
         out.push(rel);
@@ -173,7 +166,7 @@ pub(crate) fn parse_flow_subcommand(input: &str) -> Option<Result<FlowSubcommand
             }
             Some(Ok(FlowSubcommand::Run))
         }
-        "debug" => Some(Err("workflow assets use /flow run".to_string())),
+        "debug" => Some(Err("unknown /flow command `debug`".to_string())),
         "deploy" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /flow deploy".to_string()));
@@ -214,12 +207,8 @@ pub(crate) fn flow_asset_name(file_stem: &str) -> String {
         .split('/')
         .filter(|part| !part.trim().is_empty())
         .collect::<Vec<_>>();
-    let name = if parts.len() >= 4
-        && parts[parts.len() - 3] == ".a3s"
-        && parts[parts.len() - 2] == "workflows"
-        && parts[parts.len() - 1] == "main.design"
-    {
-        parts[parts.len() - 4]
+    let name = if parts.len() >= 2 && parts[parts.len() - 1] == "flow" {
+        parts[parts.len() - 2]
     } else {
         parts.last().copied().unwrap_or(file_stem)
     };
@@ -249,11 +238,23 @@ pub(crate) fn designer_view_spec(url: String) -> remote_ui::ViewSpec {
 #[derive(Clone, Copy)]
 enum FlowProgressiveIntent {
     Designer,
+    Run,
     Logs,
 }
 
 fn flow_progressive_score(intent: FlowProgressiveIntent, text: &str, operation: &str) -> i32 {
     let combined = format!("{text} {operation}").to_ascii_lowercase();
+    let operation = operation.to_ascii_lowercase();
+    if operation.contains("createasset")
+        || operation.contains("listasset")
+        || operation.contains("diagnose")
+        || operation.contains("acknowledge")
+        || operation.contains("scaffold")
+        || operation.contains("template")
+        || operation.contains("preview")
+    {
+        return 0;
+    }
     let mut score = 0;
     if combined.contains("workflow") || combined.contains("waas") {
         score += 8;
@@ -264,11 +265,16 @@ fn flow_progressive_score(intent: FlowProgressiveIntent, text: &str, operation: 
     let mut action_hit = false;
     match intent {
         FlowProgressiveIntent::Designer => {
-            if combined.contains("designer") || combined.contains("design") {
+            if operation.contains("designer")
+                || operation.contains("design")
+                || combined.contains("/designer")
+                || combined.contains("workflow-designer")
+            {
                 score += 8;
                 action_hit = true;
             }
-            if combined.contains("open") || combined.contains("view") || combined.contains("debug")
+            if operation.contains("open")
+                || (operation.contains("view") && !operation.contains("preview"))
             {
                 score += 4;
                 action_hit = true;
@@ -282,16 +288,47 @@ fn flow_progressive_score(intent: FlowProgressiveIntent, text: &str, operation: 
                 score -= 6;
             }
         }
+        FlowProgressiveIntent::Run => {
+            if operation == "runassetworkflow"
+                || operation.contains("runassetworkflow")
+                || combined.contains("/asset-workflows/{assetid}/run")
+            {
+                score += 14;
+                action_hit = true;
+            }
+            if operation.contains("dispatchworkflowrun") {
+                score += 4;
+                action_hit = true;
+            }
+            if operation.contains("list")
+                || operation.contains("get")
+                || operation.contains("logs")
+                || operation.contains("feedback")
+                || operation.contains("schedule")
+                || operation.contains("webhook")
+                || operation.contains("testnode")
+            {
+                score -= 12;
+            }
+        }
         FlowProgressiveIntent::Logs => {
-            if combined.contains("log")
-                || combined.contains("trace")
-                || combined.contains("job")
-                || combined.contains("process")
-                || combined.contains("run history")
-                || combined.contains("observability")
+            if operation.contains("workflowrunlog")
+                || operation.contains("workflowlogs")
+                || operation.contains("listworkflowexecutions")
+                || operation.contains("listassetworkflowexecutions")
             {
                 score += 10;
                 action_hit = true;
+            }
+            if operation.contains("getjoblogs")
+                || operation.contains("downloadjoblogs")
+                || operation.contains("getsteplogs")
+                || operation.contains("downloadsteplogs")
+                || operation.contains("getrunlogs")
+                || operation.contains("downloadrunlogs")
+                || operation.contains("listjobs")
+            {
+                return 0;
             }
             if combined.contains("view")
                 || combined.contains("remoteui")
@@ -339,6 +376,13 @@ fn path_segment(value: &str) -> String {
         }
     }
     out
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn envelope_json_is_error(value: &serde_json::Value) -> bool {
@@ -496,7 +540,7 @@ fn workflow_manifest_json(
         "workflowName": workflow_design_name(design, asset_name),
         "description": workflow_design_description(design),
         "designDocumentPath": DESIGN_DOCUMENT_PATH,
-        "runtimeBindingPath": WORKFLOW_RUNTIME_BINDING_PATH,
+        "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         "localFile": local_file,
         "createdBy": "a3s-code-tui",
         "service": "Workflow as a Service",
@@ -527,6 +571,7 @@ fn workflow_runtime_binding_json(
             "kind": "asset",
             "ref": "main",
             "designDocumentPath": DESIGN_DOCUMENT_PATH,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         },
         "runtime": {
             "kind": "a3s-workflow-service",
@@ -548,10 +593,34 @@ fn workflow_runtime_binding_json(
             "workflowName": workflow_design_name(design, asset_name),
             "description": workflow_design_description(design),
             "designDocumentPath": DESIGN_DOCUMENT_PATH,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localFile": local_file,
             "nodes": workflow_node_count(design),
             "edges": workflow_edge_count(design),
         },
+    })
+}
+
+fn workflow_asset_acl(asset_name: &str, local_file: &str, design: &serde_json::Value) -> String {
+    let source = [("design_document_path", DESIGN_DOCUMENT_PATH)];
+    let metadata: [(&str, &str); 0] = [];
+    let description = workflow_design_description(design);
+    asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
+        category: "workflow",
+        kind: Some("workflow"),
+        name: asset_name,
+        description: &description,
+        local_path: Some(local_file),
+        service: asset_lifecycle::OsService::WorkflowAsAService,
+        runtime: asset_lifecycle::RuntimeBindingIntent {
+            kind: "workflow",
+            isolation: "native",
+            runtime_kind: "a3s-workflow-service",
+            protocol: Some("workflow"),
+            agent_kind: None,
+        },
+        source: &source,
+        metadata: &metadata,
     })
 }
 
@@ -622,6 +691,55 @@ async fn workflow_logs_view(
         return (fallback, false);
     };
     (execution.view.unwrap_or(fallback), true)
+}
+
+async fn workflow_run_view(
+    origin: &str,
+    token: &str,
+    asset_id: &str,
+    asset_name: &str,
+) -> Option<(remote_ui::ViewSpec, String)> {
+    let Ok(client) = http() else {
+        return None;
+    };
+    let params = serde_json::json!({
+        "assetId": asset_id,
+        "id": asset_id,
+        "workflowAssetId": asset_id,
+        "assetName": asset_name,
+        "name": asset_name,
+        "category": "workflow",
+        "operation": "run",
+        "input": {
+            "assetId": asset_id,
+            "assetName": asset_name,
+            "source": "a3s-code-tui",
+        },
+        "payload": {
+            "assetId": asset_id,
+            "assetName": asset_name,
+            "source": "a3s-code-tui",
+        },
+        "source": "a3s-code-tui",
+        "idempotencyKey": format!("a3s-code-flow-run-{}", unix_timestamp_secs()),
+    });
+    let execution = os_progressive::execute_first_matching(
+        &client,
+        origin,
+        token,
+        "Workflow as a Service run workflow asset shaped ViewLink",
+        params,
+        |text, operation| flow_progressive_score(FlowProgressiveIntent::Run, text, operation),
+    )
+    .await?;
+    let fallback = designer_view_spec(flow_asset_url(origin, asset_id));
+    Some((
+        execution.view.unwrap_or(fallback),
+        format!(
+            "Published `{asset_name}` and executed the Workflow as a Service run through progressive capabilities (`{}`).",
+            execution.operation.operation
+        ),
+    ))
 }
 
 fn flow_picker_header(total: usize, root: &std::path::Path, width: usize) -> String {
@@ -708,6 +826,7 @@ fn flow_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
 
 /// Directive for `/flow <description>`: orchestrate a BASIC DAG in the
 /// designer-document schema and save it under the flows folder.
+#[cfg(test)]
 pub(crate) fn flow_gen_prompt(description: &str, dir: &str) -> String {
     format!(
         "Create a basic local workflow flow asset from the description below and save it under \
@@ -717,8 +836,12 @@ pub(crate) fn flow_gen_prompt(description: &str, dir: &str) -> String {
          IMPORTANT: {dir} is OUTSIDE this session's workspace, so the path-scoped file \
          tools will reject it — use the `bash` tool (`mkdir -p {dir}`, then write files \
          with heredocs).\n\
-         Create {dir}/<kebab-case-name>/ with <kebab-case-name>.json, \
-         .a3s/workflow.asset.json, and .a3s/workflow.runtime-binding.json. The JSON DAG \
+         Create {dir}/<kebab-case-name>/ with flow.json and .a3s/asset.acl. The JSON DAG \
+         is source and MUST stay at the asset root as `flow.json`; do NOT put workflow \
+         source under `.a3s/` or any other hidden metadata directory. Do NOT create \
+         extra generated JSON config files; keep package configuration in `.a3s/asset.acl`. \
+         The asset.acl must record service=Workflow as a Service, \
+         runtimeIntent.kind=workflow, runtime.kind=a3s-workflow-service, and protocol=workflow. \
          MUST follow the OS workflow-designer document schema exactly — this \
          minimal example shows every required field:\n\
          {{\"version\":\"a3s.workflow.design.v1\",\"name\":\"<name>\",\"description\":\
@@ -736,14 +859,94 @@ pub(crate) fn flow_gen_prompt(description: &str, dir: &str) -> String {
          edges use sourceNodeID/targetNodeID (capital D); lay nodes left-to-right \
          (x += 320 per step, y ±180 for branches); keep it BASIC — 3-7 nodes that \
          match the description, no speculative extras.\n\
-         The asset metadata should use category=workflow, service=Workflow as a Service, \
-         runtimeIntent.kind=workflow, isolation=native, runtime.kind=a3s-workflow-service, \
-         and protocol=workflow. If the folder exists, append -2, -3, … to the folder name. \
-         Validate all JSON files with `python3 -m json.tool \"$FILE\" > /dev/null && echo OK` \
-         (always pass the file path — never run a command that waits on stdin). Then \
-         report the saved path and tell the user `/flow` opens it in the OS workflow \
-         designer."
+         If the folder exists, append -2, -3, … to the folder name. \
+         Validate flow.json with `python3 -m json.tool \"$FILE\" > /dev/null && echo OK` \
+         (always pass the file path — never run a command that waits on stdin). After \
+         validation succeeds, stop using tools immediately and give a concise final answer \
+         with the saved path and the note that `/flow` opens it in the OS workflow designer."
     )
+}
+
+pub(crate) fn scaffold_flow_asset(
+    description: &str,
+    root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let name = asset_lifecycle::scaffold_name(description, "workflow");
+    let package = asset_lifecycle::unique_asset_dir(root, &name);
+    let final_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let description =
+        asset_lifecycle::scaffold_description(description, &final_name, "Local workflow asset");
+    std::fs::create_dir_all(package.join(".a3s"))
+        .map_err(|e| format!("could not create {}: {e}", package.join(".a3s").display()))?;
+    std::fs::create_dir_all(package.join("tests"))
+        .map_err(|e| format!("could not create {}: {e}", package.join("tests").display()))?;
+
+    let design = flow_scaffold_design(&final_name, &description);
+    let design_path = package.join(DESIGN_DOCUMENT_PATH);
+    let local_file = asset_lifecycle::normalized_rel(root, &design_path);
+    let asset_name = flow_asset_name(&final_name);
+    let asset_acl = workflow_asset_acl(&asset_name, &local_file, &design);
+
+    asset_lifecycle::write_scaffold_json(&design_path, &design)?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("README.md"),
+        flow_scaffold_readme(&final_name, &description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("tests/smoke.md"),
+        flow_scaffold_tests().as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join(asset_lifecycle::ASSET_ACL_PATH),
+        asset_acl.as_bytes(),
+    )?;
+    Ok(design_path)
+}
+
+fn flow_scaffold_design(name: &str, description: &str) -> serde_json::Value {
+    serde_json::json!({
+        "version": "a3s.workflow.design.v1",
+        "name": name,
+        "description": description,
+        "triggerEvents": [],
+        "variables": [],
+        "outputs": [],
+        "nodes": [
+            { "id": "start", "kind": "start", "name": "Start", "data": {}, "x": 0, "y": 0 },
+            { "id": "step-1", "kind": "llm", "name": "Process request", "data": { "prompt": description }, "x": 320, "y": 0 },
+            { "id": "end", "kind": "end", "name": "End", "data": {}, "x": 640, "y": 0 }
+        ],
+        "edges": [
+            { "id": "e1", "sourceNodeID": "start", "targetNodeID": "step-1" },
+            { "id": "e2", "sourceNodeID": "step-1", "targetNodeID": "end" }
+        ]
+    })
+}
+
+fn flow_scaffold_readme(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         {description}.\n\n\
+         ## Source\n\n\
+         - `flow.json` is the workflow source document loaded by the OS designer.\n\
+         - `tests/smoke.md` contains manual validation checks.\n\
+         - `.a3s/` contains only `asset.acl`.\n\n\
+         ## Lifecycle\n\n\
+         - `a3s code flow publish flow.json`\n\
+         - `a3s code flow run flow.json`\n\
+         - `a3s code flow open flow.json`\n"
+    )
+}
+
+fn flow_scaffold_tests() -> &'static str {
+    "# Workflow Smoke Checklist\n\n\
+     1. Validate `flow.json` with `python3 -m json.tool`.\n\
+     2. Confirm the DAG has exactly one `start` and one `end` node.\n\
+     3. Confirm `.a3s/asset.acl` has `design_document_path = \"flow.json\"`.\n"
 }
 
 pub(crate) fn flow_review_prompt(path: &std::path::Path, design_json: &str) -> String {
@@ -851,20 +1054,14 @@ pub(crate) async fn upload_flow_document(
     origin: &str,
     token: &str,
     asset_id: &str,
-    asset_name: &str,
-    local_file: &str,
     design_json: &str,
+    asset_acl: &str,
+    _manifest: &serde_json::Value,
+    _runtime_binding: &serde_json::Value,
 ) -> Result<(), String> {
     use base64::Engine;
-    let design: serde_json::Value = serde_json::from_str(design_json)
-        .map_err(|e| format!("workflow design is not valid JSON: {e}"))?;
-    let manifest = workflow_manifest_json(asset_name, local_file, &design);
-    let runtime_binding = workflow_runtime_binding_json(asset_name, local_file, &design);
     let b64 = base64::engine::general_purpose::STANDARD.encode(design_json.as_bytes());
-    let manifest_b64 = base64::engine::general_purpose::STANDARD
-        .encode(serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?);
-    let runtime_binding_b64 = base64::engine::general_purpose::STANDARD
-        .encode(serde_json::to_vec_pretty(&runtime_binding).map_err(|e| e.to_string())?);
+    let asset_acl_b64 = base64::engine::general_purpose::STANDARD.encode(asset_acl.as_bytes());
     let resp = http()?
         .post(format!(
             "{}/api/v1/assets/{asset_id}/repository/files",
@@ -876,8 +1073,7 @@ pub(crate) async fn upload_flow_document(
             "message": "a3s code /flow: update workflow design",
             "files": [
                 { "path": DESIGN_DOCUMENT_PATH, "contentBase64": b64 },
-                { "path": WORKFLOW_MANIFEST_PATH, "contentBase64": manifest_b64 },
-                { "path": WORKFLOW_RUNTIME_BINDING_PATH, "contentBase64": runtime_binding_b64 },
+                { "path": asset_lifecycle::ASSET_ACL_PATH, "contentBase64": asset_acl_b64 },
             ],
         }))
         .send()
@@ -977,7 +1173,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -999,7 +1195,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding validation failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1139,28 +1335,45 @@ pub(crate) async fn publish_flow_to_os(
     design_json: String,
     action: FlowOsAction,
 ) -> Result<FlowOsResult, String> {
+    publish_flow_to_os_with_local_path(session, file, None, design_json, action).await
+}
+
+pub(crate) async fn publish_flow_to_os_with_local_path(
+    session: crate::a3s_os::StoredOsSession,
+    file: String,
+    local_path: Option<std::path::PathBuf>,
+    design_json: String,
+    action: FlowOsAction,
+) -> Result<FlowOsResult, String> {
     let origin = crate::a3s_os::os_origin(&session.address);
     let stem = file.trim_end_matches(".json").to_string();
-    let asset_name = flow_asset_name(&stem);
+    let design: serde_json::Value = serde_json::from_str(&design_json)
+        .map_err(|e| format!("workflow design is not valid JSON: {e}"))?;
+    let design_name = workflow_design_name(&design, &stem);
+    let asset_name = flow_asset_name(&design_name);
     if matches!(
         action,
         FlowOsAction::Status | FlowOsAction::Open | FlowOsAction::Logs
     ) {
         return inspect_flow_asset(&origin, &session.access_token, action, &asset_name).await;
     }
-    let design: serde_json::Value = serde_json::from_str(&design_json)
-        .map_err(|e| format!("workflow design is not valid JSON: {e}"))?;
     let asset_id = ensure_flow_asset(&origin, &session.access_token, &asset_name).await?;
+    let manifest = workflow_manifest_json(&asset_name, &file, &design);
+    let runtime_binding = workflow_runtime_binding_json(&asset_name, &file, &design);
+    let asset_acl = workflow_asset_acl(&asset_name, &file, &design);
+    if let Some(local_path) = local_path.as_deref() {
+        asset_lifecycle::write_asset_acl(local_path, &asset_acl)?;
+    }
     upload_flow_document(
         &origin,
         &session.access_token,
         &asset_id,
-        &asset_name,
-        &file,
         &design_json,
+        &asset_acl,
+        &manifest,
+        &runtime_binding,
     )
     .await?;
-    let runtime_binding = workflow_runtime_binding_json(&asset_name, &file, &design);
     let runtime_binding_synced =
         sync_flow_runtime_binding(&origin, &session.access_token, &asset_id, &runtime_binding)
             .await;
@@ -1172,7 +1385,7 @@ pub(crate) async fn publish_flow_to_os(
             ),
             true,
         ),
-        FlowOsAction::Design | FlowOsAction::Run | FlowOsAction::Deploy => {
+        FlowOsAction::Design => {
             let (view, progressive) =
                 workflow_designer_view(&origin, &session.access_token, &asset_id, &asset_name)
                     .await;
@@ -1183,17 +1396,34 @@ pub(crate) async fn publish_flow_to_os(
             };
             (
                 view,
-                if matches!(action, FlowOsAction::Design) {
-                    format!("Published `{asset_name}` and opened the {surface} for editing.")
-                } else {
-                    format!(
-                        "Published `{asset_name}` and opened the {surface} for `{}`.",
-                        action.label()
-                    )
-                },
+                format!("Published `{asset_name}` and opened the {surface} for editing."),
                 true,
             )
         }
+        FlowOsAction::Run => workflow_run_view(
+            &origin,
+            &session.access_token,
+            &asset_id,
+            &asset_name,
+        )
+        .await
+        .map(|(view, note)| (view, note, true))
+        .unwrap_or_else(|| {
+            (
+                designer_view_spec(designer_url(&origin, &asset_id)),
+                format!(
+                    "Published `{asset_name}` and saved its Workflow as a Service runtime binding; no runnable workflow capability was available, so the designer fallback was opened."
+                ),
+                true,
+            )
+        }),
+        FlowOsAction::Deploy => (
+            designer_view_spec(designer_url(&origin, &asset_id)),
+            format!(
+                "Published `{asset_name}` and saved its Workflow as a Service runtime binding; no separate workflow deploy capability was available, so the designer fallback was opened."
+            ),
+            true,
+        ),
         FlowOsAction::Open | FlowOsAction::Logs | FlowOsAction::Status => {
             unreachable!("read-only flow actions return before publish flow")
         }
@@ -1323,8 +1553,16 @@ impl App {
                             "  ⧉ {file} → OS Workflow as a Service {}…",
                             os_action.label()
                         )));
+                        let local_path = path.clone();
                         return Some(cmd::cmd(move || async move {
-                            let result = publish_flow_to_os(session, file, design, os_action).await;
+                            let result = publish_flow_to_os_with_local_path(
+                                session,
+                                file,
+                                Some(local_path),
+                                design,
+                                os_action,
+                            )
+                            .await;
                             Msg::FlowOsCompleted(result)
                         }));
                     }
@@ -1337,9 +1575,16 @@ impl App {
                         .fg(TN_GRAY)
                         .render(&format!("  ⧉ {file} → OS Workflow as a Service designer…")),
                 );
+                let local_path = path.clone();
                 return Some(cmd::cmd(move || async move {
-                    let result =
-                        publish_flow_to_os(session, file, design, FlowOsAction::Design).await;
+                    let result = publish_flow_to_os_with_local_path(
+                        session,
+                        file,
+                        Some(local_path),
+                        design,
+                        FlowOsAction::Design,
+                    )
+                    .await;
                     Msg::FlowOsCompleted(result)
                 }));
             }
@@ -1433,14 +1678,14 @@ impl App {
                         .render(&format!("  {}", result.note)),
                 );
                 if result.open_view {
-                    let button = format!("{service} · click or /view reopens");
+                    let button = format!("{service} · click to reopen");
                     self.push_line(&gutter(ACCENT, &remote_view_button(&button)));
                     self.open_remote_view(&result.view);
                 } else {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GRAY)
-                            .render("  /view opens the related OS workflow asset view"),
+                            .render("  Open view opens the related OS workflow asset view"),
                     );
                 }
             }
@@ -1468,46 +1713,39 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[test]
-    fn lists_json_flows_sorted_skipping_dotfiles_and_nonjson() {
+    fn lists_flow_json_sources_sorted_skipping_noncanonical_json() {
         let root = std::env::temp_dir().join(format!("a3s-flows-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(root.join("daily-report")).unwrap();
         std::fs::write(root.join("zeta.json"), "{}").unwrap();
         std::fs::write(root.join("alpha.json"), "{}").unwrap();
+        std::fs::write(root.join("flow.json"), "{}").unwrap();
+        std::fs::write(root.join("daily-report/flow.json"), "{}").unwrap();
         std::fs::write(root.join(".hidden.json"), "{}").unwrap();
         std::fs::write(root.join("notes.txt"), "x").unwrap();
         std::fs::create_dir_all(root.join("dir.json")).unwrap(); // dir, not a flow
         let fs = list_flows(&root);
-        assert_eq!(fs, vec!["alpha.json", "zeta.json"]);
+        assert_eq!(fs, vec!["daily-report/flow.json", "flow.json"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn lists_canonical_designer_documents_inside_asset_folders() {
+    fn lists_visible_canonical_designer_documents_inside_asset_folders() {
         let root = std::env::temp_dir().join(format!("a3s-flow-assets-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let asset_dir = root.join("daily-report");
-        std::fs::create_dir_all(asset_dir.join(".a3s/workflows")).unwrap();
         std::fs::create_dir_all(asset_dir.join(".a3s/private")).unwrap();
         std::fs::write(asset_dir.join("daily-report.json"), "{}").unwrap();
-        std::fs::write(asset_dir.join(".a3s/workflows/main.design.json"), "{}").unwrap();
-        std::fs::write(asset_dir.join(".a3s/workflow.asset.json"), "{}").unwrap();
+        std::fs::write(asset_dir.join("flow.json"), "{}").unwrap();
         std::fs::write(asset_dir.join(".a3s/private/debug.json"), "{}").unwrap();
 
         let fs = list_flows(&root);
-        assert_eq!(
-            fs,
-            vec![
-                "daily-report/.a3s/workflows/main.design.json",
-                "daily-report/daily-report.json",
-            ]
-        );
+        assert_eq!(fs, vec!["daily-report/flow.json"]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1519,14 +1757,7 @@ mod tests {
             "http://180.163.156.38:49164/workflow-designer/abc-123"
         );
         assert_eq!(flow_asset_name("Daily Report 2"), "flow-daily-report-2");
-        assert_eq!(
-            flow_asset_name("daily-report/daily-report"),
-            "flow-daily-report"
-        );
-        assert_eq!(
-            flow_asset_name("daily-report/.a3s/workflows/main.design"),
-            "flow-daily-report"
-        );
+        assert_eq!(flow_asset_name("daily-report/flow"), "flow-daily-report");
     }
 
     #[test]
@@ -1601,7 +1832,10 @@ mod tests {
         assert!(parse_flow_subcommand("workflow").unwrap().is_err());
         assert!(parse_flow_subcommand("artifact").unwrap().is_err());
         assert!(parse_flow_subcommand("inspect").unwrap().is_err());
-        assert!(parse_flow_subcommand("debug").unwrap().is_err());
+        assert_eq!(
+            parse_flow_subcommand("debug").unwrap().unwrap_err(),
+            "unknown /flow command `debug`"
+        );
         assert!(parse_flow_subcommand("jobs").unwrap().is_err());
         assert!(parse_flow_subcommand("off").unwrap().is_err());
         assert!(parse_flow_subcommand("publish now").unwrap().is_err());
@@ -1644,10 +1878,7 @@ mod tests {
         );
         assert_eq!(manifest["runtimeIntent"]["protocol"], "workflow");
         assert_eq!(manifest["designDocumentPath"], DESIGN_DOCUMENT_PATH);
-        assert_eq!(
-            manifest["runtimeBindingPath"],
-            WORKFLOW_RUNTIME_BINDING_PATH
-        );
+        assert!(manifest.get("runtimeBindingPath").is_none());
         assert_eq!(manifest["graph"]["nodes"], 3);
         assert_eq!(binding["kind"], "workflow");
         assert_eq!(binding["isolation"], "native");
@@ -1664,6 +1895,9 @@ mod tests {
     async fn publish_flow_to_os_uploads_design_and_syncs_workflow_service_binding() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_flow_publish_mock(captured.clone()).await;
+        let root = std::env::temp_dir().join(format!("a3s-flow-publish-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
         let session = crate::a3s_os::StoredOsSession {
             address: origin.clone(),
             access_token: "token".into(),
@@ -1688,10 +1922,13 @@ mod tests {
             ]
         })
         .to_string();
+        let local_file = root.join("flow.json");
+        std::fs::write(&local_file, &design).unwrap();
 
-        let result = publish_flow_to_os(
+        let result = publish_flow_to_os_with_local_path(
             session,
-            "daily-digest.json".into(),
+            "flow.json".into(),
+            Some(local_file),
             design,
             FlowOsAction::Publish,
         )
@@ -1710,11 +1947,18 @@ mod tests {
             "{}",
             result.note
         );
+        let local_asset_acl = root.join(asset_lifecycle::ASSET_ACL_PATH);
+        assert!(local_asset_acl.is_file(), "missing local asset.acl");
+        let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
+        assert!(local_asset_acl_body.contains("category = \"workflow\""));
+        assert!(local_asset_acl_body.contains("design_document_path"));
 
         let requests = captured.lock().unwrap().clone();
         let joined = requests.join("\n");
         assert!(joined.contains("GET /api/v1/assets?"), "{joined}");
         assert!(joined.contains("POST /api/v1/assets HTTP/1.1"), "{joined}");
+        assert!(joined.contains(r#""name":"flow-daily-digest""#), "{joined}");
+        assert!(!joined.contains(r#""name":"flow-flow""#), "{joined}");
         assert!(
             joined.contains("POST /api/v1/assets/workflow-asset-1/repository/files HTTP/1.1"),
             "{joined}"
@@ -1751,22 +1995,17 @@ mod tests {
             .any(|file| file["path"] == DESIGN_DOCUMENT_PATH));
         assert!(files
             .iter()
-            .any(|file| file["path"] == WORKFLOW_MANIFEST_PATH));
-        assert!(files
-            .iter()
-            .any(|file| file["path"] == WORKFLOW_RUNTIME_BINDING_PATH));
-        let binding_file = files
-            .iter()
-            .find(|file| file["path"] == WORKFLOW_RUNTIME_BINDING_PATH)
-            .expect("runtime binding uploaded");
-        let binding_b64 = binding_file["contentBase64"].as_str().unwrap();
-        let binding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(binding_b64)
-            .unwrap();
-        let binding_json: serde_json::Value = serde_json::from_slice(&binding_bytes).unwrap();
-        assert_eq!(binding_json["kind"], "workflow");
-        assert_eq!(binding_json["runtime"]["kind"], "a3s-workflow-service");
-        assert_eq!(binding_json["runtime"]["protocol"], "workflow");
+            .any(|file| file["path"] == asset_lifecycle::ASSET_ACL_PATH));
+        for forbidden in [
+            "workflow.asset.json",
+            "workflow.runtime-binding.json",
+            "runtime-binding.json",
+        ] {
+            assert!(
+                files.iter().all(|file| file["path"] != forbidden),
+                "repository upload should not include {forbidden}"
+            );
+        }
 
         let synced = request_body(
             &requests,
@@ -1776,6 +2015,8 @@ mod tests {
         assert_eq!(synced_json["kind"], "workflow");
         assert_eq!(synced_json["runtime"]["kind"], "a3s-workflow-service");
         assert!(synced_json["runtime"].get("protocol").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -1832,6 +2073,93 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn run_and_deploy_flow_actions_publish_and_open_workflow_surface() {
+        for action in [FlowOsAction::Run, FlowOsAction::Deploy] {
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let origin = spawn_flow_publish_mock(captured.clone()).await;
+            let session = crate::a3s_os::StoredOsSession {
+                address: origin.clone(),
+                access_token: "token".into(),
+                refresh_token: None,
+                token_type: Some("Bearer".into()),
+                expires_at_ms: None,
+                account_label: None,
+                login_at_ms: 1,
+            };
+            let design = serde_json::json!({
+                "version": "a3s.workflow.design.v1",
+                "name": "Daily digest",
+                "description": "Collect and summarize daily signals",
+                "nodes": [
+                    {"id": "start", "kind": "start"},
+                    {"id": "end", "kind": "end"}
+                ],
+                "edges": [
+                    {"id": "e1", "sourceNodeID": "start", "targetNodeID": "end"}
+                ]
+            })
+            .to_string();
+
+            let result = publish_flow_to_os(session, "daily-digest.json".into(), design, action)
+                .await
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "flow {} should publish and open lifecycle surface: {err}",
+                        action.label()
+                    )
+                });
+
+            assert_eq!(result.action, action);
+            assert!(result.open_view);
+            match action {
+                FlowOsAction::Run => {
+                    assert_eq!(
+                        result.view.url,
+                        format!("{origin}/admin/workflows/workflow-asset-1/runs/run-1?embed=1")
+                    );
+                    assert!(
+                        result.note.contains("runAssetWorkflow")
+                            && result.note.contains("runtime binding was synced"),
+                        "{}",
+                        result.note
+                    );
+                }
+                FlowOsAction::Deploy => {
+                    assert_eq!(
+                        result.view.url,
+                        format!("{origin}/workflow-designer/workflow-asset-1")
+                    );
+                    assert!(
+                        result
+                            .note
+                            .contains("no separate workflow deploy capability")
+                            && result.note.contains("runtime binding was synced"),
+                        "{}",
+                        result.note
+                    );
+                }
+                _ => unreachable!(),
+            }
+
+            let requests = captured.lock().unwrap().join("\n");
+            assert!(
+                requests.contains("POST /api/v1/assets/workflow-asset-1/repository/files HTTP/1.1"),
+                "{requests}"
+            );
+            assert!(
+                requests.contains("PUT /api/v1/assets/workflow-asset-1/runtime-binding HTTP/1.1"),
+                "{requests}"
+            );
+            assert!(
+                requests.contains(
+                    "POST /api/v1/assets/workflow-asset-1/runtime-binding/validate HTTP/1.1"
+                ),
+                "{requests}"
+            );
+        }
+    }
+
     #[test]
     fn flow_progressive_score_prefers_workflow_designer_viewlink() {
         let value = serde_json::json!({
@@ -1877,6 +2205,15 @@ mod tests {
             ),
             0
         );
+        assert_eq!(
+            flow_progressive_score(
+                FlowProgressiveIntent::Designer,
+                "Workflow as a Service preview with a shaped view",
+                "WorkflowDataMappingController_preview"
+            ),
+            0,
+            "/flow open must not choose preview operations just because they contain `view`"
+        );
     }
 
     #[test]
@@ -1893,6 +2230,12 @@ mod tests {
                         "name": "WorkflowRunLogController_open",
                         "resource": "workflows.logs",
                         "description": "Workflow as a Service logs jobs run history shaped ViewLink"
+                    },
+                    {
+                        "name": "AssetActionsController_getJobLogs",
+                        "resource": "assets.actions.runs.jobs",
+                        "path": "/api/v1/assets/{assetId}/actions/runs/{runId}/jobs/{jobId}/logs",
+                        "description": "获取 Actions job 日志"
                     }
                 ]
             }
@@ -1907,6 +2250,56 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.operation != "WorkflowDesignerController_open"),
             "designer candidates must not drive /flow logs: {candidates:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.operation != "AssetActionsController_getJobLogs"),
+            "logs candidates that require runId/jobId must not drive /flow logs: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn flow_progressive_score_prefers_exact_workflow_run_operation() {
+        let value = serde_json::json!({
+            "data": {
+                "results": [
+                    {
+                        "name": "createAsset",
+                        "module": "assets",
+                        "path": "/api/v1/assets",
+                        "description": "创建资产仓库"
+                    },
+                    {
+                        "name": "runAssetWorkflow",
+                        "module": "runtimes",
+                        "path": "/api/v1/runtimes/asset-workflows/{assetId}/run",
+                        "description": "运行资产工作流"
+                    },
+                    {
+                        "name": "AssetWorkflowExecutionController_testNode",
+                        "module": "runtimes",
+                        "path": "/api/v1/runtimes/asset-workflows/test-node",
+                        "description": "单节点测试运行"
+                    }
+                ]
+            }
+        });
+        let candidates = os_progressive::operation_candidates(&value, |text, operation| {
+            flow_progressive_score(FlowProgressiveIntent::Run, text, operation)
+        });
+        assert_eq!(candidates[0].operation, "runAssetWorkflow");
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.operation != "createAsset"),
+            "generic asset create must not drive /flow run: {candidates:?}"
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.operation != "AssetWorkflowExecutionController_testNode"),
+            "node tests are not full /flow run: {candidates:?}"
         );
     }
 
@@ -2025,8 +2418,12 @@ mod tests {
         assert!(p.contains("sourceNodeID")); // capital-D edge fields
         assert!(p.contains("exactly one `start` and one `end`"));
         assert!(p.contains("OUTSIDE this session's workspace") && p.contains("bash"));
-        assert!(p.contains(".a3s/workflow.asset.json"));
-        assert!(p.contains(".a3s/workflow.runtime-binding.json"));
+        assert!(p.contains(".a3s/asset.acl"));
+        assert!(p.contains("Do NOT create"));
+        assert!(p.contains("extra generated JSON config files"));
+        assert!(p.contains("keep package configuration in `.a3s/asset.acl`"));
+        assert!(p.contains("MUST stay at the asset root"));
+        assert!(p.contains("do NOT put workflow"));
         assert!(p.contains("service=Workflow as a Service"));
         assert!(p.contains("runtimeIntent.kind=workflow"));
         assert!(p.contains("runtime.kind=a3s-workflow-service"));
@@ -2035,6 +2432,42 @@ mod tests {
         let start = p.find("{\"version\"").expect("example present");
         let end = p[start..].find("}]}").expect("example closes") + start + 3;
         assert!(serde_json::from_str::<serde_json::Value>(&p[start..end]).is_ok());
+    }
+
+    #[test]
+    fn scaffold_flow_asset_creates_root_design_and_metadata_acl() {
+        let root =
+            std::env::temp_dir().join(format!("a3s-code-flow-scaffold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let design_path = scaffold_flow_asset(
+            "Name it exactly triage-flow. It triages incoming tickets.",
+            &root,
+        )
+        .unwrap();
+        let package = design_path.parent().unwrap();
+
+        for rel in ["README.md", "flow.json", "tests/smoke.md", ".a3s/asset.acl"] {
+            assert!(package.join(rel).is_file(), "missing {rel}");
+        }
+        for rel in [
+            "workflow.asset.json",
+            "workflow.runtime-binding.json",
+            ".a3s/workflow.asset.json",
+            ".a3s/workflow.runtime-binding.json",
+        ] {
+            assert!(!package.join(rel).exists(), "unexpected {rel}");
+        }
+        assert!(!package.join(".a3s").join("workflows").exists());
+        let flows = list_flows(&root);
+        assert_eq!(flows, vec!["triage-flow/flow.json"]);
+        let asset_acl =
+            std::fs::read_to_string(package.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
+        assert!(asset_acl.contains("category = \"workflow\""));
+        assert!(asset_acl.contains("design_document_path = \"flow.json\""));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2085,6 +2518,33 @@ mod tests {
     }
 
     fn flow_publish_mock_response(line: &str, body: &str) -> (&'static str, &'static str) {
+        if line.starts_with("POST /api/v1/kernel/capabilities HTTP/1.1") {
+            if body.contains(r#""action":"search""#)
+                && body.contains("Workflow as a Service run workflow asset shaped ViewLink")
+            {
+                return (
+                    "200 OK",
+                    r#"{"data":{"data":[{"name":"createAsset","module":"assets","path":"/api/v1/assets","description":"创建资产仓库"},{"name":"runAssetWorkflow","module":"runtimes","path":"/api/v1/runtimes/asset-workflows/{assetId}/run","description":"运行资产工作流"},{"name":"AssetWorkflowExecutionController_testNode","module":"runtimes","path":"/api/v1/runtimes/asset-workflows/test-node","description":"单节点测试运行"}]}}"#,
+                );
+            }
+            if body.contains(r#""action":"describe""#) && body.contains("runAssetWorkflow") {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"operation":{"name":"runAssetWorkflow","inputSchema":{"body":{"properties":{"assetId":{"type":"string"},"input":{"type":"object"},"idempotencyKey":{"type":"string"}}}}}}}"#,
+                );
+            }
+            if body.contains(r#""action":"execute""#)
+                && body.contains(r#""shaped":true"#)
+                && body.contains("runAssetWorkflow")
+                && body.contains(r#""assetId":"workflow-asset-1""#)
+            {
+                return (
+                    "200 OK",
+                    r#"{"code":200,"data":{"executionId":"run-1"},"view":{"url":"/admin/workflows/workflow-asset-1/runs/run-1?embed=1","width":1280,"height":860}}"#,
+                );
+            }
+            return ("404 Not Found", r#"{"code":404,"message":"not found"}"#);
+        }
         if line.starts_with("GET /api/v1/assets?") {
             return ("200 OK", r#"{"data":{"items":[]}}"#);
         }
@@ -2107,8 +2567,9 @@ mod tests {
         }
         if line.starts_with("POST /api/v1/assets/workflow-asset-1/repository/files HTTP/1.1") {
             if body.contains(DESIGN_DOCUMENT_PATH)
-                && body.contains(WORKFLOW_MANIFEST_PATH)
-                && body.contains(WORKFLOW_RUNTIME_BINDING_PATH)
+                && body.contains(asset_lifecycle::ASSET_ACL_PATH)
+                && !body.contains("workflow.asset.json")
+                && !body.contains("workflow.runtime-binding.json")
             {
                 return ("200 OK", r#"{"ok":true}"#);
             }

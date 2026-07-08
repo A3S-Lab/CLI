@@ -2,6 +2,9 @@
 
 use super::super::*;
 use super::login::{claude_models, has_local_login, AuthProvider};
+use crate::config::{
+    save_model_selection_preference, ModelSelectionPreference, ModelSelectionSource,
+};
 use a3s_tui::components::{TabbedMenuItem, TabbedMenuPanel, TabbedMenuPanelMsg, TabbedMenuTab};
 use a3s_tui::event::MouseEvent;
 
@@ -120,6 +123,18 @@ fn model_menu_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
         .min(u16::MAX as usize) as u16
 }
 
+fn should_fetch_os_gateway_models(
+    active_tab: Option<&ModelTab>,
+    gateway_models: Option<&[String]>,
+    loading: bool,
+    signed_in: bool,
+) -> bool {
+    active_tab.is_some_and(|tab| tab.os_gateway)
+        && signed_in
+        && !loading
+        && gateway_models.is_none_or(|models| models.is_empty())
+}
+
 impl App {
     /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
     /// is detected.
@@ -189,6 +204,47 @@ impl App {
         self.model_menu = Some(idx);
     }
 
+    pub(crate) fn maybe_fetch_active_os_gateway_models(&mut self) -> Option<Cmd<Msg>> {
+        let tabs = self.model_tabs();
+        let active_tab = self.model_tab.min(tabs.len().saturating_sub(1));
+        if !should_fetch_os_gateway_models(
+            tabs.get(active_tab),
+            self.os_gateway_models.as_deref(),
+            self.os_gateway_models_loading,
+            self.os_session.is_some(),
+        ) {
+            return None;
+        }
+        let session = self.os_session.clone()?;
+
+        self.os_gateway_models_loading = true;
+        self.os_gateway_models = None;
+        self.os_gateway_error = None;
+
+        let addr = session.address.clone();
+        let token = session.access_token.clone();
+        let login_at_ms = session.login_at_ms;
+        Some(cmd::cmd(move || async move {
+            Msg::OsGatewayModels {
+                login_at_ms,
+                result: crate::a3s_os::fetch_gateway_models(&addr, &token).await,
+            }
+        }))
+    }
+
+    pub(crate) fn clamp_open_model_menu_selection(&mut self) {
+        let Some(sel) = self.model_menu else {
+            return;
+        };
+        let tabs = self.model_tabs();
+        if tabs.is_empty() {
+            return;
+        }
+        self.model_tab = self.model_tab.min(tabs.len() - 1);
+        let last = tabs[self.model_tab].models.len().saturating_sub(1);
+        self.model_menu = Some(sel.min(last));
+    }
+
     /// Keys while the /model panel is open: ↑/↓ select, ←/→/Tab switch tab,
     /// Enter activate (config model, or sign in with the tab's account), Esc.
     pub(crate) fn handle_model_key(&mut self, key: &KeyEvent) -> Option<Option<Cmd<Msg>>> {
@@ -209,12 +265,12 @@ impl App {
             KeyCode::Left => {
                 self.model_tab = t.saturating_sub(1);
                 self.model_menu = Some(0);
-                Some(None)
+                Some(self.maybe_fetch_active_os_gateway_models())
             }
             KeyCode::Right | KeyCode::Tab => {
                 self.model_tab = (t + 1).min(tab_count - 1);
                 self.model_menu = Some(0);
-                Some(None)
+                Some(self.maybe_fetch_active_os_gateway_models())
             }
             KeyCode::Enter => {
                 self.activate_model_menu_item(&tabs[t], sel.min(last));
@@ -228,13 +284,13 @@ impl App {
         }
     }
 
-    pub(crate) fn handle_model_mouse(&mut self, mouse: &MouseEvent) {
+    pub(crate) fn handle_model_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
         let Some(sel) = self.model_menu else {
-            return;
+            return None;
         };
         let tabs = self.model_tabs();
         if tabs.is_empty() {
-            return;
+            return None;
         }
         let active_tab = self.model_tab.min(tabs.len() - 1);
         let max_rows = model_menu_max_rows(self.height as usize);
@@ -245,7 +301,7 @@ impl App {
             model_menu_panel(&tabs, active_tab, selected, self.model.as_deref(), max_rows);
         let row_count = panel.view(width as u16, height).lines().count();
         if row_count == 0 {
-            return;
+            return None;
         }
         panel.set_y_offset(model_menu_overlay_y_offset(self.height as usize, row_count));
 
@@ -253,13 +309,15 @@ impl App {
             Some(TabbedMenuPanelMsg::TabChanged(tab)) => {
                 self.model_tab = tab.min(tabs.len() - 1);
                 self.model_menu = Some(0);
+                self.maybe_fetch_active_os_gateway_models()
             }
             Some(TabbedMenuPanelMsg::Selected { tab, item }) => {
                 if let Some(tab) = tabs.get(tab) {
                     self.activate_model_menu_item(tab, item);
                 }
+                None
             }
-            Some(TabbedMenuPanelMsg::Cancelled) | None => {}
+            Some(TabbedMenuPanelMsg::Cancelled) | None => None,
         }
     }
 
@@ -295,8 +353,17 @@ impl App {
         ctx_limit_for_model(&self.model_ctx, model)
     }
 
-    fn commit_model_switch(&mut self, session: AgentSession, model: String) {
+    fn commit_model_switch(
+        &mut self,
+        session: AgentSession,
+        model: String,
+        source: ModelSelectionSource,
+    ) {
         self.replace_session(session);
+        let preference = ModelSelectionPreference {
+            source,
+            model: model.clone(),
+        };
         self.model = Some(model);
         // The next LLM round will report the new prompt fill for the new model.
         // Until then, do not show the previous model's prompt/token counters as
@@ -304,6 +371,11 @@ impl App {
         self.last_prompt_tokens = 0;
         self.ctx_warned_tier = 0;
         self.output_tokens = 0;
+        if let Err(error) = save_model_selection_preference(&preference) {
+            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                "  model switched, but preference was not saved: {error}"
+            )));
+        }
     }
 
     /// Sign in with the local Claude Code login and switch to one of its models
@@ -328,7 +400,11 @@ impl App {
                 self.context_limit = self.active_context_limit_for(&model);
                 match self.rebuild_session(Some(&model)) {
                     Ok((session, _)) => {
-                        self.commit_model_switch(session, model.clone());
+                        self.commit_model_switch(
+                            session,
+                            model.clone(),
+                            ModelSelectionSource::Claude,
+                        );
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -373,7 +449,7 @@ impl App {
                 self.context_limit = self.active_context_limit_for(model);
                 match self.rebuild_session(Some(model)) {
                     Ok((s, _)) => {
-                        self.commit_model_switch(s, model.to_string());
+                        self.commit_model_switch(s, model.to_string(), ModelSelectionSource::Codex);
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -400,17 +476,21 @@ impl App {
     }
 
     /// Route the agent's LLM through the OS **unified AI gateway**: an
-    /// OpenAI-compatible client at `{OS origin}/v1/chat/completions`, authed with
+    /// OpenAI-compatible client at the OS authenticated LLM proxy, authed with
     /// the OS Bearer token (the gateway is "gateway-managed" — it holds the real
-    /// provider keys). `model` is a gateway model id from its `/v1/models`.
+    /// provider keys). `model` is a gateway model id.
     fn use_os_gateway(&mut self, model: &str) {
         if model.starts_with('(') {
-            // A placeholder row. Surface the precise reason if the fetch failed,
-            // else it's genuinely unconfigured.
-            let reason = self.os_gateway_error.clone().unwrap_or_else(|| {
-                "no models configured — set up the unified AI gateway on OS, then retry /model"
-                    .to_string()
-            });
+            // A placeholder row. Surface loading, the precise failure reason, or
+            // the genuinely-unconfigured gateway state.
+            let reason = if self.os_gateway_models_loading || model.contains("loading") {
+                "model list is still loading — try again in a moment".to_string()
+            } else {
+                self.os_gateway_error.clone().unwrap_or_else(|| {
+                    "no models configured — set up the unified AI gateway on OS, then reopen the OS Gateway tab"
+                        .to_string()
+                })
+            };
             self.push_line(
                 &Style::new()
                     .fg(TN_YELLOW)
@@ -429,21 +509,13 @@ impl App {
         let Some(session) = self.os_session.clone() else {
             return;
         };
-        let origin = crate::a3s_os::os_origin(&session.address);
-        // Route through the OS backend's authenticated LLM proxy (validates the
-        // OS token, forwards to the internal gateway) rather than a bare `/v1`.
-        let client =
-            a3s_code_core::llm::OpenAiClient::new(session.access_token.clone(), model.to_string())
-                .with_base_url(origin)
-                .with_chat_completions_path("/api/v1/llm/chat/completions")
-                .with_provider_name("OS Gateway");
         let prev_override = self.llm_override.clone();
         let prev_ctx = self.context_limit;
-        self.llm_override = Some(Arc::new(client));
+        self.llm_override = Some(os_gateway_llm_override(&session, model));
         self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
-                self.commit_model_switch(s, model.to_string());
+                self.commit_model_switch(s, model.to_string(), ModelSelectionSource::OsGateway);
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -467,6 +539,11 @@ impl App {
     /// planning + goal tracking + a wider tool-round budget so a turn plans,
     /// then fans independent work out to visible parallel subagents.
     pub(crate) fn effort_session_opts(&self, thinking: bool) -> SessionOptions {
+        let budget = budget_plan_for_effort_index(
+            self.effort,
+            Some(self.context_limit),
+            BudgetWorkload::Interactive,
+        );
         let mut opts = with_recent_workspace_context(
             tui_session_options(self.confirmation.clone())
                 .with_session_store(self.store.clone())
@@ -482,7 +559,7 @@ impl App {
                 .with_auto_compact_threshold(auto_compact_threshold_for(self.context_limit))
                 .with_file_memory(memory_dir())
                 // Parallel fan-out available in every mode (not just ultracode).
-                .with_max_parallel_tasks(8)
+                .with_max_parallel_tasks(budget.max_parallel_tasks)
                 .with_auto_delegation_enabled(true)
                 .with_auto_parallel_delegation(true)
                 // Pin manual delegation on so `parallel_task`/`task` stay registered
@@ -492,10 +569,10 @@ impl App {
                 // Tool-round budget scales with effort (low 120 … max 500,
                 // ultracode 600) — the old flat ~50 default cut real multi-step
                 // work (and parallel subagents) short.
-                .with_max_tool_rounds(EFFORT_LEVELS[self.effort].max_tool_rounds)
+                .with_max_tool_rounds(budget.max_tool_rounds)
                 // Auto-continuation also scales: higher effort re-prompts more
                 // times to finish before giving up (low 2 … max/ultra 8).
-                .with_max_continuation_turns(EFFORT_LEVELS[self.effort].max_continuation_turns),
+                .with_max_continuation_turns(budget.max_continuation_turns),
             &self.workspace_manifest,
         );
         // Keep project instructions (CLAUDE.md) + any /compact summary across
@@ -529,7 +606,7 @@ impl App {
         }
         // Extended thinking is Anthropic-only; only request it when asked.
         if thinking {
-            opts = opts.with_thinking_budget(EFFORT_LEVELS[self.effort].thinking_budget);
+            opts = opts.with_thinking_budget(budget.thinking_budget);
         }
         if ultra {
             // Dynamic-workflow mode: planning is message-gated (Auto), so a turn
@@ -599,7 +676,7 @@ impl App {
         self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
             Ok((s, _)) => {
-                self.commit_model_switch(s, model.to_string());
+                self.commit_model_switch(s, model.to_string(), ModelSelectionSource::Config);
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -720,6 +797,62 @@ mod tests {
             (1, 0)
         );
         assert_eq!(selected_model_location(&tabs, Some("missing")), (0, 0));
+    }
+
+    #[test]
+    fn os_gateway_models_fetch_only_when_gateway_tab_is_active() {
+        let config_tab = ModelTab {
+            label: "a3s-code",
+            color: A3S_COLOR,
+            models: vec!["openai/gpt-5".into()],
+            provider: None,
+            os_gateway: false,
+        };
+        let gateway_tab = ModelTab {
+            label: "OS Gateway",
+            color: TN_CYAN,
+            models: vec!["(loading…)".into()],
+            provider: None,
+            os_gateway: true,
+        };
+        let cached = vec!["gpt-5.1".to_string()];
+
+        assert!(!should_fetch_os_gateway_models(
+            Some(&config_tab),
+            None,
+            false,
+            true
+        ));
+        assert!(!should_fetch_os_gateway_models(
+            Some(&gateway_tab),
+            None,
+            false,
+            false
+        ));
+        assert!(!should_fetch_os_gateway_models(
+            Some(&gateway_tab),
+            None,
+            true,
+            true
+        ));
+        assert!(!should_fetch_os_gateway_models(
+            Some(&gateway_tab),
+            Some(&cached),
+            false,
+            true
+        ));
+        assert!(should_fetch_os_gateway_models(
+            Some(&gateway_tab),
+            None,
+            false,
+            true
+        ));
+        assert!(should_fetch_os_gateway_models(
+            Some(&gateway_tab),
+            Some(&[]),
+            false,
+            true
+        ));
     }
 
     #[test]

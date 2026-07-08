@@ -1,5 +1,7 @@
 //! Config-file discovery and the first-launch starter template.
 
+use serde::{Deserialize, Serialize};
+
 /// A starter `config.acl` (HCL-like ACL) with placeholders, generated on first
 /// launch so a new user has something to edit instead of an error.
 pub(crate) fn config_template() -> &'static str {
@@ -53,6 +55,49 @@ providers "openai" {
 /// `~/.a3s/config.acl` — the default user-global config location.
 pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/config.acl"))
+}
+
+/// Where the interactive `/model` picker stores the last successful choice.
+pub(crate) fn model_selection_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/model-selection.json"))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ModelSelectionSource {
+    Config,
+    Claude,
+    Codex,
+    OsGateway,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ModelSelectionPreference {
+    pub source: ModelSelectionSource,
+    pub model: String,
+}
+
+/// Load the last successful `/model` choice. Invalid or empty preferences are
+/// ignored so a broken cache never prevents the TUI from launching.
+pub(crate) fn load_model_selection_preference() -> Option<ModelSelectionPreference> {
+    let path = model_selection_path()?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let preference = serde_json::from_str::<ModelSelectionPreference>(&raw).ok()?;
+    (!preference.model.trim().is_empty()).then_some(preference)
+}
+
+/// Persist the last successful `/model` choice without mutating config.acl.
+pub(crate) fn save_model_selection_preference(
+    preference: &ModelSelectionPreference,
+) -> std::io::Result<()> {
+    let path = model_selection_path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME unset"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(preference)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    std::fs::write(path, format!("{json}\n"))
 }
 
 /// Where long-term memory is stored: `$A3S_MEMORY_DIR`, else a top-level
@@ -272,5 +317,63 @@ memoryDir = "~/camel-memories"
             std::path::Path::new(&home).join("clones")
         );
         assert_eq!(expand_home("/abs/path"), std::path::Path::new("/abs/path"));
+    }
+
+    #[test]
+    fn model_selection_preference_round_trips_under_home() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let home = temp_home("model-selection-round-trip");
+        std::env::set_var("HOME", &home);
+
+        let preference = ModelSelectionPreference {
+            source: ModelSelectionSource::Codex,
+            model: "gpt-5.5".to_string(),
+        };
+        save_model_selection_preference(&preference).expect("preference should save");
+
+        assert_eq!(load_model_selection_preference(), Some(preference));
+        assert!(home.join(".a3s/model-selection.json").is_file());
+
+        restore_var("HOME", old_home);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn invalid_model_selection_preference_is_ignored() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let home = temp_home("model-selection-invalid");
+        let path = home.join(".a3s/model-selection.json");
+        std::fs::create_dir_all(path.parent().expect("path has parent")).unwrap();
+        std::fs::write(&path, "{not-json").unwrap();
+        std::env::set_var("HOME", &home);
+
+        assert_eq!(load_model_selection_preference(), None);
+
+        restore_var("HOME", old_home);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    fn temp_home(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("a3s-{name}-{}-{nanos}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn restore_var(key: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

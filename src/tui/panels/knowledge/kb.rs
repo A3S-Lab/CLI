@@ -3,7 +3,7 @@
 //! `/kb` shows the local vault state, previews imports before copying files,
 //! and keeps note/import/search flows explicit so a mistyped path does not turn
 //! into a note by accident. Shareable OKF knowledge-package assets live under
-//! `.a3s/okf` and are managed by the sibling `/okf` module.
+//! the workspace-visible `okf/` directory and are managed by `/okf`.
 
 use super::super::*;
 use a3s_tui::components::{divider_line_with, DetailPanel, DetailRow};

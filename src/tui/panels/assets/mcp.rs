@@ -2,17 +2,16 @@
 //!
 //! Bare `/mcp` opens a picker over `mcp_dir()` (`~/.a3s/mcps` or the `mcp_dir`
 //! config key). Enter puts the TUI into a local MCP-development context. Later
-//! OS subcommands can publish/debug/test the asset through Function as a
-//! Service, but local selection itself never opens OS or RemoteUI.
+//! OS subcommands can publish/deploy the asset and, when OS exposes a real MCP
+//! runner capability, run/test it. Local selection itself never opens OS or
+//! RemoteUI.
 
+use super::super::asset_lifecycle;
 use super::super::os_progressive;
 use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const MCP_MANIFEST_PATH: &str = ".a3s/mcp.asset.json";
-const MCP_SERVER_CONFIG_PATH: &str = ".a3s/mcp.server.json";
-const MCP_RUNTIME_BINDING_PATH: &str = ".a3s/mcp.runtime-binding.json";
 const MAX_MCP_SOURCE_FILES: usize = 200;
 const MAX_MCP_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
 const MCP_OVERLAY_ROWS_BELOW: usize = 5;
@@ -47,8 +46,8 @@ pub(crate) struct McpDevSession {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum McpOsAction {
     Publish,
+    Run,
     Deploy,
-    Debug,
     Test,
     Open,
     Logs,
@@ -59,8 +58,8 @@ impl McpOsAction {
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Publish => "publish",
+            Self::Run => "run",
             Self::Deploy => "deploy",
-            Self::Debug => "debug",
             Self::Test => "test",
             Self::Open => "open",
             Self::Logs => "logs",
@@ -77,8 +76,8 @@ pub(crate) enum McpSubcommand {
     Review,
     Activity(String),
     Publish,
+    Run,
     Deploy,
-    Debug,
     Test,
     Open,
     Logs,
@@ -90,8 +89,8 @@ impl McpSubcommand {
         match self {
             Self::Exit | Self::Clone(_) | Self::List(_) | Self::Review | Self::Activity(_) => None,
             Self::Publish => Some(McpOsAction::Publish),
+            Self::Run => Some(McpOsAction::Run),
             Self::Deploy => Some(McpOsAction::Deploy),
-            Self::Debug => Some(McpOsAction::Debug),
             Self::Test => Some(McpOsAction::Test),
             Self::Open => Some(McpOsAction::Open),
             Self::Logs => Some(McpOsAction::Logs),
@@ -122,13 +121,7 @@ struct McpSourceFile {
     bytes: Vec<u8>,
 }
 
-const MCP_MARKERS: &[&str] = &[
-    ".a3s/mcp.server.json",
-    "mcp.server.json",
-    "mcp.json",
-    "package.json",
-    "pyproject.toml",
-];
+const MCP_MARKERS: &[&str] = &["server.js", "server.py", "mcp.py"];
 
 /// List MCP assets recursively, skipping dot-directories except the asset-local
 /// `.a3s` metadata folder. An asset is any directory with an MCP marker.
@@ -192,50 +185,180 @@ fn mcp_project_from_dir(root: &std::path::Path, dir: &std::path::Path) -> Option
 }
 
 fn mcp_project_metadata(dir: &std::path::Path) -> Option<(String, String)> {
-    for marker in [".a3s/mcp.server.json", "mcp.server.json", "mcp.json"] {
-        let path = dir.join(marker);
-        let Ok(text) = std::fs::read_to_string(path) else {
+    visible_readme_metadata(&dir.join("README.md"))
+}
+
+fn visible_readme_metadata(path: &std::path::Path) -> Option<(String, String)> {
+    let body = std::fs::read_to_string(path).ok()?;
+    let mut title = None;
+    let mut description = None;
+    for line in body.lines() {
+        let line = line.trim();
+        if title.is_none() {
+            if let Some(name) = line.strip_prefix("# ") {
+                let name = name.trim();
+                if !name.is_empty() {
+                    title = Some(name.to_string());
+                }
+            }
             continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        if let Some(name) = value
-            .get("name")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            let description = value
-                .get("description")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("Local MCP server asset")
-                .to_string();
-            return Some((name.to_string(), description));
+        }
+        if description.is_none() && !line.is_empty() && !line.starts_with('#') {
+            description = Some(line.trim_end_matches('.').to_string());
+            break;
         }
     }
-    if let Ok(text) = std::fs::read_to_string(dir.join("package.json")) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(name) = value
-                .get("name")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
+    title.map(|name| {
+        (
+            name,
+            description.unwrap_or_else(|| "Local MCP server asset".to_string()),
+        )
+    })
+}
+
+pub(crate) fn scaffold_mcp_project(
+    description: &str,
+    root: &std::path::Path,
+) -> Result<McpDevSession, String> {
+    let name = asset_lifecycle::scaffold_name(description, "mcp-server");
+    let package = asset_lifecycle::unique_asset_dir(root, &name);
+    let final_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(name.as_str())
+        .to_string();
+    let description =
+        asset_lifecycle::scaffold_description(description, &final_name, "Local MCP server asset");
+
+    std::fs::create_dir_all(package.join(".a3s"))
+        .map_err(|e| format!("could not create {}: {e}", package.join(".a3s").display()))?;
+    for dir in ["examples", "tests"] {
+        std::fs::create_dir_all(package.join(dir))
+            .map_err(|e| format!("could not create {}: {e}", package.join(dir).display()))?;
+    }
+
+    let server_config = serde_json::json!({
+        "version": "a3s.mcp.server.v1",
+        "name": final_name,
+        "description": description,
+        "transport": "stdio",
+        "command": "node",
+        "args": ["server.js"],
+        "entrypoint": "server.js",
+        "tools": [
             {
-                let description = value
-                    .get("description")
-                    .and_then(|value| value.as_str())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or("Local MCP server asset")
-                    .to_string();
-                return Some((name.to_string(), description));
+                "name": "health",
+                "description": "Return a lightweight health response for this MCP asset.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            }
+        ],
+        "category": "mcp",
+        "runtimeIntent": {
+            "service": "Function as a Service",
+            "runtimeBinding": {
+                "kind": "mcp",
+                "isolation": "serving",
+                "agentKind": "tool",
+                "runtimeKind": "a3s-function-service",
+                "protocol": "mcp"
             }
         }
-    }
-    None
+    });
+    let rel = asset_lifecycle::normalized_rel(root, &package);
+    let dev = McpDevSession {
+        name: final_name.clone(),
+        description: description.clone(),
+        rel,
+        path: package.clone(),
+        root: root.to_path_buf(),
+    };
+    let asset_name = mcp_asset_name(&final_name);
+    let asset_acl = mcp_asset_acl(&dev, &asset_name, &server_config);
+
+    asset_lifecycle::write_scaffold_file(
+        &package.join("server.js"),
+        mcp_scaffold_server_js(&description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("README.md"),
+        mcp_scaffold_readme(&final_name, &description).as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("examples/example-request.md"),
+        mcp_scaffold_example_request().as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join("tests/smoke.md"),
+        mcp_scaffold_tests().as_bytes(),
+    )?;
+    asset_lifecycle::write_scaffold_file(
+        &package.join(asset_lifecycle::ASSET_ACL_PATH),
+        asset_acl.as_bytes(),
+    )?;
+
+    Ok(dev)
+}
+
+fn mcp_scaffold_server_js(description: &str) -> String {
+    let description = serde_json::to_string(description).unwrap_or_else(|_| "\"MCP asset\"".into());
+    format!(
+        "const description = {description};\n\
+         \n\
+         if (process.argv.includes('--smoke')) {{\n\
+         \x20 console.log(JSON.stringify({{ ok: true, description }}));\n\
+         \x20 process.exit(0);\n\
+         }}\n\
+         \n\
+         process.stdin.setEncoding('utf8');\n\
+         let buffer = '';\n\
+         process.stdin.on('data', (chunk) => {{\n\
+         \x20 buffer += chunk;\n\
+         \x20 for (;;) {{\n\
+         \x20\x20 const nl = buffer.indexOf('\\n');\n\
+         \x20\x20 if (nl < 0) break;\n\
+         \x20\x20 const line = buffer.slice(0, nl).trim();\n\
+         \x20\x20 buffer = buffer.slice(nl + 1);\n\
+         \x20\x20 if (!line) continue;\n\
+         \x20\x20 const request = JSON.parse(line);\n\
+         \x20\x20 const response = request.method === 'tools/call'\n\
+         \x20\x20\x20 ? {{ jsonrpc: '2.0', id: request.id, result: {{ content: [{{ type: 'text', text: `ok: ${{description}}` }}] }} }}\n\
+         \x20\x20\x20 : {{ jsonrpc: '2.0', id: request.id, result: {{ tools: [{{ name: 'health', description }}] }} }};\n\
+         \x20\x20 process.stdout.write(JSON.stringify(response) + '\\n');\n\
+         \x20 }}\n\
+         }});\n"
+    )
+}
+
+fn mcp_scaffold_readme(name: &str, description: &str) -> String {
+    format!(
+        "# {name}\n\n\
+         {description}.\n\n\
+         ## Source\n\n\
+         - `server.js` is the MCP server source entrypoint.\n\
+         - `examples/` and `tests/` contain smoke fixtures.\n\
+         - `.a3s/` contains only `asset.acl`.\n\n\
+         ## Lifecycle\n\n\
+         - `a3s code mcp publish .`\n\
+         - `a3s code mcp run .`\n\
+         - `a3s code mcp test .`\n\
+         - `a3s code mcp deploy .`\n"
+    )
+}
+
+fn mcp_scaffold_tests() -> &'static str {
+    "# MCP Smoke Checklist\n\n\
+     1. Run `node --check server.js`.\n\
+     2. Run `node server.js --smoke`.\n\
+     3. Confirm `.a3s/asset.acl` points source to `server.js`.\n"
+}
+
+fn mcp_scaffold_example_request() -> &'static str {
+    "# Example Request\n\n\
+     Call the `health` tool with an empty argument object during local smoke testing.\n"
 }
 
 fn mcp_name_from_rel(rel: &str) -> String {
@@ -288,23 +411,20 @@ pub(crate) fn parse_mcp_subcommand(input: &str) -> Option<Result<McpSubcommand, 
             }
             Some(Ok(McpSubcommand::Deploy))
         }
-        "debug" => {
+        "run" => {
             if parts.next().is_some() {
-                return Some(Err("usage: /mcp debug".to_string()));
+                return Some(Err("usage: /mcp run".to_string()));
             }
-            Some(Ok(McpSubcommand::Debug))
+            Some(Ok(McpSubcommand::Run))
         }
-        "run" | "invoke" => Some(Err(
-            "MCP assets use /mcp debug for single tool calls and /mcp test for batch tests"
-                .to_string(),
-        )),
+        "debug" | "invoke" => Some(Err(format!("unknown /mcp command `{head}`"))),
         "test" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /mcp test".to_string()));
             }
             Some(Ok(McpSubcommand::Test))
         }
-        "batch" => Some(Err("usage: /mcp test".to_string())),
+        "batch" => Some(Err("unknown /mcp command `batch`".to_string())),
         "open" => {
             if parts.next().is_some() {
                 return Some(Err("usage: /mcp open".to_string()));
@@ -436,38 +556,17 @@ fn mcp_view_spec(url: String) -> remote_ui::ViewSpec {
 }
 
 fn mcp_metadata_value(dev: &McpDevSession) -> serde_json::Value {
-    for marker in [".a3s/mcp.server.json", "mcp.server.json", "mcp.json"] {
-        let path = dev.path.join(marker);
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        if value.is_object() {
-            return value;
-        }
-    }
-    if let Ok(text) = std::fs::read_to_string(dev.path.join("package.json")) {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
-            let name = json_str_at(&value, &["/name", "name"]).unwrap_or(&dev.name);
-            let description =
-                json_str_at(&value, &["/description", "description"]).unwrap_or(&dev.description);
-            let main = json_str_at(&value, &["/main", "main"]).unwrap_or("index.js");
-            return serde_json::json!({
-                "name": name,
-                "description": description,
-                "transport": "stdio",
-                "entrypoint": main,
-                "tools": [],
-            });
-        }
-    }
+    let entrypoint = ["server.js", "server.py", "mcp.py"]
+        .into_iter()
+        .find(|rel| dev.path.join(rel).is_file())
+        .unwrap_or("server.js");
     serde_json::json!({
         "name": dev.name,
         "description": dev.description,
         "transport": "stdio",
-        "entrypoint": "README.md",
+        "command": if entrypoint.ends_with(".py") { "python3" } else { "node" },
+        "args": [entrypoint],
+        "entrypoint": entrypoint,
         "tools": [],
     })
 }
@@ -554,8 +653,7 @@ fn mcp_manifest_json(
         "name": asset_name,
         "mcpName": mcp_config_name(server_config, dev),
         "description": mcp_config_description(server_config, dev),
-        "serverConfigPath": MCP_SERVER_CONFIG_PATH,
-        "runtimeBindingPath": MCP_RUNTIME_BINDING_PATH,
+        "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         "localPath": dev.rel,
         "service": "Function as a Service",
         "runtimeIntent": {
@@ -584,7 +682,7 @@ fn mcp_runtime_binding_json(
             "kind": "asset",
             "ref": "main",
             "packageRoot": ".",
-            "configPath": MCP_SERVER_CONFIG_PATH,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
         },
         "runtime": {
             "kind": "a3s-function-service",
@@ -605,10 +703,37 @@ fn mcp_runtime_binding_json(
             "assetName": asset_name,
             "mcpName": mcp_config_name(server_config, dev),
             "description": mcp_config_description(server_config, dev),
-            "serverConfigPath": MCP_SERVER_CONFIG_PATH,
+            "assetAclPath": asset_lifecycle::ASSET_ACL_PATH,
             "localPath": dev.rel,
             "tools": mcp_tool_names(server_config),
         },
+    })
+}
+
+fn mcp_asset_acl(
+    dev: &McpDevSession,
+    asset_name: &str,
+    server_config: &serde_json::Value,
+) -> String {
+    let source = [("entrypoint", "server.js"), ("package_root", ".")];
+    let metadata: [(&str, &str); 0] = [];
+    let description = mcp_config_description(server_config, dev);
+    asset_lifecycle::render_asset_acl(asset_lifecycle::AssetAclDocument {
+        category: "mcp",
+        kind: Some("mcp"),
+        name: asset_name,
+        description: &description,
+        local_path: Some(dev.rel.as_str()),
+        service: asset_lifecycle::OsService::FunctionAsAService,
+        runtime: asset_lifecycle::RuntimeBindingIntent {
+            kind: "mcp",
+            isolation: "serving",
+            runtime_kind: "a3s-function-service",
+            protocol: Some("mcp"),
+            agent_kind: Some("tool"),
+        },
+        source: &source,
+        metadata: &metadata,
     })
 }
 
@@ -648,13 +773,7 @@ fn collect_mcp_source_files_inner(
             .map(|c| c.as_os_str().to_string_lossy())
             .collect::<Vec<_>>()
             .join("/");
-        if [
-            MCP_MANIFEST_PATH,
-            MCP_SERVER_CONFIG_PATH,
-            MCP_RUNTIME_BINDING_PATH,
-        ]
-        .contains(&rel.as_str())
-        {
+        if rel.starts_with(".a3s/") {
             continue;
         }
         let meta = std::fs::metadata(&path)
@@ -675,12 +794,21 @@ fn collect_mcp_source_files_inner(
 fn should_skip_mcp_dir(name: &str) -> bool {
     matches!(
         name,
-        ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__"
+        ".a3s" | ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__"
     )
 }
 
 fn should_skip_mcp_file(name: &str) -> bool {
-    name == ".DS_Store" || name.starts_with(".env")
+    matches!(
+        name,
+        ".DS_Store"
+            | "mcp.asset.json"
+            | "mcp.server.json"
+            | "mcp.runtime-binding.json"
+            | "runtime-binding.json"
+            | "mcp.json"
+            | "package.json"
+    ) || name.starts_with(".env")
 }
 
 fn mcp_asset_ref_from_value(asset: &serde_json::Value, fallback_name: &str) -> Option<McpAssetRef> {
@@ -804,9 +932,10 @@ async fn upload_mcp_project(
     token: &str,
     asset_id: &str,
     source_files: &[McpSourceFile],
-    manifest: &serde_json::Value,
-    server_config: &serde_json::Value,
-    runtime_binding: &serde_json::Value,
+    asset_acl: &str,
+    _manifest: &serde_json::Value,
+    _server_config: &serde_json::Value,
+    _runtime_binding: &serde_json::Value,
 ) -> Result<(), String> {
     use base64::Engine;
 
@@ -818,22 +947,8 @@ async fn upload_mcp_project(
         }));
     }
     files.push(serde_json::json!({
-        "path": MCP_MANIFEST_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(manifest).map_err(|e| e.to_string())?
-        ),
-    }));
-    files.push(serde_json::json!({
-        "path": MCP_SERVER_CONFIG_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(server_config).map_err(|e| e.to_string())?
-        ),
-    }));
-    files.push(serde_json::json!({
-        "path": MCP_RUNTIME_BINDING_PATH,
-        "contentBase64": base64::engine::general_purpose::STANDARD.encode(
-            serde_json::to_vec_pretty(runtime_binding).map_err(|e| e.to_string())?
-        ),
+        "path": asset_lifecycle::ASSET_ACL_PATH,
+        "contentBase64": base64::engine::general_purpose::STANDARD.encode(asset_acl.as_bytes()),
     }));
 
     let resp = http()?
@@ -1027,7 +1142,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding check failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1063,7 +1178,7 @@ async fn runtime_binding_validation_status(
             return format!(
                 "runtime-binding validation failed: {}",
                 truncate(&err.to_string(), 120)
-            )
+            );
         }
     };
     let status = resp.status();
@@ -1174,7 +1289,15 @@ fn mcp_function_input(
 }
 
 fn mcp_function_ref(asset: &McpAssetRef) -> &str {
-    &asset.name
+    &asset.id
+}
+
+fn unix_timestamp_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn mcp_progressive_params(
@@ -1197,7 +1320,6 @@ fn mcp_progressive_params(
         "assetId": asset.id,
         "assetName": asset.name,
         "input": input,
-        "agentKind": "tool",
         "config": config,
         "timeoutMs": 120000,
         "idempotencyKey": format!("a3s-code-mcp-progressive-{}", unix_timestamp_secs()),
@@ -1223,7 +1345,6 @@ fn mcp_observe_progressive_params(
         "name": asset.name,
         "mcpName": mcp_name,
         "category": "mcp",
-        "agentKind": "tool",
         "operation": action.label(),
         "input": {
             "assetId": asset.id,
@@ -1246,6 +1367,29 @@ fn mcp_observe_progressive_params(
 
 fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i32 {
     let combined = format!("{text} {operation}").to_ascii_lowercase();
+    let operation_lower = operation.to_ascii_lowercase();
+    if matches!(action, McpOsAction::Open | McpOsAction::Logs)
+        && (operation_lower.contains("createasset")
+            || operation_lower.contains("listasset")
+            || operation_lower.contains("getasset")
+            || operation_lower.contains("deployability")
+            || operation_lower.contains("diagnose")
+            || operation_lower.contains("acknowledge")
+            || operation_lower.contains("marketplace")
+            || operation_lower.contains("scaffold")
+            || operation_lower.contains("template")
+            || operation_lower.contains("preview"))
+    {
+        return 0;
+    }
+    if matches!(action, McpOsAction::Open | McpOsAction::Logs)
+        && is_mutating_mcp_observe_operation(&combined, operation)
+    {
+        return 0;
+    }
+    if matches!(action, McpOsAction::Open | McpOsAction::Logs) && !combined.contains("mcp") {
+        return 0;
+    }
     let mut score = 0;
     if combined.contains("function") || combined.contains("faas") {
         score += 8;
@@ -1253,13 +1397,19 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
     if combined.contains("mcp") {
         score += 8;
     }
+    if matches!(action, McpOsAction::Run | McpOsAction::Test) && !combined.contains("mcp") {
+        return 0;
+    }
     if combined.contains("tool") {
         score += 3;
     }
     let mut action_hit = false;
     match action {
-        McpOsAction::Debug => {
-            if combined.contains("invoke") || combined.contains("invocation") {
+        McpOsAction::Run => {
+            if operation_lower.contains("run")
+                || combined.contains("run mcp")
+                || combined.contains("mcp run")
+            {
                 score += 12;
                 action_hit = true;
             }
@@ -1272,16 +1422,12 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
                 score += 12;
                 action_hit = true;
             }
-            if combined.contains("invoke") && !combined.contains("batch") {
-                score -= 4;
-            }
         }
         McpOsAction::Open => {
-            if combined.contains("open")
-                || combined.contains("view")
+            if (operation_lower.contains("open") && !operation_lower.contains("reopen"))
+                || (operation_lower.contains("view") && !operation_lower.contains("preview"))
                 || combined.contains("remoteui")
-                || combined.contains("manage")
-                || combined.contains("asset view")
+                || combined.contains("mcp asset view")
             {
                 score += 10;
                 action_hit = true;
@@ -1291,11 +1437,10 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
             }
         }
         McpOsAction::Logs
-            if combined.contains("log")
-                || combined.contains("trace")
-                || combined.contains("job")
-                || combined.contains("process")
-                || combined.contains("observability") =>
+            if operation_lower.contains("log")
+                || operation_lower.contains("trace")
+                || operation_lower.contains("inspect")
+                || operation_lower.contains("observability") =>
         {
             score += 10;
             action_hit = true;
@@ -1307,7 +1452,7 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
     }
     if matches!(
         action,
-        McpOsAction::Debug | McpOsAction::Test | McpOsAction::Open | McpOsAction::Logs
+        McpOsAction::Run | McpOsAction::Test | McpOsAction::Open | McpOsAction::Logs
     ) && !action_hit
     {
         0
@@ -1316,6 +1461,33 @@ fn mcp_progressive_score(action: McpOsAction, text: &str, operation: &str) -> i3
     } else {
         0
     }
+}
+
+fn is_mutating_mcp_observe_operation(_combined: &str, operation: &str) -> bool {
+    let operation = operation.to_ascii_lowercase();
+    let has_safe_observe_hint = operation.contains("open")
+        || operation.contains("view")
+        || operation.contains("get")
+        || operation.contains("list")
+        || operation.contains("inspect")
+        || operation.contains("log");
+    let has_mutating_hint = operation.contains("create")
+        || operation.contains("update")
+        || operation.contains("delete")
+        || operation.contains("apply")
+        || operation.contains("publish")
+        || operation.contains("deploy")
+        || operation.contains("build")
+        || operation.contains("launch")
+        || operation.contains("reopen")
+        || operation.contains("close")
+        || operation.contains("resolve")
+        || operation.contains("run")
+        || operation.contains("trigger")
+        || operation.contains("batch")
+        || operation.contains("validate")
+        || operation.contains("acknowledge");
+    has_mutating_hint && !has_safe_observe_hint
 }
 
 async fn try_mcp_progressive_observe(
@@ -1367,7 +1539,7 @@ async fn try_mcp_progressive_function(
     inputs: Option<Vec<serde_json::Value>>,
 ) -> Option<(remote_ui::ViewSpec, String)> {
     let query = match action {
-        McpOsAction::Debug => "Function as a Service invoke MCP tool asset shaped view",
+        McpOsAction::Run => "Function as a Service run MCP tool asset shaped view",
         McpOsAction::Test => "Function as a Service batch MCP tools shaped view",
         _ => return None,
     };
@@ -1385,8 +1557,8 @@ async fn try_mcp_progressive_function(
         .view
         .unwrap_or_else(|| mcp_view_spec(mcp_function_view_url(origin, &asset.id)));
     let note = match action {
-        McpOsAction::Debug => format!(
-            "OS Function as a Service accepted the MCP debug invoke through progressive capabilities (`{}`).",
+        McpOsAction::Run => format!(
+            "OS Function as a Service accepted the MCP run through progressive capabilities (`{}`).",
             execution.operation.operation
         ),
         McpOsAction::Test => format!(
@@ -1398,20 +1570,20 @@ async fn try_mcp_progressive_function(
     Some((view, note))
 }
 
-async fn invoke_mcp_function(
+async fn run_mcp_function(
     client: &reqwest::Client,
     origin: &str,
     token: &str,
     asset: &McpAssetRef,
     server_config: &serde_json::Value,
-) -> Option<(remote_ui::ViewSpec, String)> {
+) -> Result<(remote_ui::ViewSpec, String), String> {
     let tool = mcp_tool_names(server_config).into_iter().next();
-    let input = mcp_function_input("debug", asset, server_config, tool.as_deref());
+    let input = mcp_function_input("run", asset, server_config, tool.as_deref());
     if let Some(result) = try_mcp_progressive_function(
         client,
         origin,
         token,
-        McpOsAction::Debug,
+        McpOsAction::Run,
         asset,
         server_config,
         input.clone(),
@@ -1419,49 +1591,11 @@ async fn invoke_mcp_function(
     )
     .await
     {
-        return Some(result);
+        return Ok(result);
     }
-    let resp = client
-        .post(format!(
-            "{}/api/v1/functions/{}/invoke",
-            origin.trim_end_matches('/'),
-            path_segment(mcp_function_ref(asset))
-        ))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "input": input,
-            "agentKind": "tool",
-            "config": {
-                "assetId": asset.id,
-                "assetName": asset.name,
-                "category": "mcp",
-                "protocol": "mcp",
-            },
-            "timeoutMs": 120000,
-            "idempotencyKey": format!("a3s-code-mcp-debug-{}", unix_timestamp_secs()),
-        }))
-        .send()
-        .await
-        .ok()?;
-    let status = resp.status();
-    let text = resp.text().await.ok()?;
-    let fallback = mcp_view_spec(mcp_function_view_url(origin, &asset.id));
-    if !status.is_success() || envelope_text_is_error(&text) {
-        return Some((
-            fallback,
-            format!(
-                "Published `{}`; OS Function as a Service debug invoke was unavailable ({}).",
-                asset.name,
-                truncate(&text, 160)
-            ),
-        ));
-    }
-    Some((
-        remote_ui::find_view_url(&text, Some(origin)).unwrap_or(fallback),
-        format!(
-            "OS Function as a Service accepted the MCP debug invoke for `{}`.",
-            asset.name
-        ),
+    Err(format!(
+        "Published `{}` but OS did not expose a runnable MCP capability yet. Use `mcp deploy`, `mcp open`, or `mcp status` until the OS MCP runner API is available.",
+        asset.name
     ))
 }
 
@@ -1471,7 +1605,7 @@ async fn batch_test_mcp_function(
     token: &str,
     asset: &McpAssetRef,
     server_config: &serde_json::Value,
-) -> Option<(remote_ui::ViewSpec, String)> {
+) -> Result<(remote_ui::ViewSpec, String), String> {
     let mut tools = mcp_tool_names(server_config);
     if tools.is_empty() {
         tools.push("list-tools".to_string());
@@ -1497,64 +1631,12 @@ async fn batch_test_mcp_function(
     )
     .await
     {
-        return Some(result);
+        return Ok(result);
     }
-    let resp = client
-        .post(format!(
-            "{}/api/v1/functions/{}/batch",
-            origin.trim_end_matches('/'),
-            path_segment(mcp_function_ref(asset))
-        ))
-        .bearer_auth(token)
-        .json(&serde_json::json!({
-            "inputs": inputs,
-            "agentKind": "tool",
-            "config": {
-                "assetId": asset.id,
-                "assetName": asset.name,
-                "category": "mcp",
-                "protocol": "mcp",
-            },
-            "timeoutMs": 120000,
-            "idempotencyKey": format!("a3s-code-mcp-test-{}", unix_timestamp_secs()),
-        }))
-        .send()
-        .await
-        .ok()?;
-    let status = resp.status();
-    let text = resp.text().await.ok()?;
-    let fallback = mcp_view_spec(mcp_function_view_url(origin, &asset.id));
-    if !status.is_success() || envelope_text_is_error(&text) {
-        return Some((
-            fallback,
-            format!(
-                "Published `{}`; OS Function as a Service batch test was unavailable ({}).",
-                asset.name,
-                truncate(&text, 160)
-            ),
-        ));
-    }
-    Some((
-        remote_ui::find_view_url(&text, Some(origin)).unwrap_or(fallback),
-        format!(
-            "OS Function as a Service accepted the MCP batch test for `{}`.",
-            asset.name
-        ),
+    Err(format!(
+        "Published `{}` but OS did not expose an MCP test capability yet. Use `mcp deploy`, `mcp open`, or `mcp status` until the OS MCP runner API is available.",
+        asset.name
     ))
-}
-
-fn envelope_text_is_error(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .is_some_and(|value| envelope_json_is_error(&value))
-}
-
-fn unix_timestamp_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }
 
 fn append_mcp_runtime_binding_sync_note(
@@ -1618,11 +1700,14 @@ pub(crate) async fn publish_mcp_to_os(
     let source_files = collect_mcp_source_files(&dev.path)?;
     let manifest = mcp_manifest_json(&dev, &asset_name, &server_config);
     let runtime_binding = mcp_runtime_binding_json(&dev, &asset_name, &server_config);
+    let asset_acl = mcp_asset_acl(&dev, &asset_name, &server_config);
+    asset_lifecycle::write_asset_acl(&dev.path, &asset_acl)?;
     upload_mcp_project(
         &origin,
         &session.access_token,
         &asset.id,
         &source_files,
+        &asset_acl,
         &manifest,
         &server_config,
         &runtime_binding,
@@ -1644,20 +1729,14 @@ pub(crate) async fn publish_mcp_to_os(
                 "Deployed `{mcp_name}` by publishing its serving MCP runtime binding for Function as a Service."
             ),
         ),
-        McpOsAction::Debug => invoke_mcp_function(
+        McpOsAction::Run => run_mcp_function(
             &client,
             &origin,
             &session.access_token,
             &asset,
             &server_config,
         )
-        .await
-        .unwrap_or_else(|| {
-            (
-                mcp_view_spec(mcp_function_view_url(&origin, &asset.id)),
-                format!("Published `{mcp_name}`; opened the Function as a Service view because debug invoke was unavailable."),
-            )
-        }),
+        .await?,
         McpOsAction::Test => batch_test_mcp_function(
             &client,
             &origin,
@@ -1665,13 +1744,7 @@ pub(crate) async fn publish_mcp_to_os(
             &asset,
             &server_config,
         )
-        .await
-        .unwrap_or_else(|| {
-            (
-                mcp_view_spec(mcp_function_view_url(&origin, &asset.id)),
-                format!("Published `{mcp_name}`; opened the Function as a Service view because batch test was unavailable."),
-            )
-        }),
+        .await?,
         McpOsAction::Open | McpOsAction::Logs | McpOsAction::Status => {
             unreachable!("read-only MCP actions return before publish flow")
         }
@@ -1767,24 +1840,32 @@ fn mcp_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
 }
 
 /// Directive for `/mcp <description>`: create a local MCP server asset.
+#[cfg(test)]
 pub(crate) fn mcp_gen_prompt(description: &str, dir: &str) -> String {
     format!(
         "Create a local MCP server asset from the description below and save it under \
          {dir}. This is a local authoring task: do not open OS, RemoteUI, or a browser.\n\
          Description: {description}\n\
          IMPORTANT: {dir} is OUTSIDE this session's workspace, so path-scoped file tools \
-         may reject it. Use non-interactive bash commands with full quoted paths. Never run \
-         a command that waits on stdin.\n\
+         will reject writes there. Use the `bash` tool for ALL file creation and edits under \
+         {dir}; do not use path-scoped write/edit tools for this task. Use non-interactive bash \
+         commands with full quoted paths. Never run a command that waits on stdin. Prefer a \
+         single bash heredoc script that creates the directory and ALL required files; the first \
+         bash command should leave a complete asset package on disk.\n\
          Create {dir}/<kebab-case-name>/ with a minimal runnable MCP server, README.md, \
-         package.json or pyproject.toml, tool schema examples, .a3s/mcp.asset.json, \
-         .a3s/mcp.server.json, and .a3s/mcp.runtime-binding.json. \
-         The metadata file should include name, description, transport, entrypoint, tools, \
-         category=mcp, service=Function as a Service, runtimeIntent.kind=mcp, isolation=serving, \
-         runtime.kind=a3s-function-service, protocol=mcp, and agentKind=tool for future Function \
-         invoke/batch calls.\n\
-         Prefer stdio for local development. Add a small test or smoke script that lists \
-         tools and calls one example tool. Validate JSON files with python3 -m json.tool, \
-         then report the saved asset path and tell the user `/mcp` starts local MCP dev."
+         examples/, tests/, and .a3s/asset.acl. \
+         The package-local `.a3s/` directory is metadata-only. Do NOT put `server.js`, \
+         README, examples, tests, or other source files under `.a3s/`. \
+         Do NOT create extra generated JSON config files; keep package configuration in \
+         `.a3s/asset.acl`. Runtime configuration is synced through OS Function as a Service \
+         APIs during publish/deploy, not stored in the asset repository.\n\
+         Keep the first implementation tiny. Prefer a small stdio server stub over an elaborate framework implementation. Prefer stdio for local \
+         development. Add a small smoke script file, but do NOT start a \
+         long-running MCP stdio server during generation. For validation, use static or one-shot \
+         checks only, such as `python3 -m py_compile server.py` or \
+         `node --check server.js`; do not start the server process. After validation succeeds, \
+         stop using tools immediately and give a concise final answer with the saved asset path \
+         and the note that `/mcp` starts local MCP dev."
     )
 }
 
@@ -1800,7 +1881,7 @@ pub(crate) fn mcp_dev_prompt(session: &McpDevSession, request: &str) -> String {
          before editing. Keep the server runnable locally, preserve valid tool schemas, and \
          keep metadata ready for OS Function as a Service: category=mcp, runtime binding \
          kind=mcp, serving isolation by default, and tool calls that can map to Function \
-         invoke/batch with agentKind=tool. Do not open OS, WebIDE, RemoteUI, or browser pages \
+         run/batch with agentKind=tool. Do not open OS, WebIDE, RemoteUI, or browser pages \
          for this local MCP-dev turn. Validate changed JSON and run a lightweight local smoke \
          check when practical. End with a concise summary and the next best MCP Function as a Service step.\n\n\
          The TUI remains in MCP-development mode for `{name}` after this turn; the user can \
@@ -1824,7 +1905,7 @@ pub(crate) fn mcp_review_prompt(session: &McpDevSession) -> String {
          Read the project metadata and key implementation files. Report concise findings on: MCP \
          protocol correctness, tool schemas, entrypoint/run command, local smoke tests, secret \
          handling, packaging, .a3s metadata, and readiness for Function as a Service. Mention the \
-         smallest recommended improvements and whether `/mcp debug` or `/mcp deploy` is the right \
+         smallest recommended improvements and whether `/mcp run` or `/mcp deploy` is the right \
          next lifecycle step.{contract}",
         name = session.name.as_str(),
         description = session.description.as_str(),
@@ -1855,14 +1936,14 @@ impl App {
                 if result.open_view {
                     self.push_line(&gutter(
                         ACCENT,
-                        &remote_view_button("MCP Function as a Service · click or /view reopens"),
+                        &remote_view_button("MCP Function as a Service · click to reopen"),
                     ));
                     self.open_remote_view(&result.view);
                 } else {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GRAY)
-                            .render("  /view opens the related OS MCP asset view"),
+                            .render("  Open view opens the related OS MCP asset view"),
                     );
                 }
             }
@@ -2233,16 +2314,33 @@ mod tests {
                 r#"{"code":404,"message":"capabilities unavailable in mock"}"#.to_string(),
             );
         }
-        if line.starts_with("POST /api/v1/functions/mcp-weather-tools/invoke ") {
+        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+    }
+
+    fn mcp_publish_progressive_mock_response(line: &str, body: &str) -> (&'static str, String) {
+        if !line.starts_with("POST /api/v1/kernel/capabilities ") {
+            return mcp_publish_function_mock_response(line, body);
+        }
+        if body.contains(r#""action":"search""#) {
             return (
                 "200 OK",
-                r#"{"data":{"viewUrl":"/admin/infrastructure/batch?asset=mcp-asset-1&debug=1&embed=1"}}"#.to_string(),
+                r#"{"code":200,"data":{"results":[{"name":"runMcpAsset","module":"mcp/runtime","operation":"runMcpAsset","resource":"mcp.runtime","method":"POST","description":"Function as a Service MCP run shaped view"}]}}"#
+                    .to_string(),
             );
         }
-        if line.starts_with("POST /api/v1/functions/mcp-weather-tools/batch ") {
+        if body.contains(r#""action":"describe""#) && body.contains(r#""operation":"runMcpAsset""#)
+        {
             return (
                 "200 OK",
-                r#"{"data":{"viewUrl":"/admin/infrastructure/batch?asset=mcp-asset-1&batch=1&embed=1"}}"#.to_string(),
+                r#"{"code":200,"data":{"operation":{"name":"runMcpAsset","inputSchema":{"properties":{"assetId":{"type":"string"},"input":{"type":"object"},"config":{"type":"object"}}}},"view":{"url":"/admin/mcp/runs/mcp-asset-1?embed=1","width":1280,"height":860}}}"#
+                    .to_string(),
+            );
+        }
+        if body.contains(r#""action":"execute""#) && body.contains(r#""operation":"runMcpAsset""#) {
+            return (
+                "200 OK",
+                r#"{"code":200,"data":{"runId":"mcp-run-1","viewUrl":"/admin/mcp/runs/mcp-asset-1?embed=1"}}"#
+                    .to_string(),
             );
         }
         ("404 Not Found", r#"{"message":"not found"}"#.to_string())
@@ -2266,14 +2364,13 @@ mod tests {
         let project = root.join("weather-tools");
         std::fs::create_dir_all(project.join(".a3s")).unwrap();
         std::fs::write(
-            project.join(".a3s/mcp.server.json"),
-            r#"{
-              "name": "weather-tools",
-              "description": "Weather MCP tools",
-              "transport": "stdio",
-              "entrypoint": "server.js",
-              "tools": [{"name":"forecast"},{"name":"current"}]
-            }"#,
+            project.join("README.md"),
+            "# weather-tools\n\nWeather MCP tools\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.join(asset_lifecycle::ASSET_ACL_PATH),
+            "version = \"a3s.asset.v1\"",
         )
         .unwrap();
         std::fs::write(project.join("server.js"), "console.log('weather tools');\n").unwrap();
@@ -2374,27 +2471,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publish_mcp_to_os_debug_invokes_function_service() {
+    async fn publish_mcp_to_os_run_requires_mcp_runner_capability_without_runtime_function_fallback(
+    ) {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_mcp_os_mock(captured.clone(), mcp_publish_function_mock_response).await;
-        let (root, dev) = write_mcp_fixture("mcp-debug-os");
+        let (root, dev) = write_mcp_fixture("mcp-run-os");
 
-        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Debug)
+        let err = publish_mcp_to_os(test_os_session(origin), dev, McpOsAction::Run)
             .await
-            .expect("debug should publish and invoke MCP function");
+            .expect_err("run should fail clearly when OS exposes no MCP runner");
         let requests = captured.lock().unwrap().clone();
         let _ = std::fs::remove_dir_all(&root);
 
-        assert_eq!(result.action, McpOsAction::Debug);
-        assert_eq!(result.asset_id, "mcp-asset-1");
-        assert!(result.open_view);
-        assert!(result.view.url.starts_with(&origin), "{}", result.view.url);
-        assert!(result.view.url.contains("debug=1"), "{}", result.view.url);
         assert!(
-            result.note.contains("MCP debug invoke")
-                && result.note.contains("runtime binding was synced"),
-            "{}",
-            result.note
+            err.contains("did not expose a runnable MCP capability"),
+            "{err}"
         );
 
         assert!(has_request(&requests, "POST /api/v1/assets HTTP/1.1"));
@@ -2406,13 +2497,13 @@ mod tests {
             &requests,
             "PUT /api/v1/assets/mcp-asset-1/runtime-binding "
         ));
-        assert!(has_request(
+        assert!(!has_request(
             &requests,
-            "POST /api/v1/functions/mcp-weather-tools/invoke "
+            "POST /api/v1/runtime/functions/mcp-asset-1/run "
         ));
         assert!(!has_request(
             &requests,
-            "POST /api/v1/functions/mcp-weather-tools/batch "
+            "POST /api/v1/runtime/functions/mcp-asset-1/batch "
         ));
 
         let upload = request_body(
@@ -2428,52 +2519,138 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(uploaded_paths.contains(&"server.js"), "{uploaded_paths:?}");
         assert!(
-            uploaded_paths.contains(&MCP_SERVER_CONFIG_PATH),
+            uploaded_paths.contains(&asset_lifecycle::ASSET_ACL_PATH),
             "{uploaded_paths:?}"
         );
-        assert!(
-            uploaded_paths.contains(&MCP_RUNTIME_BINDING_PATH),
-            "{uploaded_paths:?}"
-        );
-
-        let invoke = request_body(
-            &requests,
-            "POST /api/v1/functions/mcp-weather-tools/invoke ",
-        );
-        let invoke_json: serde_json::Value = serde_json::from_str(&invoke).unwrap();
-        assert_eq!(invoke_json["agentKind"], "tool");
-        assert_eq!(invoke_json["config"]["category"], "mcp");
-        assert_eq!(invoke_json["config"]["protocol"], "mcp");
-        assert_eq!(invoke_json["input"]["mode"], "debug");
-        assert_eq!(invoke_json["input"]["protocol"], "mcp");
-        assert_eq!(invoke_json["input"]["assetId"], "mcp-asset-1");
-        assert_eq!(invoke_json["input"]["assetName"], "mcp-weather-tools");
-        assert_eq!(
-            invoke_json["input"]["serverConfig"]["entrypoint"],
-            "server.js"
-        );
-        assert_eq!(invoke_json["input"]["tool"], "current");
+        for forbidden in [
+            "mcp.asset.json",
+            "mcp.server.json",
+            "mcp.runtime-binding.json",
+            "runtime-binding.json",
+            "package.json",
+        ] {
+            assert!(
+                !uploaded_paths.contains(&forbidden),
+                "repository upload should not include {forbidden}: {uploaded_paths:?}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn publish_mcp_to_os_test_batches_function_service() {
+    async fn publish_mcp_to_os_run_uses_progressive_mcp_runner_when_available() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin =
+            spawn_mcp_os_mock(captured.clone(), mcp_publish_progressive_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-run-progressive-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Run)
+            .await
+            .expect("run should use the OS MCP runner capability");
+        let requests = captured.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(result.action, McpOsAction::Run);
+        assert_eq!(result.asset_id, "mcp-asset-1");
+        assert!(result.open_view);
+        assert_eq!(
+            result.view.url,
+            format!("{origin}/admin/mcp/runs/mcp-asset-1?embed=1")
+        );
+        assert!(
+            result.note.contains("MCP run") && result.note.contains("runtime binding was synced"),
+            "{}",
+            result.note
+        );
+
+        assert!(has_request(&requests, "POST /api/v1/assets HTTP/1.1"));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files "
+        ));
+        assert!(has_request(
+            &requests,
+            "PUT /api/v1/assets/mcp-asset-1/runtime-binding "
+        ));
+        assert!(has_request(&requests, "POST /api/v1/kernel/capabilities "));
+        let execute = request_body(&requests, "POST /api/v1/kernel/capabilities ");
+        assert!(execute.contains(r#""action":"search""#), "{execute}");
+        assert!(
+            requests.iter().any(|request| {
+                request.contains(r#""action":"execute""#)
+                    && request.contains(r#""module":"mcp/runtime""#)
+                    && request.contains(r#""operation":"runMcpAsset""#)
+                    && request.contains(r#""assetId":"mcp-asset-1""#)
+            }),
+            "missing progressive MCP execute request:\n{}",
+            requests.join("\n")
+        );
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/runtime/functions/mcp-asset-1/run "
+        ));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/runtime/functions/mcp-asset-1/batch "
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_mcp_to_os_test_requires_mcp_runner_capability_without_runtime_function_fallback(
+    ) {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let origin = spawn_mcp_os_mock(captured.clone(), mcp_publish_function_mock_response).await;
         let (root, dev) = write_mcp_fixture("mcp-test-os");
 
-        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Test)
+        let err = publish_mcp_to_os(test_os_session(origin), dev, McpOsAction::Test)
             .await
-            .expect("test should publish and batch MCP function inputs");
+            .expect_err("test should fail clearly when OS exposes no MCP test capability");
         let requests = captured.lock().unwrap().clone();
         let _ = std::fs::remove_dir_all(&root);
 
-        assert_eq!(result.action, McpOsAction::Test);
+        assert!(
+            err.contains("did not expose an MCP test capability"),
+            "{err}"
+        );
+        assert!(has_request(&requests, "POST /api/v1/assets HTTP/1.1"));
+        assert!(has_request(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files "
+        ));
+        assert!(has_request(
+            &requests,
+            "PUT /api/v1/assets/mcp-asset-1/runtime-binding "
+        ));
+        assert!(has_request(&requests, "POST /api/v1/kernel/capabilities "));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/runtime/functions/mcp-asset-1/run "
+        ));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/runtime/functions/mcp-asset-1/batch "
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_mcp_to_os_deploy_syncs_serving_runtime_binding_without_invoking_function() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let origin = spawn_mcp_os_mock(captured.clone(), mcp_publish_function_mock_response).await;
+        let (root, dev) = write_mcp_fixture("mcp-deploy-os");
+
+        let result = publish_mcp_to_os(test_os_session(origin.clone()), dev, McpOsAction::Deploy)
+            .await
+            .expect("deploy should publish and sync MCP serving runtime binding");
+        let requests = captured.lock().unwrap().clone();
+
+        assert_eq!(result.action, McpOsAction::Deploy);
         assert_eq!(result.asset_id, "mcp-asset-1");
         assert!(result.open_view);
-        assert!(result.view.url.starts_with(&origin), "{}", result.view.url);
-        assert!(result.view.url.contains("batch=1"), "{}", result.view.url);
+        assert_eq!(
+            result.view.url,
+            format!("{origin}/admin/assets/mcp-asset-1?embed=1")
+        );
         assert!(
-            result.note.contains("MCP batch test")
+            result.note.contains("Deployed `weather-tools`")
                 && result.note.contains("runtime binding was synced"),
             "{}",
             result.note
@@ -2490,52 +2667,97 @@ mod tests {
         ));
         assert!(has_request(
             &requests,
-            "POST /api/v1/functions/mcp-weather-tools/batch "
+            "POST /api/v1/assets/mcp-asset-1/runtime-binding/validate "
+        ));
+        assert!(!has_request(&requests, "POST /api/v1/kernel/capabilities "));
+        assert!(!has_request(
+            &requests,
+            "POST /api/v1/runtime/functions/mcp-asset-1/run "
         ));
         assert!(!has_request(
             &requests,
-            "POST /api/v1/functions/mcp-weather-tools/invoke "
+            "POST /api/v1/runtime/functions/mcp-asset-1/batch "
         ));
 
-        let batch = request_body(&requests, "POST /api/v1/functions/mcp-weather-tools/batch ");
-        let batch_json: serde_json::Value = serde_json::from_str(&batch).unwrap();
-        assert_eq!(batch_json["agentKind"], "tool");
-        assert_eq!(batch_json["config"]["category"], "mcp");
-        assert_eq!(batch_json["config"]["protocol"], "mcp");
-        let inputs = batch_json["inputs"].as_array().unwrap();
-        assert_eq!(inputs.len(), 2);
-        let modes = inputs
+        let upload = request_body(
+            &requests,
+            "POST /api/v1/assets/mcp-asset-1/repository/files ",
+        );
+        let upload_json: serde_json::Value = serde_json::from_str(&upload).unwrap();
+        let uploaded_paths = upload_json["files"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|input| input["mode"].as_str().unwrap())
+            .filter_map(|file| file["path"].as_str())
             .collect::<Vec<_>>();
-        assert_eq!(modes, vec!["test", "test"]);
-        let tools = inputs
-            .iter()
-            .map(|input| input["tool"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(tools, vec!["current", "forecast"]);
-        assert!(inputs.iter().all(|input| {
-            input["assetId"] == "mcp-asset-1"
-                && input["assetName"] == "mcp-weather-tools"
-                && input["protocol"] == "mcp"
-        }));
+        assert!(uploaded_paths.contains(&"server.js"), "{uploaded_paths:?}");
+        assert!(
+            uploaded_paths.contains(&asset_lifecycle::ASSET_ACL_PATH),
+            "{uploaded_paths:?}"
+        );
+        for forbidden in [
+            "mcp.asset.json",
+            "mcp.server.json",
+            "mcp.runtime-binding.json",
+            "runtime-binding.json",
+            "package.json",
+        ] {
+            assert!(
+                !uploaded_paths.contains(&forbidden),
+                "repository upload should not include {forbidden}: {uploaded_paths:?}"
+            );
+        }
+
+        let binding = request_body(&requests, "PUT /api/v1/assets/mcp-asset-1/runtime-binding ");
+        let binding_json: serde_json::Value = serde_json::from_str(&binding).unwrap();
+        assert_eq!(binding_json["kind"], "mcp");
+        assert_eq!(binding_json["isolation"], "serving");
+        assert_eq!(binding_json["target"]["kind"], "asset");
+        assert_eq!(binding_json["target"]["ref"], "main");
+        assert_eq!(binding_json["runtime"]["kind"], "a3s-function-service");
+        assert_eq!(binding_json["runtime"]["sharedRuntime"], "node-20");
+        assert_eq!(binding_json["enabled"], true);
+        assert_eq!(binding_json["metadata"]["source"], "a3s-code-tui");
+        assert_eq!(binding_json["metadata"]["assetCategory"], "mcp");
+        assert_eq!(binding_json["metadata"]["assetName"], "mcp-weather-tools");
+        assert_eq!(binding_json["metadata"]["mcpName"], "weather-tools");
+        assert_eq!(
+            binding_json["metadata"]["tools"],
+            serde_json::json!([]),
+            "MCP tools should not be inferred from removed JSON config files"
+        );
+        let local_asset_acl = root
+            .join("weather-tools")
+            .join(asset_lifecycle::ASSET_ACL_PATH);
+        assert!(local_asset_acl.is_file(), "missing local asset.acl");
+        let local_asset_acl_body = std::fs::read_to_string(&local_asset_acl).unwrap();
+        assert!(local_asset_acl_body.contains("category = \"mcp\""));
+        assert!(local_asset_acl_body.contains("entrypoint = \"server.js\""));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
     fn lists_mcp_projects_by_marker_and_metadata() {
         let root = temp_root("mcp-list");
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("calc/.a3s")).unwrap();
+        std::fs::create_dir_all(root.join("calc")).unwrap();
         std::fs::create_dir_all(root.join("nested/search")).unwrap();
         std::fs::create_dir_all(root.join(".hidden/skip")).unwrap();
         std::fs::write(
-            root.join("calc/.a3s/mcp.server.json"),
-            r#"{"name":"calc-tools","description":"Calculator tools"}"#,
+            root.join("calc/README.md"),
+            "# calc-tools\n\nCalculator tools\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("calc/server.js"), "console.log('calc')").unwrap();
+        std::fs::write(
+            root.join("nested/search/README.md"),
+            "# search-tools\n\nSearch tools\n",
         )
         .unwrap();
         std::fs::write(
-            root.join("nested/search/package.json"),
-            r#"{"name":"search-tools","description":"Search tools"}"#,
+            root.join("nested/search/server.js"),
+            "console.log('search')",
         )
         .unwrap();
         std::fs::write(root.join(".hidden/skip/mcp.json"), "{}").unwrap();
@@ -2694,8 +2916,8 @@ mod tests {
     fn parses_mcp_lifecycle_subcommands() {
         let cases = [
             ("publish", McpSubcommand::Publish, McpOsAction::Publish),
+            ("run", McpSubcommand::Run, McpOsAction::Run),
             ("deploy", McpSubcommand::Deploy, McpOsAction::Deploy),
-            ("debug", McpSubcommand::Debug, McpOsAction::Debug),
             ("test", McpSubcommand::Test, McpOsAction::Test),
             ("open", McpSubcommand::Open, McpOsAction::Open),
             ("logs", McpSubcommand::Logs, McpOsAction::Logs),
@@ -2713,11 +2935,21 @@ mod tests {
             McpSubcommand::Activity("failed invocations".into())
         );
         assert!(parse_mcp_subcommand("ps").unwrap().is_err());
-        assert!(parse_mcp_subcommand("run").unwrap().is_err());
-        assert!(parse_mcp_subcommand("batch").unwrap().is_err());
+        assert_eq!(
+            parse_mcp_subcommand("batch").unwrap().unwrap_err(),
+            "unknown /mcp command `batch`"
+        );
         assert!(parse_mcp_subcommand("inspect").unwrap().is_err());
         assert!(parse_mcp_subcommand("jobs").unwrap().is_err());
-        assert!(parse_mcp_subcommand("debug weather").unwrap().is_err());
+        assert!(parse_mcp_subcommand("run weather").unwrap().is_err());
+        assert_eq!(
+            parse_mcp_subcommand("debug").unwrap().unwrap_err(),
+            "unknown /mcp command `debug`"
+        );
+        assert_eq!(
+            parse_mcp_subcommand("invoke").unwrap().unwrap_err(),
+            "unknown /mcp command `invoke`"
+        );
         assert!(parse_mcp_subcommand("publish now").unwrap().is_err());
         for removed in ["view", "remote", "os", "dashboard"] {
             assert!(
@@ -2732,14 +2964,67 @@ mod tests {
     fn mcp_gen_prompt_carries_faas_contract_and_dir() {
         let prompt = mcp_gen_prompt("weather tools", "/Users/x/.a3s/mcps");
         assert!(prompt.contains("/Users/x/.a3s/mcps"));
-        assert!(prompt.contains(".a3s/mcp.asset.json"));
-        assert!(prompt.contains(".a3s/mcp.server.json"));
-        assert!(prompt.contains(".a3s/mcp.runtime-binding.json"));
+        assert!(prompt.contains(".a3s/asset.acl"));
+        assert!(prompt.contains("Do NOT create extra generated JSON config files"));
+        assert!(prompt.contains("keep package configuration in `.a3s/asset.acl`"));
+        assert!(prompt.contains("metadata-only"));
+        assert!(prompt.contains("Do NOT put `server.js`"));
         assert!(prompt.contains("Function as a Service"));
-        assert!(prompt.contains("runtimeIntent.kind=mcp"));
-        assert!(prompt.contains("runtime.kind=a3s-function-service"));
-        assert!(prompt.contains("protocol=mcp"));
-        assert!(prompt.contains("agentKind=tool"));
+        assert!(prompt.contains("do not start the server process"));
+        assert!(!prompt.contains("timeout 5s"));
+    }
+
+    #[test]
+    fn scaffold_mcp_project_creates_source_at_root_and_metadata_acl() {
+        let root = temp_root("mcp-scaffold");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let dev = scaffold_mcp_project(
+            "Name it exactly sql-checker. It exposes SQL checking tools.",
+            &root,
+        )
+        .unwrap();
+
+        assert_eq!(dev.name, "sql-checker");
+        for rel in [
+            "README.md",
+            "server.js",
+            "examples/example-request.md",
+            "tests/smoke.md",
+            ".a3s/asset.acl",
+        ] {
+            assert!(dev.path.join(rel).is_file(), "missing {rel}");
+        }
+        for rel in [
+            "package.json",
+            "mcp.asset.json",
+            "mcp.server.json",
+            "mcp.runtime-binding.json",
+            ".a3s/mcp.asset.json",
+            ".a3s/mcp.server.json",
+            ".a3s/mcp.runtime-binding.json",
+        ] {
+            assert!(!dev.path.join(rel).exists(), "unexpected {rel}");
+        }
+        assert!(!dev.path.join(".a3s/server.js").exists());
+        let source_files = collect_mcp_source_files(&dev.path).unwrap();
+        let paths = source_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"server.js"), "{paths:?}");
+        assert!(!paths.contains(&"package.json"), "{paths:?}");
+        assert!(
+            paths.iter().all(|path| !path.starts_with(".a3s/")),
+            "{paths:?}"
+        );
+        let asset_acl =
+            std::fs::read_to_string(dev.path.join(asset_lifecycle::ASSET_ACL_PATH)).unwrap();
+        assert!(asset_acl.contains("category = \"mcp\""));
+        assert!(asset_acl.contains("package_root = \".\""));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2777,6 +3062,11 @@ mod tests {
                         "description": "Function as a Service MCP asset metadata"
                     },
                     {
+                        "module": "assets",
+                        "operation": "listAssets",
+                        "description": "Function as a Service open MCP asset shaped ViewLink"
+                    },
+                    {
                         "module": "functions",
                         "operation": "McpFunctionController_openView",
                         "description": "Function as a Service MCP RemoteUI ViewLink open"
@@ -2800,11 +3090,84 @@ mod tests {
                 .all(|candidate| candidate.operation != "FunctionController_getAsset"),
             "asset metadata without an open/view hint should not drive /mcp open: {candidates:?}"
         );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.operation != "listAssets"),
+            "generic asset list must not drive /mcp open: {candidates:?}"
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Open,
+                "Function as a Service MCP asset create operation with a returned ViewLink",
+                "AssetController_createAsset"
+            ),
+            0,
+            "/mcp open must not choose a mutating create operation"
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Open,
+                "Function as a Service MCP asset repository preview",
+                "AssetCrudController_getScaffoldTemplatePreview"
+            ),
+            0,
+            "/mcp open must not choose scaffold/template preview operations"
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Open,
+                "Issue workflow reopen action",
+                "IssueController_reopenIssue"
+            ),
+            0,
+            "/mcp open must not choose issue mutations"
+        );
         assert_eq!(
             mcp_progressive_score(
                 McpOsAction::Logs,
                 "Function as a Service MCP runtime logs shaped ViewLink",
                 "McpFunctionController_logs"
+            )
+            .cmp(&0),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Logs,
+                "Function as a Service MCP run code function",
+                "FunctionController_runCodeFunction"
+            ),
+            0,
+            "/mcp logs must not run the function"
+        );
+    }
+
+    #[test]
+    fn mcp_progressive_score_requires_mcp_semantics_for_run() {
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Run,
+                "Runtime Function tool run operation",
+                "runFunction"
+            ),
+            0,
+            "/mcp run must not choose generic Runtime Function operations"
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Run,
+                "Function as a Service MCP execute operation",
+                "executeMcpAsset"
+            ),
+            0,
+            "/mcp run must not treat execute as a run capability"
+        );
+        assert_eq!(
+            mcp_progressive_score(
+                McpOsAction::Run,
+                "Function as a Service MCP run shaped view",
+                "runMcpAsset"
             )
             .cmp(&0),
             std::cmp::Ordering::Greater
@@ -2852,7 +3215,8 @@ mod tests {
             "a3s-function-service"
         );
         assert_eq!(manifest["runtimeIntent"]["protocol"], "mcp");
-        assert_eq!(manifest["serverConfigPath"], MCP_SERVER_CONFIG_PATH);
+        assert!(manifest.get("serverConfigPath").is_none());
+        assert!(manifest.get("runtimeBindingPath").is_none());
         assert_eq!(binding["kind"], "mcp");
         assert_eq!(binding["isolation"], "serving");
         assert_eq!(binding["runtime"]["kind"], "a3s-function-service");
@@ -2867,7 +3231,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_source_upload_skips_generated_and_heavy_local_files() {
+    fn mcp_source_upload_collects_visible_sources_only() {
         let root = temp_root("mcp-source");
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".a3s")).unwrap();
@@ -2875,9 +3239,7 @@ mod tests {
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         std::fs::write(root.join("src/server.js"), "console.log('ok')").unwrap();
         std::fs::write(root.join(".env"), "SECRET=1").unwrap();
-        std::fs::write(root.join(".a3s/mcp.asset.json"), "{}").unwrap();
-        std::fs::write(root.join(".a3s/mcp.server.json"), "{}").unwrap();
-        std::fs::write(root.join(".a3s/mcp.runtime-binding.json"), "{}").unwrap();
+        std::fs::write(root.join(".a3s/asset.acl"), "version = \"a3s.asset.v1\"").unwrap();
         std::fs::write(root.join("node_modules/pkg/index.js"), "ignored").unwrap();
 
         let files = collect_mcp_source_files(&root).unwrap();
