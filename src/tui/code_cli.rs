@@ -940,10 +940,10 @@ async fn run_deepresearch_workflow(
     session: &AgentSession,
     args: serde_json::Value,
 ) -> Result<ToolCallResult, String> {
+    let timeout_ms = super::deep_research_workflow_host_timeout_ms(&args);
     let (mut progress_rx, workflow_join) = session.tool_with_events("dynamic_workflow", args);
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
-    let timeout_ms = super::DEEP_RESEARCH_SCRIPT_TIMEOUT_MS + 30_000;
     let result = match tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms),
         workflow_join,
@@ -3256,11 +3256,16 @@ mod tests {
 
         let args = super::super::deep_research_workflow_args("runtime disabled", true);
         let budget = super::super::deep_research_default_budget();
+        let workflow_budget = super::super::deep_research_workflow_budget_for_query(
+            "runtime disabled",
+            false,
+            budget,
+        );
         assert_eq!(args["input"]["os_runtime"], false);
         assert_eq!(args["allowed_tools"], serde_json::json!([]));
         assert_eq!(
             args["input"]["local_max_parallel_tasks"],
-            serde_json::json!(budget.max_parallel_tasks)
+            serde_json::json!(workflow_budget.local_max_parallel_tasks)
         );
         assert_eq!(args["input"]["local_research_rounds"], serde_json::json!(1));
         let workflow = run_deepresearch_workflow(&session, args)

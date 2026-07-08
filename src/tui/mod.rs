@@ -122,6 +122,7 @@ const DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS: u64 = 90 * 1000;
 const DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS: u64 = 15 * 60 * 1000;
 const DEEP_RESEARCH_SCRIPT_TIMEOUT_MS: u64 =
     DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS + DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS + 60 * 1000;
+const DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS: u64 = 30_000;
 const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
@@ -1570,6 +1571,8 @@ fn deep_research_report_contract() -> &'static str {
        citations/sources, evidence notes, confidence/caveats, and next actions.\n\
      - Write only the required report artifacts unless a tool error requires a targeted correction; \
        the host validates file existence, source traceability, and HTML completeness.\n\
+     - If a targeted self-check is necessary, only read or list the report files under \
+       `.a3s/research/<slug>/`; never use shell commands for report verification.\n\
      - The final answer must contain the research answer and the required marker only. Do not list \
        directory creation, file write, shell, or verification steps.\n\
      - End the final answer with one plain line exactly like \
@@ -1649,6 +1652,19 @@ fn deep_research_budget_for_effort_index(effort: usize, context_limit: u32) -> B
     budget_plan_for_effort_index(effort, Some(context_limit), BudgetWorkload::DeepResearch)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DeepResearchWorkflowBudget {
+    complexity_layers: usize,
+    local_research_rounds: usize,
+    local_max_parallel_tasks: usize,
+    local_max_steps: usize,
+    runtime_preflight_timeout_ms: u64,
+    runtime_step_timeout_ms: u64,
+    workflow_timeout_ms: u64,
+    workflow_max_tool_calls: usize,
+    workflow_max_output_bytes: usize,
+}
+
 fn deep_research_workflow_args(query: &str, os_runtime: bool) -> serde_json::Value {
     deep_research_workflow_args_for_budget(query, os_runtime, deep_research_default_budget())
 }
@@ -1663,6 +1679,82 @@ fn deep_research_research_rounds(query: &str, os_runtime: bool, budget: BudgetPl
     complexity_rounds.clamp(1, effort_cap)
 }
 
+fn deep_research_workflow_budget_for_query(
+    query: &str,
+    os_runtime: bool,
+    budget: BudgetPlan,
+) -> DeepResearchWorkflowBudget {
+    let complexity_layers = deep_research_loop_layers(query, os_runtime);
+    let local_research_rounds = deep_research_research_rounds(query, os_runtime, budget);
+    let local_parallel_cap = match complexity_layers {
+        0 => 4,
+        1 => 6,
+        2 => 12,
+        _ => budget.max_parallel_tasks,
+    };
+    let local_step_cap = match complexity_layers {
+        0 => 80,
+        1 => 140,
+        2 => 240,
+        _ => budget.deep_research_child_steps,
+    };
+    let workflow_tool_call_cap = match complexity_layers {
+        0 => 120,
+        1 => 200,
+        2 => 360,
+        _ => budget.workflow_max_tool_calls,
+    };
+    let workflow_output_cap = match complexity_layers {
+        0 => 1024 * 1024,
+        1 => 2 * 1024 * 1024,
+        2 => 4 * 1024 * 1024,
+        _ => budget.workflow_max_output_bytes,
+    };
+    let (runtime_preflight_timeout_ms, runtime_step_timeout_ms) = match complexity_layers {
+        0 => (30 * 1000, 4 * 60 * 1000),
+        1 => (45 * 1000, 7 * 60 * 1000),
+        2 => (60 * 1000, 11 * 60 * 1000),
+        _ => (
+            DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS,
+            DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS,
+        ),
+    };
+    let workflow_timeout_ms = runtime_preflight_timeout_ms + runtime_step_timeout_ms + 60 * 1000;
+
+    DeepResearchWorkflowBudget {
+        complexity_layers,
+        local_research_rounds,
+        local_max_parallel_tasks: budget.max_parallel_tasks.min(local_parallel_cap).max(1),
+        local_max_steps: budget.deep_research_child_steps.min(local_step_cap).max(1),
+        runtime_preflight_timeout_ms,
+        runtime_step_timeout_ms,
+        workflow_timeout_ms,
+        workflow_max_tool_calls: budget
+            .workflow_max_tool_calls
+            .min(workflow_tool_call_cap)
+            .max(
+                local_research_rounds
+                    .saturating_mul(local_parallel_cap)
+                    .max(1),
+            ),
+        workflow_max_output_bytes: budget
+            .workflow_max_output_bytes
+            .min(workflow_output_cap)
+            .max(256 * 1024),
+    }
+}
+
+pub(crate) fn deep_research_workflow_timeout_ms(args: &serde_json::Value) -> u64 {
+    args.pointer("/limits/timeoutMs")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|timeout_ms| *timeout_ms >= 1_000)
+        .unwrap_or(DEEP_RESEARCH_SCRIPT_TIMEOUT_MS)
+}
+
+pub(crate) fn deep_research_workflow_host_timeout_ms(args: &serde_json::Value) -> u64 {
+    deep_research_workflow_timeout_ms(args).saturating_add(DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS)
+}
+
 fn deep_research_workflow_args_for_budget(
     query: &str,
     _os_runtime: bool,
@@ -1670,23 +1762,24 @@ fn deep_research_workflow_args_for_budget(
 ) -> serde_json::Value {
     let os_runtime = false;
     let allowed_tools = serde_json::json!([]);
-    let local_research_rounds = deep_research_research_rounds(query, os_runtime, budget);
+    let workflow_budget = deep_research_workflow_budget_for_query(query, os_runtime, budget);
     serde_json::json!({
         "source": deep_research_workflow_source(),
         "input": {
             "query": query,
             "os_runtime": os_runtime,
-            "runtime_preflight_timeout_ms": DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS,
-            "runtime_timeout_ms": DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS,
-            "local_max_parallel_tasks": budget.max_parallel_tasks,
-            "local_research_rounds": local_research_rounds,
-            "local_max_steps": budget.deep_research_child_steps,
+            "complexity_layers": workflow_budget.complexity_layers,
+            "runtime_preflight_timeout_ms": workflow_budget.runtime_preflight_timeout_ms,
+            "runtime_timeout_ms": workflow_budget.runtime_step_timeout_ms,
+            "local_max_parallel_tasks": workflow_budget.local_max_parallel_tasks,
+            "local_research_rounds": workflow_budget.local_research_rounds,
+            "local_max_steps": workflow_budget.local_max_steps,
         },
         "allowed_tools": allowed_tools,
         "limits": {
-            "timeoutMs": DEEP_RESEARCH_SCRIPT_TIMEOUT_MS,
-            "maxToolCalls": budget.workflow_max_tool_calls,
-            "maxOutputBytes": budget.workflow_max_output_bytes
+            "timeoutMs": workflow_budget.workflow_timeout_ms,
+            "maxToolCalls": workflow_budget.workflow_max_tool_calls,
+            "maxOutputBytes": workflow_budget.workflow_max_output_bytes
         }
     })
 }
@@ -4376,18 +4469,39 @@ fn deep_research_report_phase_tool_permission(
     args: &serde_json::Value,
 ) -> a3s_code_core::permissions::PermissionDecision {
     match tool_name.to_ascii_lowercase().as_str() {
-        "write" | "edit" if is_deep_research_report_artifact_tool_args(args) => {
+        "write" | "edit" if is_deep_research_report_artifact_write_tool_args(args) => {
+            a3s_code_core::permissions::PermissionDecision::Allow
+        }
+        "read" | "ls" | "glob" | "grep"
+            if is_deep_research_report_artifact_read_tool_args(args) =>
+        {
             a3s_code_core::permissions::PermissionDecision::Allow
         }
         _ => a3s_code_core::permissions::PermissionDecision::Deny,
     }
 }
 
-fn is_deep_research_report_artifact_tool_args(args: &serde_json::Value) -> bool {
-    args.get("file_path")
-        .or_else(|| args.get("path"))
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(is_deep_research_report_artifact_path)
+fn is_deep_research_report_artifact_write_tool_args(args: &serde_json::Value) -> bool {
+    ["file_path", "path"]
+        .iter()
+        .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+        .any(is_deep_research_report_artifact_path)
+}
+
+fn is_deep_research_report_artifact_read_tool_args(args: &serde_json::Value) -> bool {
+    [
+        "file_path",
+        "path",
+        "dir",
+        "directory",
+        "root",
+        "pattern",
+        "glob",
+        "include",
+    ]
+    .iter()
+    .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+    .any(is_deep_research_report_artifact_path)
 }
 
 fn is_deep_research_report_artifact_path(path: &str) -> bool {
@@ -8311,7 +8425,7 @@ impl App {
         self.host_progress_inflight = true;
         self.interrupting = false;
         let workflow_abort = workflow_join.abort_handle();
-        let timeout_ms = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS + 30_000;
+        let timeout_ms = deep_research_workflow_host_timeout_ms(&args);
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let result = match tokio::time::timeout(
@@ -9998,7 +10112,7 @@ async fn run_smoke_deep_research(
         session.tool_with_events("dynamic_workflow", workflow_args.clone());
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
-    let timeout_ms = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS + 30_000;
+    let timeout_ms = deep_research_workflow_host_timeout_ms(&workflow_args);
     let workflow = match tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms),
         workflow_join,
@@ -12245,34 +12359,47 @@ mod tests {
         let args = deep_research_workflow_args("rust async runtimes", true);
         let source = args["source"].as_str().unwrap();
         let budget = deep_research_default_budget();
+        let workflow_budget =
+            deep_research_workflow_budget_for_query("rust async runtimes", false, budget);
 
         assert_eq!(args["input"]["query"], "rust async runtimes");
         assert_eq!(args["input"]["os_runtime"], false);
         assert_eq!(
+            args["input"]["complexity_layers"],
+            workflow_budget.complexity_layers
+        );
+        assert_eq!(
             args["input"]["local_max_parallel_tasks"],
-            budget.max_parallel_tasks
+            workflow_budget.local_max_parallel_tasks
         );
         assert_eq!(
             args["input"]["local_max_steps"],
-            budget.deep_research_child_steps
+            workflow_budget.local_max_steps
         );
         assert_eq!(args["input"]["local_research_rounds"], 1);
         assert_eq!(
             args["input"]["runtime_preflight_timeout_ms"],
-            DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS
+            workflow_budget.runtime_preflight_timeout_ms
         );
         assert_eq!(
             args["input"]["runtime_timeout_ms"],
-            DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS
+            workflow_budget.runtime_step_timeout_ms
         );
-        assert_eq!(args["limits"]["timeoutMs"], DEEP_RESEARCH_SCRIPT_TIMEOUT_MS);
+        assert_eq!(
+            args["limits"]["timeoutMs"],
+            workflow_budget.workflow_timeout_ms
+        );
+        assert_eq!(
+            deep_research_workflow_host_timeout_ms(&args),
+            workflow_budget.workflow_timeout_ms + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
+        );
         assert_eq!(
             args["limits"]["maxToolCalls"],
-            budget.workflow_max_tool_calls
+            workflow_budget.workflow_max_tool_calls
         );
         assert_eq!(
             args["limits"]["maxOutputBytes"],
-            budget.workflow_max_output_bytes
+            workflow_budget.workflow_max_output_bytes
         );
         assert_eq!(args["allowed_tools"], serde_json::json!([]));
         assert!(source.contains("local_research"), "{source}");
@@ -12365,6 +12492,51 @@ mod tests {
         assert!(!source.contains("Math.min(8"), "{source}");
         assert!(source.contains(": 200"), "{source}");
         assert!(!source.contains("agent: \"general\""), "{source}");
+    }
+
+    #[test]
+    fn deep_research_workflow_budget_scales_with_query_complexity() {
+        let budget = deep_research_default_budget();
+        let narrow = deep_research_workflow_budget_for_query(
+            "Rust stable version from official Rust source; concise cited report.",
+            false,
+            budget,
+        );
+        assert_eq!(narrow.complexity_layers, 0);
+        assert_eq!(narrow.local_research_rounds, 1);
+        assert_eq!(narrow.local_max_parallel_tasks, 4);
+        assert_eq!(narrow.local_max_steps, 80);
+        assert_eq!(narrow.runtime_preflight_timeout_ms, 30_000);
+        assert_eq!(narrow.runtime_step_timeout_ms, 4 * 60 * 1000);
+        assert_eq!(narrow.workflow_timeout_ms, 330_000);
+        assert_eq!(narrow.workflow_max_tool_calls, 120);
+        assert_eq!(narrow.workflow_max_output_bytes, 1024 * 1024);
+        assert!(narrow.local_max_steps < budget.deep_research_child_steps);
+        assert!(narrow.workflow_timeout_ms < DEEP_RESEARCH_SCRIPT_TIMEOUT_MS);
+
+        let broad =
+            "全面调研 2026 年多智能体运行时市场、最新论文、竞品、趋势、多来源、大量并行证据";
+        let complex = deep_research_workflow_budget_for_query(broad, false, budget);
+        assert_eq!(complex.complexity_layers, 3);
+        assert_eq!(complex.local_max_parallel_tasks, budget.max_parallel_tasks);
+        assert_eq!(complex.local_max_steps, budget.deep_research_child_steps);
+        assert_eq!(
+            complex.runtime_preflight_timeout_ms,
+            DEEP_RESEARCH_RUNTIME_PREFLIGHT_TIMEOUT_MS
+        );
+        assert_eq!(
+            complex.runtime_step_timeout_ms,
+            DEEP_RESEARCH_RUNTIME_STEP_TIMEOUT_MS
+        );
+        assert_eq!(complex.workflow_timeout_ms, DEEP_RESEARCH_SCRIPT_TIMEOUT_MS);
+        assert_eq!(
+            complex.workflow_max_tool_calls,
+            budget.workflow_max_tool_calls
+        );
+        assert_eq!(
+            complex.workflow_max_output_bytes,
+            budget.workflow_max_output_bytes
+        );
     }
 
     #[test]
@@ -13006,6 +13178,20 @@ mod tests {
             PermissionDecision::Deny
         );
         assert_eq!(
+            checker.check(
+                "read",
+                &serde_json::json!({"file_path": ".a3s/research/rust-stable/report.md"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "ls",
+                &serde_json::json!({"path": ".a3s/research/rust-stable"})
+            ),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
             checker.check("web_search", &serde_json::json!({"query": "rust stable"})),
             PermissionDecision::Deny
         );
@@ -13018,6 +13204,17 @@ mod tests {
                 })
             ),
             PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({
+                    "file_path": "README.md",
+                    "include": ".a3s/research/**",
+                    "content": "# Report"
+                })
+            ),
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check(

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-07-09
+
 ### Changed
 
 - Reworked DeepResearch evidence gathering into a bounded, complexity-driven
@@ -14,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rounds now derive follow-up searches from prior gaps and contradictions,
   stop early when no useful follow-up remains, and keep OS Runtime tool-call
   fan-out disabled until Function-as-a-Service support is available.
+- Scaled DeepResearch workflow budgets by query complexity so narrow questions
+  get bounded child steps, tool-call/output limits, and host timeouts, while
+  broad research still keeps the long-running recursive budget.
 
 ### Fixed
 
