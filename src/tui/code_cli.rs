@@ -693,6 +693,7 @@ struct DeepResearchReportSynthesis {
     status: DeepResearchReportStatus,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn synthesize_deepresearch_report(
     session: &AgentSession,
     workspace: &Path,
@@ -3468,6 +3469,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn code_cli_asset_lifecycle_commands_use_os_api_from_cli_entrypoint() {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
@@ -3557,6 +3559,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn code_cli_rejects_removed_mcp_debug_and_invoke_without_os_requests() {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
@@ -3589,6 +3592,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn code_cli_mcp_run_requires_mcp_runner_without_runtime_function_fallback() {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
@@ -3991,10 +3995,7 @@ mod tests {
         let mut buf = Vec::new();
         let mut tmp = [0_u8; 8192];
         let mut expected_len = None;
-        loop {
-            let Ok(n) = sock.read(&mut tmp).await else {
-                break;
-            };
+        while let Ok(n) = sock.read(&mut tmp).await {
             if n == 0 {
                 break;
             }

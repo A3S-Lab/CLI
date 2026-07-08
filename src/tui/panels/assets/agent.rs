@@ -1030,7 +1030,7 @@ fn agent_asset_acl(
         source: &source,
         metadata: &metadata,
     });
-    acl.push_str("\n");
+    acl.push('\n');
     acl.push_str(&agent_contract_acl_block(kind));
     acl
 }
@@ -1432,7 +1432,7 @@ fn json_failure_text(value: &serde_json::Value) -> Option<String> {
     if let Some(text) = json_str_at(value, &["/message", "message", "/error", "error"]) {
         return Some(text.to_string());
     }
-    Some(serde_json::to_string(value).ok()?)
+    serde_json::to_string(value).ok()
 }
 
 fn json_str_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -1686,6 +1686,7 @@ pub(crate) struct AgentRepositoryFile {
     pub(crate) bytes: Vec<u8>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_agent_definition(
     origin: &str,
     token: &str,
@@ -2843,10 +2844,10 @@ fn agent_progressive_score(text: &str, operation: &str, action: AgentOsAction) -
                 return 0;
             }
         }
-        AgentOsAction::Run(AgentOsKind::Agentic | AgentOsKind::Application) => {
-            if combined.contains("function as a service") || combined.contains("faas") {
-                return 0;
-            }
+        AgentOsAction::Run(AgentOsKind::Agentic | AgentOsKind::Application)
+            if combined.contains("function as a service") || combined.contains("faas") =>
+        {
+            return 0;
         }
         _ => {}
     }

@@ -3142,8 +3142,8 @@ fn research_report_artifact_slug_matches(
 fn clean_research_report_marker_value(raw: &str) -> Option<String> {
     let mut value = raw.trim();
     value = value
-        .trim_start_matches(|c| matches!(c, '`' | '"' | '\'' | '<'))
-        .trim_end_matches(|c| matches!(c, '`' | '"' | '\'' | '>' | '.' | ',' | ';'));
+        .trim_start_matches(['`', '"', '\'', '<'])
+        .trim_end_matches(['`', '"', '\'', '>', '.', ',', ';']);
     if value.is_empty() || value.starts_with("file://") {
         return None;
     }
@@ -3501,7 +3501,7 @@ fn normalize_research_source_anchor(value: &str) -> Option<String> {
                 '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}'
             )
         })
-        .trim_end_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | ')' | ']'))
+        .trim_end_matches(['.', ',', ';', ':', ')', ']'])
         .trim()
         .trim_end_matches('/')
         .to_string();
@@ -6271,10 +6271,10 @@ impl Model for App {
                 login_at_ms,
                 result,
             } => {
-                if !self
+                if self
                     .os_session
                     .as_ref()
-                    .is_some_and(|session| session.login_at_ms == login_at_ms)
+                    .is_none_or(|session| session.login_at_ms != login_at_ms)
                 {
                     return None;
                 }
@@ -12638,11 +12638,8 @@ mod tests {
     #[test]
     fn deep_research_synthesis_prompt_sanitizes_parallel_task_metadata() {
         let verbose_failure = format!(
-            "Task failed: Max tool rounds (30) exceeded {}",
-            format!(
-                "{}RAW_FAILURE_DETAIL_SHOULD_NOT_SURVIVE",
-                "padding ".repeat(120)
-            )
+            "Task failed: Max tool rounds (30) exceeded {}RAW_FAILURE_DETAIL_SHOULD_NOT_SURVIVE",
+            "padding ".repeat(120)
         );
         let prompt = deep_research_synthesis_prompt(
             "unstable research",
@@ -13441,7 +13438,7 @@ mod tests {
                 .collect::<std::collections::BTreeSet<_>>()
         });
 
-        if only.as_ref().map_or(true, |only| only.contains("agent")) {
+        if only.as_ref().is_none_or(|only| only.contains("agent")) {
             eprintln!("\n[asset-e2e] creating agent");
             let dev = panels::agent::scaffold_agent_package(
                 "Name it exactly a3s-e2e-review-agent. It reviews pull-request diffs for risky Rust changes and reports concise findings.",

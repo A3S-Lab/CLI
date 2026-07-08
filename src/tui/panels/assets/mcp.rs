@@ -927,6 +927,7 @@ async fn ensure_mcp_asset(
         .ok_or_else(|| "create MCP asset: no id in response".to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_mcp_project(
     origin: &str,
     token: &str,

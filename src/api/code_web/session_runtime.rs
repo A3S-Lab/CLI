@@ -337,34 +337,36 @@ mod tests {
 
     #[test]
     fn configured_context_limit_matches_qualified_and_plain_model_ids() {
-        let mut config = CodeConfig::default();
-        config.providers = vec![ProviderConfig {
-            name: "openai".to_string(),
-            api_key: None,
-            base_url: None,
-            headers: HashMap::new(),
-            session_id_header: None,
-            models: vec![ModelConfig {
-                id: "tiny".to_string(),
-                name: "Tiny".to_string(),
-                family: String::new(),
+        let config = CodeConfig {
+            providers: vec![ProviderConfig {
+                name: "openai".to_string(),
                 api_key: None,
                 base_url: None,
                 headers: HashMap::new(),
                 session_id_header: None,
-                attachment: false,
-                reasoning: false,
-                tool_call: true,
-                temperature: true,
-                release_date: None,
-                modalities: Default::default(),
-                cost: Default::default(),
-                limit: ModelLimit {
-                    context: 32_768,
-                    output: 0,
-                },
+                models: vec![ModelConfig {
+                    id: "tiny".to_string(),
+                    name: "Tiny".to_string(),
+                    family: String::new(),
+                    api_key: None,
+                    base_url: None,
+                    headers: HashMap::new(),
+                    session_id_header: None,
+                    attachment: false,
+                    reasoning: false,
+                    tool_call: true,
+                    temperature: true,
+                    release_date: None,
+                    modalities: Default::default(),
+                    cost: Default::default(),
+                    limit: ModelLimit {
+                        context: 32_768,
+                        output: 0,
+                    },
+                }],
             }],
-        }];
+            ..Default::default()
+        };
 
         assert_eq!(
             configured_context_limit(&config, "openai/tiny"),

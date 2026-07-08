@@ -285,9 +285,7 @@ impl App {
     }
 
     pub(crate) fn handle_model_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
-        let Some(sel) = self.model_menu else {
-            return None;
-        };
+        let sel = self.model_menu?;
         let tabs = self.model_tabs();
         if tabs.is_empty() {
             return None;

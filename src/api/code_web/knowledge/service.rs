@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_boot::{BootError, Result as BootResult};
@@ -119,7 +119,7 @@ impl KnowledgeService {
         }))
     }
 
-    async fn ensure_workspace(&self, workspace: &PathBuf) -> BootResult<()> {
+    async fn ensure_workspace(&self, workspace: &Path) -> BootResult<()> {
         let kb_root = kbutil::kb_dir(&workspace.display().to_string());
         tokio::fs::create_dir_all(kb_root.join("sources"))
             .await
@@ -140,7 +140,7 @@ impl KnowledgeService {
     }
 }
 
-fn kb_home_json(workspace: &PathBuf) -> Value {
+fn kb_home_json(workspace: &Path) -> Value {
     let workspace_text = workspace.display().to_string();
     let stats = kbutil::kb_stats(&workspace_text);
     json!({
@@ -151,7 +151,7 @@ fn kb_home_json(workspace: &PathBuf) -> Value {
     })
 }
 
-fn kb_action_json(workspace: &PathBuf, summary: String, action: &str) -> Value {
+fn kb_action_json(workspace: &Path, summary: String, action: &str) -> Value {
     let home = kb_home_json(workspace);
     json!({
         "action": action,

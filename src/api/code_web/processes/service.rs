@@ -33,7 +33,7 @@ fn top_snapshot_json(rows: &[ProcessRow]) -> Value {
         "rows": rows.iter().map(process_row_json).collect::<Vec<_>>(),
         "activityRows": activity_rows
             .iter()
-            .map(|row| process_row_json(*row))
+            .map(|row| process_row_json(row))
             .collect::<Vec<_>>(),
     })
 }

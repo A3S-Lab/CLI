@@ -639,6 +639,7 @@ fn add_graph_entity(
     entity_ids.insert(id);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn add_metadata_graph_entities(
     entities: &mut BTreeMap<String, GraphEntity>,
     relations: &mut Vec<GraphRelation>,

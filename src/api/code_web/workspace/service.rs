@@ -660,7 +660,7 @@ fn wildcard_match(path: &str, pattern: &str) -> bool {
         }
         cursor += found + part.len();
     }
-    pattern.ends_with('*') || parts.last().map_or(true, |last| path.ends_with(last))
+    pattern.ends_with('*') || parts.last().is_none_or(|last| path.ends_with(last))
 }
 
 fn find_line_matches(

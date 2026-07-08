@@ -142,6 +142,7 @@ impl WorkspaceController {
         Ok(self.service.git_status(root_path))
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[get("/search")]
     async fn search_workspace_files(
         &self,
