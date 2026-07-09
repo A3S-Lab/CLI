@@ -705,6 +705,24 @@ async fn synthesize_deepresearch_report(
     report_tool_gate: &super::DeepResearchReportToolGate,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     eprintln!("deepresearch: synthesizing report artifacts…");
+    if exit_code != 0 && !super::deep_research_has_source_evidence(workflow_output, metadata) {
+        report_tool_gate.set_report_only(false);
+        let artifacts = super::materialize_deep_research_fallback_draft(
+            workspace,
+            query,
+            "DeepResearch evidence collection failed before source-backed evidence was available.",
+            workflow_output,
+        )
+        .map_err(anyhow::Error::msg)?;
+        return Ok(DeepResearchReportSynthesis {
+            text: format!(
+                "DeepResearch fallback draft written at {}\n",
+                artifacts.html.display()
+            ),
+            artifacts,
+            status: DeepResearchReportStatus::FallbackDraft,
+        });
+    }
     let prompt = if exit_code == 0 {
         super::deep_research_synthesis_prompt(query, os_runtime, workflow_output, metadata)
     } else {
@@ -2281,6 +2299,62 @@ mod tests {
         }
     }
 
+    struct StructuredCoercionFailsLlmClient;
+
+    #[async_trait]
+    impl LlmClient for StructuredCoercionFailsLlmClient {
+        async fn complete(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> {
+            Ok(structured_failure_response(messages, system, tools))
+        }
+
+        async fn complete_streaming(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            tools: &[ToolDefinition],
+            _cancel_token: CancellationToken,
+        ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+            let response = structured_failure_response(messages, system, tools);
+            let (tx, rx) = mpsc::channel(1);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamEvent::Done(response)).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    fn structured_failure_response(
+        messages: &[Message],
+        system: Option<&str>,
+        tools: &[ToolDefinition],
+    ) -> LlmResponse {
+        if tools.iter().any(|tool| tool.name == "emit_step_output") {
+            return text_response("I found evidence, but I am not emitting the schema tool.");
+        }
+        let last = message_text(messages.last());
+        if system.is_some_and(|system| system.contains("pre-analysis assistant"))
+            || last.contains("ONLY the JSON object")
+        {
+            return text_response(
+                r#"{"intent":"GeneralPurpose","requires_planning":false,"goal":{"description":"DeepResearch child task","success_criteria":["evidence returned"]},"execution_plan":{"complexity":"Simple","steps":[],"required_tools":[]},"optimized_input":"DeepResearch child task"}"#,
+            );
+        }
+        if last
+            .to_ascii_lowercase()
+            .contains("deep-research evidence track for:")
+        {
+            return text_response(
+                "## Summary\n\nThe latest stable Rust version is 1.96.1, released on 2026-06-30.\n\n## Sources\n\n- Official Rust Blog: https://blog.rust-lang.org/2026/06/30/Rust-1.96.1/ confirms Rust 1.96.1.\n- Rust stable manifest: https://static.rust-lang.org/dist/channel-rust-stable.toml confirms pkg.rust.version 1.96.1.\n\n## Confidence\n\nHigh because two official Rust sources agree.",
+            );
+        }
+        text_response("DONE")
+    }
+
     fn message_text(message: Option<&Message>) -> String {
         message
             .map(|message| {
@@ -2806,6 +2880,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepresearch_cli_failed_collection_without_sources_falls_back_without_model_recovery()
+    {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-no-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![text_response(
+            "Incorrect recovery should not be used.\nA3S_RESEARCH_VIEW: .a3s/research/no-evidence/index.html",
+        )]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "no evidence",
+            false,
+            "dynamic_workflow timed out before evidence was available",
+            1,
+            None,
+            &report_tool_gate,
+        )
+        .await
+        .expect("host fallback should materialize draft artifacts");
+
+        assert_eq!(synthesis.status, DeepResearchReportStatus::FallbackDraft);
+        assert!(
+            synthesis
+                .text
+                .contains("DeepResearch fallback draft written at"),
+            "{}",
+            synthesis.text
+        );
+        assert!(!synthesis.text.contains("A3S_RESEARCH_VIEW"));
+        let markdown = std::fs::read_to_string(&synthesis.artifacts.markdown).unwrap();
+        assert!(markdown.contains("DeepResearch Fallback Draft"));
+        assert!(markdown.contains("evidence collection failed"));
+        assert!(!markdown.contains("Incorrect recovery should not be used"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
     async fn deepresearch_cli_dirty_synthesis_is_repaired_or_falls_back_cleanly() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-dirty-fallback-{}-{}",
@@ -3228,6 +3358,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepresearch_workflow_retains_source_evidence_when_metadata_is_incomplete() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-retained-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(StructuredCoercionFailsLlmClient);
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(4);
+        let session = agent
+            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .unwrap();
+        session.register_dynamic_workflow_runtime();
+
+        let mut workflow_args =
+            super::super::deep_research_workflow_args("latest Rust stable official version", false);
+        workflow_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        workflow_args["input"]["local_max_parallel_tasks"] = serde_json::json!(1);
+        workflow_args["input"]["tracks"] = serde_json::json!([
+            {
+                "title": "Official source",
+                "focus": "Find the official latest Rust stable version."
+            }
+        ]);
+
+        let workflow = run_deepresearch_workflow(&session, workflow_args)
+            .await
+            .expect("workflow should retain useful source-backed evidence");
+        assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
+        assert_eq!(output["mode"], "local_parallel_task_partial_success");
+        assert_eq!(output["research"]["status"], "partial_success");
+        assert_eq!(output["research"]["stop_reason"], "source_notes_retained");
+        assert_eq!(
+            output["research"]["metadata"]["success_count"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            output["research"]["results"][0]["structured"]["summary"],
+            "The latest stable Rust version is 1.96.1, released on 2026-06-30."
+        );
+        assert_eq!(
+            output["research"]["results"][0]["structured"]["sources"]
+                .as_array()
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(
+            output["research"]["warnings"]["failed_rounds"][0]["error_summary"]
+                .as_str()
+                .is_some_and(|summary| summary.contains("Delegated task failed")),
+            "{}",
+            workflow.output
+        );
+        assert!(
+            !workflow.output.contains("[structured output failed"),
+            "{}",
+            workflow.output
+        );
+        assert!(
+            !workflow.output.contains("schema coercion"),
+            "{}",
+            workflow.output
+        );
+        assert!(
+            !workflow.output.contains("raw delegated"),
+            "{}",
+            workflow.output
+        );
+        assert!(!workflow.output.contains("salvage"), "{}", workflow.output);
+        assert!(!workflow.output.contains("salvaged"), "{}", workflow.output);
+        assert!(!workflow.output.contains("Task ID:"), "{}", workflow.output);
+
+        let prompt = super::super::deep_research_synthesis_prompt(
+            "latest Rust stable official version",
+            false,
+            &workflow.output,
+            workflow.metadata.as_ref(),
+        );
+        assert!(prompt.contains("1.96.1"), "{prompt}");
+        assert!(
+            prompt.contains("https://blog.rust-lang.org/2026/06/30/Rust-1.96.1/"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("[structured output failed"), "{prompt}");
+        assert!(!prompt.contains("schema coercion"), "{prompt}");
+        assert!(!prompt.contains("raw delegated"), "{prompt}");
+        assert!(!prompt.contains("salvage"), "{prompt}");
+        assert!(!prompt.contains("salvaged"), "{prompt}");
+        assert!(!prompt.contains("Task ID:"), "{prompt}");
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
     async fn deepresearch_workflow_forces_local_when_os_runtime_requested() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-runtime-disabled-{}-{}",
@@ -3294,12 +3530,12 @@ mod tests {
         assert_eq!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
                 ["metadata"]["task_count"],
-            serde_json::json!(2)
+            serde_json::json!(1)
         );
         assert_eq!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
                 ["metadata"]["result_count"],
-            serde_json::json!(2)
+            serde_json::json!(1)
         );
         assert!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]

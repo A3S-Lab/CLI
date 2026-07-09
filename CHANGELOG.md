@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-07-09
+
+### Fixed
+
+- Hardened DeepResearch against child-task evidence packaging failures: when a
+  delegated research track returns source-backed notes but misses the expected
+  metadata shape, the workflow now preserves the cited evidence, normalizes it
+  into the recursive summary, and continues to synthesis instead of discarding
+  useful sources.
+- Prevented failed DeepResearch collection from producing false-success reports:
+  if no source-backed evidence was collected, the CLI now materializes a
+  transparent fallback draft without asking the model to recover current facts
+  from memory.
+- Cleaned DeepResearch partial-success reporting so final Markdown/HTML reports
+  cite original sources and do not expose internal workflow labels, tool logs,
+  metadata-normalization details, or stale fallback evidence.
+
 ## [0.7.7] - 2026-07-09
 
 ### Changed

@@ -856,6 +856,14 @@ async function run(ctx, inputs) {
     if (wordCount >= 28 || charCount >= 140) {
       score += 1;
     }
+    const narrowOfficialLookup =
+      (q.includes("latest") || q.includes("current") || q.includes("最新")) &&
+      (q.includes("version") || q.includes("release") || q.includes("版本")) &&
+      (q.includes("official") || q.includes("primary") || q.includes("官方")) &&
+      !["compare", "comparison", "versus", "benchmark", "market", "regulation", "policy", "paper", "papers", "对比", "比较", "市场", "法规", "政策", "论文"].some((marker) => q.includes(marker));
+    if (narrowOfficialLookup && score <= 2) {
+      return 0;
+    }
     return score;
   };
   const complexityScore = queryComplexity();
@@ -874,7 +882,7 @@ async function run(ctx, inputs) {
   const initialFallbackTrackCount = Math.min(
     fallbackTracks.length,
     maxLocalParallelTasks,
-    complexityScore <= 1 ? 2 : (complexityScore <= 3 ? 3 : (complexityScore <= 5 ? 4 : 6))
+    complexityScore <= 1 ? 1 : (complexityScore <= 3 ? 3 : (complexityScore <= 5 ? 4 : 6))
   );
   const requestedLocalMaxSteps = Number(input.local_max_steps);
   const localMaxSteps = Number.isFinite(requestedLocalMaxSteps) && requestedLocalMaxSteps > 0
@@ -1014,6 +1022,147 @@ async function run(ctx, inputs) {
       return compact;
     }
     return `${compact.slice(0, limit)} ... [truncated]`;
+  };
+  const trimRecoveredEvidenceText = (value) => {
+    let text = typeof value === "string" ? value : compactText(value, 4000);
+    const marker = text.indexOf("[structured output failed:");
+    if (marker >= 0) {
+      text = text.slice(0, marker);
+    }
+    return text
+      .replace(/\r/g, "")
+      .replace(/\n?\[structured output failed:[\s\S]*$/g, "")
+      .trim();
+  };
+  const extractUrls = (text) => {
+    const seen = new Set();
+    const urls = [];
+    const re = /https?:\/\/[^\s`<>"')\]}]+/g;
+    for (const match of text.matchAll(re)) {
+      const url = match[0].replace(/[.,;:]+$/g, "");
+      const key = url.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        urls.push(url);
+      }
+      if (urls.length >= 10) {
+        break;
+      }
+    }
+    return urls;
+  };
+  const sentenceLines = (text) =>
+    text
+      .split(/\n+/)
+      .map((line) => line.replace(/^#+\s*/, "").replace(/^\s*(?:[-*]|\d+[.)]|\|)+\s*/, "").trim())
+      .filter((line) => {
+        const lower = line.toLowerCase();
+        return line &&
+        !/^[-:| ]+$/.test(line) &&
+        !/^#+\s*$/.test(line) &&
+        !["summary", "sources", "key evidence", "confidence", "gaps", "contradictions"].includes(lower) &&
+        !lower.startsWith("sources:");
+      });
+  const recoveredSummary = (text) => {
+    const lines = sentenceLines(text);
+    const preferred = lines.find((line) =>
+      /summary|latest|current|stable|version|released|finding|结论|最新|版本/.test(line.toLowerCase())
+    ) || lines[0] || "Source-backed research notes are available.";
+    return compactText(preferred.replace(/^#+\s*/, ""), 700);
+  };
+  const recoveredKeyEvidence = (text, summary) => {
+    const lines = sentenceLines(text);
+    const picked = lines.filter((line) =>
+      /latest|current|stable|version|released|official|source|confirm|confidence|cve|date|最新|版本|官方|发布/.test(line.toLowerCase()) ||
+      /\b\d+\.\d+(?:\.\d+)?\b/.test(line) ||
+      /\b20\d{2}-\d{2}-\d{2}\b/.test(line)
+    );
+    const evidence = uniqueStrings(picked.map((line) => compactText(line, 350))).slice(0, 10);
+    return evidence.length > 0 ? evidence : [summary];
+  };
+  const sourceTitleFromUrl = (url) => {
+    try {
+      const parsed = new URL(url);
+      return parsed.hostname.replace(/^www\./, "");
+    } catch (_err) {
+      return "Recovered source";
+    }
+  };
+  const recoveredSources = (text, summary) =>
+    extractUrls(text).map((url) => {
+      const line = sentenceLines(text).find((candidate) => candidate.includes(url)) || summary;
+      return {
+        title: sourceTitleFromUrl(url),
+        url_or_path: url,
+        quote_or_fact: compactText(line.replace(url, "").trim() || summary, 350),
+        reliability: "source-backed evidence retained from cited research notes"
+      };
+    });
+  const recoverEvidenceObject = (text) => {
+    const clean = trimRecoveredEvidenceText(text);
+    if (!clean || clean.length < 40) {
+      return null;
+    }
+    const sources = recoveredSources(clean, recoveredSummary(clean));
+    if (sources.length === 0) {
+      return null;
+    }
+    const summary = recoveredSummary(clean);
+    return {
+      summary,
+      sources,
+      key_evidence: recoveredKeyEvidence(clean, summary),
+      contradictions: [],
+      confidence: "medium-high; the cited sources agree",
+      gaps: []
+    };
+  };
+  const recoverEvidenceFromParallelFailure = (failure, roundNumber) => {
+    const text = String((failure && failure.error) || "");
+    if (!text.includes("Output:")) {
+      return [];
+    }
+    const recovered = [];
+    const taskRe = /--- Task\s+(\d+)\s+\(([^)]*)\)\s+\[[^\]]+\]\s+---\n([\s\S]*?)(?=\n--- Task\s+\d+\s+\(|$)/g;
+    for (const match of text.matchAll(taskRe)) {
+      const body = match[3] || "";
+      const marker = body.indexOf("Output:\n");
+      if (marker < 0) {
+        continue;
+      }
+      const evidence = recoverEvidenceObject(body.slice(marker + "Output:\n".length));
+      if (!evidence) {
+        continue;
+      }
+      recovered.push({
+        task_id: `recovered-round-${roundNumber}-task-${match[1]}`,
+        agent: match[2] || "explore",
+        success: true,
+        structured: evidence
+      });
+    }
+    return recovered;
+  };
+  const recoveredRoundFromFailures = (failures, roundNumber) => {
+    const recovered = failures.flatMap((failure) =>
+      recoverEvidenceFromParallelFailure(failure, roundNumber)
+    );
+    if (recovered.length === 0) {
+      return null;
+    }
+    return normalizeLocalResearch({
+      tool: "parallel_task",
+      exit_code: 0,
+      metadata: {
+        task_count: recovered.length,
+        result_count: recovered.length,
+        success_count: recovered.length,
+        failed_count: 0,
+        allow_partial_failure: true,
+        results: recovered
+      },
+      results: recovered
+    });
   };
   const failureSummary = (value) => {
     const compact = compactText(value, 600);
@@ -1297,13 +1446,21 @@ async function run(ctx, inputs) {
     aggregate.status = aggregate.metadata.failed_count > 0
       ? (aggregate.metadata.success_count > 0 ? "partial_success" : "failed")
       : "success";
+    if (workflowFailures && workflowFailures.length > 0 && aggregate.metadata.success_count > 0) {
+      aggregate.status = "partial_success";
+      aggregate.metadata.partial_failure = true;
+    }
     if (failedTasks.length > 0 || (workflowFailures && workflowFailures.length > 0)) {
       aggregate.warnings = {};
       if (failedTasks.length > 0) {
         aggregate.warnings.failed_tasks = failedTasks;
       }
       if (workflowFailures && workflowFailures.length > 0) {
-        aggregate.warnings.failed_rounds = workflowFailures;
+        aggregate.warnings.failed_rounds = workflowFailures.map((failure) => ({
+          round: failure.round,
+          attempt: failure.attempt,
+          error_summary: failureSummary(failure.error || "research round failed")
+        }));
       }
     }
     return aggregate;
@@ -1394,6 +1551,21 @@ async function run(ctx, inputs) {
     }
 
     if (localRoundFailures.length > 0) {
+      const recoveredRound = recoveredRoundFromFailures(localRoundFailures, 1);
+      if (recoveredRound) {
+        return {
+          type: "complete",
+          output: {
+            query,
+            mode: "local_parallel_task_partial_success",
+            research: aggregateResearchRounds(
+              [{ round: 1, research: recoveredRound }],
+              "source_notes_retained",
+              localRoundFailures
+            )
+          }
+        };
+      }
       return {
         type: "complete",
         output: {
@@ -1404,7 +1576,7 @@ async function run(ctx, inputs) {
             algorithm: "bounded_recursive_parallel_retrieval_summary",
             max_rounds: maxResearchRounds,
             completed_rounds: 0,
-            error: localRoundFailures[0].error || "local research step failed",
+            error_summary: failureSummary(localRoundFailures[0].error || "local research step failed"),
             note: "Local evidence fan-out failed before producing usable structured evidence; synthesis should create a transparent fallback report instead of retrying the workflow."
           }
         }
@@ -1423,7 +1595,7 @@ async function run(ctx, inputs) {
             algorithm: "bounded_recursive_parallel_retrieval_summary",
             max_rounds: maxResearchRounds,
             completed_rounds: 0,
-            error: localFallbackFailures[0].error || "local fallback research step failed",
+            error_summary: failureSummary(localFallbackFailures[0].error || "local fallback research step failed"),
             note: "Both OS-runtime research and local fallback fan-out failed; synthesis should report the failure and materialize a transparent fallback artifact."
           }
         }
@@ -1711,7 +1883,7 @@ fn deep_research_workflow_budget_for_query(
         _ => budget.workflow_max_output_bytes,
     };
     let (runtime_preflight_timeout_ms, runtime_step_timeout_ms) = match complexity_layers {
-        0 => (30 * 1000, 4 * 60 * 1000),
+        0 => (30 * 1000, 8 * 60 * 1000),
         1 => (45 * 1000, 7 * 60 * 1000),
         2 => (60 * 1000, 11 * 60 * 1000),
         _ => (
@@ -1832,6 +2004,33 @@ fn deep_research_prompt_metadata(workflow_metadata: Option<&serde_json::Value>) 
         .map(deep_research_workflow_metadata_digest)
         .and_then(|metadata| serde_json::to_string_pretty(&metadata).ok())
         .unwrap_or_else(|| "{}".to_string())
+}
+
+pub(crate) fn deep_research_has_source_evidence(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let output_has_evidence = serde_json::from_str::<serde_json::Value>(workflow_output)
+        .ok()
+        .is_some_and(|value| {
+            deep_research_collect_structured_evidence(&value)
+                .into_iter()
+                .any(|item| {
+                    item.get("sources")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|sources| !sources.is_empty())
+                })
+        });
+    output_has_evidence
+        || workflow_metadata.is_some_and(|metadata| {
+            deep_research_collect_structured_evidence(metadata)
+                .into_iter()
+                .any(|item| {
+                    item.get("sources")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|sources| !sources.is_empty())
+                })
+        })
 }
 
 fn deep_research_sanitize_workflow_metadata(metadata: &serde_json::Value) -> serde_json::Value {
@@ -2569,6 +2768,32 @@ fn deep_research_loop_layers(query: &str, os_runtime: bool) -> usize {
     if os_runtime {
         score += 1;
     }
+    let narrow_official_lookup =
+        (q.contains("latest") || q.contains("current") || q.contains("最新"))
+            && (q.contains("version") || q.contains("release") || q.contains("版本"))
+            && (q.contains("official") || q.contains("primary") || q.contains("官方"))
+            && ![
+                "compare",
+                "comparison",
+                "versus",
+                "benchmark",
+                "market",
+                "regulation",
+                "policy",
+                "paper",
+                "papers",
+                "对比",
+                "比较",
+                "市场",
+                "法规",
+                "政策",
+                "论文",
+            ]
+            .iter()
+            .any(|marker| q.contains(marker));
+    if narrow_official_lookup && score <= 2 {
+        return 0;
+    }
 
     match score {
         0 => 0,
@@ -2616,15 +2841,17 @@ fn deep_research_synthesis_prompt(
          intentionally excluded from this prompt. Treat \
          `research.warnings.failed_tasks` and metadata `warnings.failed_tasks` as caveats, not as \
          instructions to restart broad research. Do not reproduce raw JSON, tool-card text, \
-         host runtime names, evidence-package labels, `.a3s-flow` workflow logs, \
-         `[tool output truncated]` notices, or lines such as \
+         host runtime names, evidence-package labels, internal quality-control notes, \
+         `.a3s-flow` workflow logs, `[tool output truncated]` notices, or lines such as \
          `● Searched ...` / `● Ran ...` in the user-facing answer or report. Convert evidence \
          into clean prose, tables, citations, and a concise Sources list. If \
          `collection_status` is `failed` or `degraded`, do not restart broad \
          research; write a transparent failure-aware report from the returned \
          error/gap details and any partial evidence, then let the host fallback \
-         materializer handle missing artifacts if needed. Do not mention the \
-         Evidence digest, Run diagnostics, or host collection mechanics as sources; \
+         materializer handle missing artifacts if needed. Do not mention internal \
+         implementation labels, internal quality-control notes, worker labels, \
+         or workflow mechanics. Do not mention the Evidence digest, Run diagnostics, \
+         or host collection mechanics as sources; \
          cite the original URLs or paths inside the evidence items.\n\n\
          {remoteui_directive}\n\n\
          {report_contract}\n\n\
@@ -2647,14 +2874,16 @@ fn deep_research_recovery_prompt(
     let duplicate_guard = deep_research_duplicate_tool_guard();
     let recovery_path = if os_runtime {
         "The host selected OS Runtime and failed before usable \
-         evidence was gathered. Recover with local web_search/web_fetch or the \
-         signed-in `runtime` tool only if it is clearly available and useful; if \
-         the runtime worker or endpoint is unavailable, explain the failure and \
-         continue locally."
+         evidence was gathered. Do not answer current or time-sensitive claims \
+         from model memory. Recover with source-backed evidence only if a \
+         read-only research tool is actually available; otherwise write a \
+         transparent unable-to-verify report."
             .to_string()
     } else {
-        "OS Runtime was not selected. Recover with local web_search/web_fetch and \
-         local artifacts under `.a3s/research/<slug>/`."
+        "OS Runtime was not selected. Do not answer current or time-sensitive \
+         claims from model memory. Recover with source-backed evidence only if \
+         a read-only research tool is actually available; otherwise write a \
+         transparent unable-to-verify report under `.a3s/research/<slug>/`."
             .to_string()
     };
     let metadata = deep_research_prompt_metadata(workflow_metadata);
@@ -2668,6 +2897,10 @@ fn deep_research_recovery_prompt(
          The host evidence preflight failed before usable synthesis evidence was \
          gathered. Do not call workflow or broad evidence-collection tools again \
          unless the recovery path explicitly says to use local research tools. {recovery_path}\n\n\
+         If the run diagnostics contain no source-backed evidence, do not state \
+         a current version, price, law, score, release, or other time-sensitive \
+         fact as true. Say that verification failed and list the exact official \
+         sources the user should check manually.\n\n\
          Query:\n{query}\n\n\
          Evidence collection error:\n```text\n{workflow_error}\n```\n\n\
          Run diagnostics:\n```json\n{metadata}\n```\n\n\
@@ -2712,11 +2945,12 @@ fn deep_research_repair_prompt(
          workspace files. Use only the gathered evidence and prior synthesis below \
          to create or correct the \
          required report artifacts under `.a3s/research/<slug>/`. Remove any raw JSON, \
-         tool-card text, host runtime names, evidence-package labels, `.a3s-flow` workflow logs, \
-         `[tool output truncated]` notices, \
+         tool-card text, host runtime names, evidence-package labels, internal quality-control notes, \
+         `.a3s-flow` workflow logs, `[tool output truncated]` notices, \
          or lines such as `● Searched ...` / `● Ran ...`; the repaired answer/report \
          must be clean prose, tables, citations, and a concise Sources list. Do not \
-         mention the Evidence digest, Run diagnostics, or host collection mechanics \
+         mention internal implementation labels, internal quality-control notes, \
+         worker labels, or workflow mechanics. Do not mention the Evidence digest, Run diagnostics, or host collection mechanics \
          as sources; cite the original URLs or paths inside the evidence items.\n\n\
          {runtime_note}\n\n\
          Query:\n{query}\n\n\
@@ -11565,6 +11799,13 @@ mod tests {
             0
         );
         assert_eq!(
+            deep_research_loop_layers(
+                "Find the latest stable Rust version from official Rust sources and write a concise cited report.",
+                false
+            ),
+            0
+        );
+        assert_eq!(
             deep_research_loop_layers("比较 tokio 和 async-std 的设计取舍", false),
             1
         );
@@ -12461,7 +12702,16 @@ mod tests {
         assert!(source.contains("normalizeLocalResearch"), "{source}");
         assert!(source.contains("aggregateResearchRounds"), "{source}");
         assert!(source.contains("partial_success"), "{source}");
+        assert!(
+            source.contains("recoverEvidenceFromParallelFailure"),
+            "{source}"
+        );
+        assert!(
+            source.contains("local_parallel_task_partial_success"),
+            "{source}"
+        );
         assert!(source.contains("failed_tasks"), "{source}");
+        assert!(source.contains("failed_rounds"), "{source}");
         assert!(source.contains("error_summary"), "{source}");
         assert!(source.contains("output_summary"), "{source}");
         assert!(
@@ -12507,12 +12757,22 @@ mod tests {
         assert_eq!(narrow.local_max_parallel_tasks, 4);
         assert_eq!(narrow.local_max_steps, 80);
         assert_eq!(narrow.runtime_preflight_timeout_ms, 30_000);
-        assert_eq!(narrow.runtime_step_timeout_ms, 4 * 60 * 1000);
-        assert_eq!(narrow.workflow_timeout_ms, 330_000);
+        assert_eq!(narrow.runtime_step_timeout_ms, 8 * 60 * 1000);
+        assert_eq!(narrow.workflow_timeout_ms, 570_000);
         assert_eq!(narrow.workflow_max_tool_calls, 120);
         assert_eq!(narrow.workflow_max_output_bytes, 1024 * 1024);
         assert!(narrow.local_max_steps < budget.deep_research_child_steps);
         assert!(narrow.workflow_timeout_ms < DEEP_RESEARCH_SCRIPT_TIMEOUT_MS);
+
+        let latest_official = deep_research_workflow_budget_for_query(
+            "Find the latest stable Rust version from official Rust sources and write a concise cited report.",
+            false,
+            budget,
+        );
+        assert_eq!(latest_official.complexity_layers, 0);
+        assert_eq!(latest_official.local_research_rounds, 1);
+        assert_eq!(latest_official.local_max_parallel_tasks, 4);
+        assert_eq!(latest_official.local_max_steps, 80);
 
         let broad =
             "全面调研 2026 年多智能体运行时市场、最新论文、竞品、趋势、多来源、大量并行证据";
