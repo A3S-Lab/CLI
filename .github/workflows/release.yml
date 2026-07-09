@@ -49,9 +49,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare A3S workspace crates
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Use published A3S crates
         shell: bash
-        run: bash .github/scripts/checkout-a3s-workspace.sh
+        run: bash .github/scripts/use-published-a3s-crates.sh
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: a3s
@@ -64,8 +65,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare A3S workspace crates
-        run: bash .github/scripts/checkout-a3s-workspace.sh
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         env:
@@ -91,7 +90,11 @@ jobs:
           if ! crate_exists a3s-tui 0.1.6; then
             echo "::error::a3s-tui 0.1.6 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          cargo publish --locked
+          publish_dir="$(mktemp -d)"
+          trap 'rm -rf "$publish_dir"' EXIT
+          git archive HEAD | tar -x -C "$publish_dir"
+          bash .github/scripts/use-published-a3s-crates.sh "$publish_dir/Cargo.toml"
+          cargo publish --locked --manifest-path "$publish_dir/Cargo.toml"
 
   homebrew:
     needs: binaries
