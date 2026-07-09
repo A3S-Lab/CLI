@@ -127,6 +127,7 @@ const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
+const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 
 /// Terminal-safe mapping of the DESIGN.md Geist/Vercel palette.
 const ACCENT: Color = Color::Rgb(0, 112, 243); // link / active / success
@@ -5028,14 +5029,80 @@ fn has_successful_llm_history(history: &[a3s_code_core::Message]) -> bool {
         .any(|m| m.role == "assistant" && !m.text().trim().is_empty())
 }
 
-fn compacted_summary_text(history: &[a3s_code_core::Message]) -> Option<String> {
+fn is_compact_timeline_message(message: &a3s_code_core::Message) -> bool {
+    message.role == a3s_code_core::A3S_COMPACT_ROLE
+}
+
+fn resumed_transcript_line_for_message(
+    message: &a3s_code_core::Message,
+    width: u16,
+) -> Option<String> {
+    if is_compact_timeline_message(message) {
+        return None;
+    }
+    let text = message.text();
+    if text.trim().is_empty() {
+        return None;
+    }
+    match message.role.as_str() {
+        "user" => Some(gutter(ACCENT, text.trim())),
+        "assistant" => {
+            let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
+            md.push(&text);
+            Some(gutter(TN_GREEN, &md.view()))
+        }
+        _ => None,
+    }
+}
+
+fn resumed_transcript_lines(history: &[a3s_code_core::Message], width: u16) -> Vec<String> {
     history
         .iter()
-        .rev()
-        .map(|message| message.text())
-        .find(|text| text.contains("Context Summary"))
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .filter_map(|message| resumed_transcript_line_for_message(message, width))
+        .collect()
+}
+
+fn resumed_timeline_event_lines(
+    events: &[a3s_code_core::timeline::TranscriptEvent],
+    width: u16,
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            if !event.display.visible {
+                return None;
+            }
+            if event.event_kind == a3s_code_core::timeline::TranscriptEventKind::CompactMarker {
+                return Some(compact_completion_marker_line());
+            }
+            event
+                .message
+                .as_ref()
+                .and_then(|message| resumed_transcript_line_for_message(message, width))
+        })
+        .collect()
+}
+
+fn resumed_initial_transcript_lines(
+    timeline_page: Option<&a3s_code_core::timeline::TimelinePage>,
+    history: &[a3s_code_core::Message],
+    width: u16,
+) -> Vec<String> {
+    match timeline_page {
+        Some(page) => resumed_timeline_event_lines(&page.events, width),
+        None => resumed_transcript_lines(history, width),
+    }
+}
+
+fn compact_completion_marker_line() -> String {
+    Style::new()
+        .fg(TN_GREEN)
+        .bold()
+        .render("  ✦ context compacted for the model")
+}
+
+fn append_compact_completion_marker(messages: &mut Vec<String>) {
+    messages.push(compact_completion_marker_line());
 }
 
 fn touch_workspace_file_path_for_manifest(
@@ -6350,22 +6417,13 @@ impl Model for App {
                         return None;
                     }
                 };
-                self.messages.clear();
                 self.output_tokens = 0;
                 self.last_prompt_tokens = 0;
                 self.ctx_warned_tier = 0; // compacted window: re-arm fill warnings
                 self.has_successful_llm_history = has_successful_llm_history(&compacted);
                 self.last_auto_review_history_len = compacted.len();
                 self.auto_reviewed = false;
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GREEN)
-                        .bold()
-                        .render("  ✦ context compacted — continuing from this summary:"),
-                );
-                if let Some(summary) = compacted_summary_text(&compacted) {
-                    self.push_line(&gutter(TN_CYAN, &summary));
-                }
+                append_compact_completion_marker(&mut self.messages);
                 self.rebuild_viewport();
             }
 
@@ -10798,25 +10856,15 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // Seed the transcript with any resumed conversation (user + assistant text).
     let resumed = session.history();
     let has_resumed_successful_llm_history = has_successful_llm_history(&resumed);
-    let mut initial_messages: Vec<String> = resumed
-        .iter()
-        .filter_map(|m| {
-            let text = m.text();
-            if text.trim().is_empty() {
-                return None;
-            }
-            match m.role.as_str() {
-                // Same gutter (● dot + indent) as live messages.
-                "user" => Some(gutter(ACCENT, text.trim())),
-                "assistant" => {
-                    let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
-                    md.push(&text);
-                    Some(gutter(TN_GREEN, &md.view()))
-                }
-                _ => None,
-            }
+    let timeline_page = session
+        .timeline_page(a3s_code_core::timeline::TimelinePageRequest {
+            before_seq: None,
+            limit: RESUME_TIMELINE_PAGE_LIMIT,
         })
-        .collect();
+        .await
+        .unwrap_or_default();
+    let mut initial_messages =
+        resumed_initial_transcript_lines(timeline_page.as_ref(), &resumed, width);
     // Seed ↑/↓ input recall with the user's prior prompts so resuming a session
     // keeps its command history (tool-result `user` messages carry no text block,
     // so the non-empty filter excludes them).
@@ -11470,17 +11518,124 @@ mod tests {
     }
 
     #[test]
-    fn compacted_summary_text_uses_core_summary_message() {
+    fn resumed_transcript_lines_skip_compact_summary_messages() {
         let history = vec![
-            Message::user("initial"),
-            Message::user("## Context Summary\n\nolder work condensed"),
-            Message::assistant("latest reply"),
+            Message::user("before compact"),
+            Message {
+                role: a3s_code_core::A3S_COMPACT_ROLE.to_string(),
+                content: vec![a3s_code_core::ContentBlock::Text {
+                    text: "## Context Summary\n\nhidden summary".to_string(),
+                }],
+                reasoning_content: None,
+            },
+            Message::assistant("after compact"),
         ];
 
-        assert_eq!(
-            compacted_summary_text(&history).as_deref(),
-            Some("## Context Summary\n\nolder work condensed")
+        let plain = resumed_transcript_lines(&history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+    }
+
+    #[test]
+    fn resumed_timeline_event_lines_render_marker_without_summary_body() {
+        let compact = Message {
+            role: a3s_code_core::A3S_COMPACT_ROLE.to_string(),
+            content: vec![a3s_code_core::ContentBlock::Text {
+                text: "## Context Summary\n\nhidden summary".to_string(),
+            }],
+            reasoning_content: None,
+        };
+        let mut events = Vec::new();
+        events.extend(a3s_code_core::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::user("before compact"),
+            0,
+        ));
+        events.extend(a3s_code_core::timeline::events_for_message(
+            "session", 1, 1, &compact, 0,
+        ));
+        events.extend(a3s_code_core::timeline::events_for_message(
+            "session",
+            2,
+            3,
+            &Message::assistant("after compact"),
+            0,
+        ));
+
+        let plain = resumed_timeline_event_lines(&events, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("context compacted for the model"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+        assert!(!plain.contains("Context Summary"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_prefers_timeline_page_over_history() {
+        let timeline_events = a3s_code_core::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::assistant("from timeline"),
+            0,
         );
+        let page = a3s_code_core::timeline::TimelinePage {
+            events: timeline_events,
+            has_more_before: false,
+            next_before_seq: None,
+        };
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(Some(&page), &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from timeline"));
+        assert!(!plain.contains("from history"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_falls_back_to_history_without_timeline_page() {
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(None, &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from history"));
+    }
+
+    #[test]
+    fn compact_completion_marker_preserves_existing_ui_history_without_summary() {
+        let mut messages = vec!["existing user line".to_string()];
+
+        append_compact_completion_marker(&mut messages);
+
+        let plain = messages
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0], "existing user line");
+        assert!(plain[1].contains("context compacted for the model"));
+        assert!(!plain[1].contains("Context Summary"));
     }
 
     #[test]
