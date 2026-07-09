@@ -781,6 +781,21 @@ still execute inside a3s-code. The adapter accepts Claude Code-style
 common argument aliases like `path` to a3s's `file_path`, and feeds tool results
 back into the next Claude turn as structured history.
 
+When Codex CLI is logged in (`codex login`), the Codex tab can switch the
+current session to Codex account models using `$CODEX_HOME/auth.json` or
+`~/.codex/auth.json`. Codex auth can also be used as a normal config provider:
+
+```acl
+default_model = "codex/model-slug"
+
+providers "codex" {
+  models "model-slug" {
+    name = "Codex model"
+    toolCall = true
+  }
+}
+```
+
 ## Testing
 
 ```sh

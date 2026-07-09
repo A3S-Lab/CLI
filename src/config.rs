@@ -54,6 +54,13 @@ providers "openai" {
     limit       = { context = 200000, output = 4096 }
   }
 }
+
+# Optional: use the local Codex CLI / ChatGPT account login as a provider.
+# Run `codex login`, then set `default_model` to a slug from `a3s code models`.
+# default_model = "codex/model-slug"
+# providers "codex" {
+#   models "model-slug" { name = "Codex model"; toolCall = true }
+# }
 "#
 }
 

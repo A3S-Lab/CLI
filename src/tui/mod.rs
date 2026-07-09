@@ -420,10 +420,14 @@ fn estimate_tokens(s: &str) -> usize {
 }
 
 fn ctx_limit_for_model(model_ctx: &std::collections::HashMap<String, u32>, model: &str) -> u32 {
+    let codex_model = model
+        .strip_prefix("codex/")
+        .or_else(|| model.strip_prefix("openai-codex/"))
+        .unwrap_or(model);
     context_limit_for_model(
         model,
         model_ctx.get(model).copied(),
-        crate::codex::codex_model_context(model),
+        crate::codex::codex_model_context(codex_model),
     )
 }
 

@@ -102,11 +102,9 @@ pub(crate) fn has_local_login(provider: AuthProvider) -> bool {
     match provider {
         AuthProvider::Claude => crate::claude::has_claude_login(),
         AuthProvider::Codex => {
-            let Some(home) = std::env::var_os("HOME") else {
+            let Some(path) = crate::codex::codex_auth_path() else {
                 return false;
             };
-            let home = std::path::Path::new(&home);
-            let path = home.join(".codex/auth.json");
             std::fs::read_to_string(path)
                 .ok()
                 .and_then(|txt| serde_json::from_str::<serde_json::Value>(&txt).ok())
