@@ -91,7 +91,7 @@ jobs:
           if ! crate_exists a3s-tui 0.1.6; then
             echo "::error::a3s-tui 0.1.6 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          cargo publish
+          cargo publish --locked
 
   homebrew:
     needs: binaries
