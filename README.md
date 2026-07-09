@@ -703,6 +703,12 @@ These commands are available outside the asset-specific flows:
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
 
+A3S Code auto-discovers `SKILL.md` skills from project and user roots:
+`.a3s/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`, plus
+plugin-bundled `plugins/**/skills` directories under `.agents`, `.codex`, and
+`.claude`. Discovered skills appear in `/plugin` and are selected on demand by
+the skill matcher for the current request.
+
 ### Agents, Research, and Loops
 
 | Command | What it does |

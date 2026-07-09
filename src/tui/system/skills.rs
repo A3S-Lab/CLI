@@ -1,9 +1,10 @@
-//! Claude Code skill discovery, loading, and the disabled-skills persistence.
+//! Agent skill discovery, loading, and the disabled-skills persistence.
 
-/// Discover Claude Code skill directories — personal (`~/.claude/skills`),
-/// project (`<ws>/.claude/skills`), and plugin-bundled (`~/.claude/plugins/**/
-/// skills`) — so a3s can load Claude `SKILL.md` skills directly. a3s's skill
-/// loader already understands the `<name>/SKILL.md` layout and YAML frontmatter.
+/// Discover agent skill directories — personal (`~/.agents/skills`,
+/// `~/.codex/skills`, `~/.claude/skills`), project (`<ws>/<root>/skills`),
+/// and plugin-bundled (`~/<root>/plugins/**/skills`) — so a3s can load
+/// `SKILL.md` skills directly. a3s's skill loader already understands the
+/// `<name>/SKILL.md` layout and YAML frontmatter.
 /// Parse a SKILL.md's YAML frontmatter for `name` + `description`.
 fn parse_skill_meta(path: &std::path::Path) -> Option<(String, String)> {
     let content = std::fs::read_to_string(path).ok()?;
@@ -159,9 +160,10 @@ pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     if configured_a3s.is_dir() {
         dirs.push(configured_a3s);
     }
-    // Claude Code and Codex both keep skills under `<root>/skills` (same SKILL.md
-    // layout); load from either so a skill written for one works in the other.
-    for root in [".claude", ".codex"] {
+    // Agents, Claude Code, and Codex all keep skills under `<root>/skills`
+    // (same SKILL.md layout); load from any of them so a skill written for one
+    // works in the others.
+    for root in [".agents", ".claude", ".codex"] {
         let project = std::path::Path::new(workspace).join(root).join("skills");
         if project.is_dir() {
             dirs.push(project);
@@ -169,7 +171,7 @@ pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = std::path::PathBuf::from(home);
-        for root in [".claude", ".codex"] {
+        for root in [".agents", ".claude", ".codex"] {
             let personal = home.join(root).join("skills");
             if personal.is_dir() {
                 dirs.push(personal);
@@ -177,6 +179,7 @@ pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
         }
         // Depth 6 covers nested plugin layouts: plugins/cache/<plugin>/<plugin>/
         // <version>/skills and marketplaces/<mkt>/external_plugins/<plugin>/skills.
+        collect_skills_dirs(&home.join(".agents/plugins"), 0, 6, &mut dirs);
         collect_skills_dirs(&home.join(".claude/plugins"), 0, 6, &mut dirs);
         collect_skills_dirs(&home.join(".codex/plugins"), 0, 6, &mut dirs);
     }
@@ -217,6 +220,21 @@ fn collect_skills_dirs(
 mod tests {
     use super::*;
 
+    fn temp_root(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!("a3s-{name}-{}-{nanos}", std::process::id()))
+    }
+
+    fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
+        match value {
+            Some(value) => std::env::set_var(name, value),
+            None => std::env::remove_var(name),
+        }
+    }
+
     #[test]
     fn okf_skill_materializes_and_parses() {
         let dir = std::env::temp_dir().join(format!("a3s-okf-skill-{}", std::process::id()));
@@ -252,5 +270,68 @@ mod tests {
             "allowed-tools must parse (fail-secure) so the skill is usable"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agent_skill_dirs_include_agents_codex_and_claude_roots() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let old_config = std::env::var_os("A3S_CONFIG_FILE");
+        let old_skill_dir = std::env::var_os("A3S_SKILL_DIR");
+
+        let root = temp_root("skill-roots");
+        let home = root.join("home");
+        let workspace = root.join("workspace");
+        let a3s_skills = home.join(".a3s/skills");
+        let agents_personal = home.join(".agents/skills");
+        let agents_plugin = home.join(".agents/plugins/cache/example/1.0.0/skills");
+        let codex_personal = home.join(".codex/skills");
+        let claude_personal = home.join(".claude/skills");
+        let project_agents = workspace.join(".agents/skills");
+        let project_codex = workspace.join(".codex/skills");
+        let project_claude = workspace.join(".claude/skills");
+
+        for dir in [
+            &a3s_skills,
+            &agents_personal,
+            &agents_plugin,
+            &codex_personal,
+            &claude_personal,
+            &project_agents,
+            &project_codex,
+            &project_claude,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        std::env::set_var("HOME", &home);
+        std::env::remove_var("A3S_CONFIG_FILE");
+        std::env::set_var("A3S_SKILL_DIR", &a3s_skills);
+
+        let dirs = agent_skill_dirs(workspace.to_str().unwrap());
+
+        for expected in [
+            &a3s_skills,
+            &agents_personal,
+            &agents_plugin,
+            &codex_personal,
+            &claude_personal,
+            &project_agents,
+            &project_codex,
+            &project_claude,
+        ] {
+            assert!(
+                dirs.iter().any(|dir| dir == expected),
+                "missing skill dir {} in {dirs:?}",
+                expected.display()
+            );
+        }
+
+        restore_env_var("HOME", old_home);
+        restore_env_var("A3S_CONFIG_FILE", old_config);
+        restore_env_var("A3S_SKILL_DIR", old_skill_dir);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
