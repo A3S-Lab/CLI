@@ -69,8 +69,7 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         budget::budget_plan_for_effort_id(effort, Some(context_limit), BudgetWorkload::Interactive);
     let mut options = SessionOptions::new()
         .with_auto_save(false)
-        .with_auto_compact(true)
-        .with_auto_compact_threshold(budget.auto_compact_threshold)
+        .with_auto_compact(false)
         .with_file_memory(config::memory_dir())
         .with_skill_dirs(runtime.skill_dirs.clone())
         .with_max_tool_rounds(budget.max_tool_rounds)

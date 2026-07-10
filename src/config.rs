@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub(crate) const DEFAULT_AUTO_COMPACT_THRESHOLD: f64 = 0.85;
+
 /// A starter `config.acl` (HCL-like ACL) with placeholders, generated on first
 /// launch so a new user has something to edit instead of an error.
 pub(crate) fn config_template() -> &'static str {
@@ -10,6 +12,9 @@ pub(crate) fn config_template() -> &'static str {
 # with Ctrl+S. Docs: https://a3s-lab.github.io/a3s/
 
 default_model = "openai/my-model"
+
+# Compact automatically when the last prompt reaches this share of the model context window.
+# auto_compact_threshold = 0.85
 
 # Optional OS endpoint. When set, a3s code enables /login and /logout.
 # os = "https://os.example.com"
@@ -46,7 +51,7 @@ providers "openai" {
     toolCall    = true
     temperature = true
     modalities  = { input = ["text"], output = ["text"] }
-    limit       = { context = 128000, output = 4096 }
+    limit       = { context = 200000, output = 4096 }
   }
 }
 "#
@@ -208,6 +213,43 @@ pub(crate) fn skill_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"))
 }
 
+pub(crate) fn auto_compact_threshold() -> f64 {
+    let Some(path) = find_config() else {
+        return DEFAULT_AUTO_COMPACT_THRESHOLD;
+    };
+    auto_compact_threshold_for_path(std::path::Path::new(&path))
+}
+
+pub(crate) fn auto_compact_threshold_for_path(path: &std::path::Path) -> f64 {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return DEFAULT_AUTO_COMPACT_THRESHOLD;
+    };
+    match auto_compact_threshold_from_text(&text) {
+        Ok(Some(threshold)) => threshold,
+        Ok(None) => DEFAULT_AUTO_COMPACT_THRESHOLD,
+        Err(value) => {
+            eprintln!(
+                "warning: invalid auto compact threshold {value:?}; using {DEFAULT_AUTO_COMPACT_THRESHOLD}"
+            );
+            DEFAULT_AUTO_COMPACT_THRESHOLD
+        }
+    }
+}
+
+fn auto_compact_threshold_from_text(text: &str) -> Result<Option<f64>, String> {
+    let value = top_level_str(text, "auto_compact_threshold")
+        .or_else(|| top_level_str(text, "autoCompactThreshold"));
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let threshold = value.parse::<f64>().map_err(|_| value.clone())?;
+    if threshold > 0.0 && threshold <= 1.0 {
+        Ok(Some(threshold))
+    } else {
+        Err(value)
+    }
+}
+
 /// Extract a top-level `key = "value"` scalar from HCL-ish text. Only lines at
 /// brace depth 0 count, so a same-named key inside a `providers { … }` block
 /// can't shadow it. The core's CodeConfig ignores unknown keys, so the option
@@ -283,6 +325,39 @@ pub(crate) fn find_config() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_compact_threshold_parses_snake_and_camel_case_top_level_values() {
+        assert_eq!(
+            auto_compact_threshold_from_text("auto_compact_threshold = 0.9"),
+            Ok(Some(0.9))
+        );
+        assert_eq!(
+            auto_compact_threshold_from_text("autoCompactThreshold = 0.75"),
+            Ok(Some(0.75))
+        );
+        assert_eq!(
+            auto_compact_threshold_from_text("default_model = \"x\""),
+            Ok(None)
+        );
+        assert_eq!(
+            auto_compact_threshold_from_text(
+                "providers \"x\" { auto_compact_threshold = 0.2 }\nauto_compact_threshold = 0.8"
+            ),
+            Ok(Some(0.8))
+        );
+    }
+
+    #[test]
+    fn auto_compact_threshold_rejects_values_outside_ratio_range() {
+        for value in ["0", "-0.1", "1.01", "not-a-number"] {
+            let text = format!("auto_compact_threshold = {value}");
+            assert!(
+                auto_compact_threshold_from_text(&text).is_err(),
+                "{value} should be invalid"
+            );
+        }
+    }
 
     #[test]
     fn top_level_str_reads_only_depth_zero_keys() {

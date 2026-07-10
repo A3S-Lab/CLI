@@ -367,6 +367,11 @@ impl App {
         // Until then, do not show the previous model's prompt/token counters as
         // if they belonged to this context window.
         self.last_prompt_tokens = 0;
+        self.auto_compact = crate::compact::auto_compact::AutoCompactController::new(
+            crate::config::auto_compact_threshold(),
+            self.context_limit,
+        );
+        self.rebuild_model_context();
         self.ctx_warned_tier = 0;
         self.output_tokens = 0;
         if let Err(error) = save_model_selection_preference(&preference) {
@@ -393,8 +398,7 @@ impl App {
                 let prev_override = self.llm_override.clone();
                 let prev_ctx = self.context_limit;
                 self.llm_override = Some(Arc::new(client));
-                // Before rebuild: effort_session_opts scales the auto-compact
-                // threshold from context_limit, so it must reflect the NEW model.
+                // Build the replacement session with the new model's context policy.
                 self.context_limit = self.active_context_limit_for(&model);
                 match self.rebuild_session(Some(&model)) {
                     Ok((session, _)) => {
@@ -550,11 +554,6 @@ impl App {
                 // Includes the login-gated OS `a3s-os-capabilities` skill.
                 .with_skill_dirs(self.skill_dirs())
                 .with_auto_save(true)
-                // Auto-compact the context when it nears the window (Claude-style).
-                // The threshold is scaled to THIS model's real window because the
-                // core triggers off a fixed 200k (see `auto_compact_threshold_for`).
-                .with_auto_compact(true)
-                .with_auto_compact_threshold(auto_compact_threshold_for(self.context_limit))
                 .with_file_memory(memory_dir())
                 // Parallel fan-out available in every mode (not just ultracode).
                 .with_max_parallel_tasks(budget.max_parallel_tasks)
@@ -663,8 +662,7 @@ impl App {
             );
             return;
         }
-        // Before rebuild: effort_session_opts scales the auto-compact threshold
-        // from context_limit, so it must reflect the NEW model's window.
+        // Build the replacement session with the new model's context policy.
         let prev_override = self.llm_override.clone();
         let prev_ctx = self.context_limit;
         self.llm_override = None;

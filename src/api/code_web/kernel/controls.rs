@@ -15,11 +15,14 @@ pub(super) fn controls_json(
     session_id: &str,
     controls: &CodeWebSessionControls,
     context_limit: Option<u32>,
+    auto_compact_threshold: f64,
 ) -> Value {
     let profile = normalize_effort(&controls.effort)
         .or_else(|| normalize_effort(budget::DEFAULT_CODE_WEB_EFFORT_ID))
         .expect("medium effort profile must exist");
-    let plan = budget::budget_plan_for_profile(profile, context_limit, BudgetWorkload::Interactive);
+    let mut plan =
+        budget::budget_plan_for_profile(profile, context_limit, BudgetWorkload::Interactive);
+    plan.auto_compact_threshold = auto_compact_threshold;
     json!({
         "sessionId": session_id,
         "effort": profile.id,
@@ -81,7 +84,7 @@ mod tests {
             effort: "xhigh".to_string(),
             goal: Some("finish the migration".to_string()),
         };
-        let value = controls_json("session-1", &controls, Some(32_768));
+        let value = controls_json("session-1", &controls, Some(32_768), 0.9);
         let budget =
             budget::budget_plan_for_effort_id("xhigh", Some(32_768), BudgetWorkload::Interactive);
 
@@ -100,10 +103,7 @@ mod tests {
             value["budget"]["workflowMaxToolCalls"].as_u64(),
             Some(budget.workflow_max_tool_calls as u64)
         );
-        assert_eq!(
-            value["budget"]["autoCompactThreshold"].as_f64(),
-            Some(budget.auto_compact_threshold as f64)
-        );
+        assert_eq!(value["budget"]["autoCompactThreshold"].as_f64(), Some(0.9));
     }
 
     #[test]
@@ -112,7 +112,7 @@ mod tests {
             effort: "warp-drive".to_string(),
             goal: None,
         };
-        let value = controls_json("session-2", &controls, None);
+        let value = controls_json("session-2", &controls, None, 0.85);
         let budget = budget::budget_plan_for_effort_id(
             DEFAULT_CODE_WEB_EFFORT_ID,
             None,

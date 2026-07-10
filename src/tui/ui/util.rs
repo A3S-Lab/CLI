@@ -147,17 +147,21 @@ pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
         return String::new();
     }
 
-    let pct = ((elapsed.as_secs_f64() / 30.0) * 100.0).min(95.0);
     let prefix = Style::new().fg(ACCENT).render(&format!(
-        "  ✦ Compacting context… ({}) ",
-        fmt_elapsed(elapsed)
+        "  ✦ Compacting context… {} / {} ",
+        fmt_elapsed(elapsed),
+        fmt_elapsed(crate::compact::MANUAL_COMPACT_TIMEOUT),
     ));
     let progress_width = width
         .saturating_sub(a3s_tui::style::visible_len(&prefix))
         .clamp(1, 29);
+    let phase = (elapsed.as_millis() / 120) % 20;
+    let pulse = if phase <= 10 { phase } else { 20 - phase };
+    let value = 0.15 + (pulse as f64 / 10.0) * 0.7;
     let progress = a3s_tui::components::Progress::new()
-        .value(pct / 100.0)
+        .value(value)
         .width(progress_width.min(u16::MAX as usize) as u16)
+        .show_percentage(false)
         .filled_char('▰')
         .empty_char('▱')
         .filled_color(ACCENT)
@@ -441,7 +445,8 @@ mod tests {
         let plain = strip_ansi(&rendered);
 
         assert!(plain.contains("Compacting context"), "{plain}");
-        assert!(plain.contains("50%"), "{plain}");
+        assert!(plain.contains("15s / 1m 00s"), "{plain}");
+        assert!(!plain.contains('%'), "{plain}");
         assert!(plain.contains('▰'), "{plain}");
         assert!(plain.contains('▱'), "{plain}");
         assert!(rendered.contains("\x1b[38;2;0;112;243m"));
@@ -449,10 +454,13 @@ mod tests {
     }
 
     #[test]
-    fn compact_progress_line_caps_estimated_progress() {
-        let rendered = compact_progress_line(Duration::from_secs(60), 80);
+    fn compact_progress_line_animates_without_claiming_completion_percentage() {
+        let first = strip_ansi(&compact_progress_line(Duration::from_millis(600), 80));
+        let second = strip_ansi(&compact_progress_line(Duration::from_millis(1_800), 80));
 
-        assert!(strip_ansi(&rendered).contains("95%"));
+        assert_ne!(first, second);
+        assert!(!first.contains('%'));
+        assert!(!second.contains('%'));
     }
 
     #[test]

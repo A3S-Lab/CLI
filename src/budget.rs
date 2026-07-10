@@ -7,7 +7,7 @@
 
 use serde_json::{json, Value};
 
-const DEFAULT_CONTEXT_LIMIT: u32 = 128_000;
+const DEFAULT_CONTEXT_LIMIT: u32 = 200_000;
 const CORE_MAX_CONTEXT_TOKENS: f32 = 200_000.0;
 const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 1_200;
 const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 12;
@@ -85,7 +85,7 @@ pub(crate) struct BudgetPlan {
     pub(crate) max_tool_rounds: usize,
     pub(crate) max_continuation_turns: u32,
     pub(crate) max_parallel_tasks: usize,
-    pub(crate) auto_compact_threshold: f32,
+    pub(crate) auto_compact_threshold: f64,
     pub(crate) deep_research_child_steps: usize,
     pub(crate) workflow_max_tool_calls: usize,
     pub(crate) workflow_max_output_bytes: usize,
@@ -208,7 +208,7 @@ pub(crate) fn budget_plan_for_effort_id(
 
 pub(crate) fn budget_plan_for_profile(
     profile: &'static BudgetProfile,
-    context_limit: Option<u32>,
+    _context_limit: Option<u32>,
     workload: BudgetWorkload,
 ) -> BudgetPlan {
     let mut plan = BudgetPlan {
@@ -217,7 +217,7 @@ pub(crate) fn budget_plan_for_profile(
         max_tool_rounds: profile.max_tool_rounds,
         max_continuation_turns: profile.max_continuation_turns,
         max_parallel_tasks: profile.max_parallel_tasks,
-        auto_compact_threshold: auto_compact_threshold_for(context_limit.unwrap_or(0)),
+        auto_compact_threshold: crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD,
         deep_research_child_steps: profile.deep_research_child_steps,
         workflow_max_tool_calls: profile.workflow_max_tool_calls,
         workflow_max_output_bytes: profile.workflow_max_output_bytes,
@@ -307,16 +307,6 @@ fn context_suffix_limit(model: &str) -> Option<u32> {
     }
 }
 
-/// Scale the core's fixed compaction threshold to the active model window.
-pub(crate) fn auto_compact_threshold_for(window: u32) -> f32 {
-    let window = if window > 0 {
-        window as f32
-    } else {
-        CORE_MAX_CONTEXT_TOKENS
-    };
-    (0.85 * window / CORE_MAX_CONTEXT_TOKENS).clamp(0.01, 1.0)
-}
-
 pub(crate) fn context_percent_from_core_window(
     percent_of_core_window: f32,
     context_limit: u32,
@@ -395,15 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_compact_threshold_scales_to_real_window() {
-        assert!((auto_compact_threshold_for(128_000) - 0.544).abs() < 0.001);
-        assert!((auto_compact_threshold_for(200_000) - 0.85).abs() < 0.001);
-        assert_eq!(auto_compact_threshold_for(1_000_000), 1.0);
-        assert!((auto_compact_threshold_for(0) - 0.85).abs() < 0.001);
-        assert!((auto_compact_threshold_for(8_000) - 0.034).abs() < 0.001);
-    }
-
-    #[test]
     fn model_context_prefers_declared_then_account_then_inferred() {
         assert_eq!(
             context_limit_for_model("openai/gpt-5", Some(256_000), Some(512_000)),
@@ -421,9 +402,7 @@ mod tests {
             context_limit_for_model("unknown[1m]", None, None),
             1_000_000
         );
-        assert_eq!(
-            context_limit_for_model("unknown", None, None),
-            DEFAULT_CONTEXT_LIMIT
-        );
+        assert_eq!(context_limit_for_model("unknown", None, None), 200_000);
+        assert_eq!(resolve_ctx_limit(None), 200_000);
     }
 }

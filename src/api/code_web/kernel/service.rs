@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use a3s_boot::{BootError, Result as BootResult};
-use a3s_code_core::{AgentSession, ContentBlock, Message};
+use a3s_code_core::{AgentEvent, AgentSession, ContentBlock, Message, TokenUsage};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -31,6 +31,84 @@ pub(in crate::api::code_web) struct KernelService {
 
 const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SHELL_OUTPUT_MAX_CHARS: usize = 128_000;
+
+struct CodeWebStreamResult {
+    text: String,
+    usage: TokenUsage,
+    tool_calls_count: usize,
+    last_prompt_tokens: usize,
+}
+
+#[derive(Default)]
+struct CodeWebStreamAccumulator {
+    streamed_text: String,
+    end_text: Option<String>,
+    usage: Option<TokenUsage>,
+    tool_calls_count: usize,
+    last_prompt_tokens: usize,
+    error: Option<String>,
+}
+
+impl CodeWebStreamAccumulator {
+    fn observe(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::TextDelta { text } => self.streamed_text.push_str(&text),
+            AgentEvent::ToolStart { .. } => {
+                self.tool_calls_count = self.tool_calls_count.saturating_add(1)
+            }
+            AgentEvent::TurnEnd { usage, .. } => {
+                self.last_prompt_tokens = usage.prompt_tokens;
+            }
+            AgentEvent::End { text, usage, .. } => {
+                self.end_text = Some(text);
+                self.usage = Some(usage);
+            }
+            AgentEvent::Error { message } => self.error = Some(message),
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> Result<CodeWebStreamResult, String> {
+        if let Some(error) = self.error {
+            return Err(error);
+        }
+        let usage = self
+            .usage
+            .ok_or_else(|| "agent stream ended without a final response".to_string())?;
+        let end_text = self.end_text.unwrap_or_default();
+        Ok(CodeWebStreamResult {
+            text: if end_text.trim().is_empty() {
+                self.streamed_text
+            } else {
+                end_text
+            },
+            usage,
+            tool_calls_count: self.tool_calls_count,
+            last_prompt_tokens: self.last_prompt_tokens,
+        })
+    }
+}
+
+async fn run_code_web_stream(
+    session: &AgentSession,
+    prompt: &str,
+    history: &[Message],
+) -> Result<CodeWebStreamResult, String> {
+    let (mut events, join) = session
+        .stream(prompt, Some(history))
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut accumulator = CodeWebStreamAccumulator::default();
+    while let Some(event) = events.recv().await {
+        let finished = matches!(event, AgentEvent::End { .. } | AgentEvent::Error { .. });
+        accumulator.observe(event);
+        if finished {
+            break;
+        }
+    }
+    join.await.map_err(|error| error.to_string())?;
+    accumulator.finish()
+}
 
 impl KernelService {
     pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
@@ -272,7 +350,8 @@ impl KernelService {
             started_at: &started_at.to_rfc3339(),
             completed_at: &completed_at.to_rfc3339(),
         });
-        self.append_shell_output_message(session_id, &record).await;
+        self.append_shell_output_message(session_id, &record)
+            .await?;
 
         Ok(json!({
             "sessionId": session_id,
@@ -299,6 +378,13 @@ impl KernelService {
         let old_session = self.kernel_session(session_id).await?;
         let workspace = old_session.workspace().to_path_buf();
         old_session.close().await;
+        let store_dir = code_web_store_dir(&workspace);
+        crate::timeline::TimelineJsonlStore::for_session(&store_dir, session_id)
+            .clear()
+            .map_err(|error| BootError::Internal(error.to_string()))?;
+        crate::compact::ContextJsonStore::for_session(&store_dir, session_id)
+            .clear()
+            .map_err(|error| BootError::Internal(error.to_string()))?;
 
         let controls = self.session_controls_snapshot(session_id).await;
         let new_session = self
@@ -377,7 +463,12 @@ impl KernelService {
         let settings = self.session_settings_snapshot(session_id).await;
         let model = self.effective_model(&settings);
         let context_limit = code_web_context_limit_for_model(self.state.as_ref(), model.as_deref());
-        Ok(controls_json(session_id, &controls, Some(context_limit)))
+        Ok(controls_json(
+            session_id,
+            &controls,
+            Some(context_limit),
+            self.state.auto_compact_threshold,
+        ))
     }
 
     pub(in crate::api::code_web) async fn update_session_controls(
@@ -431,6 +522,7 @@ impl KernelService {
             session_id,
             &controls_snapshot,
             Some(context_limit),
+            self.state.auto_compact_threshold,
         ))
     }
 
@@ -439,65 +531,33 @@ impl KernelService {
         session_id: &str,
     ) -> BootResult<serde_json::Value> {
         let session = self.kernel_session(session_id).await?;
-        let history = session.history();
-        if history.is_empty() {
+        self.model_history_for_session(session.as_ref()).await?;
+        let workspace = session.workspace().to_path_buf();
+        let timeline_store = crate::timeline::TimelineJsonlStore::for_session(
+            code_web_store_dir(&workspace),
+            session_id,
+        );
+        let history_messages = timeline_store
+            .metadata()
+            .map_err(|error| BootError::Internal(error.to_string()))?
+            .source_message_count;
+        if history_messages == 0 {
             return Err(BootError::BadRequest("nothing to compact yet".to_string()));
         }
 
-        let workspace = session.workspace().to_path_buf();
-        let previous_summary = self
-            .session_context_snapshot(session_id)
-            .await
-            .compact_summary;
-        let prompt = compact_prompt(previous_summary.as_deref());
-        let result = session
-            .send(&prompt, Some(&history))
+        let summary = crate::compact::compact_timeline(session.llm_client(), &timeline_store)
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
-        let summary = result.text.trim().to_string();
-        if summary.is_empty() {
-            return Err(BootError::Internal(
-                "compaction failed with an empty summary".to_string(),
-            ));
-        }
-
-        session.close().await;
-        let controls = self.session_controls_snapshot(session_id).await;
-        let new_session = self
-            .create_agent_session(
-                &workspace,
-                Some(session_id),
-                self.session_response_model(session_id).await,
-                &controls.effort,
-            )
+        let summary =
+            summary.ok_or_else(|| BootError::BadRequest("nothing to compact yet".to_string()))?;
+        self.finalize_code_web_compact(session_id, session.as_ref(), &summary)
             .await?;
-        self.state
-            .sessions
-            .lock()
-            .await
-            .insert(session_id.to_string(), new_session);
-        self.state.messages.lock().await.insert(
-            session_id.to_string(),
-            vec![json!({
-                "id": format!("{}-compact", chrono::Utc::now().timestamp_millis()),
-                "sessionId": session_id,
-                "role": "system",
-                "content": format!("Context compacted. Future turns will continue from this summary:\n\n{summary}"),
-                "createdAt": chrono::Utc::now().to_rfc3339(),
-            })],
-        );
-        self.state.session_contexts.lock().await.insert(
-            session_id.to_string(),
-            CodeWebSessionContext {
-                compact_summary: Some(summary.clone()),
-            },
-        );
 
         Ok(json!({
             "sessionId": session_id,
             "compacted": true,
             "summary": summary,
-            "historyMessages": history.len(),
+            "historyMessages": history_messages,
             "completedAt": chrono::Utc::now().to_rfc3339(),
         }))
     }
@@ -517,13 +577,17 @@ impl KernelService {
             .to_string();
         let today = sleep_today();
         let directive = sleep_directive(&focus, false, &today);
-        let result = session
-            .send(&directive, None)
+        let history = self.model_history_for_session(session.as_ref()).await?;
+        self.save_code_web_message_to_timeline(session_id, &Message::user(&directive))
+            .await?;
+        let result = run_code_web_stream(session.as_ref(), &directive, &history)
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
-        let assistant_text = result.text;
-        let usage = UsageResponse::from_usage(result.usage);
+        let assistant_text = result.text.clone();
+        let usage = UsageResponse::from_usage(result.usage.clone());
         let tool_calls_count = result.tool_calls_count;
+        self.save_code_web_message_to_timeline(session_id, &Message::assistant(&assistant_text))
+            .await?;
         let (report_captured, saved_memories) = match parse_sleep_report(&assistant_text) {
             Some(memories) => (
                 true,
@@ -547,9 +611,11 @@ impl KernelService {
                 saved_memories.len()
             )
         };
-        self.append_message(session_id, "user", &display, None)
+        self.append_visible_message(session_id, "user", &display, None)
             .await;
-        self.append_message(session_id, "system", &summary, None)
+        self.append_visible_message(session_id, "system", &summary, None)
+            .await;
+        self.maybe_auto_compact(session_id, session.as_ref(), result.last_prompt_tokens)
             .await;
 
         Ok(json!({
@@ -612,6 +678,7 @@ impl KernelService {
                 &source_messages,
                 &source_history,
             ),
+            ..CodeWebSessionContext::default()
         };
         let target_messages =
             fork_messages(session_id, &target_session_id, &source_messages, &focus);
@@ -678,9 +745,10 @@ impl KernelService {
             .ok_or_else(|| BootError::BadRequest("content is required".to_string()))?;
         let session = self.kernel_session(session_id).await?;
         let prompt = self.compose_session_prompt(session_id, content).await;
-        self.append_message(session_id, "user", content, None).await;
-        let result = session
-            .send(&prompt, None)
+        let history = self.model_history_for_session(session.as_ref()).await?;
+        self.append_message(session_id, "user", content, None)
+            .await?;
+        let result = run_code_web_stream(session.as_ref(), &prompt, &history)
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
         self.append_message(
@@ -689,7 +757,9 @@ impl KernelService {
             &result.text,
             self.session_response_model(session_id).await,
         )
-        .await;
+        .await?;
+        self.maybe_auto_compact(session_id, session.as_ref(), result.last_prompt_tokens)
+            .await;
         Ok(json!({
             "sessionId": session_id,
             "accepted": true,
@@ -723,10 +793,10 @@ impl KernelService {
             .await?;
         let session_id = session.session_id().to_string();
         let prompt = self.compose_session_prompt(&session_id, &message).await;
+        let history = self.model_history_for_session(session.as_ref()).await?;
         self.append_message(&session_id, "user", &message, None)
-            .await;
-        let result = session
-            .send(&prompt, None)
+            .await?;
+        let result = run_code_web_stream(session.as_ref(), &prompt, &history)
             .await
             .map_err(|e| BootError::Internal(e.to_string()))?;
         self.append_message(
@@ -735,7 +805,9 @@ impl KernelService {
             &result.text,
             self.session_response_model(&session_id).await,
         )
-        .await;
+        .await?;
+        self.maybe_auto_compact(&session_id, session.as_ref(), result.last_prompt_tokens)
+            .await;
 
         Ok(ChatResponse {
             session_id,
@@ -993,6 +1065,7 @@ impl KernelService {
                 session_id.to_string(),
                 CodeWebSessionContext {
                     compact_summary: Some(carried_context),
+                    ..CodeWebSessionContext::default()
                 },
             );
         }
@@ -1021,22 +1094,226 @@ impl KernelService {
         }
 
         let controls = self.session_controls_snapshot(session_id).await;
-        let context = self.session_context_snapshot(session_id).await;
-        let controlled_prompt = compose_controlled_prompt(&controls, user_prompt);
-        match context
-            .compact_summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|summary| !summary.is_empty())
-        {
-            Some(summary) => {
-                format!("# Earlier conversation (compacted)\n\n{summary}\n\n{controlled_prompt}")
+        compose_controlled_prompt(&controls, user_prompt)
+    }
+
+    async fn model_history_for_session(&self, session: &AgentSession) -> BootResult<Vec<Message>> {
+        let session_id = session.session_id();
+        let store_dir = code_web_store_dir(session.workspace());
+        let timeline_store =
+            crate::timeline::TimelineJsonlStore::for_session(&store_dir, session_id);
+        let context_limit = self.context_limit_for_session(session_id).await;
+        let threshold = self.state.auto_compact_threshold;
+        let mut metadata = timeline_store
+            .metadata()
+            .map_err(|error| BootError::Internal(error.to_string()))?;
+        if metadata.source_message_count == 0 {
+            let legacy_history = session.history();
+            if !legacy_history.is_empty() {
+                seed_code_web_timeline(
+                    &store_dir,
+                    session_id,
+                    &legacy_history,
+                    context_limit,
+                    threshold,
+                )
+                .map_err(|error| BootError::Internal(error.to_string()))?;
+                metadata = timeline_store
+                    .metadata()
+                    .map_err(|error| BootError::Internal(error.to_string()))?;
             }
-            None => controlled_prompt,
+        }
+
+        let context_store = crate::compact::ContextJsonStore::for_session(&store_dir, session_id);
+        if let Some(mut context) = context_store
+            .load()
+            .map_err(|error| BootError::Internal(error.to_string()))?
+            .filter(|context| {
+                context.matches_timeline(metadata)
+                    && context.context_limit as usize == context_limit
+            })
+        {
+            context.update_runtime_metadata(
+                context.last_prompt_tokens,
+                context_limit.min(u32::MAX as usize) as u32,
+                threshold,
+            );
+            context_store
+                .save(&context)
+                .map_err(|error| BootError::Internal(error.to_string()))?;
+            return Ok(context.messages);
+        }
+
+        let timeline = timeline_store
+            .load_all()
+            .map(|events| crate::timeline::messages_from_events(&events))
+            .map_err(|error| BootError::Internal(error.to_string()))?;
+        let context = crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+            &timeline,
+            crate::compact::ProjectionBudget::for_token_limit(context_limit),
+            metadata,
+            0,
+            context_limit.min(u32::MAX as usize) as u32,
+            threshold,
+        );
+        context_store
+            .save(&context)
+            .map_err(|error| BootError::Internal(error.to_string()))?;
+        Ok(context.messages)
+    }
+
+    async fn maybe_auto_compact(
+        &self,
+        session_id: &str,
+        session: &AgentSession,
+        last_prompt_tokens: usize,
+    ) {
+        if last_prompt_tokens == 0 {
+            return;
+        }
+        let context_limit = self.context_limit_for_session(session_id).await;
+        let threshold = self.state.auto_compact_threshold;
+        let should_compact = {
+            let mut contexts = self.state.session_contexts.lock().await;
+            let context = contexts.entry(session_id.to_string()).or_default();
+            let controller = context.auto_compact.get_or_insert_with(|| {
+                crate::compact::auto_compact::AutoCompactController::new(
+                    threshold,
+                    context_limit.min(u32::MAX as usize) as u32,
+                )
+            });
+            controller.update_policy(threshold, context_limit.min(u32::MAX as usize) as u32);
+            controller.observe_prompt_tokens(last_prompt_tokens) && controller.start()
+        };
+        self.persist_code_web_context_usage(
+            session_id,
+            session.workspace(),
+            last_prompt_tokens,
+            context_limit,
+            threshold,
+        );
+        if !should_compact {
+            return;
+        }
+
+        let timeline_store = crate::timeline::TimelineJsonlStore::for_session(
+            code_web_store_dir(session.workspace()),
+            session_id,
+        );
+        let result =
+            match crate::compact::compact_timeline(session.llm_client(), &timeline_store).await {
+                Ok(Some(summary)) => {
+                    self.finalize_code_web_compact(session_id, session, &summary)
+                        .await
+                }
+                Ok(None) => Err(BootError::Internal(
+                    "automatic compact found an empty timeline".to_string(),
+                )),
+                Err(error) => Err(BootError::Internal(error)),
+            };
+
+        let mut contexts = self.state.session_contexts.lock().await;
+        let context = contexts.entry(session_id.to_string()).or_default();
+        if let Some(controller) = context.auto_compact.as_mut() {
+            if result.is_ok() {
+                controller.finish_success(0);
+            } else {
+                controller.finish_failure();
+            }
+        }
+        if let Err(error) = result {
+            eprintln!("warning: automatic compact failed for {session_id}: {error}");
+        }
+    }
+
+    async fn finalize_code_web_compact(
+        &self,
+        session_id: &str,
+        session: &AgentSession,
+        summary: &str,
+    ) -> BootResult<()> {
+        let workspace = session.workspace().to_path_buf();
+        let context_limit = self.context_limit_for_session(session_id).await;
+        let threshold = self.state.auto_compact_threshold;
+        persist_code_web_compact_summary(
+            &code_web_store_dir(&workspace),
+            session_id,
+            summary,
+            context_limit,
+            threshold,
+        )
+        .map_err(|error| BootError::Internal(error.to_string()))?;
+
+        let controls = self.session_controls_snapshot(session_id).await;
+        let new_session = self
+            .create_agent_session(
+                &workspace,
+                Some(session_id),
+                self.session_response_model(session_id).await,
+                &controls.effort,
+            )
+            .await?;
+        session.close().await;
+        self.state
+            .sessions
+            .lock()
+            .await
+            .insert(session_id.to_string(), new_session);
+        {
+            let mut messages_by_session = self.state.messages.lock().await;
+            let current_messages = messages_by_session.remove(session_id).unwrap_or_default();
+            messages_by_session.insert(
+                session_id.to_string(),
+                compact_visible_messages_after_success(session_id, current_messages, summary),
+            );
+        }
+        self.state
+            .session_contexts
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .compact_summary = Some(summary.to_string());
+        Ok(())
+    }
+
+    fn persist_code_web_context_usage(
+        &self,
+        session_id: &str,
+        workspace: &Path,
+        last_prompt_tokens: usize,
+        context_limit: usize,
+        threshold: f64,
+    ) {
+        let store = crate::compact::ContextJsonStore::for_session(
+            code_web_store_dir(workspace),
+            session_id,
+        );
+        if let Ok(Some(mut context)) = store.load() {
+            context.update_runtime_metadata(
+                last_prompt_tokens,
+                context_limit.min(u32::MAX as usize) as u32,
+                threshold,
+            );
+            let _ = store.save(&context);
         }
     }
 
     async fn append_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+        model: Option<String>,
+    ) -> BootResult<()> {
+        self.append_visible_message(session_id, role, content, model)
+            .await;
+        self.save_code_web_message_to_timeline(session_id, &message_for_role(role, content))
+            .await?;
+        Ok(())
+    }
+
+    async fn append_visible_message(
         &self,
         session_id: &str,
         role: &str,
@@ -1063,7 +1340,11 @@ impl KernelService {
             .push(message);
     }
 
-    async fn append_shell_output_message(&self, session_id: &str, record: &Value) {
+    async fn append_shell_output_message(
+        &self,
+        session_id: &str,
+        record: &Value,
+    ) -> BootResult<()> {
         let id = format!("{}-shell", chrono::Utc::now().timestamp_millis());
         let command = record
             .get("input")
@@ -1111,27 +1392,209 @@ impl KernelService {
             .entry(session_id.to_string())
             .or_default()
             .push(message);
+        let is_error = record
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.save_code_web_message_to_timeline(
+            session_id,
+            &Message::tool_result(tool_use_id, output, is_error),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn save_code_web_message_to_timeline(
+        &self,
+        session_id: &str,
+        message: &Message,
+    ) -> BootResult<()> {
+        let session = self.kernel_session(session_id).await?;
+        let store_dir = code_web_store_dir(session.workspace());
+        let context_limit = self.context_limit_for_session(session_id).await;
+        save_code_web_timeline_message(
+            &store_dir,
+            session_id,
+            message,
+            context_limit,
+            self.state.auto_compact_threshold,
+        )
+        .map_err(|error| BootError::Internal(error.to_string()))
+    }
+
+    async fn context_limit_for_session(&self, session_id: &str) -> usize {
+        let settings = self.session_settings_snapshot(session_id).await;
+        let model = self.effective_model(&settings);
+        code_web_context_limit_for_model(self.state.as_ref(), model.as_deref()) as usize
     }
 }
 
-fn compact_prompt(previous_summary: Option<&str>) -> String {
-    match previous_summary
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(previous_summary) => format!(
-            "An earlier part of this conversation was already condensed into this \
-             summary:\n\n{previous_summary}\n\nProduce a SINGLE updated summary that \
-             fully incorporates the summary above AND the conversation history below, \
-             so a fresh session can continue seamlessly: the goal, key decisions, \
-             files/commands touched, current state, and the immediate next steps. Be \
-             thorough but compact."
-        ),
-        None => "Summarize this conversation so a fresh session can continue seamlessly: \
-             the goal, key decisions, files/commands touched, current state, and the \
-             immediate next steps. Be thorough but compact."
-            .to_string(),
+fn message_for_role(role: &str, content: &str) -> Message {
+    match role {
+        "assistant" => Message::assistant(content),
+        "user" => Message::user(content),
+        _ => Message {
+            role: role.to_string(),
+            content: vec![ContentBlock::Text {
+                text: content.to_string(),
+            }],
+            reasoning_content: None,
+        },
     }
+}
+
+fn code_web_store_dir(workspace: &Path) -> PathBuf {
+    workspace.join(".a3s").join("tui-sessions")
+}
+
+fn seed_code_web_timeline(
+    store_dir: &Path,
+    session_id: &str,
+    history: &[Message],
+    context_limit: usize,
+    auto_compact_threshold: f64,
+) -> anyhow::Result<()> {
+    let timeline_store = crate::timeline::TimelineJsonlStore::for_session(store_dir, session_id);
+    if timeline_store.metadata()?.source_message_count > 0 {
+        return Ok(());
+    }
+
+    let mut source_event_count = 0;
+    for (message_index, message) in history.iter().enumerate() {
+        let events = crate::timeline::events_for_message(
+            session_id,
+            message_index,
+            source_event_count as u64,
+            message,
+            chrono::Utc::now().timestamp_millis(),
+        );
+        source_event_count += events.len();
+        for event in &events {
+            timeline_store.append(event)?;
+        }
+    }
+    let metadata = crate::timeline::TimelineMetadata {
+        source_file_bytes: timeline_store.file_len()?,
+        source_event_count,
+        source_message_count: history.len(),
+        active_summary_index: history.iter().rposition(crate::compact::is_compact_message),
+        compact_generation: history
+            .iter()
+            .filter(|message| crate::compact::is_compact_message(message))
+            .count() as u32,
+    };
+    let context = crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+        history,
+        crate::compact::ProjectionBudget::for_token_limit(context_limit),
+        metadata,
+        0,
+        context_limit.min(u32::MAX as usize) as u32,
+        auto_compact_threshold,
+    );
+    crate::compact::ContextJsonStore::for_session(store_dir, session_id).save(&context)
+}
+
+fn save_code_web_timeline_message(
+    store_dir: &Path,
+    session_id: &str,
+    message: &Message,
+    context_limit: usize,
+    auto_compact_threshold: f64,
+) -> anyhow::Result<()> {
+    let timeline_store = crate::timeline::TimelineJsonlStore::for_session(store_dir, session_id);
+    let context_store = crate::compact::ContextJsonStore::for_session(store_dir, session_id);
+    let source_file_bytes = timeline_store.file_len()?;
+    let cached_context = context_store.load()?.filter(|context| {
+        context.context_version == 2
+            && context.source_file_bytes == source_file_bytes
+            && context.context_limit as usize == context_limit
+    });
+    let next_index = cached_context
+        .as_ref()
+        .map(|context| context.source_message_count)
+        .unwrap_or(0);
+    let next_seq = cached_context
+        .as_ref()
+        .map(|context| context.source_event_count as u64)
+        .unwrap_or(0);
+    let appended_events = crate::timeline::events_for_message(
+        session_id,
+        next_index,
+        next_seq,
+        message,
+        chrono::Utc::now().timestamp_millis(),
+    );
+    for event in &appended_events {
+        timeline_store.append(event)?;
+    }
+
+    let budget = crate::compact::ProjectionBudget::for_token_limit(context_limit);
+    if let Some(mut context) = cached_context {
+        let last_prompt_tokens = context.last_prompt_tokens;
+        context.append_timeline_message(
+            message,
+            appended_events.len(),
+            timeline_store.file_len()?,
+            budget,
+        );
+        context.update_runtime_metadata(
+            last_prompt_tokens,
+            context_limit.min(u32::MAX as usize) as u32,
+            auto_compact_threshold,
+        );
+        context_store.save(&context)?;
+        return Ok(());
+    }
+
+    let all_events = timeline_store.load_all()?;
+    let timeline_messages = crate::timeline::messages_from_events(&all_events);
+    let metadata = timeline_store.metadata()?;
+    let context = crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+        &timeline_messages,
+        budget,
+        metadata,
+        0,
+        context_limit.min(u32::MAX as usize) as u32,
+        auto_compact_threshold,
+    );
+    context_store.save(&context)?;
+    Ok(())
+}
+
+fn persist_code_web_compact_summary(
+    store_dir: &Path,
+    session_id: &str,
+    summary: &str,
+    context_limit: usize,
+    auto_compact_threshold: f64,
+) -> anyhow::Result<()> {
+    let mut messages = Vec::new();
+    crate::compact::append_compact_summary(&mut messages, summary);
+    let Some(message) = messages.first() else {
+        return Ok(());
+    };
+    save_code_web_timeline_message(
+        store_dir,
+        session_id,
+        message,
+        context_limit,
+        auto_compact_threshold,
+    )
+}
+
+fn compact_visible_messages_after_success(
+    session_id: &str,
+    mut messages: Vec<Value>,
+    _summary: &str,
+) -> Vec<Value> {
+    messages.push(json!({
+        "id": format!("{}-compact", chrono::Utc::now().timestamp_millis()),
+        "sessionId": session_id,
+        "role": "system",
+        "content": "Context compacted for the model.",
+        "createdAt": chrono::Utc::now().to_rfc3339(),
+    }));
+    messages
 }
 
 fn apply_settings_patch(
@@ -1772,6 +2235,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stream_accumulator_uses_last_turn_prompt_tokens_and_final_usage() {
+        let mut accumulator = CodeWebStreamAccumulator::default();
+        accumulator.observe(AgentEvent::TurnEnd {
+            turn: 0,
+            usage: TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 10,
+                total_tokens: 110,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+        });
+        accumulator.observe(AgentEvent::ToolStart {
+            id: "tool-1".to_string(),
+            name: "read".to_string(),
+        });
+        accumulator.observe(AgentEvent::TurnEnd {
+            turn: 1,
+            usage: TokenUsage {
+                prompt_tokens: 170,
+                completion_tokens: 20,
+                total_tokens: 190,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+        });
+        accumulator.observe(AgentEvent::TextDelta {
+            text: "streamed".to_string(),
+        });
+        accumulator.observe(AgentEvent::End {
+            text: "final answer".to_string(),
+            usage: TokenUsage {
+                prompt_tokens: 270,
+                completion_tokens: 30,
+                total_tokens: 300,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            verification_summary: Box::new(
+                a3s_code_core::verification::VerificationSummary::from_reports(&[]),
+            ),
+            meta: None,
+        });
+
+        let result = accumulator.finish().expect("completed stream");
+        assert_eq!(result.last_prompt_tokens, 170);
+        assert_eq!(result.usage.prompt_tokens, 270);
+        assert_eq!(result.text, "final answer");
+        assert_eq!(result.tool_calls_count, 1);
+    }
+
+    fn temp_code_web_store_dir(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "a3s-code-web-{name}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
     fn fork_messages_rekeys_copied_messages_and_marks_the_branch() {
         let source_messages = vec![json!({
             "id": "old",
@@ -1809,6 +2335,114 @@ mod tests {
         assert!(context.contains("Earlier compact summary"));
         assert!(context.contains("The toolbar now uses GUI actions for sleep."));
         assert!(!context.contains("history fallback"));
+    }
+
+    #[test]
+    fn compact_visible_messages_preserve_history_and_hide_summary_body() {
+        let existing = vec![
+            json!({
+                "id": "user-1",
+                "sessionId": "session",
+                "role": "user",
+                "content": "keep this visible",
+            }),
+            json!({
+                "id": "assistant-1",
+                "sessionId": "session",
+                "role": "assistant",
+                "content": "keep this response",
+            }),
+        ];
+        let summary = "private compact summary that must not be visible";
+
+        let updated = compact_visible_messages_after_success("session", existing.clone(), summary);
+
+        assert_eq!(updated.len(), 3);
+        assert_eq!(updated[0], existing[0]);
+        assert_eq!(updated[1], existing[1]);
+        assert_eq!(updated[2]["sessionId"], "session");
+        assert_eq!(updated[2]["role"], "system");
+        let marker = updated[2]["content"].as_str().expect("marker content");
+        assert!(marker.contains("Context compacted"));
+        assert!(!marker.contains(summary));
+    }
+
+    #[test]
+    fn code_web_timeline_message_persists_timeline_and_context() {
+        let store_dir = temp_code_web_store_dir("timeline-context");
+        let message = Message::user("hello from code web");
+
+        save_code_web_timeline_message(&store_dir, "session", &message, 128_000, 0.85)
+            .expect("save timeline message");
+        save_code_web_timeline_message(
+            &store_dir,
+            "session",
+            &Message::assistant("incremental reply"),
+            128_000,
+            0.85,
+        )
+        .expect("append timeline message incrementally");
+
+        let timeline_store =
+            crate::timeline::TimelineJsonlStore::for_session(&store_dir, "session");
+        let events = timeline_store.load_all().expect("load timeline");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].message.as_ref().unwrap().text(),
+            "hello from code web"
+        );
+
+        let context_store = crate::compact::ContextJsonStore::for_session(&store_dir, "session");
+        let context = context_store
+            .load()
+            .expect("load context")
+            .expect("context");
+        assert_eq!(context.source_message_count, 2);
+        assert_eq!(context.source_event_count, 2);
+        assert_eq!(
+            context.source_file_bytes,
+            timeline_store.file_len().unwrap()
+        );
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[0].text(), "hello from code web");
+        assert_eq!(context.messages[1].text(), "incremental reply");
+    }
+
+    #[test]
+    fn code_web_compact_summary_persists_hidden_summary_and_context_marker() {
+        let store_dir = temp_code_web_store_dir("compact-summary");
+
+        persist_code_web_compact_summary(&store_dir, "session", "compact summary", 128_000, 0.85)
+            .expect("persist compact summary");
+
+        let timeline_store =
+            crate::timeline::TimelineJsonlStore::for_session(&store_dir, "session");
+        let events = timeline_store.load_all().expect("load timeline");
+        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events[0].event_kind,
+            crate::timeline::TranscriptEventKind::ContextSummary
+        );
+        assert!(!events[0].display.visible);
+        assert_eq!(
+            events[1].event_kind,
+            crate::timeline::TranscriptEventKind::CompactMarker
+        );
+        assert!(events[1].display.visible);
+
+        let context_store = crate::compact::ContextJsonStore::for_session(&store_dir, "session");
+        let context = context_store
+            .load()
+            .expect("load context")
+            .expect("context");
+        assert_eq!(context.compact_generation, 1);
+        assert_eq!(context.messages.len(), 1);
+        assert_eq!(context.messages[0].role, "user");
+        assert_eq!(context.messages[0].text(), "compact summary");
+        assert!(context
+            .messages
+            .iter()
+            .all(|message| message.role != crate::compact::A3S_COMPACT_ROLE));
     }
 
     #[test]

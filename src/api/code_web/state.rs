@@ -25,6 +25,8 @@ impl Default for CodeWebSessionControls {
 #[derive(Debug, Clone, Default)]
 pub(in crate::api::code_web) struct CodeWebSessionContext {
     pub(in crate::api::code_web) compact_summary: Option<String>,
+    pub(in crate::api::code_web) auto_compact:
+        Option<crate::compact::auto_compact::AutoCompactController>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +53,7 @@ impl Default for CodeWebSessionSettings {
 pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) agent: Arc<Agent>,
     pub(in crate::api::code_web) config_path: PathBuf,
+    pub(in crate::api::code_web) auto_compact_threshold: f64,
     pub(in crate::api::code_web) default_workspace: PathBuf,
     pub(in crate::api::code_web) code_config: RwLock<CodeConfig>,
     pub(in crate::api::code_web) sessions: Mutex<HashMap<String, Arc<AgentSession>>>,
@@ -67,9 +70,11 @@ impl CodeWebState {
         default_workspace: PathBuf,
         code_config: CodeConfig,
     ) -> Self {
+        let auto_compact_threshold = crate::config::auto_compact_threshold_for_path(&config_path);
         Self {
             agent,
             config_path,
+            auto_compact_threshold,
             default_workspace,
             code_config: RwLock::new(code_config),
             sessions: Mutex::new(HashMap::new()),

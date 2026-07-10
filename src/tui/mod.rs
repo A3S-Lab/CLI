@@ -96,9 +96,9 @@ mod util;
 
 mod panels;
 use crate::budget::{
-    auto_compact_threshold_for, budget_plan_for_effort_index, context_limit_for_model,
-    context_percent_from_core_window, resolve_ctx_limit, BudgetPlan, BudgetWorkload,
-    DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS, ULTRACODE_INDEX as ULTRACODE,
+    budget_plan_for_effort_index, context_limit_for_model, context_percent_from_core_window,
+    resolve_ctx_limit, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS,
+    ULTRACODE_INDEX as ULTRACODE,
 };
 use crate::config::*;
 use asset_naming::*;
@@ -127,6 +127,8 @@ const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
+#[allow(dead_code)]
+const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 
 /// Terminal-safe mapping of the DESIGN.md Geist/Vercel palette.
 const ACCENT: Color = Color::Rgb(0, 112, 243); // link / active / success
@@ -4393,6 +4395,12 @@ enum State {
     Awaiting,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactTrigger {
+    Manual,
+    Automatic,
+}
+
 #[derive(Clone)]
 #[allow(clippy::enum_variant_names)]
 enum Action {
@@ -4496,8 +4504,11 @@ enum Msg {
     CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text.
     AutoReview(String),
-    /// `/compact` finished through the core compaction pipeline.
-    Compacted(Result<Option<Vec<a3s_code_core::Message>>, String>),
+    /// Manual or automatic compact finished through the CLI-owned flow.
+    Compacted {
+        trigger: CompactTrigger,
+        result: Result<Option<String>, String>,
+    },
     /// Startup update check completed with the latest published version (if any).
     UpdateCheck(Option<String>),
 }
@@ -4571,6 +4582,7 @@ fn tui_session_options_with_gate(
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
     SessionOptions::new()
+        .with_auto_compact(false)
         .with_confirmation_policy(confirmation)
         .with_permission_policy(permission_policy.clone())
         .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(
@@ -5028,14 +5040,101 @@ fn has_successful_llm_history(history: &[a3s_code_core::Message]) -> bool {
         .any(|m| m.role == "assistant" && !m.text().trim().is_empty())
 }
 
-fn compacted_summary_text(history: &[a3s_code_core::Message]) -> Option<String> {
+fn background_llm_history(history: &[a3s_code_core::Message]) -> Vec<a3s_code_core::Message> {
+    crate::compact::project_messages_for_llm(history)
+}
+
+fn model_context_for_policy(
+    timeline: &[a3s_code_core::Message],
+    metadata: crate::timeline::TimelineMetadata,
+    last_prompt_tokens: usize,
+    context_limit: u32,
+    auto_compact_threshold: f64,
+) -> crate::compact::ModelContextState {
+    crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+        timeline,
+        crate::compact::ProjectionBudget::for_token_limit(context_limit as usize),
+        metadata,
+        last_prompt_tokens,
+        context_limit,
+        auto_compact_threshold,
+    )
+}
+
+fn is_compact_timeline_message(message: &a3s_code_core::Message) -> bool {
+    crate::compact::is_compact_message(message)
+}
+
+fn resumed_transcript_line_for_message(
+    message: &a3s_code_core::Message,
+    width: u16,
+) -> Option<String> {
+    if is_compact_timeline_message(message) {
+        return None;
+    }
+    let text = message.text();
+    if text.trim().is_empty() {
+        return None;
+    }
+    match message.role.as_str() {
+        "user" => Some(gutter(ACCENT, text.trim())),
+        "assistant" => {
+            let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
+            md.push(&text);
+            Some(gutter(TN_GREEN, &md.view()))
+        }
+        _ => None,
+    }
+}
+
+fn resumed_transcript_lines(history: &[a3s_code_core::Message], width: u16) -> Vec<String> {
     history
         .iter()
-        .rev()
-        .map(|message| message.text())
-        .find(|text| text.contains("Context Summary"))
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .filter_map(|message| resumed_transcript_line_for_message(message, width))
+        .collect()
+}
+
+fn resumed_timeline_event_lines(
+    events: &[crate::timeline::TranscriptEvent],
+    width: u16,
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            if !event.display.visible {
+                return None;
+            }
+            if event.event_kind == crate::timeline::TranscriptEventKind::CompactMarker {
+                return Some(compact_completion_marker_line());
+            }
+            event
+                .message
+                .as_ref()
+                .and_then(|message| resumed_transcript_line_for_message(message, width))
+        })
+        .collect()
+}
+
+fn resumed_initial_transcript_lines(
+    timeline_page: Option<&crate::timeline::TimelinePage>,
+    history: &[a3s_code_core::Message],
+    width: u16,
+) -> Vec<String> {
+    match timeline_page {
+        Some(page) => resumed_timeline_event_lines(&page.events, width),
+        None => resumed_transcript_lines(history, width),
+    }
+}
+
+fn compact_completion_marker_line() -> String {
+    Style::new()
+        .fg(TN_GREEN)
+        .bold()
+        .render("  ✦ context compacted for the model")
+}
+
+fn append_compact_completion_marker(messages: &mut Vec<String>) {
+    messages.push(compact_completion_marker_line());
 }
 
 fn touch_workspace_file_path_for_manifest(
@@ -5297,6 +5396,11 @@ fn take_pending_tool_label(
 
 struct App {
     session: Arc<AgentSession>,
+    /// CLI-owned model timeline. Compact summaries live here, not in code/core.
+    model_timeline: Vec<a3s_code_core::Message>,
+    timeline_store: crate::timeline::TimelineJsonlStore,
+    model_context: crate::compact::ModelContextState,
+    context_store: crate::compact::ContextJsonStore,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
@@ -5313,6 +5417,8 @@ struct App {
     context_limit: u32,
     /// Prompt tokens of the last turn = current context fill.
     last_prompt_tokens: usize,
+    /// CLI-owned automatic compact generation latch.
+    auto_compact: crate::compact::auto_compact::AutoCompactController,
     /// Highest context-fill tier already warned about (0 / 70 / 85), so each
     /// warning prints once per fill-up and re-arms when usage drops back.
     ctx_warned_tier: u8,
@@ -6253,19 +6359,20 @@ impl Model for App {
                     self.has_successful_llm_history,
                     self.auto_reviewed,
                 ) {
-                    let history = self.session.history();
+                    let raw_history = self.model_timeline.clone();
                     if should_run_inactivity_review(
                         self.state,
                         self.last_activity.elapsed(),
                         self.has_successful_llm_history,
-                        history.len(),
+                        raw_history.len(),
                         self.last_auto_review_history_len,
                         self.auto_reviewed,
                     ) {
                         self.auto_reviewed = true;
-                        self.last_auto_review_history_len = history.len();
+                        self.last_auto_review_history_len = raw_history.len();
                         let agent = self.agent.clone();
                         let workspace = self.cwd.clone();
+                        let history = background_llm_history(&raw_history);
                         let review = cmd::cmd(move || async move {
                             let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
                                 .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
@@ -6331,42 +6438,60 @@ impl Model for App {
                 }
             }
 
-            Msg::Compacted(result) => {
+            Msg::Compacted { trigger, result } => {
                 self.compacting = None;
-                let compacted = match result {
-                    Ok(Some(compacted)) => compacted,
+                let summary = match result {
+                    Ok(Some(summary)) => summary,
                     Ok(None) => {
-                        self.push_line(
-                            &Style::new().fg(TN_GRAY).render("  nothing to compact yet"),
-                        );
-                        return None;
+                        if trigger == CompactTrigger::Manual {
+                            self.push_line(
+                                &Style::new().fg(TN_GRAY).render("  nothing to compact yet"),
+                            );
+                        } else {
+                            self.auto_compact.finish_failure();
+                        }
+                        return if trigger == CompactTrigger::Automatic {
+                            self.complete_turn()
+                        } else {
+                            None
+                        };
                     }
                     Err(message) => {
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_RED)
-                                .render(&format!("  compaction failed: {message}")),
-                        );
-                        return None;
+                        if trigger == CompactTrigger::Manual {
+                            self.push_line(
+                                &Style::new()
+                                    .fg(TN_RED)
+                                    .render(&format!("  compaction failed: {message}")),
+                            );
+                        } else {
+                            self.auto_compact.finish_failure();
+                        }
+                        return if trigger == CompactTrigger::Automatic {
+                            self.complete_turn()
+                        } else {
+                            None
+                        };
                     }
                 };
-                self.messages.clear();
+                crate::compact::append_compact_summary(&mut self.model_timeline, &summary);
+                if let Some(message) = self.model_timeline.last() {
+                    let _ = self.persist_timeline_message(message);
+                }
+                self.rebuild_model_context();
                 self.output_tokens = 0;
                 self.last_prompt_tokens = 0;
-                self.ctx_warned_tier = 0; // compacted window: re-arm fill warnings
-                self.has_successful_llm_history = has_successful_llm_history(&compacted);
-                self.last_auto_review_history_len = compacted.len();
-                self.auto_reviewed = false;
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GREEN)
-                        .bold()
-                        .render("  ✦ context compacted — continuing from this summary:"),
-                );
-                if let Some(summary) = compacted_summary_text(&compacted) {
-                    self.push_line(&gutter(TN_CYAN, &summary));
+                if trigger == CompactTrigger::Automatic {
+                    self.auto_compact.finish_success(0);
                 }
+                self.ctx_warned_tier = 0; // compacted window: re-arm fill warnings
+                self.has_successful_llm_history = has_successful_llm_history(&self.model_timeline);
+                self.last_auto_review_history_len = self.model_timeline.len();
+                self.auto_reviewed = false;
+                append_compact_completion_marker(&mut self.messages);
                 self.rebuild_viewport();
+                if trigger == CompactTrigger::Automatic {
+                    return self.complete_turn();
+                }
             }
 
             Msg::UpdateCheck(latest) => {
@@ -7887,7 +8012,7 @@ impl App {
             self.btw = Some((q.clone(), None));
             let agent = self.agent.clone();
             let workspace = self.cwd.clone();
-            let history = self.session.history();
+            let history = background_llm_history(&self.model_timeline);
             return Some(cmd::cmd(move || async move {
                 // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
                 let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
@@ -8374,21 +8499,11 @@ impl App {
                     );
                     return None;
                 }
-                let history = self.session.history();
-                if history.is_empty() {
+                if self.model_timeline.is_empty() {
                     self.push_line(&Style::new().fg(TN_GRAY).render("  nothing to compact yet"));
                     return None;
                 }
-                self.compacting = Some(Instant::now()); // progress bar + input lock
-                let session = self.session.clone();
-                return Some(cmd::cmd(move || async move {
-                    Msg::Compacted(
-                        session
-                            .compact_history(None)
-                            .await
-                            .map_err(|e| compact_error_display("compact failed", &e.to_string())),
-                    )
-                }));
+                return self.start_compact(CompactTrigger::Manual);
             }
             "/help" => {
                 self.textarea.clear();
@@ -8628,6 +8743,112 @@ impl App {
         self.rebuild_viewport();
         self.pending_images
             .push(a3s_code_core::llm::Attachment::png(bytes));
+    }
+
+    fn model_history_for_llm(&self) -> Vec<a3s_code_core::Message> {
+        self.model_context.messages.clone()
+    }
+
+    fn persist_model_context(&self) {
+        let _ = self.context_store.save(&self.model_context);
+    }
+
+    fn rebuild_model_context(&mut self) {
+        let metadata =
+            self.timeline_store
+                .metadata()
+                .unwrap_or_else(|_| crate::timeline::TimelineMetadata {
+                    source_file_bytes: 0,
+                    source_event_count: self.model_timeline.len(),
+                    source_message_count: self.model_timeline.len(),
+                    active_summary_index: self
+                        .model_timeline
+                        .iter()
+                        .rposition(crate::compact::is_compact_message),
+                    compact_generation: self
+                        .model_timeline
+                        .iter()
+                        .filter(|message| crate::compact::is_compact_message(message))
+                        .count() as u32,
+                });
+        self.model_context = model_context_for_policy(
+            &self.model_timeline,
+            metadata,
+            self.last_prompt_tokens,
+            self.context_limit,
+            self.auto_compact.threshold(),
+        );
+        self.persist_model_context();
+    }
+
+    fn start_compact(&mut self, trigger: CompactTrigger) -> Option<Cmd<Msg>> {
+        if trigger == CompactTrigger::Automatic && !self.auto_compact.start() {
+            return None;
+        }
+        self.compacting = Some(Instant::now());
+        let llm_client = self.session.llm_client();
+        let timeline_store = self.timeline_store.clone();
+        Some(cmd::cmd(move || async move {
+            Msg::Compacted {
+                trigger,
+                result: crate::compact::compact_timeline(llm_client, &timeline_store)
+                    .await
+                    .map_err(|error| compact_error_display("compact failed", &error)),
+            }
+        }))
+    }
+
+    fn persist_timeline_message(
+        &self,
+        message: &a3s_code_core::Message,
+    ) -> anyhow::Result<(u64, u64, usize)> {
+        let source_file_bytes = self.timeline_store.file_len()?;
+        let events = crate::timeline::events_for_message(&self.session_id, 0, 0, message, 0);
+        for event in &events {
+            self.timeline_store.append(event)?;
+        }
+        Ok((
+            source_file_bytes,
+            self.timeline_store.file_len()?,
+            events.len(),
+        ))
+    }
+
+    fn append_model_timeline_message(&mut self, message: a3s_code_core::Message) {
+        let persisted = self.persist_timeline_message(&message);
+        self.model_timeline.push(message.clone());
+        let Ok((previous_file_bytes, source_file_bytes, appended_event_count)) = persisted else {
+            self.rebuild_model_context();
+            return;
+        };
+        if self.model_context.context_version != 2
+            || self.model_context.source_file_bytes != previous_file_bytes
+        {
+            self.rebuild_model_context();
+            return;
+        }
+        self.model_context.append_timeline_message(
+            &message,
+            appended_event_count,
+            source_file_bytes,
+            crate::compact::ProjectionBudget::for_token_limit(self.context_limit as usize),
+        );
+        self.model_context.update_runtime_metadata(
+            self.last_prompt_tokens,
+            self.context_limit,
+            self.auto_compact.threshold(),
+        );
+        self.persist_model_context();
+    }
+
+    fn record_model_user_turn(&mut self, prompt: &str) {
+        self.append_model_timeline_message(a3s_code_core::Message::user(prompt));
+    }
+
+    fn record_model_assistant_turn(&mut self, text: &str) {
+        if !text.trim().is_empty() {
+            self.append_model_timeline_message(a3s_code_core::Message::assistant(text));
+        }
     }
 
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
@@ -8979,6 +9200,8 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
+        let history = self.model_history_for_llm();
+        self.record_model_user_turn(&prompt);
         // (A `/ctx <n>` staged transcript window is attached upstream, only to a
         // genuine typed user message — see on_submit — never to a `/loop`,
         // asset review, `?`, or synthesis continuation.)
@@ -8990,10 +9213,10 @@ impl App {
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
-                    session.stream(prompt.as_str(), None).await
+                    session.stream(prompt.as_str(), Some(&history)).await
                 } else {
                     session
-                        .stream_with_attachments(prompt.as_str(), &atts, None)
+                        .stream_with_attachments(prompt.as_str(), &atts, Some(&history))
                         .await
                 };
                 match res {
@@ -9442,6 +9665,13 @@ impl App {
             AgentEvent::TurnEnd { usage, .. } => {
                 if usage.prompt_tokens > 0 {
                     self.last_prompt_tokens = usage.prompt_tokens;
+                    self.model_context.update_runtime_metadata(
+                        self.last_prompt_tokens,
+                        self.context_limit,
+                        self.auto_compact.threshold(),
+                    );
+                    self.auto_compact
+                        .observe_prompt_tokens(self.last_prompt_tokens);
                     self.maybe_warn_ctx();
                 }
             }
@@ -9626,12 +9856,25 @@ impl App {
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
-                if has_successful_llm_history(&self.session.history()) {
+                if !deep_research_dirty_output {
+                    self.record_model_assistant_turn(&review_text);
+                }
+                self.persist_model_context();
+                if has_successful_llm_history(&self.model_timeline) {
                     self.has_successful_llm_history = true;
                     self.auto_reviewed = false;
                 }
                 // Count the turn, idle, then continue /loop or drain the queue.
                 // A captured sleep report's save runs alongside.
+                if self.auto_compact.state()
+                    == crate::compact::auto_compact::AutoCompactState::Triggered
+                {
+                    let compact = self.start_compact(CompactTrigger::Automatic);
+                    return match (sleep_save, compact) {
+                        (Some(save), Some(compact)) => Some(cmd::batch(vec![save, compact])),
+                        (save, compact) => save.or(compact),
+                    };
+                }
                 return match (sleep_save, self.complete_turn()) {
                     (Some(save), Some(next)) => Some(cmd::batch(vec![save, next])),
                     (save, next) => save.or(next),
@@ -10730,12 +10973,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                 .with_workspace_backend(workspace_services.clone())
                 .with_skill_dirs(claude_dirs.clone())
                 .with_auto_save(true)
-                .with_auto_compact(true)
-                // Scaled to the model's real window — the core triggers off a
-                // fixed 200k, so a flat 0.85 would put the trigger past a
-                // smaller window and auto-compact would never fire (see
-                // `auto_compact_threshold_for`).
-                .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
                 .with_file_memory(memory_dir())
                 .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                 .with_max_tool_rounds(initial_budget.max_tool_rounds)
@@ -10763,8 +11000,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_workspace_backend(workspace_services.clone())
                     .with_skill_dirs(claude_dirs.clone())
                     .with_auto_save(true)
-                    .with_auto_compact(true)
-                    .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
                     .with_file_memory(memory_dir())
                     .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                     .with_max_tool_rounds(initial_budget.max_tool_rounds)
@@ -10797,30 +11032,75 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     // Seed the transcript with any resumed conversation (user + assistant text).
     let resumed = session.history();
-    let has_resumed_successful_llm_history = has_successful_llm_history(&resumed);
-    let mut initial_messages: Vec<String> = resumed
-        .iter()
-        .filter_map(|m| {
-            let text = m.text();
-            if text.trim().is_empty() {
-                return None;
+    let timeline_store =
+        crate::timeline::TimelineJsonlStore::for_session(store_dir.clone(), &session_id);
+    let mut timeline_messages = timeline_store
+        .load_all()
+        .ok()
+        .map(|events| crate::timeline::messages_from_events(&events))
+        .filter(|messages| !messages.is_empty())
+        .unwrap_or_else(|| resumed.clone());
+    if timeline_store
+        .metadata()
+        .is_ok_and(|metadata| metadata.source_message_count == 0)
+        && !resumed.is_empty()
+    {
+        for message in &resumed {
+            for event in crate::timeline::events_for_message(&session_id, 0, 0, message, 0) {
+                let _ = timeline_store.append(&event);
             }
-            match m.role.as_str() {
-                // Same gutter (● dot + indent) as live messages.
-                "user" => Some(gutter(ACCENT, text.trim())),
-                "assistant" => {
-                    let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
-                    md.push(&text);
-                    Some(gutter(TN_GREEN, &md.view()))
-                }
-                _ => None,
-            }
+        }
+        timeline_messages = resumed.clone();
+    }
+    let timeline_metadata =
+        timeline_store
+            .metadata()
+            .unwrap_or(crate::timeline::TimelineMetadata {
+                source_file_bytes: 0,
+                source_event_count: timeline_messages.len(),
+                source_message_count: timeline_messages.len(),
+                active_summary_index: timeline_messages
+                    .iter()
+                    .rposition(crate::compact::is_compact_message),
+                compact_generation: timeline_messages
+                    .iter()
+                    .filter(|message| crate::compact::is_compact_message(message))
+                    .count() as u32,
+            });
+    let compact_threshold = auto_compact_threshold();
+    let context_store =
+        crate::compact::ContextJsonStore::for_session(store_dir.clone(), &session_id);
+    let mut model_context = context_store
+        .load()
+        .ok()
+        .flatten()
+        .filter(|state| {
+            state.matches_timeline(timeline_metadata) && state.context_limit == context_limit
         })
-        .collect();
+        .unwrap_or_else(|| {
+            crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+                &timeline_messages,
+                crate::compact::ProjectionBudget::for_token_limit(context_limit as usize),
+                timeline_metadata,
+                0,
+                context_limit,
+                compact_threshold,
+            )
+        });
+    let last_prompt_tokens = model_context.last_prompt_tokens;
+    model_context.update_runtime_metadata(last_prompt_tokens, context_limit, compact_threshold);
+    let _ = context_store.save(&model_context);
+    let has_resumed_successful_llm_history = has_successful_llm_history(&timeline_messages);
+    let timeline_page = timeline_store
+        .load_tail_page(RESUME_TIMELINE_PAGE_LIMIT)
+        .ok()
+        .filter(|page| !page.events.is_empty());
+    let mut initial_messages =
+        resumed_initial_transcript_lines(timeline_page.as_ref(), &resumed, width);
     // Seed ↑/↓ input recall with the user's prior prompts so resuming a session
     // keeps its command history (tool-result `user` messages carry no text block,
     // so the non-empty filter excludes them).
-    let history_seed: Vec<String> = resumed
+    let history_seed: Vec<String> = timeline_messages
         .iter()
         .filter(|m| m.role == "user")
         .map(|m| m.text().trim().to_string())
@@ -10886,6 +11166,10 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     let mut app = App {
         session,
+        model_timeline: timeline_messages,
+        timeline_store,
+        model_context,
+        context_store,
         agent: agent.clone(),
         store: store.clone(),
         confirmation,
@@ -10894,7 +11178,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         models,
         model_ctx,
         context_limit,
-        last_prompt_tokens: 0,
+        last_prompt_tokens,
+        auto_compact: crate::compact::auto_compact::AutoCompactController::new(
+            compact_threshold,
+            context_limit,
+        ),
         ctx_warned_tier: 0,
         model_menu: None,
         model_tab: 0,
@@ -11470,17 +11758,182 @@ mod tests {
     }
 
     #[test]
-    fn compacted_summary_text_uses_core_summary_message() {
+    fn resumed_transcript_lines_skip_compact_summary_messages() {
         let history = vec![
-            Message::user("initial"),
-            Message::user("## Context Summary\n\nolder work condensed"),
-            Message::assistant("latest reply"),
+            Message::user("before compact"),
+            Message {
+                role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+                content: vec![a3s_code_core::ContentBlock::Text {
+                    text: "## Context Summary\n\nhidden summary".to_string(),
+                }],
+                reasoning_content: None,
+            },
+            Message::assistant("after compact"),
         ];
 
-        assert_eq!(
-            compacted_summary_text(&history).as_deref(),
-            Some("## Context Summary\n\nolder work condensed")
+        let plain = resumed_transcript_lines(&history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+    }
+
+    #[test]
+    fn background_llm_history_projects_compact_summary_for_provider() {
+        let history = vec![
+            Message::user("old user"),
+            Message {
+                role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+                content: vec![a3s_code_core::ContentBlock::Text {
+                    text: "summary".to_string(),
+                }],
+                reasoning_content: Some("internal reasoning".to_string()),
+            },
+            Message::user("new user"),
+        ];
+
+        let projected = background_llm_history(&history);
+
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].role, "user");
+        assert_eq!(projected[0].text(), "summary");
+        assert_eq!(projected[0].reasoning_content, None);
+        assert_eq!(projected[1].text(), "new user");
+        assert!(projected
+            .iter()
+            .all(|message| message.role != crate::compact::A3S_COMPACT_ROLE));
+    }
+
+    #[test]
+    fn model_switch_reprojects_context_for_the_new_window() {
+        let mut timeline = vec![Message {
+            role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+            content: vec![a3s_code_core::ContentBlock::Text {
+                text: "active summary".to_string(),
+            }],
+            reasoning_content: None,
+        }];
+        timeline.extend((0..60).map(|index| {
+            let text = format!("recent-{index}: {}", "x".repeat(20_000));
+            Message::user(&text)
+        }));
+        let metadata = crate::timeline::TimelineMetadata {
+            source_file_bytes: 1,
+            source_event_count: timeline.len() + 1,
+            source_message_count: timeline.len(),
+            active_summary_index: Some(0),
+            compact_generation: 1,
+        };
+
+        let context = model_context_for_policy(&timeline, metadata, 0, 200_000, 0.85);
+
+        assert_eq!(context.context_limit, 200_000);
+        assert_eq!(context.messages[0].text(), "active summary");
+        assert!(context.messages.len() < timeline.len());
+        assert!(context
+            .messages
+            .iter()
+            .all(|message| !crate::compact::is_compact_message(message)));
+    }
+
+    #[test]
+    fn resumed_timeline_event_lines_render_marker_without_summary_body() {
+        let compact = Message {
+            role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+            content: vec![a3s_code_core::ContentBlock::Text {
+                text: "## Context Summary\n\nhidden summary".to_string(),
+            }],
+            reasoning_content: None,
+        };
+        let mut events = Vec::new();
+        events.extend(crate::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::user("before compact"),
+            0,
+        ));
+        events.extend(crate::timeline::events_for_message(
+            "session", 1, 1, &compact, 0,
+        ));
+        events.extend(crate::timeline::events_for_message(
+            "session",
+            2,
+            3,
+            &Message::assistant("after compact"),
+            0,
+        ));
+
+        let plain = resumed_timeline_event_lines(&events, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("context compacted for the model"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+        assert!(!plain.contains("Context Summary"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_prefers_timeline_page_over_history() {
+        let timeline_events = crate::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::assistant("from timeline"),
+            0,
         );
+        let page = crate::timeline::TimelinePage {
+            events: timeline_events,
+            has_more_before: false,
+            next_before_seq: None,
+        };
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(Some(&page), &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from timeline"));
+        assert!(!plain.contains("from history"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_falls_back_to_history_without_timeline_page() {
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(None, &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from history"));
+    }
+
+    #[test]
+    fn compact_completion_marker_preserves_existing_ui_history_without_summary() {
+        let mut messages = vec!["existing user line".to_string()];
+
+        append_compact_completion_marker(&mut messages);
+
+        let plain = messages
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0], "existing user line");
+        assert!(plain[1].contains("context compacted for the model"));
+        assert!(!plain[1].contains("Context Summary"));
     }
 
     #[test]
@@ -14812,22 +15265,6 @@ mod tests {
             ctx_limit_for_model(&ctx, "unknown-model"),
             resolve_ctx_limit(None)
         );
-    }
-
-    #[test]
-    fn auto_compact_threshold_scales_to_real_window() {
-        // 128k model: fire at 85% of 128k, i.e. 0.85*128/200 of the core's fixed 200k.
-        assert!((auto_compact_threshold_for(128_000) - 0.544).abs() < 0.001);
-        // 200k model == the core's own denominator: plain 0.85.
-        assert!((auto_compact_threshold_for(200_000) - 0.85).abs() < 0.001);
-        // Windows past ~235k clamp to 1.0 (trigger at the fixed 200k, never overflow).
-        assert_eq!(auto_compact_threshold_for(1_000_000), 1.0);
-        // Unknown window (0) falls back to the core default of 0.85.
-        assert!((auto_compact_threshold_for(0) - 0.85).abs() < 0.001);
-        // Small window: NOT floored past the window itself — 8k triggers at
-        // 0.034 * 200k = 6.8k = 85% of 8k (the old 0.05 floor meant 10k > 8k,
-        // i.e. compaction could never fire before overflow).
-        assert!((auto_compact_threshold_for(8_000) - 0.034).abs() < 0.001);
     }
 
     #[test]
