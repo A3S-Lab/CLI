@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Aligned fenced Markdown code with Codex-style terminal highlighting: known
+  languages retain distinct token colors, unknown languages stay plain, CRLF
+  is normalized, and 512 KiB / 10,000-line guardrails avoid render stalls.
+- Replaced width-unstable colorful emoji in the transcript, task queue,
+  thinking indicator, and `/ide` tree with monochrome terminal-safe marks and
+  consistent hair-space padding.
+- Reworked `/btw` into an isolated side conversation with cancellation,
+  request-safe completion, in-memory answer history, and raw Markdown copy;
+  side requests inherit the active model/context but never alter or persist the
+  main timeline.
 - Made the footer the single owner of live context usage; the composer status
   chip now keeps effort/mode information without duplicating context fill in
   the input border.

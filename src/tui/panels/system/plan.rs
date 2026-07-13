@@ -373,9 +373,9 @@ mod tests {
 
         assert_eq!(lines.len(), 4);
         assert!(plain[0].contains("tasks · ✓ 3 done"), "{plain:?}");
-        assert!(plain[1].contains("⏳ running"), "{plain:?}");
-        assert!(plain[2].contains("▱ first queued job"), "{plain:?}");
-        assert!(plain[3].contains("▱ later queued job"), "{plain:?}");
+        assert!(plain[1].contains("● running"), "{plain:?}");
+        assert!(plain[2].contains("◦ first queued job"), "{plain:?}");
+        assert!(plain[3].contains("◦ later queued job"), "{plain:?}");
         assert!(
             lines
                 .iter()

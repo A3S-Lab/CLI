@@ -131,7 +131,7 @@ pub(crate) fn thinking_block(text: &str, width: usize) -> String {
     a3s_tui::components::WrappedPrefixBlock::new(text)
         .margin(PAD)
         .width(width)
-        .prefixes("💭 ", "   ")
+        .prefixes("✦\u{200A}", "  ")
         .style(Style::new().fg(TN_GRAY).italic())
         .view()
 }
@@ -410,10 +410,10 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("  💭 alpha"));
-        assert!(rows.iter().skip(1).all(|row| row.starts_with("     ")));
+        assert!(rows[0].starts_with("  ✦\u{200A}alpha"));
+        assert!(rows.iter().skip(1).all(|row| row.starts_with("    ")));
         assert!(rendered.lines().all(|line| visible_len(line) == 16));
-        assert!(rendered.contains("\x1b[3;38;2;143;143;143m💭 alpha"));
+        assert!(rendered.contains("\x1b[3;38;2;143;143;143m✦\u{200A}alpha"));
     }
 
     #[test]
@@ -428,8 +428,8 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("  💭 中文测试"));
-        assert!(rows[1].starts_with("     内容"));
+        assert!(rows[0].starts_with("  ✦\u{200A}中文测试"));
+        assert!(rows[1].starts_with("    内容"));
         assert!(rendered.lines().all(|line| visible_len(line) == 13));
     }
 

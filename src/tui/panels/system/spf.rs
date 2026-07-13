@@ -81,20 +81,27 @@ pub(crate) fn hjoin(left: &[String], right: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// File-type icon (consistently double-width emoji so column math stays sane).
+/// Terminal-stable monochrome file mark followed by Codex's hair-space pad.
+/// Every returned value is exactly two display columns, independent of emoji
+/// presentation rules and the user's font fallback.
 pub(crate) fn file_icon(name: &str, is_dir: bool, expanded: bool) -> &'static str {
     if is_dir {
-        return if expanded { "📂" } else { "📁" };
+        return if expanded {
+            "▾\u{200A}"
+        } else {
+            "▸\u{200A}"
+        };
     }
     match name.rsplit('.').next().unwrap_or("") {
-        "rs" => "🦀",
-        "md" => "📝",
-        "acl" | "toml" | "yaml" | "yml" | "json" | "hcl" | "lock" => "🔧",
-        // No VS16 sequences here: a3s-tui's truncate counts them differently
-        // from visible_len, which broke row-width budgets (📷 not 🖼️).
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" => "📷",
-        "sh" | "bash" | "zsh" => "💲",
-        _ => "📄",
+        "rs" => "◆\u{200A}",
+        "py" | "pyi" => "λ\u{200A}",
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "go" | "c" | "h" | "cpp" | "hpp" | "java"
+        | "rb" | "html" | "css" | "sql" => "◇\u{200A}",
+        "md" | "mdx" | "txt" | "rst" => "≡\u{200A}",
+        "acl" | "toml" | "yaml" | "yml" | "json" | "hcl" | "lock" => "⌘\u{200A}",
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" => "▧\u{200A}",
+        "sh" | "bash" | "zsh" | "fish" => "$\u{200A}",
+        _ => "·\u{200A}",
     }
 }
 
@@ -217,9 +224,19 @@ mod tests {
 
     #[test]
     fn icons_stay_within_truncate_budgets() {
-        // A width-inconsistent glyph (e.g. emoji+VS16) makes truncate return
-        // MORE display columns than budgeted, overflowing the panel frame.
-        for icon in ["📁", "📂", "🦀", "📝", "🔧", "📷", "💲", "📄"] {
+        for icon in [
+            "▾\u{200A}",
+            "▸\u{200A}",
+            "◆\u{200A}",
+            "λ\u{200A}",
+            "◇\u{200A}",
+            "≡\u{200A}",
+            "⌘\u{200A}",
+            "▧\u{200A}",
+            "$\u{200A}",
+            "·\u{200A}",
+        ] {
+            assert_eq!(a3s_tui::style::visible_len(icon), 2, "{icon:?}");
             let row = format!("{icon} very-long-file-name-{}.ext", "x".repeat(40));
             let cut = truncate(&row, 20);
             assert!(
@@ -227,6 +244,10 @@ mod tests {
                 "{icon} breaks the column budget"
             );
         }
+        assert_eq!(file_icon("src", true, false), "▸\u{200A}");
+        assert_eq!(file_icon("src", true, true), "▾\u{200A}");
+        assert_eq!(file_icon("lib.rs", false, false), "◆\u{200A}");
+        assert_eq!(file_icon("README.md", false, false), "≡\u{200A}");
     }
 
     #[test]

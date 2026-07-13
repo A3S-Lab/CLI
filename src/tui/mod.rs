@@ -7305,7 +7305,7 @@ impl App {
                 .map(|t| format!(" ({})", fmt_elapsed(t.elapsed())))
                 .unwrap_or_default();
             chips.push(
-                SessionStatusChip::new("🎯", format!("Pursuing goal{elapsed}")).color(TN_CYAN),
+                SessionStatusChip::new("◎", format!("Pursuing goal{elapsed}")).color(TN_CYAN),
             );
         }
         if let Some(dev) = &self.agent_dev {
@@ -7855,7 +7855,7 @@ impl App {
                 TN_CYAN,
                 &Style::new()
                     .bold()
-                    .render(&format!("🔬 deep research: {query}")),
+                    .render(&format!("✦\u{200A}deep research: {query}")),
             ));
             let os_runtime =
                 should_use_os_runtime_for_deep_research(&query, self.os_session.is_some());
@@ -7874,19 +7874,19 @@ impl App {
             };
             let runtime_hint = if os_runtime {
                 format!(
-                    "  🎯 goal set · adaptive deep research · local workflow selected · OS Runtime FaaS pending · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  ◎\u{200A}goal set · adaptive deep research · local workflow selected · OS Runtime FaaS pending · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             } else if self.os_session.is_some() {
                 format!(
-                    "  🎯 goal set · adaptive deep research · local workflow selected · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  ◎\u{200A}goal set · adaptive deep research · local workflow selected · {round_hint} · local HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             } else {
                 format!(
-                    "  🎯 goal set · local deep research · {round_hint} · report + HTML opens in RemoteUI · {layer_hint} (Esc stops)"
+                    "  ◎\u{200A}goal set · local deep research · {round_hint} · report + HTML opens in RemoteUI · {layer_hint} (Esc stops)"
                 )
             };
             self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
-            let display = format!("🔬 {query}");
+            let display = format!("✦\u{200A}{query}");
             // DeepResearch is bounded in two places: the host workflow runs a
             // finite recursive retrieval-summary loop, then the synthesis turn
             // may get a small scored number of report verification layers.
@@ -8088,7 +8088,7 @@ impl App {
                 match &self.goal {
                     Some(cur) => self.push_line(&gutter(
                         TN_CYAN,
-                        &format!("🎯 goal: {cur}   (/goal clear to remove)"),
+                        &format!("◎\u{200A}goal: {cur}   (/goal clear to remove)"),
                     )),
                     None => self.push_line(
                         &Style::new()
@@ -8108,7 +8108,7 @@ impl App {
                     self.goal_since = Some(Instant::now());
                     self.push_line(&gutter(
                         TN_CYAN,
-                        &format!("🎯 agent goal set: {} · {g}", dev.name),
+                        &format!("◎\u{200A}agent goal set: {} · {g}", dev.name),
                     ));
                     let prompt = panels::agent::agent_dev_prompt(&dev, g);
                     let display = format!("◇ {} goal: {}", dev.name, truncate(g, 54));
@@ -8118,7 +8118,7 @@ impl App {
                 // goal is prepended to this and every later prompt).
                 self.goal = Some(g.to_string());
                 self.goal_since = Some(Instant::now());
-                self.push_line(&gutter(TN_CYAN, &format!("🎯 goal set: {g}")));
+                self.push_line(&gutter(TN_CYAN, &format!("◎\u{200A}goal set: {g}")));
                 return Some(cmd::msg(Msg::Submit(g.to_string())));
             }
             return None;
@@ -8771,7 +8771,7 @@ impl App {
         };
         self.messages.push(gutter(
             ACCENT,
-            "📎 pasted image (sends with your next message):",
+            "⊕\u{200A}pasted image (sends with your next message):",
         ));
         // Render narrower than the viewport so half-block rows never wrap (a
         // wrapped row splits the picture and garbles it). Indent to align.
@@ -8950,7 +8950,7 @@ impl App {
         self.viewport.set_auto_scroll(true);
         self.plan.clear();
         self.runtime.clear_turn_entities();
-        let display_task = format!("🔬 {query}");
+        let display_task = format!("✦\u{200A}{query}");
         self.runtime.set_subagent_task(display_task.clone());
         self.running_task = Some(display_task);
         self.state = State::Streaming;
@@ -9078,7 +9078,7 @@ impl App {
         self.deep_research_report_tool_gate.set_report_only(true);
         self.start_stream_inner_with_runtime(
             prompt,
-            format!("🔬 synthesize {query}"),
+            format!("✦\u{200A}synthesize {query}"),
             false,
             false,
             false,
@@ -10217,11 +10217,10 @@ impl App {
                 )));
             }
             Err(err) => {
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GRAY)
-                        .render(&format!("  🔗 open in your browser: {} ({err})", spec.url)),
-                );
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  ↗\u{200A}open in your browser: {} ({err})",
+                    spec.url
+                )));
             }
         }
     }

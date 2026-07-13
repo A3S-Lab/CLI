@@ -262,9 +262,10 @@ impl App {
         for i in 0..body {
             let row = if let Some(e) = ide.entries.get(ide.tree_scroll + i) {
                 let icon = spf::file_icon(&e.name, e.is_dir, e.expanded);
-                // fit(): emoji in user file NAMES must not widen the row.
+                // The icon already carries Codex's hair-space pad. fit() also
+                // protects the row from wide glyphs in user file names.
                 let plain = spf::fit(
-                    &format!("{}{icon} {}", " ".repeat(e.depth * 2), e.name),
+                    &format!("{}{icon}{}", " ".repeat(e.depth * 2), e.name),
                     tree_iw,
                 );
                 if ide.tree_scroll + i == ide.sel && !ide.focus_editor {

@@ -306,7 +306,7 @@ impl App {
                 let total = r.issues.len();
                 self.review_open = false;
                 let prompt = review_fix_prompt(&asset_dir, &picked);
-                let label = format!("🛠 fixing {}/{total} review issues", picked.len());
+                let label = format!("◆\u{200A}fixing {}/{total} review issues", picked.len());
                 self.messages
                     .push(gutter(TN_PURPLE, &Style::new().bold().render(&label)));
                 if self.state == State::Idle {
