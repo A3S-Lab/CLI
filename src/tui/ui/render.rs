@@ -1,7 +1,19 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
 use super::*;
-use a3s_tui::components::{ChecklistItem, ChecklistStatus, OutputStatus};
+use a3s_tui::components::{ChecklistItem, ChecklistStatus, DiffLineKind, DiffSpan, OutputStatus};
+
+const DIFF_HEADER_BULLET: Color = Color::Rgb(120, 123, 125);
+const DIFF_HEADER_ACTION: Color = Color::Rgb(255, 255, 255);
+const DIFF_HEADER_DETAIL: Color = Color::Rgb(220, 220, 220);
+const DIFF_CONTEXT_GUTTER: Color = Color::Rgb(120, 123, 125);
+const DIFF_INSERT_GUTTER: Color = Color::Rgb(122, 139, 131);
+const DIFF_DELETE_GUTTER: Color = Color::Rgb(150, 125, 123);
+const DIFF_INSERT_MARKER: Color = Color::Rgb(0, 194, 0);
+const DIFF_DELETE_MARKER: Color = Color::Rgb(180, 60, 42);
+const DIFF_INSERT_BG: Color = Color::Rgb(24, 59, 42);
+const DIFF_DELETE_BG: Color = Color::Rgb(80, 31, 27);
+const DIFF_CODE_FG: Color = Color::Rgb(203, 214, 247);
 
 /// Render a completed tool call. File-editing tools (`write`/`edit`) carry
 /// `before`/`after`/`file_path` in their metadata — show those as a colored
@@ -595,17 +607,60 @@ fn summarize_tasks(tasks: &[serde_json::Value], worker: Option<&str>) -> Option<
 pub(crate) fn render_diff(path: &str, before: &str, after: &str, width: usize) -> String {
     const MAX_DIFF_ROWS: usize = 200;
 
+    render_diff_action("Edited", path, before, after, width, MAX_DIFF_ROWS)
+}
+
+fn render_diff_action(
+    action: &str,
+    path: &str,
+    before: &str,
+    after: &str,
+    width: usize,
+    max_rows: usize,
+) -> String {
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
+    let lang = lang_of(std::path::Path::new(path));
     chrome
         .diff_texts(path, before, after)
-        .context_color(TN_GRAY)
-        .separator_color(TN_GRAY)
-        .insert_color(Color::Rgb(211, 229, 255))
-        .delete_color(Color::Rgb(255, 215, 215))
-        .changed_backgrounds(Some(SURFACE_SELECTED), Some(Color::Rgb(82, 30, 34)))
-        .max_lines(MAX_DIFF_ROWS)
-        .view(width.min(u16::MAX as usize) as u16, MAX_DIFF_ROWS + 2)
+        .action(action)
+        .header_colors(DIFF_HEADER_BULLET, DIFF_HEADER_ACTION, DIFF_HEADER_DETAIL)
+        .context_color(DIFF_CODE_FG)
+        .separator_color(DIFF_CONTEXT_GUTTER)
+        .gutter_colors(DIFF_CONTEXT_GUTTER, DIFF_INSERT_GUTTER, DIFF_DELETE_GUTTER)
+        .marker_colors(DIFF_INSERT_MARKER, DIFF_DELETE_MARKER)
+        .changed_content_colors(DIFF_CODE_FG, mix_diff_color(DIFF_CODE_FG, DIFF_DELETE_BG))
+        .changed_backgrounds(Some(DIFF_INSERT_BG), Some(DIFF_DELETE_BG))
+        .highlight_content(|kind, content| {
+            highlight_diff_spans(content, lang)
+                .into_iter()
+                .map(|span| {
+                    let color = span.color.unwrap_or(DIFF_CODE_FG);
+                    let color = if kind == DiffLineKind::Delete {
+                        mix_diff_color(color, DIFF_DELETE_BG)
+                    } else {
+                        color
+                    };
+                    DiffSpan::new(span.content).color(color)
+                })
+                .collect()
+        })
+        .max_lines(max_rows)
+        .view(
+            width.min(u16::MAX as usize) as u16,
+            max_rows.saturating_add(2),
+        )
+}
+
+fn mix_diff_color(foreground: Color, background: Color) -> Color {
+    match (foreground, background) {
+        (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) => Color::Rgb(
+            ((u16::from(fr) + u16::from(br)) / 2) as u8,
+            ((u16::from(fg) + u16::from(bg)) / 2) as u8,
+            ((u16::from(fb) + u16::from(bb)) / 2) as u8,
+        ),
+        (color, _) => color,
+    }
 }
 
 #[cfg(test)]
@@ -1024,12 +1079,51 @@ mod tests {
             48,
         );
         let plain = a3s_tui::style::strip_ansi(&rendered);
+        let header = rendered.lines().next().expect("diff header");
 
         assert!(plain.contains("Edited"));
         assert!(plain.contains("+1") && plain.contains("-1"));
         assert!(
-            rendered.contains(&TN_GREEN.fg_ansi()),
-            "diff header should use the shared DiffView header color: {rendered:?}"
+            header.contains(&Style::new().fg(DIFF_HEADER_BULLET).bold().render("•")),
+            "diff bullet should use the muted header color: {header:?}"
+        );
+        assert!(
+            header.contains(&Style::new().fg(DIFF_HEADER_ACTION).bold().render("Edited")),
+            "diff action should use the bright header color: {header:?}"
+        );
+        assert!(
+            header.contains(&Style::new().fg(DIFF_INSERT_MARKER).bold().render("+1")),
+            "addition count should use the insert marker color: {header:?}"
+        );
+        assert!(
+            header.contains(&Style::new().fg(DIFF_DELETE_MARKER).bold().render("-1")),
+            "deletion count should use the delete marker color: {header:?}"
+        );
+        assert!(
+            rendered.contains(&DIFF_INSERT_BG.bg_ansi()),
+            "insert rows should use the reference background: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&DIFF_DELETE_BG.bg_ansi()),
+            "delete rows should use the reference background: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(
+                &Style::new()
+                    .fg(Color::Rgb(210, 164, 253))
+                    .bg(DIFF_INSERT_BG)
+                    .render("let")
+            ),
+            "inserted Rust should retain syntax highlighting: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(
+                &Style::new()
+                    .fg(mix_diff_color(Color::Rgb(210, 164, 253), DIFF_DELETE_BG))
+                    .bg(DIFF_DELETE_BG)
+                    .render("let")
+            ),
+            "deleted Rust should use the muted syntax color: {rendered:?}"
         );
         assert_visible_lines_bounded(&rendered, 48);
     }

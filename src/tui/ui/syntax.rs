@@ -102,7 +102,8 @@ fn keywords(lang: &str) -> &'static [&'static str] {
 
 /// Lightweight per-line syntax highlighting → ANSI. Handles comments, strings,
 /// numbers, keywords, types (CamelCase) and call sites. Single-line only.
-/// Syntax-highlight palette for the IDE editor + diffs (`/theme` cycles these).
+/// Syntax-highlight palette for the IDE editor (`/theme` cycles these).
+/// Diff rendering intentionally uses the fixed Codex reference palette below.
 pub(crate) struct SyntaxTheme {
     pub(crate) name: &'static str,
     comment: Color,
@@ -112,6 +113,29 @@ pub(crate) struct SyntaxTheme {
     typ: Color,
     func: Color,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SyntaxSpan {
+    pub(crate) content: String,
+    pub(crate) color: Option<Color>,
+}
+
+const CODEX_COMMENT: Color = Color::Rgb(125, 137, 154);
+const CODEX_STRING: Color = Color::Rgb(148, 229, 154);
+const CODEX_NUMBER: Color = Color::Rgb(243, 198, 119);
+const CODEX_KEYWORD: Color = Color::Rgb(210, 164, 253);
+const CODEX_TYPE: Color = Color::Rgb(254, 225, 168);
+const CODEX_FUNCTION: Color = Color::Rgb(125, 182, 255);
+
+const DIFF_THEME: SyntaxTheme = SyntaxTheme {
+    name: "Codex Diff",
+    comment: CODEX_COMMENT,
+    string: CODEX_STRING,
+    number: CODEX_NUMBER,
+    keyword: CODEX_KEYWORD,
+    typ: CODEX_TYPE,
+    func: CODEX_FUNCTION,
+};
 
 /// Built-in themes; index 0 (Geist Dark) is the default.
 pub(crate) const THEMES: &[SyntaxTheme] = &[
@@ -168,8 +192,25 @@ pub(crate) fn highlight_code(line: &str, lang: &str) -> String {
 }
 
 pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String {
+    highlight_spans_with(line, lang, th)
+        .into_iter()
+        .map(|span| match span.color {
+            Some(color) => Style::new().fg(color).render(&span.content),
+            None => span.content,
+        })
+        .collect()
+}
+
+pub(crate) fn highlight_diff_spans(line: &str, lang: &str) -> Vec<SyntaxSpan> {
+    highlight_spans_with(line, lang, &DIFF_THEME)
+}
+
+fn highlight_spans_with(line: &str, lang: &str, th: &SyntaxTheme) -> Vec<SyntaxSpan> {
     if lang.is_empty() {
-        return line.to_string();
+        return vec![SyntaxSpan {
+            content: line.to_string(),
+            color: None,
+        }];
     }
     let kw = keywords(lang);
     let line_comment: &str = match lang {
@@ -178,7 +219,7 @@ pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String
         _ => "",
     };
     let chars: Vec<char> = line.chars().collect();
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -190,7 +231,7 @@ pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String
         };
         if is_comment {
             let rest: String = chars[i..].iter().collect();
-            out.push_str(&Style::new().fg(th.comment).render(&rest));
+            push_span(&mut out, rest, Some(th.comment));
             break;
         }
         // String literal.
@@ -207,7 +248,7 @@ pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            out.push_str(&Style::new().fg(th.string).render(&s));
+            push_span(&mut out, s, Some(th.string));
             continue;
         }
         // Number.
@@ -219,7 +260,7 @@ pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String
                 i += 1;
             }
             let s: String = chars[start..i].iter().collect();
-            out.push_str(&Style::new().fg(th.number).render(&s));
+            push_span(&mut out, s, Some(th.number));
             continue;
         }
         // Identifier / keyword / type / call.
@@ -229,22 +270,30 @@ pub(crate) fn highlight_with(line: &str, lang: &str, th: &SyntaxTheme) -> String
                 i += 1;
             }
             let word: String = chars[start..i].iter().collect();
-            let styled = if kw.contains(&word.as_str()) {
-                Style::new().fg(th.keyword).render(&word)
+            let color = if kw.contains(&word.as_str()) {
+                Some(th.keyword)
             } else if chars.get(i) == Some(&'(') {
-                Style::new().fg(th.func).render(&word)
+                Some(th.func)
             } else if word.chars().next().is_some_and(|c| c.is_uppercase()) {
-                Style::new().fg(th.typ).render(&word)
+                Some(th.typ)
             } else {
-                word
+                None
             };
-            out.push_str(&styled);
+            push_span(&mut out, word, color);
             continue;
         }
-        out.push(c);
+        push_span(&mut out, c.to_string(), None);
         i += 1;
     }
     out
+}
+
+fn push_span(spans: &mut Vec<SyntaxSpan>, content: String, color: Option<Color>) {
+    if let Some(last) = spans.last_mut().filter(|span| span.color == color) {
+        last.content.push_str(&content);
+    } else {
+        spans.push(SyntaxSpan { content, color });
+    }
 }
 
 pub(crate) fn lang_from_path(path: &str) -> Option<&'static str> {
@@ -269,4 +318,19 @@ pub(crate) fn lang_from_path(path: &str) -> Option<&'static str> {
         "sql" => "sql",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_tokens_match_the_reference_diff_palette() {
+        assert_eq!(CODEX_COMMENT, Color::Rgb(125, 137, 154));
+        assert_eq!(CODEX_STRING, Color::Rgb(148, 229, 154));
+        assert_eq!(CODEX_NUMBER, Color::Rgb(243, 198, 119));
+        assert_eq!(CODEX_KEYWORD, Color::Rgb(210, 164, 253));
+        assert_eq!(CODEX_TYPE, Color::Rgb(254, 225, 168));
+        assert_eq!(CODEX_FUNCTION, Color::Rgb(125, 182, 255));
+    }
 }
