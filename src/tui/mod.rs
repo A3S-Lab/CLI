@@ -96,9 +96,9 @@ mod util;
 
 mod panels;
 use crate::budget::{
-    auto_compact_threshold_for, budget_plan_for_effort_index, context_limit_for_model,
-    context_percent_from_core_window, resolve_ctx_limit, BudgetPlan, BudgetWorkload,
-    DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS, ULTRACODE_INDEX as ULTRACODE,
+    budget_plan_for_effort_index, context_limit_for_model, context_percent_from_core_window,
+    resolve_ctx_limit, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS,
+    ULTRACODE_INDEX as ULTRACODE,
 };
 use crate::config::*;
 use asset_naming::*;
@@ -127,6 +127,8 @@ const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
+#[allow(dead_code)]
+const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 
 /// Terminal-safe mapping of the DESIGN.md Geist/Vercel palette.
 const ACCENT: Color = Color::Rgb(0, 112, 243); // link / active / success
@@ -503,6 +505,24 @@ fn ctx_warn_tier(pct: usize, warned: u8) -> (u8, Option<u8>) {
         0
     };
     (tier, (tier > warned).then_some(tier))
+}
+
+fn compact_error_display(kind: &str, error: &str) -> String {
+    const MAX_LEN: usize = 120;
+    let detail = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut message = if detail.is_empty() {
+        kind.to_string()
+    } else {
+        format!("{kind}: {detail}")
+    };
+    if message.len() > MAX_LEN {
+        message.truncate(MAX_LEN.saturating_sub(3));
+        while !message.is_char_boundary(message.len()) {
+            message.pop();
+        }
+        message.push_str("...");
+    }
+    message
 }
 
 fn workflow_doc_for_tool(name: &str, args: Option<&serde_json::Value>) -> Option<(String, String)> {
@@ -4368,11 +4388,17 @@ type SharedManifestRx =
 type StreamJoin = tokio::task::JoinHandle<()>;
 type HostToolAbort = tokio::task::AbortHandle;
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum State {
     Idle,
     Streaming,
     Awaiting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactTrigger {
+    Manual,
+    Automatic,
 }
 
 #[derive(Clone)]
@@ -4478,8 +4504,11 @@ enum Msg {
     CtxMemorySource(Result<(String, String), String>),
     /// Inactivity auto-review summary text.
     AutoReview(String),
-    /// `/compact` produced this conversation summary; reseed a fresh session.
-    Compacted(String),
+    /// Manual or automatic compact finished through the CLI-owned flow.
+    Compacted {
+        trigger: CompactTrigger,
+        result: Result<Option<String>, String>,
+    },
     /// Startup update check completed with the latest published version (if any).
     UpdateCheck(Option<String>),
 }
@@ -4553,6 +4582,7 @@ fn tui_session_options_with_gate(
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
     SessionOptions::new()
+        .with_auto_compact(false)
         .with_confirmation_policy(confirmation)
         .with_permission_policy(permission_policy.clone())
         .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(
@@ -4977,6 +5007,136 @@ fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
         .unwrap_or(now)
 }
 
+fn should_run_inactivity_review(
+    state: State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    history_len: usize,
+    last_auto_review_history_len: usize,
+    auto_reviewed: bool,
+) -> bool {
+    !auto_reviewed
+        && state == State::Idle
+        && idle_for > Duration::from_secs(300)
+        && has_successful_llm_history
+        && history_len > last_auto_review_history_len
+}
+
+fn should_check_inactivity_review_history(
+    state: State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    auto_reviewed: bool,
+) -> bool {
+    !auto_reviewed
+        && state == State::Idle
+        && idle_for > Duration::from_secs(300)
+        && has_successful_llm_history
+}
+
+fn has_successful_llm_history(history: &[a3s_code_core::Message]) -> bool {
+    history
+        .iter()
+        .any(|m| m.role == "assistant" && !m.text().trim().is_empty())
+}
+
+fn background_llm_history(history: &[a3s_code_core::Message]) -> Vec<a3s_code_core::Message> {
+    crate::compact::project_messages_for_llm(history)
+}
+
+fn model_context_for_policy(
+    timeline: &[a3s_code_core::Message],
+    metadata: crate::timeline::TimelineMetadata,
+    last_prompt_tokens: usize,
+    context_limit: u32,
+    auto_compact_threshold: f64,
+) -> crate::compact::ModelContextState {
+    crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+        timeline,
+        crate::compact::ProjectionBudget::for_token_limit(context_limit as usize),
+        metadata,
+        last_prompt_tokens,
+        context_limit,
+        auto_compact_threshold,
+    )
+}
+
+fn is_compact_timeline_message(message: &a3s_code_core::Message) -> bool {
+    crate::compact::is_compact_message(message)
+}
+
+fn resumed_transcript_line_for_message(
+    message: &a3s_code_core::Message,
+    width: u16,
+) -> Option<String> {
+    if is_compact_timeline_message(message) {
+        return None;
+    }
+    let text = message.text();
+    if text.trim().is_empty() {
+        return None;
+    }
+    match message.role.as_str() {
+        "user" => Some(gutter(ACCENT, text.trim())),
+        "assistant" => {
+            let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
+            md.push(&text);
+            Some(gutter(TN_GREEN, &md.view()))
+        }
+        _ => None,
+    }
+}
+
+fn resumed_transcript_lines(history: &[a3s_code_core::Message], width: u16) -> Vec<String> {
+    history
+        .iter()
+        .filter_map(|message| resumed_transcript_line_for_message(message, width))
+        .collect()
+}
+
+fn resumed_timeline_event_lines(
+    events: &[crate::timeline::TranscriptEvent],
+    width: u16,
+) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| {
+            if !event.display.visible {
+                return None;
+            }
+            if event.event_kind == crate::timeline::TranscriptEventKind::CompactMarker {
+                return Some(compact_completion_marker_line());
+            }
+            event
+                .message
+                .as_ref()
+                .and_then(|message| resumed_transcript_line_for_message(message, width))
+        })
+        .collect()
+}
+
+fn resumed_initial_transcript_lines(
+    timeline_page: Option<&crate::timeline::TimelinePage>,
+    history: &[a3s_code_core::Message],
+    width: u16,
+) -> Vec<String> {
+    match timeline_page {
+        Some(page) => resumed_timeline_event_lines(&page.events, width),
+        None => resumed_transcript_lines(history, width),
+    }
+}
+
+fn compact_completion_marker_line() -> String {
+    Style::new()
+        .fg(TN_GREEN)
+        .bold()
+        .render("  ✦ context compacted for the model")
+}
+
+fn append_compact_completion_marker(messages: &mut Vec<String>) {
+    messages.push(compact_completion_marker_line());
+}
+
 fn touch_workspace_file_path_for_manifest(
     manifest: &LocalWorkspaceManifest,
     workspace: &str,
@@ -5236,9 +5396,16 @@ fn take_pending_tool_label(
 
 struct App {
     session: Arc<AgentSession>,
+    llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
+    /// CLI-owned model timeline. Compact summaries live here, not in code/core.
+    model_timeline: Vec<a3s_code_core::Message>,
+    timeline_store: crate::timeline::TimelineJsonlStore,
+    model_context: crate::compact::ModelContextState,
+    context_store: crate::compact::ContextJsonStore,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
+    code_config: a3s_code_core::CodeConfig,
     store: Arc<dyn a3s_code_core::store::SessionStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
@@ -5252,6 +5419,8 @@ struct App {
     context_limit: u32,
     /// Prompt tokens of the last turn = current context fill.
     last_prompt_tokens: usize,
+    /// CLI-owned automatic compact generation latch.
+    auto_compact: crate::compact::auto_compact::AutoCompactController,
     /// Highest context-fill tier already warned about (0 / 70 / 85), so each
     /// warning prints once per fill-up and re-arms when usage drops back.
     ctx_warned_tier: u8,
@@ -5322,6 +5491,13 @@ struct App {
     last_activity: Instant,
     /// True once the idle conversation has been auto-reviewed (until next input).
     auto_reviewed: bool,
+    /// True once this session has completed at least one LLM turn that wrote
+    /// conversation history.
+    has_successful_llm_history: bool,
+    /// Conversation-history length at the last inactivity review. UI-only
+    /// transcript lines do not change this, so they cannot trigger another
+    /// review.
+    last_auto_review_history_len: usize,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
     /// Deep-research mode: a leading `?` turns the input into a deep-research
@@ -5414,8 +5590,6 @@ struct App {
     ultracode_synthesis_used: bool,
     /// Project instructions (CLAUDE.md/AGENT.md), injected into the system prompt.
     instructions: Option<String>,
-    /// Summary of earlier conversation after a manual `/compact` (reseed).
-    compact_summary: Option<String>,
     /// Shared in-memory workspace file manifest, refreshed by a background watcher.
     workspace_manifest: Arc<LocalWorkspaceManifest>,
     workspace_manifest_rx: SharedManifestRx,
@@ -6181,42 +6355,58 @@ impl Model for App {
                 }
                 // Inactivity auto-review: after a quiet stretch with a real
                 // conversation, summarise it once as a side note (Claude-style).
-                if !self.auto_reviewed
-                    && self.state == State::Idle
-                    && !self.messages.is_empty()
-                    && self.last_activity.elapsed() > Duration::from_secs(300)
-                {
-                    self.auto_reviewed = true;
-                    let agent = self.agent.clone();
-                    let workspace = self.cwd.clone();
-                    let history = self.session.history();
-                    let review = cmd::cmd(move || async move {
-                        let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                            .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                        let prompt = "Briefly review this conversation so far: summarise the \
+                if should_check_inactivity_review_history(
+                    self.state,
+                    self.last_activity.elapsed(),
+                    self.has_successful_llm_history,
+                    self.auto_reviewed,
+                ) {
+                    let raw_history = self.model_timeline.clone();
+                    if should_run_inactivity_review(
+                        self.state,
+                        self.last_activity.elapsed(),
+                        self.has_successful_llm_history,
+                        raw_history.len(),
+                        self.last_auto_review_history_len,
+                        self.auto_reviewed,
+                    ) {
+                        self.auto_reviewed = true;
+                        self.last_auto_review_history_len = raw_history.len();
+                        let agent = self.agent.clone();
+                        let workspace = self.cwd.clone();
+                        let history = background_llm_history(&raw_history);
+                        let review = cmd::cmd(move || async move {
+                            let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                                .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+                            let prompt = "Briefly review this conversation so far: summarise the \
                              key decisions and what's done, then list any open threads or next \
                              steps. Keep it to a few lines.";
-                        let mut answer = String::new();
-                        if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf)))
-                        {
-                            if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await {
-                                while let Some(ev) = rx.recv().await {
-                                    match ev {
-                                        AgentEvent::TextDelta { text } => answer.push_str(&text),
-                                        AgentEvent::End { text, .. } => {
-                                            if answer.trim().is_empty() {
-                                                answer = text;
+                            let mut answer = String::new();
+                            if let Ok(sess) =
+                                agent.session(workspace, Some(tui_session_options(conf)))
+                            {
+                                if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await
+                                {
+                                    while let Some(ev) = rx.recv().await {
+                                        match ev {
+                                            AgentEvent::TextDelta { text } => {
+                                                answer.push_str(&text)
                                             }
-                                            break;
+                                            AgentEvent::End { text, .. } => {
+                                                if answer.trim().is_empty() {
+                                                    answer = text;
+                                                }
+                                                break;
+                                            }
+                                            _ => {}
                                         }
-                                        _ => {}
                                     }
                                 }
                             }
-                        }
-                        Msg::AutoReview(answer)
-                    });
-                    return Some(cmd::batch(vec![banner_tick(), review]));
+                            Msg::AutoReview(answer)
+                        });
+                        return Some(cmd::batch(vec![banner_tick(), review]));
+                    }
                 }
                 // Keep the OS access token fresh: refresh proactively before it
                 // expires so the agent's $A3S_OS_TOKEN never goes stale mid-session.
@@ -6250,45 +6440,59 @@ impl Model for App {
                 }
             }
 
-            Msg::Compacted(summary) => {
+            Msg::Compacted { trigger, result } => {
                 self.compacting = None;
-                if summary.trim().is_empty() {
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render("  compaction failed (empty summary)"),
-                    );
-                    return None;
-                }
-                // Reseed a FRESH session (new id, no history) carrying just the
-                // summary in its system prompt — that's the actual compaction.
-                self.compact_summary = Some(summary.trim().to_string());
-                self.session_id = new_session_id();
-                let model = self.model.clone();
-                match self.rebuild_session(model.as_deref()) {
-                    Ok((s, _)) => {
-                        self.replace_session(s);
-                        self.messages.clear();
-                        self.output_tokens = 0;
-                        self.last_prompt_tokens = 0;
-                        self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_GREEN)
-                                .bold()
-                                .render("  ✦ context compacted — continuing from this summary:"),
-                        );
-                        self.push_line(&gutter(
-                            TN_CYAN,
-                            self.compact_summary.as_deref().unwrap_or(""),
-                        ));
-                        self.rebuild_viewport();
+                let summary = match result {
+                    Ok(Some(summary)) => summary,
+                    Ok(None) => {
+                        if trigger == CompactTrigger::Manual {
+                            self.push_line(
+                                &Style::new().fg(TN_GRAY).render("  nothing to compact yet"),
+                            );
+                        } else {
+                            self.auto_compact.finish_failure();
+                        }
+                        return if trigger == CompactTrigger::Automatic {
+                            self.complete_turn()
+                        } else {
+                            None
+                        };
                     }
-                    Err(e) => self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  compaction failed: {e}")),
-                    ),
+                    Err(message) => {
+                        if trigger == CompactTrigger::Manual {
+                            self.push_line(
+                                &Style::new()
+                                    .fg(TN_RED)
+                                    .render(&format!("  compaction failed: {message}")),
+                            );
+                        } else {
+                            self.auto_compact.finish_failure();
+                        }
+                        return if trigger == CompactTrigger::Automatic {
+                            self.complete_turn()
+                        } else {
+                            None
+                        };
+                    }
+                };
+                crate::compact::append_compact_summary(&mut self.model_timeline, &summary);
+                if let Some(message) = self.model_timeline.last() {
+                    let _ = self.persist_timeline_message(message);
+                }
+                self.rebuild_model_context();
+                self.output_tokens = 0;
+                self.last_prompt_tokens = 0;
+                if trigger == CompactTrigger::Automatic {
+                    self.auto_compact.finish_success(0);
+                }
+                self.ctx_warned_tier = 0; // compacted window: re-arm fill warnings
+                self.has_successful_llm_history = has_successful_llm_history(&self.model_timeline);
+                self.last_auto_review_history_len = self.model_timeline.len();
+                self.auto_reviewed = false;
+                append_compact_completion_marker(&mut self.messages);
+                self.rebuild_viewport();
+                if trigger == CompactTrigger::Automatic {
+                    return self.complete_turn();
                 }
             }
 
@@ -6564,8 +6768,8 @@ impl Model for App {
                         let prev = std::mem::replace(&mut self.session_id, new_id);
                         let model = self.model.clone();
                         match self.rebuild_session(model.as_deref()) {
-                            Ok((s, _)) => {
-                                self.replace_session(s);
+                            Ok((s, llm_client, _)) => {
+                                self.replace_session(s, llm_client);
                                 let short: String = self.session_id.chars().take(8).collect();
                                 self.push_line(&gutter(
                                 TN_CYAN,
@@ -7810,7 +8014,7 @@ impl App {
             self.btw = Some((q.clone(), None));
             let agent = self.agent.clone();
             let workspace = self.cwd.clone();
-            let history = self.session.history();
+            let history = background_llm_history(&self.model_timeline);
             return Some(cmd::cmd(move || async move {
                 // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
                 let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
@@ -8254,12 +8458,14 @@ impl App {
                 let prev_id = std::mem::replace(&mut self.session_id, new_session_id());
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
-                    Ok((s, _)) => {
-                        self.replace_session(s);
-                        self.compact_summary = None;
+                    Ok((s, llm_client, _)) => {
+                        self.replace_session(s, llm_client);
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
                         self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
+                        self.has_successful_llm_history = false;
+                        self.last_auto_review_history_len = 0;
+                        self.auto_reviewed = false;
                     }
                     Err(_) => self.session_id = prev_id,
                 }
@@ -8295,53 +8501,11 @@ impl App {
                     );
                     return None;
                 }
-                let history = self.session.history();
-                if history.is_empty() {
+                if self.model_timeline.is_empty() {
                     self.push_line(&Style::new().fg(TN_GRAY).render("  nothing to compact yet"));
                     return None;
                 }
-                self.compacting = Some(Instant::now()); // progress bar + input lock
-                let agent = self.agent.clone();
-                let workspace = self.cwd.clone();
-                // Re-compacting must subsume the PRIOR summary — it lives in the
-                // system prompt, not in `history`, so without this everything
-                // before the last /compact would be dropped from the new summary.
-                let prompt = match &self.compact_summary {
-                    Some(prev) => format!(
-                        "An earlier part of this conversation was already condensed into this \
-                         summary:\n\n{prev}\n\nProduce a SINGLE updated summary that fully \
-                         incorporates the summary above AND the conversation history below, so a \
-                         fresh session can continue seamlessly: the goal, key decisions, \
-                         files/commands touched, current state, and the immediate next steps. Be \
-                         thorough but compact."
-                    ),
-                    None => "Summarize this conversation so a fresh session can continue \
-                         seamlessly: the goal, key decisions, files/commands touched, current \
-                         state, and the immediate next steps. Be thorough but compact."
-                        .to_string(),
-                };
-                return Some(cmd::cmd(move || async move {
-                    let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                        .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                    let mut summary = String::new();
-                    if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf))) {
-                        if let Ok((mut rx, _j)) = sess.stream(&prompt, Some(&history)).await {
-                            while let Some(ev) = rx.recv().await {
-                                match ev {
-                                    AgentEvent::TextDelta { text } => summary.push_str(&text),
-                                    AgentEvent::End { text, .. } => {
-                                        if summary.trim().is_empty() {
-                                            summary = text;
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    Msg::Compacted(summary)
-                }));
+                return self.start_compact(CompactTrigger::Manual);
             }
             "/help" => {
                 self.textarea.clear();
@@ -8438,8 +8602,8 @@ impl App {
                 self.skill_count = count_skill_files(&dirs);
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
-                    Ok((session, _)) => {
-                        self.replace_session(session);
+                    Ok((session, llm_client, _)) => {
+                        self.replace_session(session, llm_client);
                         self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                             "  ↻ reloaded — {} skills available",
                             self.skills.len()
@@ -8581,6 +8745,112 @@ impl App {
         self.rebuild_viewport();
         self.pending_images
             .push(a3s_code_core::llm::Attachment::png(bytes));
+    }
+
+    fn model_history_for_llm(&self) -> Vec<a3s_code_core::Message> {
+        self.model_context.messages.clone()
+    }
+
+    fn persist_model_context(&self) {
+        let _ = self.context_store.save(&self.model_context);
+    }
+
+    fn rebuild_model_context(&mut self) {
+        let metadata =
+            self.timeline_store
+                .metadata()
+                .unwrap_or_else(|_| crate::timeline::TimelineMetadata {
+                    source_file_bytes: 0,
+                    source_event_count: self.model_timeline.len(),
+                    source_message_count: self.model_timeline.len(),
+                    active_summary_index: self
+                        .model_timeline
+                        .iter()
+                        .rposition(crate::compact::is_compact_message),
+                    compact_generation: self
+                        .model_timeline
+                        .iter()
+                        .filter(|message| crate::compact::is_compact_message(message))
+                        .count() as u32,
+                });
+        self.model_context = model_context_for_policy(
+            &self.model_timeline,
+            metadata,
+            self.last_prompt_tokens,
+            self.context_limit,
+            self.auto_compact.threshold(),
+        );
+        self.persist_model_context();
+    }
+
+    fn start_compact(&mut self, trigger: CompactTrigger) -> Option<Cmd<Msg>> {
+        if trigger == CompactTrigger::Automatic && !self.auto_compact.start() {
+            return None;
+        }
+        self.compacting = Some(Instant::now());
+        let llm_client = Arc::clone(&self.llm_client);
+        let timeline_store = self.timeline_store.clone();
+        Some(cmd::cmd(move || async move {
+            Msg::Compacted {
+                trigger,
+                result: crate::compact::compact_timeline(llm_client, &timeline_store)
+                    .await
+                    .map_err(|error| compact_error_display("compact failed", &error)),
+            }
+        }))
+    }
+
+    fn persist_timeline_message(
+        &self,
+        message: &a3s_code_core::Message,
+    ) -> anyhow::Result<(u64, u64, usize)> {
+        let source_file_bytes = self.timeline_store.file_len()?;
+        let events = crate::timeline::events_for_message(&self.session_id, 0, 0, message, 0);
+        for event in &events {
+            self.timeline_store.append(event)?;
+        }
+        Ok((
+            source_file_bytes,
+            self.timeline_store.file_len()?,
+            events.len(),
+        ))
+    }
+
+    fn append_model_timeline_message(&mut self, message: a3s_code_core::Message) {
+        let persisted = self.persist_timeline_message(&message);
+        self.model_timeline.push(message.clone());
+        let Ok((previous_file_bytes, source_file_bytes, appended_event_count)) = persisted else {
+            self.rebuild_model_context();
+            return;
+        };
+        if self.model_context.context_version != 2
+            || self.model_context.source_file_bytes != previous_file_bytes
+        {
+            self.rebuild_model_context();
+            return;
+        }
+        self.model_context.append_timeline_message(
+            &message,
+            appended_event_count,
+            source_file_bytes,
+            crate::compact::ProjectionBudget::for_token_limit(self.context_limit as usize),
+        );
+        self.model_context.update_runtime_metadata(
+            self.last_prompt_tokens,
+            self.context_limit,
+            self.auto_compact.threshold(),
+        );
+        self.persist_model_context();
+    }
+
+    fn record_model_user_turn(&mut self, prompt: &str) {
+        self.append_model_timeline_message(a3s_code_core::Message::user(prompt));
+    }
+
+    fn record_model_assistant_turn(&mut self, text: &str) {
+        if !text.trim().is_empty() {
+            self.append_model_timeline_message(a3s_code_core::Message::assistant(text));
+        }
     }
 
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
@@ -8932,6 +9202,8 @@ impl App {
             Some(g) => format!("[Ongoing goal: {g}]\n\n{prompt}"),
             None => prompt,
         };
+        let history = self.model_history_for_llm();
+        self.record_model_user_turn(&prompt);
         // (A `/ctx <n>` staged transcript window is attached upstream, only to a
         // genuine typed user message — see on_submit — never to a `/loop`,
         // asset review, `?`, or synthesis continuation.)
@@ -8943,10 +9215,10 @@ impl App {
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let res = if atts.is_empty() {
-                    session.stream(prompt.as_str(), None).await
+                    session.stream(prompt.as_str(), Some(&history)).await
                 } else {
                     session
-                        .stream_with_attachments(prompt.as_str(), &atts, None)
+                        .stream_with_attachments(prompt.as_str(), &atts, Some(&history))
                         .await
                 };
                 match res {
@@ -9395,6 +9667,13 @@ impl App {
             AgentEvent::TurnEnd { usage, .. } => {
                 if usage.prompt_tokens > 0 {
                     self.last_prompt_tokens = usage.prompt_tokens;
+                    self.model_context.update_runtime_metadata(
+                        self.last_prompt_tokens,
+                        self.context_limit,
+                        self.auto_compact.threshold(),
+                    );
+                    self.auto_compact
+                        .observe_prompt_tokens(self.last_prompt_tokens);
                     self.maybe_warn_ctx();
                 }
             }
@@ -9579,8 +9858,25 @@ impl App {
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
+                if !deep_research_dirty_output {
+                    self.record_model_assistant_turn(&review_text);
+                }
+                self.persist_model_context();
+                if has_successful_llm_history(&self.model_timeline) {
+                    self.has_successful_llm_history = true;
+                    self.auto_reviewed = false;
+                }
                 // Count the turn, idle, then continue /loop or drain the queue.
                 // A captured sleep report's save runs alongside.
+                if self.auto_compact.state()
+                    == crate::compact::auto_compact::AutoCompactState::Triggered
+                {
+                    let compact = self.start_compact(CompactTrigger::Automatic);
+                    return match (sleep_save, compact) {
+                        (Some(save), Some(compact)) => Some(cmd::batch(vec![save, compact])),
+                        (save, compact) => save.or(compact),
+                    };
+                }
                 return match (sleep_save, self.complete_turn()) {
                     (Some(save), Some(next)) => Some(cmd::batch(vec![save, next])),
                     (save, next) => save.or(next),
@@ -9913,8 +10209,8 @@ impl App {
         self.os_gateway_models_loading = false;
         self.os_gateway_error = None;
         if self.state == State::Idle {
-            if let Ok((s, _)) = self.rebuild_session(self.model.as_deref()) {
-                self.replace_session(s);
+            if let Ok((s, llm_client, _)) = self.rebuild_session(self.model.as_deref()) {
+                self.replace_session(s, llm_client);
             }
         }
         // Login/logout flips whether the A3S Runtime `runtime` tool is available.
@@ -9928,8 +10224,13 @@ impl App {
     /// unregister it while signed out — so it only appears in the model's toolset
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
-    fn replace_session(&mut self, session: AgentSession) {
+    fn replace_session(
+        &mut self,
+        session: AgentSession,
+        llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
+    ) {
         self.session = Arc::new(session);
+        self.llm_client = llm_client;
         self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
     }
@@ -10518,21 +10819,19 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?.to_string_lossy().to_string();
 
     // Configured "provider/model" ids (+ context windows) + the default model.
+    let code_config = a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(
+        &config_path,
+    ))
+    .map_err(|error| anyhow::anyhow!("failed to load config from {config_path}: {error}"))?;
     let mut models: Vec<String> = Vec::new();
     let mut model_ctx: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let mut default_model: Option<String> = None;
-    let mut os_config: Option<OsConfig> = None;
-    if let Ok(cfg) =
-        a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(&config_path))
-    {
-        for (p, m) in cfg.list_models() {
-            let id = format!("{}/{}", p.name, m.id);
-            model_ctx.insert(id.clone(), m.limit.context);
-            models.push(id);
-        }
-        default_model = cfg.default_model.clone();
-        os_config = cfg.os.clone();
+    for (p, m) in code_config.list_models() {
+        let id = format!("{}/{}", p.name, m.id);
+        model_ctx.insert(id.clone(), m.limit.context);
+        models.push(id);
     }
+    let default_model = code_config.default_model.clone();
+    let os_config = code_config.os.clone();
 
     // Persistent, resumable session: stored under <cwd>/.a3s/tui-sessions and
     // keyed by a fixed id, so relaunching in the same directory continues the
@@ -10667,65 +10966,37 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let initial_files = initial_manifest.file_paths();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
     let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
-    let session = match agent.resume_session(
-        session_id.as_str(),
-        apply_launch_model_options(
-            with_instr(with_recent_workspace_context(
-                tui_session_options_with_gate(
-                    confirmation.clone(),
-                    deep_research_report_tool_gate.clone(),
-                )
-                .with_session_store(store.clone())
-                .with_workspace_backend(workspace_services.clone())
-                .with_skill_dirs(claude_dirs.clone())
-                .with_auto_save(true)
-                .with_auto_compact(true)
-                // Scaled to the model's real window — the core triggers off a
-                // fixed 200k, so a flat 0.85 would put the trigger past a
-                // smaller window and auto-compact would never fire (see
-                // `auto_compact_threshold_for`).
-                .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
-                .with_file_memory(memory_dir())
-                .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true)
-                .with_manual_delegation_enabled(true),
-                &workspace_manifest,
-            )),
-            launch_model.as_deref(),
-            launch_llm_override.as_ref(),
-        ),
-    ) {
+    let launch_options = apply_launch_model_options(
+        with_instr(with_recent_workspace_context(
+            tui_session_options_with_gate(
+                confirmation.clone(),
+                deep_research_report_tool_gate.clone(),
+            )
+            .with_session_store(store.clone())
+            .with_workspace_backend(workspace_services.clone())
+            .with_skill_dirs(claude_dirs.clone())
+            .with_auto_save(true)
+            .with_file_memory(memory_dir())
+            .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
+            .with_max_tool_rounds(initial_budget.max_tool_rounds)
+            .with_max_continuation_turns(initial_budget.max_continuation_turns)
+            .with_auto_delegation_enabled(true)
+            .with_auto_parallel_delegation(true)
+            .with_manual_delegation_enabled(true),
+            &workspace_manifest,
+        )),
+        launch_model.as_deref(),
+        launch_llm_override.as_ref(),
+    );
+    let llm_client =
+        crate::session_llm::resolve_session_llm_client(&code_config, &launch_options, &session_id)
+            .map_err(anyhow::Error::msg)?;
+    let launch_options = launch_options.with_llm_client(Arc::clone(&llm_client));
+    let session = match agent.resume_session(session_id.as_str(), launch_options.clone()) {
         Ok(s) => s,
         Err(_) => agent.session(
             workspace.clone(),
-            Some(apply_launch_model_options(
-                with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate(
-                        confirmation.clone(),
-                        deep_research_report_tool_gate.clone(),
-                    )
-                    .with_session_store(store.clone())
-                    .with_session_id(session_id.as_str())
-                    .with_workspace_backend(workspace_services.clone())
-                    .with_skill_dirs(claude_dirs.clone())
-                    .with_auto_save(true)
-                    .with_auto_compact(true)
-                    .with_auto_compact_threshold(auto_compact_threshold_for(context_limit))
-                    .with_file_memory(memory_dir())
-                    .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                    .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                    .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                    .with_auto_delegation_enabled(true)
-                    .with_auto_parallel_delegation(true)
-                    .with_manual_delegation_enabled(true),
-                    &workspace_manifest,
-                )),
-                launch_model.as_deref(),
-                launch_llm_override.as_ref(),
-            )),
+            Some(launch_options.with_session_id(session_id.as_str())),
         )?,
     };
 
@@ -10746,29 +11017,75 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     // Seed the transcript with any resumed conversation (user + assistant text).
     let resumed = session.history();
-    let mut initial_messages: Vec<String> = resumed
-        .iter()
-        .filter_map(|m| {
-            let text = m.text();
-            if text.trim().is_empty() {
-                return None;
+    let timeline_store =
+        crate::timeline::TimelineJsonlStore::for_session(store_dir.clone(), &session_id);
+    let mut timeline_messages = timeline_store
+        .load_all()
+        .ok()
+        .map(|events| crate::timeline::messages_from_events(&events))
+        .filter(|messages| !messages.is_empty())
+        .unwrap_or_else(|| resumed.clone());
+    if timeline_store
+        .metadata()
+        .is_ok_and(|metadata| metadata.source_message_count == 0)
+        && !resumed.is_empty()
+    {
+        for message in &resumed {
+            for event in crate::timeline::events_for_message(&session_id, 0, 0, message, 0) {
+                let _ = timeline_store.append(&event);
             }
-            match m.role.as_str() {
-                // Same gutter (● dot + indent) as live messages.
-                "user" => Some(gutter(ACCENT, text.trim())),
-                "assistant" => {
-                    let mut md = StreamingMarkdown::new(transcript_markdown_width_for(width));
-                    md.push(&text);
-                    Some(gutter(TN_GREEN, &md.view()))
-                }
-                _ => None,
-            }
+        }
+        timeline_messages = resumed.clone();
+    }
+    let timeline_metadata =
+        timeline_store
+            .metadata()
+            .unwrap_or(crate::timeline::TimelineMetadata {
+                source_file_bytes: 0,
+                source_event_count: timeline_messages.len(),
+                source_message_count: timeline_messages.len(),
+                active_summary_index: timeline_messages
+                    .iter()
+                    .rposition(crate::compact::is_compact_message),
+                compact_generation: timeline_messages
+                    .iter()
+                    .filter(|message| crate::compact::is_compact_message(message))
+                    .count() as u32,
+            });
+    let compact_threshold = auto_compact_threshold();
+    let context_store =
+        crate::compact::ContextJsonStore::for_session(store_dir.clone(), &session_id);
+    let mut model_context = context_store
+        .load()
+        .ok()
+        .flatten()
+        .filter(|state| {
+            state.matches_timeline(timeline_metadata) && state.context_limit == context_limit
         })
-        .collect();
+        .unwrap_or_else(|| {
+            crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+                &timeline_messages,
+                crate::compact::ProjectionBudget::for_token_limit(context_limit as usize),
+                timeline_metadata,
+                0,
+                context_limit,
+                compact_threshold,
+            )
+        });
+    let last_prompt_tokens = model_context.last_prompt_tokens;
+    model_context.update_runtime_metadata(last_prompt_tokens, context_limit, compact_threshold);
+    let _ = context_store.save(&model_context);
+    let has_resumed_successful_llm_history = has_successful_llm_history(&timeline_messages);
+    let timeline_page = timeline_store
+        .load_tail_page(RESUME_TIMELINE_PAGE_LIMIT)
+        .ok()
+        .filter(|page| !page.events.is_empty());
+    let mut initial_messages =
+        resumed_initial_transcript_lines(timeline_page.as_ref(), &resumed, width);
     // Seed ↑/↓ input recall with the user's prior prompts so resuming a session
     // keeps its command history (tool-result `user` messages carry no text block,
     // so the non-empty filter excludes them).
-    let history_seed: Vec<String> = resumed
+    let history_seed: Vec<String> = timeline_messages
         .iter()
         .filter(|m| m.role == "user")
         .map(|m| m.text().trim().to_string())
@@ -10834,7 +11151,13 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     let mut app = App {
         session,
+        llm_client,
+        model_timeline: timeline_messages,
+        timeline_store,
+        model_context,
+        context_store,
         agent: agent.clone(),
+        code_config,
         store: store.clone(),
         confirmation,
         deep_research_report_tool_gate,
@@ -10842,7 +11165,11 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         models,
         model_ctx,
         context_limit,
-        last_prompt_tokens: 0,
+        last_prompt_tokens,
+        auto_compact: crate::compact::auto_compact::AutoCompactController::new(
+            compact_threshold,
+            context_limit,
+        ),
         ctx_warned_tier: 0,
         model_menu: None,
         model_tab: 0,
@@ -10869,6 +11196,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         quit_armed: None,
         last_activity: Instant::now(),
         auto_reviewed: false,
+        has_successful_llm_history: has_resumed_successful_llm_history,
+        last_auto_review_history_len: 0,
         shell_mode: false,
         research_mode: false,
         review_pending: false,
@@ -10913,7 +11242,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         gradient_until: None,
         gradient_frame: 0,
         effort_anim: None,
-        compact_summary: None,
         btw: None,
         viewport: Viewport::new(width.saturating_sub(1), height.saturating_sub(7)),
         textarea: Textarea::new()
@@ -11000,8 +11328,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // /effort switch does). Best-effort: keep the launch session if it can't
     // rebuild. (Resumes the same id, so transcript history is preserved.)
     let launch_model = app.model.clone();
-    if let Ok((s, _)) = app.rebuild_session(launch_model.as_deref()) {
-        app.replace_session(s);
+    if let Ok((s, llm_client, _)) = app.rebuild_session(launch_model.as_deref()) {
+        app.replace_session(s, llm_client);
     }
 
     ProgramBuilder::new(app)
@@ -11313,6 +11641,286 @@ mod tests {
             )),
             "{dbg}"
         );
+    }
+
+    #[test]
+    fn inactivity_review_requires_successful_llm_history() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            false,
+            0,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_history_is_checked_only_after_cheap_guards() {
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            false,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Streaming,
+            Duration::from_secs(301),
+            true,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(300),
+            true,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            true,
+        ));
+        assert!(should_check_inactivity_review_history(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_runs_after_successful_history_is_idle() {
+        assert!(should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_waits_for_new_history_after_review() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            2,
+            false,
+        ));
+        assert!(should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(301),
+            true,
+            4,
+            2,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_keeps_existing_idle_boundary() {
+        assert!(!should_run_inactivity_review(
+            State::Idle,
+            Duration::from_secs(300),
+            true,
+            2,
+            0,
+            false,
+        ));
+    }
+
+    #[test]
+    fn successful_llm_history_requires_non_empty_assistant_message() {
+        assert!(!has_successful_llm_history(&[]));
+        assert!(!has_successful_llm_history(&[Message::user("hello")]));
+        assert!(!has_successful_llm_history(&[Message::assistant("   ")]));
+        assert!(has_successful_llm_history(&[
+            Message::user("hello"),
+            Message::assistant("hi"),
+        ]));
+    }
+
+    #[test]
+    fn resumed_transcript_lines_skip_compact_summary_messages() {
+        let history = vec![
+            Message::user("before compact"),
+            Message {
+                role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+                content: vec![a3s_code_core::ContentBlock::Text {
+                    text: "## Context Summary\n\nhidden summary".to_string(),
+                }],
+                reasoning_content: None,
+            },
+            Message::assistant("after compact"),
+        ];
+
+        let plain = resumed_transcript_lines(&history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+    }
+
+    #[test]
+    fn background_llm_history_projects_compact_summary_for_provider() {
+        let history = vec![
+            Message::user("old user"),
+            Message {
+                role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+                content: vec![a3s_code_core::ContentBlock::Text {
+                    text: "summary".to_string(),
+                }],
+                reasoning_content: Some("internal reasoning".to_string()),
+            },
+            Message::user("new user"),
+        ];
+
+        let projected = background_llm_history(&history);
+
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].role, "user");
+        assert_eq!(projected[0].text(), "summary");
+        assert_eq!(projected[0].reasoning_content, None);
+        assert_eq!(projected[1].text(), "new user");
+        assert!(projected
+            .iter()
+            .all(|message| message.role != crate::compact::A3S_COMPACT_ROLE));
+    }
+
+    #[test]
+    fn model_switch_reprojects_context_for_the_new_window() {
+        let mut timeline = vec![Message {
+            role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+            content: vec![a3s_code_core::ContentBlock::Text {
+                text: "active summary".to_string(),
+            }],
+            reasoning_content: None,
+        }];
+        timeline.extend((0..60).map(|index| {
+            let text = format!("recent-{index}: {}", "x".repeat(20_000));
+            Message::user(&text)
+        }));
+        let metadata = crate::timeline::TimelineMetadata {
+            source_file_bytes: 1,
+            source_event_count: timeline.len() + 1,
+            source_message_count: timeline.len(),
+            active_summary_index: Some(0),
+            compact_generation: 1,
+        };
+
+        let context = model_context_for_policy(&timeline, metadata, 0, 200_000, 0.85);
+
+        assert_eq!(context.context_limit, 200_000);
+        assert_eq!(context.messages[0].text(), "active summary");
+        assert!(context.messages.len() < timeline.len());
+        assert!(context
+            .messages
+            .iter()
+            .all(|message| !crate::compact::is_compact_message(message)));
+    }
+
+    #[test]
+    fn resumed_timeline_event_lines_render_marker_without_summary_body() {
+        let compact = Message {
+            role: crate::compact::A3S_COMPACT_ROLE.to_string(),
+            content: vec![a3s_code_core::ContentBlock::Text {
+                text: "## Context Summary\n\nhidden summary".to_string(),
+            }],
+            reasoning_content: None,
+        };
+        let mut events = Vec::new();
+        events.extend(crate::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::user("before compact"),
+            0,
+        ));
+        events.extend(crate::timeline::events_for_message(
+            "session", 1, 1, &compact, 0,
+        ));
+        events.extend(crate::timeline::events_for_message(
+            "session",
+            2,
+            3,
+            &Message::assistant("after compact"),
+            0,
+        ));
+
+        let plain = resumed_timeline_event_lines(&events, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("before compact"));
+        assert!(plain.contains("context compacted for the model"));
+        assert!(plain.contains("after compact"));
+        assert!(!plain.contains("hidden summary"));
+        assert!(!plain.contains("Context Summary"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_prefers_timeline_page_over_history() {
+        let timeline_events = crate::timeline::events_for_message(
+            "session",
+            0,
+            0,
+            &Message::assistant("from timeline"),
+            0,
+        );
+        let page = crate::timeline::TimelinePage {
+            events: timeline_events,
+            has_more_before: false,
+            next_before_seq: None,
+        };
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(Some(&page), &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from timeline"));
+        assert!(!plain.contains("from history"));
+    }
+
+    #[test]
+    fn resumed_initial_transcript_falls_back_to_history_without_timeline_page() {
+        let history = vec![Message::assistant("from history")];
+
+        let plain = resumed_initial_transcript_lines(None, &history, 80)
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(plain.contains("from history"));
+    }
+
+    #[test]
+    fn compact_completion_marker_preserves_existing_ui_history_without_summary() {
+        let mut messages = vec!["existing user line".to_string()];
+
+        append_compact_completion_marker(&mut messages);
+
+        let plain = messages
+            .iter()
+            .map(|line| a3s_tui::style::strip_ansi(line))
+            .collect::<Vec<_>>();
+        assert_eq!(plain.len(), 2);
+        assert_eq!(plain[0], "existing user line");
+        assert!(plain[1].contains("context compacted for the model"));
+        assert!(!plain[1].contains("Context Summary"));
     }
 
     #[test]
@@ -14647,22 +15255,6 @@ mod tests {
     }
 
     #[test]
-    fn auto_compact_threshold_scales_to_real_window() {
-        // 128k model: fire at 85% of 128k, i.e. 0.85*128/200 of the core's fixed 200k.
-        assert!((auto_compact_threshold_for(128_000) - 0.544).abs() < 0.001);
-        // 200k model == the core's own denominator: plain 0.85.
-        assert!((auto_compact_threshold_for(200_000) - 0.85).abs() < 0.001);
-        // Windows past ~235k clamp to 1.0 (trigger at the fixed 200k, never overflow).
-        assert_eq!(auto_compact_threshold_for(1_000_000), 1.0);
-        // Unknown window (0) falls back to the core default of 0.85.
-        assert!((auto_compact_threshold_for(0) - 0.85).abs() < 0.001);
-        // Small window: NOT floored past the window itself — 8k triggers at
-        // 0.034 * 200k = 6.8k = 85% of 8k (the old 0.05 floor meant 10k > 8k,
-        // i.e. compaction could never fire before overflow).
-        assert!((auto_compact_threshold_for(8_000) - 0.034).abs() < 0.001);
-    }
-
-    #[test]
     fn ctx_warn_tier_latches_once_and_rearms_on_drop() {
         // Climb: 0 → warn at 70 tier → no re-warn inside the tier → warn at 85.
         assert_eq!(ctx_warn_tier(40, 0), (0, None));
@@ -14956,6 +15548,25 @@ mod tests {
                 "{cmd} is registered but not mapped to a handler category"
             );
         }
+    }
+
+    #[test]
+    fn compact_error_display_is_classified_and_short() {
+        let long = "provider returned 400 bad request with a very long JSON body: ".to_string()
+            + &"x".repeat(240);
+
+        let display = compact_error_display("stream setup failed", &long);
+
+        assert!(display.starts_with("stream setup failed: provider returned 400"));
+        assert!(display.len() <= 120, "{display}");
+        assert!(display.ends_with("..."), "{display}");
+    }
+
+    #[test]
+    fn compact_error_display_collapses_whitespace() {
+        let display = compact_error_display("llm failed", "first line\n\nsecond\tline");
+
+        assert_eq!(display, "llm failed: first line second line");
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

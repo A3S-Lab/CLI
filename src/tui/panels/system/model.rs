@@ -354,10 +354,11 @@ impl App {
     fn commit_model_switch(
         &mut self,
         session: AgentSession,
+        llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
         model: String,
         source: ModelSelectionSource,
     ) {
-        self.replace_session(session);
+        self.replace_session(session, llm_client);
         let preference = ModelSelectionPreference {
             source,
             model: model.clone(),
@@ -367,6 +368,11 @@ impl App {
         // Until then, do not show the previous model's prompt/token counters as
         // if they belonged to this context window.
         self.last_prompt_tokens = 0;
+        self.auto_compact = crate::compact::auto_compact::AutoCompactController::new(
+            crate::config::auto_compact_threshold(),
+            self.context_limit,
+        );
+        self.rebuild_model_context();
         self.ctx_warned_tier = 0;
         self.output_tokens = 0;
         if let Err(error) = save_model_selection_preference(&preference) {
@@ -393,13 +399,13 @@ impl App {
                 let prev_override = self.llm_override.clone();
                 let prev_ctx = self.context_limit;
                 self.llm_override = Some(Arc::new(client));
-                // Before rebuild: effort_session_opts scales the auto-compact
-                // threshold from context_limit, so it must reflect the NEW model.
+                // Build the replacement session with the new model's context policy.
                 self.context_limit = self.active_context_limit_for(&model);
                 match self.rebuild_session(Some(&model)) {
-                    Ok((session, _)) => {
+                    Ok((session, llm_client, _)) => {
                         self.commit_model_switch(
                             session,
+                            llm_client,
                             model.clone(),
                             ModelSelectionSource::Claude,
                         );
@@ -446,8 +452,13 @@ impl App {
                 self.llm_override = Some(Arc::new(client));
                 self.context_limit = self.active_context_limit_for(model);
                 match self.rebuild_session(Some(model)) {
-                    Ok((s, _)) => {
-                        self.commit_model_switch(s, model.to_string(), ModelSelectionSource::Codex);
+                    Ok((s, llm_client, _)) => {
+                        self.commit_model_switch(
+                            s,
+                            llm_client,
+                            model.to_string(),
+                            ModelSelectionSource::Codex,
+                        );
                         self.push_line(
                             &Style::new()
                                 .fg(TN_GREEN)
@@ -512,8 +523,13 @@ impl App {
         self.llm_override = Some(os_gateway_llm_override(&session, model));
         self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
-            Ok((s, _)) => {
-                self.commit_model_switch(s, model.to_string(), ModelSelectionSource::OsGateway);
+            Ok((s, llm_client, _)) => {
+                self.commit_model_switch(
+                    s,
+                    llm_client,
+                    model.to_string(),
+                    ModelSelectionSource::OsGateway,
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -550,11 +566,6 @@ impl App {
                 // Includes the login-gated OS `a3s-os-capabilities` skill.
                 .with_skill_dirs(self.skill_dirs())
                 .with_auto_save(true)
-                // Auto-compact the context when it nears the window (Claude-style).
-                // The threshold is scaled to THIS model's real window because the
-                // core triggers off a fixed 200k (see `auto_compact_threshold_for`).
-                .with_auto_compact(true)
-                .with_auto_compact_threshold(auto_compact_threshold_for(self.context_limit))
                 .with_file_memory(memory_dir())
                 // Parallel fan-out available in every mode (not just ultracode).
                 .with_max_parallel_tasks(budget.max_parallel_tasks)
@@ -573,16 +584,13 @@ impl App {
                 .with_max_continuation_turns(budget.max_continuation_turns),
             &self.workspace_manifest,
         );
-        // Keep project instructions (CLAUDE.md) + any /compact summary across
-        // model/effort/compact rebuilds, injected into the system prompt. When
-        // signed in, also steer the model to the progressive-API skill for OS
-        // questions (else "OS" reads as the local operating system → `whoami`).
+        // Keep project instructions (CLAUDE.md) across model/effort rebuilds,
+        // injected into the system prompt. When signed in, also steer the model
+        // to the progressive-API skill for OS questions (else "OS" reads as the
+        // local operating system → `whoami`).
         let mut extra_parts: Vec<String> = Vec::new();
         if let Some(i) = &self.instructions {
             extra_parts.push(i.clone());
-        }
-        if let Some(s) = &self.compact_summary {
-            extra_parts.push(format!("# Earlier conversation (compacted)\n\n{s}"));
         }
         if let Some(s) = &self.os_session {
             extra_parts.push(os_platform_guide(&s.address));
@@ -629,29 +637,36 @@ impl App {
     pub(crate) fn rebuild_session(
         &self,
         model: Option<&str>,
-    ) -> Result<(AgentSession, bool), String> {
+    ) -> Result<(AgentSession, Arc<dyn a3s_code_core::llm::LlmClient>, bool), String> {
         let build = |thinking: bool| {
             let o = self.effort_session_opts(thinking);
-            match model {
+            let options = match model {
                 Some(m) => o.with_model(m),
                 None => o,
-            }
+            };
+            let llm_client = crate::session_llm::resolve_session_llm_client(
+                &self.code_config,
+                &options,
+                &self.session_id,
+            )?;
+            Ok::<_, String>((options.with_llm_client(Arc::clone(&llm_client)), llm_client))
         };
         // Resume keeps history if the session was saved. Before the first turn
         // it isn't in the store ("Session not found"), so fall back to a fresh
         // session with the same id (no turns yet = no history to lose). Each is
         // also retried without the thinking budget for non-Anthropic models.
         for thinking in [true, false] {
+            let (options, llm_client) = build(thinking)?;
             if let Ok(s) = self
                 .agent
-                .resume_session(self.session_id.as_str(), build(thinking))
+                .resume_session(self.session_id.as_str(), options.clone())
             {
                 s.register_dynamic_workflow_runtime();
-                return Ok((s, !thinking));
+                return Ok((s, llm_client, !thinking));
             }
-            if let Ok(s) = self.agent.session(self.cwd.clone(), Some(build(thinking))) {
+            if let Ok(s) = self.agent.session(self.cwd.clone(), Some(options)) {
                 s.register_dynamic_workflow_runtime();
-                return Ok((s, !thinking));
+                return Ok((s, llm_client, !thinking));
             }
         }
         Err("could not rebuild the session".into())
@@ -666,15 +681,19 @@ impl App {
             );
             return;
         }
-        // Before rebuild: effort_session_opts scales the auto-compact threshold
-        // from context_limit, so it must reflect the NEW model's window.
+        // Build the replacement session with the new model's context policy.
         let prev_override = self.llm_override.clone();
         let prev_ctx = self.context_limit;
         self.llm_override = None;
         self.context_limit = self.active_context_limit_for(model);
         match self.rebuild_session(Some(model)) {
-            Ok((s, _)) => {
-                self.commit_model_switch(s, model.to_string(), ModelSelectionSource::Config);
+            Ok((s, llm_client, _)) => {
+                self.commit_model_switch(
+                    s,
+                    llm_client,
+                    model.to_string(),
+                    ModelSelectionSource::Config,
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GREEN)
@@ -705,8 +724,8 @@ impl App {
         }
         let model = self.model.clone();
         match self.rebuild_session(model.as_deref()) {
-            Ok((s, dropped)) => {
-                self.replace_session(s);
+            Ok((s, llm_client, dropped)) => {
+                self.replace_session(s, llm_client);
                 if self.effort == ULTRACODE {
                     // Unattended fan-out: auto-approve so subagents run freely.
                     self.mode = Mode::Auto;
