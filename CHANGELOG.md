@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Made the footer the single owner of live context usage; the composer status
+  chip now keeps effort/mode information without duplicating context fill in
+  the input border.
+- Enabled Core's model-aware rolling compaction for TUI and Code Web sessions.
+  Each selected model supplies its actual context window, requests compact
+  before overflow, and can compact repeatedly throughout a long-running task.
+  Core summaries are written back to each host's durable timeline so later
+  turns continue from the latest generation instead of compacting it again.
+
 ## [0.7.8] - 2026-07-09
 
 ### Fixed

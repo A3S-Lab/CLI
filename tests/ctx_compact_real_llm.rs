@@ -10,11 +10,9 @@
 //!      (`ContextCompacted` with fewer messages after than before),
 //!   3. the next round's prompt actually SHRINKS after compaction.
 //!
-//! The threshold is a deliberately low 0.05 (like the TUI's scaled
-//! `auto_compact_threshold_for` for a ~12k window): the core triggers at
-//! 0.05 × 200k = 10k prompt tokens. Turns carry ~800-token fillers, so the
-//! crossing lands after roughly a dozen turns and real summarization (needs
-//! > 30 messages) shortly after.
+//! The test pins a 200k context window and uses a deliberately low 0.05
+//! threshold, so compaction triggers at 10k prompt tokens. Turns carry
+//! ~800-token fillers, placing the crossing after roughly a dozen turns.
 //!
 //! Ignored by default — it hits the network + a real model. Run with:
 //!   cargo test --test ctx_compact_real_llm -- --ignored --nocapture
@@ -27,7 +25,8 @@ use a3s_code_core::store::{FileSessionStore, SessionStore};
 use a3s_code_core::{AgentEvent, AgentSession, SessionOptions};
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
-/// Low on purpose: 0.05 × the core's fixed 200k = trigger at 10k prompt tokens.
+const TEST_CONTEXT_TOKENS: usize = 200_000;
+/// Low on purpose: 0.05 × the pinned 200k window = trigger at 10k prompt tokens.
 const TEST_THRESHOLD: f32 = 0.05;
 const MAX_TURNS: usize = 25;
 
@@ -97,6 +96,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
                     .with_session_id("ctx-compact")
                     .with_auto_save(true)
                     .with_auto_compact(true)
+                    .with_max_context_tokens(TEST_CONTEXT_TOKENS)
                     .with_auto_compact_threshold(TEST_THRESHOLD)
                     .with_confirmation_policy(
                         ConfirmationPolicy::enabled().with_timeout(500, TimeoutAction::Reject),

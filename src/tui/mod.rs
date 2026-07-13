@@ -96,9 +96,8 @@ mod util;
 
 mod panels;
 use crate::budget::{
-    budget_plan_for_effort_index, context_limit_for_model, context_percent_from_core_window,
-    resolve_ctx_limit, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS,
-    ULTRACODE_INDEX as ULTRACODE,
+    budget_plan_for_effort_index, context_limit_for_model, resolve_ctx_limit, BudgetPlan,
+    BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS, ULTRACODE_INDEX as ULTRACODE,
 };
 use crate::config::*;
 use asset_naming::*;
@@ -6479,13 +6478,9 @@ impl Model for App {
                         };
                     }
                 };
-                crate::compact::append_compact_summary(&mut self.model_timeline, &summary);
-                if let Some(message) = self.model_timeline.last() {
-                    let _ = self.persist_timeline_message(message);
-                }
-                self.rebuild_model_context();
                 self.output_tokens = 0;
                 self.last_prompt_tokens = 0;
+                self.record_compact_summary(&summary);
                 if trigger == CompactTrigger::Automatic {
                     self.auto_compact.finish_success(0);
                 }
@@ -6959,14 +6954,7 @@ impl Model for App {
             input_gradient_rule(width, &BRAND_GRADIENT, self.gradient_frame)
         } else {
             let elabel = format!("◇ {}", EFFORT_LEVELS[self.effort].label);
-            // Context-window usage at the top-right of the input (Claude-style).
-            let ctxlabel = if self.context_limit > 0 {
-                let pct = (self.last_prompt_tokens * 100 / self.context_limit as usize).min(100);
-                format!("{pct}% context used  ")
-            } else {
-                String::new()
-            };
-            input_status_rule(width, border, &ctxlabel, &elabel)
+            input_status_rule(width, border, &elabel)
         };
 
         // Activity line directly above the input: spinner while the agent works,
@@ -8857,6 +8845,14 @@ impl App {
         }
     }
 
+    fn record_compact_summary(&mut self, summary: &str) {
+        let mut messages = Vec::with_capacity(1);
+        crate::compact::append_compact_summary(&mut messages, summary);
+        if let Some(message) = messages.pop() {
+            self.append_model_timeline_message(message);
+        }
+    }
+
     fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
         self.start_stream_inner(prompt.clone(), prompt, true, true, false)
     }
@@ -9569,20 +9565,38 @@ impl App {
                 before_messages,
                 after_messages,
                 percent_before,
+                summary,
                 ..
             } => {
                 // The core auto-compacted mid-turn (pruned tool outputs + summarized
-                // old messages). The next turn's prompt reflects the smaller context,
-                // so ctx% self-corrects on the following End — just surface a note.
-                // The core emits this whenever the threshold is crossed, even
-                // when nothing could shrink (short histories can't summarize);
-                // a note per round would spam "auto-compacted" while nothing
-                // happened. Only surface real reductions — prune-only rounds
-                // (equal count, smaller content) show up via ctx% instead.
+                // old messages). Persist the cumulative summary into the host
+                // timeline so the next TUI turn resumes the same compact
+                // generation instead of summarizing the raw transcript again.
+                if let Some(summary) = summary
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|summary| !summary.is_empty())
+                {
+                    self.output_tokens = 0;
+                    self.last_prompt_tokens = 0;
+                    self.record_compact_summary(summary);
+                    self.ctx_warned_tier = 0;
+                    self.has_successful_llm_history =
+                        has_successful_llm_history(&self.model_timeline);
+                    self.last_auto_review_history_len = self.model_timeline.len();
+                    self.auto_reviewed = false;
+                }
+                // A Core compaction satisfies the host controller too. This
+                // prevents a second summary request at AgentEvent::End while
+                // retaining the host compactor as a fallback if Core times out.
+                self.auto_compact.finish_success(0);
+
+                // Only surface real message-count reductions. Prune-only rounds
+                // (equal count, smaller content) remain quiet to avoid noise.
                 if after_messages < before_messages {
-                    // `percent_before` is relative to the core's fixed 200k
-                    // window; rescale to the model's REAL window to match ctx%.
-                    let pct = context_percent_from_core_window(percent_before, self.context_limit);
+                    // Core calculates this against the active model's context
+                    // window, so it matches the footer without rescaling.
+                    let pct = (percent_before * 100.0).round().clamp(0.0, 100.0) as u32;
                     self.push_line(&Style::new().fg(TN_GRAY).italic().render(&format!(
                         "  ✦ context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
                     )));

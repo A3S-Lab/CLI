@@ -69,6 +69,11 @@ impl ConfigController {
         Ok(self.service.llm_diagnostics())
     }
 
+    #[get("/llm/models")]
+    async fn model_catalog(&self) -> BootResult<serde_json::Value> {
+        Ok(self.service.model_catalog())
+    }
+
     #[post("/llm/providers/models/fetch")]
     async fn fetch_provider_models(
         &self,

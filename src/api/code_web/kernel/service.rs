@@ -37,6 +37,7 @@ struct CodeWebStreamResult {
     usage: TokenUsage,
     tool_calls_count: usize,
     last_prompt_tokens: usize,
+    compact_summary: Option<String>,
 }
 
 #[derive(Default)]
@@ -46,6 +47,7 @@ struct CodeWebStreamAccumulator {
     usage: Option<TokenUsage>,
     tool_calls_count: usize,
     last_prompt_tokens: usize,
+    compact_summary: Option<String>,
     error: Option<String>,
 }
 
@@ -58,6 +60,14 @@ impl CodeWebStreamAccumulator {
             }
             AgentEvent::TurnEnd { usage, .. } => {
                 self.last_prompt_tokens = usage.prompt_tokens;
+            }
+            AgentEvent::ContextCompacted {
+                summary: Some(summary),
+                ..
+            } if !summary.trim().is_empty() => {
+                // A later compaction summary includes the earlier generation,
+                // so retaining only the latest one is sufficient.
+                self.compact_summary = Some(summary);
             }
             AgentEvent::End { text, usage, .. } => {
                 self.end_text = Some(text);
@@ -85,6 +95,7 @@ impl CodeWebStreamAccumulator {
             usage,
             tool_calls_count: self.tool_calls_count,
             last_prompt_tokens: self.last_prompt_tokens,
+            compact_summary: self.compact_summary,
         })
     }
 }
@@ -591,8 +602,11 @@ impl KernelService {
         let assistant_text = result.text.clone();
         let usage = UsageResponse::from_usage(result.usage.clone());
         let tool_calls_count = result.tool_calls_count;
-        self.save_code_web_message_to_timeline(session_id, &Message::assistant(&assistant_text))
-            .await?;
+        let core_summary = result
+            .compact_summary
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
         let (report_captured, saved_memories) = match parse_sleep_report(&assistant_text) {
             Some(memories) => (
                 true,
@@ -600,6 +614,17 @@ impl KernelService {
             ),
             None => (false, Vec::new()),
         };
+        if let Some(summary) = core_summary.as_deref() {
+            self.maybe_auto_compact(
+                session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                Some(summary),
+            )
+            .await;
+        }
+        self.save_code_web_message_to_timeline(session_id, &Message::assistant(&assistant_text))
+            .await?;
 
         let display = if focus.is_empty() {
             "Sleep consolidation".to_string()
@@ -620,8 +645,15 @@ impl KernelService {
             .await;
         self.append_visible_message(session_id, "system", &summary, None)
             .await;
-        self.maybe_auto_compact(session_id, session.as_ref(), result.last_prompt_tokens)
+        if core_summary.is_none() {
+            self.maybe_auto_compact(
+                session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                None,
+            )
             .await;
+        }
 
         Ok(json!({
             "sessionId": session_id,
@@ -757,6 +789,20 @@ impl KernelService {
         let result = run_code_web_stream(session.as_ref(), &prompt, &history)
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
+        let core_summary = result
+            .compact_summary
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        if let Some(summary) = core_summary.as_deref() {
+            self.maybe_auto_compact(
+                session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                Some(summary),
+            )
+            .await;
+        }
         self.append_message(
             session_id,
             "assistant",
@@ -764,8 +810,15 @@ impl KernelService {
             self.session_response_model(session_id).await,
         )
         .await?;
-        self.maybe_auto_compact(session_id, session.as_ref(), result.last_prompt_tokens)
+        if core_summary.is_none() {
+            self.maybe_auto_compact(
+                session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                None,
+            )
             .await;
+        }
         Ok(json!({
             "sessionId": session_id,
             "accepted": true,
@@ -805,6 +858,20 @@ impl KernelService {
         let result = run_code_web_stream(session.as_ref(), &prompt, &history)
             .await
             .map_err(|e| BootError::Internal(e.to_string()))?;
+        let core_summary = result
+            .compact_summary
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string);
+        if let Some(summary) = core_summary.as_deref() {
+            self.maybe_auto_compact(
+                &session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                Some(summary),
+            )
+            .await;
+        }
         self.append_message(
             &session_id,
             "assistant",
@@ -812,8 +879,15 @@ impl KernelService {
             self.session_response_model(&session_id).await,
         )
         .await?;
-        self.maybe_auto_compact(&session_id, session.as_ref(), result.last_prompt_tokens)
+        if core_summary.is_none() {
+            self.maybe_auto_compact(
+                &session_id,
+                session.as_ref(),
+                result.last_prompt_tokens,
+                None,
+            )
             .await;
+        }
 
         Ok(ChatResponse {
             session_id,
@@ -1198,12 +1272,47 @@ impl KernelService {
         session_id: &str,
         session: &AgentSession,
         last_prompt_tokens: usize,
+        core_summary: Option<&str>,
     ) {
+        let context_limit = self.context_limit_for_session(session_id).await;
+        let threshold = self.state.auto_compact_threshold;
+        if last_prompt_tokens > 0 {
+            self.persist_code_web_context_usage(
+                session_id,
+                session.workspace(),
+                last_prompt_tokens,
+                context_limit,
+                threshold,
+            );
+        }
+
+        if let Some(summary) = core_summary.filter(|value| !value.trim().is_empty()) {
+            let result = self
+                .finalize_code_web_compact(session_id, session, summary.trim())
+                .await;
+            let mut contexts = self.state.session_contexts.lock().await;
+            let context = contexts.entry(session_id.to_string()).or_default();
+            let controller = context.auto_compact.get_or_insert_with(|| {
+                crate::compact::auto_compact::AutoCompactController::new(
+                    threshold,
+                    context_limit.min(u32::MAX as usize) as u32,
+                )
+            });
+            if result.is_ok() {
+                controller.finish_success(0);
+            } else {
+                controller.finish_failure();
+            }
+            drop(contexts);
+            if let Err(error) = result {
+                eprintln!("warning: failed to persist Core compaction for {session_id}: {error}");
+            }
+            return;
+        }
+
         if last_prompt_tokens == 0 {
             return;
         }
-        let context_limit = self.context_limit_for_session(session_id).await;
-        let threshold = self.state.auto_compact_threshold;
         let should_compact = {
             let mut contexts = self.state.session_contexts.lock().await;
             let context = contexts.entry(session_id.to_string()).or_default();
@@ -1216,13 +1325,6 @@ impl KernelService {
             controller.update_policy(threshold, context_limit.min(u32::MAX as usize) as u32);
             controller.observe_prompt_tokens(last_prompt_tokens) && controller.start()
         };
-        self.persist_code_web_context_usage(
-            session_id,
-            session.workspace(),
-            last_prompt_tokens,
-            context_limit,
-            threshold,
-        );
         if !should_compact {
             return;
         }
@@ -2296,6 +2398,13 @@ mod tests {
         accumulator.observe(AgentEvent::TextDelta {
             text: "streamed".to_string(),
         });
+        accumulator.observe(AgentEvent::ContextCompacted {
+            session_id: "session-1".to_string(),
+            before_messages: 30,
+            after_messages: 12,
+            percent_before: 0.85,
+            summary: Some("latest durable summary".to_string()),
+        });
         accumulator.observe(AgentEvent::End {
             text: "final answer".to_string(),
             usage: TokenUsage {
@@ -2316,6 +2425,10 @@ mod tests {
         assert_eq!(result.usage.prompt_tokens, 270);
         assert_eq!(result.text, "final answer");
         assert_eq!(result.tool_calls_count, 1);
+        assert_eq!(
+            result.compact_summary.as_deref(),
+            Some("latest durable summary")
+        );
     }
 
     fn temp_code_web_store_dir(name: &str) -> PathBuf {
@@ -2475,6 +2588,32 @@ mod tests {
             .messages
             .iter()
             .all(|message| message.role != crate::compact::A3S_COMPACT_ROLE));
+    }
+
+    #[test]
+    fn code_web_core_summary_keeps_the_current_assistant_turn_after_it() {
+        let store_dir = temp_code_web_store_dir("compact-then-assistant");
+
+        persist_code_web_compact_summary(&store_dir, "session", "compact summary", 128_000, 0.85)
+            .expect("persist compact summary");
+        save_code_web_timeline_message(
+            &store_dir,
+            "session",
+            &Message::assistant("current turn complete"),
+            128_000,
+            0.85,
+        )
+        .expect("persist assistant after compact summary");
+
+        let context_store = crate::compact::ContextJsonStore::for_session(&store_dir, "session");
+        let context = context_store
+            .load()
+            .expect("load context")
+            .expect("context");
+        assert_eq!(context.messages.len(), 2);
+        assert_eq!(context.messages[0].text(), "compact summary");
+        assert_eq!(context.messages[1].role, "assistant");
+        assert_eq!(context.messages[1].text(), "current turn complete");
     }
 
     #[test]

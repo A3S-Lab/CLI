@@ -173,6 +173,10 @@ impl ConfigService {
         })
     }
 
+    pub(in crate::api::code_web) fn model_catalog(&self) -> serde_json::Value {
+        model_catalog_from_config(&self.state.code_config_snapshot())
+    }
+
     pub(in crate::api::code_web) fn fetch_provider_models(
         &self,
         request: Value,
@@ -370,6 +374,47 @@ fn display_model_name(model: &ModelConfig) -> &str {
     optional_text(&model.name).unwrap_or(model.id.as_str())
 }
 
+fn model_catalog_from_config(config: &a3s_code_core::CodeConfig) -> serde_json::Value {
+    let items = config
+        .providers
+        .iter()
+        .flat_map(|provider| {
+            provider.models.iter().map(move |model| {
+                json!({
+                    "id": format!("{}/{}", provider.name, model.id),
+                    "name": display_model_name(model),
+                    "source": provider.name,
+                    "contextWindow": (model.limit.context > 0).then_some(model.limit.context),
+                    "reasoning": model.reasoning,
+                    "toolCall": model.tool_call,
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let default_model = config.default_model.clone();
+    let mut warnings = Vec::new();
+    if items.is_empty() {
+        warnings
+            .push("No models are configured. Add a provider and model in Settings.".to_string());
+    }
+    if let Some(default_model) = default_model.as_deref() {
+        let default_exists = items
+            .iter()
+            .any(|item| item.get("id").and_then(Value::as_str) == Some(default_model));
+        if !default_exists {
+            warnings.push(format!(
+                "The default model `{default_model}` is not present in the configured model catalog."
+            ));
+        }
+    }
+
+    json!({
+        "items": items,
+        "warnings": warnings,
+        "defaultModel": default_model,
+    })
+}
+
 fn optional_text(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
@@ -559,5 +604,36 @@ fn preserve_headers(headers: &mut HashMap<String, String>, previous: &HashMap<St
             }
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_catalog_from_config;
+
+    #[test]
+    fn model_catalog_uses_qualified_ids_and_provider_sources() {
+        let config = a3s_code_core::CodeConfig::from_acl(
+            r#"
+                default_model = "openai/gpt-test"
+                providers "openai" {
+                  models "gpt-test" {
+                    name = "GPT Test"
+                    reasoning = true
+                    toolCall = true
+                    limit { context = 128000 }
+                  }
+                }
+            "#,
+        )
+        .expect("valid config");
+
+        let catalog = model_catalog_from_config(&config);
+        assert_eq!(catalog["defaultModel"], "openai/gpt-test");
+        assert_eq!(catalog["items"][0]["id"], "openai/gpt-test");
+        assert_eq!(catalog["items"][0]["source"], "openai");
+        assert_eq!(catalog["items"][0]["contextWindow"], 128000);
+        assert_eq!(catalog["items"][0]["reasoning"], true);
+        assert_eq!(catalog["warnings"].as_array().map(Vec::len), Some(0));
     }
 }

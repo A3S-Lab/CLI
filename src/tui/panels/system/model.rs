@@ -566,6 +566,12 @@ impl App {
                 // Includes the login-gated OS `a3s-os-capabilities` skill.
                 .with_skill_dirs(self.skill_dirs())
                 .with_auto_save(true)
+                // Core owns in-turn rolling compaction and uses the selected
+                // model's actual context window. The TUI timeline remains the
+                // durable cross-turn transcript source.
+                .with_auto_compact(true)
+                .with_max_context_tokens(self.context_limit as usize)
+                .with_auto_compact_threshold(self.auto_compact.threshold() as f32)
                 .with_file_memory(memory_dir())
                 // Parallel fan-out available in every mode (not just ultracode).
                 .with_max_parallel_tasks(budget.max_parallel_tasks)
@@ -661,11 +667,11 @@ impl App {
                 .agent
                 .resume_session(self.session_id.as_str(), options.clone())
             {
-                s.register_dynamic_workflow_runtime();
+                let _ = s.register_dynamic_workflow_runtime();
                 return Ok((s, llm_client, !thinking));
             }
             if let Ok(s) = self.agent.session(self.cwd.clone(), Some(options)) {
-                s.register_dynamic_workflow_runtime();
+                let _ = s.register_dynamic_workflow_runtime();
                 return Ok((s, llm_client, !thinking));
             }
         }

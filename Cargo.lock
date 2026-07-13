@@ -30,11 +30,6 @@ dependencies = [
 
 [[package]]
 name = "a3s-acl"
-version = "0.2.0"
-source = "git+https://github.com/A3S-Lab/ACL.git?tag=v0.2.0#ccb8622b42847481c451197d4f9ce5623a350a25"
-
-[[package]]
-name = "a3s-acl"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35b83be97f61abdd33096446eae063f9d65d98e84c446560b59d3c744194287e"
@@ -68,8 +63,10 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "4.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60c7e1fb3b6178652bbea1402fa09379c1b070d10cbc4730184d5d8802ee39a1"
 dependencies = [
- "a3s-acl 0.2.0",
+ "a3s-acl",
  "a3s-common",
  "a3s-flow",
  "a3s-lane",
@@ -135,6 +132,8 @@ dependencies = [
 [[package]]
 name = "a3s-flow"
 version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30212cc3979a790cea7e15fa0c1e8fe7a17e17b942bc4fa1f47196ccd0437834"
 dependencies = [
  "async-trait",
  "chrono",
@@ -150,10 +149,11 @@ dependencies = [
 [[package]]
 name = "a3s-lane"
 version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c9cecdc55d04934664676b5945e46afc1e17abb92ffccb8612bb2ec9728b33e"
 dependencies = [
  "async-trait",
  "chrono",
- "cron",
  "dashmap",
  "futures-core",
  "num_cpus",
@@ -183,9 +183,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-search"
-version = "1.3.0"
+version = "1.4.1"
 dependencies = [
- "a3s-acl 0.2.1",
+ "a3s-acl",
  "a3s-updater",
  "anyhow",
  "async-trait",
@@ -193,6 +193,7 @@ dependencies = [
  "clap",
  "dom_smoothie",
  "futures",
+ "quick-xml",
  "reqwest 0.12.28",
  "scraper",
  "serde",
@@ -1033,19 +1034,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "cron"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5dcd6f69605c2956916ce24e8af637b754964c9a83f4662d3a2361654cdba09"
-dependencies = [
- "chrono",
- "once_cell",
- "phf 0.11.3",
- "serde",
- "winnow 0.7.15",
 ]
 
 [[package]]
@@ -2968,6 +2956,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
+name = "quick-xml"
+version = "0.38.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quinn"
 version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4208,7 +4206,7 @@ dependencies = [
  "serde",
  "serde_spanned",
  "toml_datetime",
- "winnow 0.5.40",
+ "winnow",
 ]
 
 [[package]]
@@ -5016,15 +5014,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "winnow"
-version = "0.7.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df79d97927682d2fd8adb29682d1140b343be4ac0f08fd68b7765d9c059d3945"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "winreg"
 version = "0.50.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5246,3 +5235,11 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "a3s-code-core"
+version = "5.2.3"
+
+[[patch.unused]]
+name = "a3s-lane"
+version = "0.5.0"

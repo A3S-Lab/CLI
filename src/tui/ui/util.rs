@@ -82,12 +82,7 @@ pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize
         .view(input_chrome_width(width))
 }
 
-pub(crate) fn input_status_rule(
-    width: usize,
-    border_color: Color,
-    context: &str,
-    label: &str,
-) -> String {
+pub(crate) fn input_status_rule(width: usize, border_color: Color, label: &str) -> String {
     if width == 0 {
         return String::new();
     }
@@ -98,7 +93,6 @@ pub(crate) fn input_status_rule(
         .input_border()
         .margin(PAD)
         .rule_color(border_color)
-        .context(context)
         .label(label)
         .view(input_chrome_width(width))
 }
@@ -384,10 +378,10 @@ mod tests {
         assert_eq!(visible_len(&plain), 18);
         assert!(plain.starts_with("  ─"));
 
-        let status = input_status_rule(48, Color::BrightBlack, "70% context used  ", "◇ high");
+        let status = input_status_rule(48, Color::BrightBlack, "◇ high");
         let status_plain = strip_ansi(&status);
         assert_eq!(visible_len(&status), 46);
-        assert!(status_plain.contains("70% context used"));
+        assert!(!status_plain.contains("context"));
         assert!(status_plain.contains("◇ high"));
         assert!(status.contains("\x1b[1;38;2;0;112;243m◇ high\x1b[0m"));
     }

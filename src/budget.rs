@@ -8,7 +8,6 @@
 use serde_json::{json, Value};
 
 const DEFAULT_CONTEXT_LIMIT: u32 = 200_000;
-const CORE_MAX_CONTEXT_TOKENS: f32 = 200_000.0;
 const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 1_200;
 const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 12;
 const DEEP_RESEARCH_MIN_PARALLEL_TASKS: usize = 4;
@@ -304,19 +303,6 @@ fn context_suffix_limit(model: &str) -> Option<u32> {
         "k" => base.checked_mul(1_000),
         "m" => base.checked_mul(1_000_000),
         _ => suffix.parse::<u32>().ok(),
-    }
-}
-
-pub(crate) fn context_percent_from_core_window(
-    percent_of_core_window: f32,
-    context_limit: u32,
-) -> u32 {
-    if context_limit > 0 {
-        (percent_of_core_window * CORE_MAX_CONTEXT_TOKENS * 100.0 / context_limit as f32)
-            .round()
-            .min(100.0) as u32
-    } else {
-        (percent_of_core_window * 100.0).round() as u32
     }
 }
 

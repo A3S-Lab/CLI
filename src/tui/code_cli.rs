@@ -951,7 +951,7 @@ async fn build_deepresearch_session(
         .with_auto_parallel_delegation(true)
         .with_manual_delegation_enabled(true);
     let session = agent.session(workspace.to_string(), Some(opts))?;
-    session.register_dynamic_workflow_runtime();
+    session.register_dynamic_workflow_runtime()?;
     Ok((session, report_tool_gate))
 }
 
@@ -3052,7 +3052,7 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("local workflow e2e", false);
@@ -3189,7 +3189,7 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("recursive rounds e2e", false);
@@ -3275,7 +3275,7 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("partial failure e2e", false);
@@ -3380,7 +3380,7 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("latest Rust stable official version", false);
@@ -3485,11 +3485,13 @@ mod tests {
         let session = agent
             .session(workspace.to_string_lossy().to_string(), Some(opts))
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
         let seen_args = std::sync::Arc::new(Mutex::new(Vec::new()));
-        session.register_dynamic_tool(Arc::new(StructuredRuntimeTool {
-            seen_args: std::sync::Arc::clone(&seen_args),
-        }));
+        session
+            .register_dynamic_tool(Arc::new(StructuredRuntimeTool {
+                seen_args: std::sync::Arc::clone(&seen_args),
+            }))
+            .unwrap();
 
         let args = super::super::deep_research_workflow_args("runtime disabled", true);
         let budget = super::super::deep_research_default_budget();
