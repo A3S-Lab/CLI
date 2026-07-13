@@ -78,9 +78,10 @@ impl AnthropicEventMapper {
                     if !self.current_tool_input.is_empty() {
                         self.mark_first_token();
                         let _ = tx
-                            .send(StreamEvent::ToolUseInputDelta(
-                                self.current_tool_input.clone(),
-                            ))
+                            .send(StreamEvent::ToolUseInputDelta {
+                                id: None,
+                                delta: self.current_tool_input.clone(),
+                            })
                             .await;
                     }
                 }
@@ -94,7 +95,12 @@ impl AnthropicEventMapper {
                 AnthropicDelta::InputJsonDelta { partial_json } => {
                     self.mark_first_token();
                     self.current_tool_input.push_str(&partial_json);
-                    let _ = tx.send(StreamEvent::ToolUseInputDelta(partial_json)).await;
+                    let _ = tx
+                        .send(StreamEvent::ToolUseInputDelta {
+                            id: None,
+                            delta: partial_json,
+                        })
+                        .await;
                 }
             },
             AnthropicStreamEvent::ContentBlockStop if !self.current_tool_id.is_empty() => {

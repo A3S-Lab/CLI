@@ -130,11 +130,15 @@ pub(in crate::api::code_web) fn activate_session_runtime(
     session: &AgentSession,
     runtime: &CodeWebSessionRuntime,
 ) {
-    session.register_dynamic_workflow_runtime();
+    let _ = session.register_dynamic_workflow_runtime();
     match runtime.os_session.as_ref() {
-        Some(os_session) => session
-            .register_dynamic_tool(Arc::new(crate::runtime_tool::RuntimeTool::new(os_session))),
-        None => session.unregister_dynamic_tool("runtime"),
+        Some(os_session) => {
+            let _ = session
+                .register_dynamic_tool(Arc::new(crate::runtime_tool::RuntimeTool::new(os_session)));
+        }
+        None => {
+            let _ = session.unregister_dynamic_tool("runtime");
+        }
     }
 }
 
@@ -159,7 +163,8 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
         let new_session = Arc::new(
             state
                 .agent
-                .session(workspace.display().to_string(), Some(options))
+                .session_async(workspace.display().to_string(), Some(options))
+                .await
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(new_session.as_ref(), &runtime);

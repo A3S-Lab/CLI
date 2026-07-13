@@ -34,7 +34,7 @@ const MAX_TURNS: usize = 25;
 /// as (before, after) message counts).
 async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>) {
     let fut = async {
-        let (mut rx, _join) = sess.stream(prompt, None).await.expect("stream start");
+        let (mut rx, join) = sess.stream(prompt, None).await.expect("stream start");
         let mut prompt_tokens = 0usize;
         let mut compactions = Vec::new();
         while let Some(ev) = rx.recv().await {
@@ -61,6 +61,7 @@ async fn turn(sess: &AgentSession, prompt: &str) -> (usize, Vec<(usize, usize)>)
                 _ => {}
             }
         }
+        join.await.expect("stream task join");
         (prompt_tokens, compactions)
     };
     tokio::time::timeout(TURN_TIMEOUT, fut)
@@ -88,7 +89,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .expect("build agent from config.acl");
     let cwd = tmp.to_string_lossy().to_string();
     let sess = agent
-        .session(
+        .session_async(
             cwd,
             Some(
                 SessionOptions::new()
@@ -103,6 +104,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
                     ),
             ),
         )
+        .await
         .expect("session");
 
     // ~800 tokens of inert filler per turn (unique per turn so nothing dedups).
@@ -131,8 +133,8 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
             break;
         }
         peak_prompt = peak_prompt.max(prompt_tokens);
-        // A crossing below the 30-message minimum only prunes (before == after);
-        // keep going until a real summarization shrinks the history.
+        // Prune-only compactions keep the message count unchanged; keep going
+        // until a summary replaces older history and shrinks the timeline.
         if let Some(&(b, a)) = compactions.iter().find(|(b, a)| a < b) {
             real_compaction = Some((b, a));
         }

@@ -613,19 +613,19 @@ mod tests {
 
     #[test]
     fn model_catalog_uses_qualified_ids_and_provider_sources() {
-        let config = a3s_code_core::CodeConfig::from_acl(
-            r#"
-                default_model = "openai/gpt-test"
-                providers "openai" {
-                  models "gpt-test" {
-                    name = "GPT Test"
-                    reasoning = true
-                    toolCall = true
-                    limit { context = 128000 }
-                  }
-                }
-            "#,
-        )
+        let config: a3s_code_core::CodeConfig = serde_json::from_value(serde_json::json!({
+            "defaultModel": "openai/gpt-test",
+            "providers": [{
+                "name": "openai",
+                "models": [{
+                    "id": "gpt-test",
+                    "name": "GPT Test",
+                    "reasoning": true,
+                    "toolCall": true,
+                    "limit": { "context": 128000 }
+                }]
+            }]
+        }))
         .expect("valid config");
 
         let catalog = model_catalog_from_config(&config);

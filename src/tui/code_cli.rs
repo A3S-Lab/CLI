@@ -950,7 +950,9 @@ async fn build_deepresearch_session(
         .with_auto_delegation_enabled(true)
         .with_auto_parallel_delegation(true)
         .with_manual_delegation_enabled(true);
-    let session = agent.session(workspace.to_string(), Some(opts))?;
+    let session = agent
+        .session_async(workspace.to_string(), Some(opts))
+        .await?;
     session.register_dynamic_workflow_runtime()?;
     Ok((session, report_tool_gate))
 }
@@ -2229,6 +2231,12 @@ mod tests {
             });
             Ok(rx)
         }
+
+        fn native_structured_support(
+            &self,
+        ) -> a3s_code_core::llm::structured::NativeStructuredSupport {
+            a3s_code_core::llm::structured::NativeStructuredSupport::ForcedTool
+        }
     }
 
     impl ScriptedLlmClient {
@@ -2325,6 +2333,12 @@ mod tests {
                 let _ = tx.send(StreamEvent::Done(response)).await;
             });
             Ok(rx)
+        }
+
+        fn native_structured_support(
+            &self,
+        ) -> a3s_code_core::llm::structured::NativeStructuredSupport {
+            a3s_code_core::llm::structured::NativeStructuredSupport::ForcedTool
         }
     }
 
@@ -2644,7 +2658,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let synthesis = synthesize_deepresearch_report(
             &session,
@@ -2740,7 +2755,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(6);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let synthesis = synthesize_deepresearch_report(
@@ -2824,7 +2840,8 @@ mod tests {
             .with_llm_client(llm)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
@@ -2901,7 +2918,8 @@ mod tests {
             .with_llm_client(llm)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
@@ -2959,10 +2977,11 @@ mod tests {
         ]));
         let opts = SessionOptions::new().with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(
+            .session_async(
                 workspace.to_string_lossy().to_string(),
                 Some(opts.with_llm_client(llm)),
             )
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
@@ -3050,7 +3069,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(6);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         session.register_dynamic_workflow_runtime().unwrap();
 
@@ -3187,7 +3207,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(8);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         session.register_dynamic_workflow_runtime().unwrap();
 
@@ -3273,7 +3294,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         session.register_dynamic_workflow_runtime().unwrap();
 
@@ -3378,7 +3400,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         session.register_dynamic_workflow_runtime().unwrap();
 
@@ -3483,7 +3506,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         session.register_dynamic_workflow_runtime().unwrap();
         let seen_args = std::sync::Arc::new(Mutex::new(Vec::new()));

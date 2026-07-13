@@ -1102,7 +1102,8 @@ impl KernelService {
         let session = Arc::new(
             self.state
                 .agent
-                .session(workspace.display().to_string(), Some(options))
+                .session_async(workspace.display().to_string(), Some(options))
+                .await
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(session.as_ref(), &runtime);

@@ -327,7 +327,12 @@ impl ClaudeCliHostToolMapper {
                             name: call.name.clone(),
                         })
                         .await;
-                    let _ = tx.send(StreamEvent::ToolUseInputDelta(input_delta)).await;
+                    let _ = tx
+                        .send(StreamEvent::ToolUseInputDelta {
+                            id: None,
+                            delta: input_delta,
+                        })
+                        .await;
                     content.push(call.into_content_block());
                 }
             }
@@ -518,7 +523,7 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(StreamEvent::ToolUseInputDelta(delta)) if delta.contains("README.md")
+            Some(StreamEvent::ToolUseInputDelta { delta, .. }) if delta.contains("README.md")
         ));
         let Some(StreamEvent::Done(response)) = rx.recv().await else {
             panic!("expected done");
@@ -570,7 +575,7 @@ mod tests {
         ));
         assert!(matches!(
             rx.recv().await,
-            Some(StreamEvent::ToolUseInputDelta(delta)) if delta.contains("README.md")
+            Some(StreamEvent::ToolUseInputDelta { delta, .. }) if delta.contains("README.md")
         ));
         let Some(StreamEvent::Done(response)) = rx.recv().await else {
             panic!("expected done");

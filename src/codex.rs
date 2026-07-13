@@ -323,7 +323,10 @@ impl LlmClient for CodexClient {
                                         entry.1 .2.push_str(delta);
                                     }
                                     let _ = tx
-                                        .send(StreamEvent::ToolUseInputDelta(delta.to_string()))
+                                        .send(StreamEvent::ToolUseInputDelta {
+                                            id: None,
+                                            delta: delta.to_string(),
+                                        })
                                         .await;
                                 }
                             }

@@ -5410,6 +5410,9 @@ struct App {
     agent: Arc<Agent>,
     code_config: a3s_code_core::CodeConfig,
     store: Arc<dyn a3s_code_core::store::SessionStore>,
+    /// File-backed memory store initialized by the async launch path and reused
+    /// by synchronous model/effort session rebuilds.
+    memory_store: Arc<dyn a3s_memory::MemoryStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
     /// This session's id (for model-switch resume + the exit hint).
@@ -6385,8 +6388,9 @@ impl Model for App {
                              key decisions and what's done, then list any open threads or next \
                              steps. Keep it to a few lines.";
                             let mut answer = String::new();
-                            if let Ok(sess) =
-                                agent.session(workspace, Some(tui_session_options(conf)))
+                            if let Ok(sess) = agent
+                                .session_async(workspace, Some(tui_session_options(conf)))
+                                .await
                             {
                                 if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await
                                 {
@@ -8011,7 +8015,10 @@ impl App {
                 // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
                 let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
                     .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                let sess = match agent.session(workspace, Some(tui_session_options(conf))) {
+                let sess = match agent
+                    .session_async(workspace, Some(tui_session_options(conf)))
+                    .await
+                {
                     Ok(s) => s,
                     Err(e) => return Msg::SideNote(format!("(/btw failed: {e})")),
                 };
@@ -9443,7 +9450,7 @@ impl App {
                 self.runtime.start_tool(id, name);
                 self.update_viewport_with_stream();
             }
-            AgentEvent::ToolInputDelta { delta } => {
+            AgentEvent::ToolInputDelta { delta, .. } => {
                 self.runtime.push_tool_input(&delta);
             }
             AgentEvent::ToolOutputDelta { id, name, delta } => {
@@ -10249,16 +10256,20 @@ impl App {
     ) {
         self.session = Arc::new(session);
         self.llm_client = llm_client;
-        self.session.register_dynamic_workflow_runtime();
+        let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
     }
 
     fn sync_runtime_tool(&self) {
         match self.os_session.as_ref() {
-            Some(s) => self.session.register_dynamic_tool(std::sync::Arc::new(
-                crate::runtime_tool::RuntimeTool::new(s),
-            )),
-            None => self.session.unregister_dynamic_tool("runtime"),
+            Some(s) => {
+                let _ = self.session.register_dynamic_tool(std::sync::Arc::new(
+                    crate::runtime_tool::RuntimeTool::new(s),
+                ));
+            }
+            None => {
+                let _ = self.session.unregister_dynamic_tool("runtime");
+            }
         }
     }
 
@@ -10984,6 +10995,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let initial_files = initial_manifest.file_paths();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
     let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
+    let compact_threshold = auto_compact_threshold();
     let launch_options = apply_launch_model_options(
         with_instr(with_recent_workspace_context(
             tui_session_options_with_gate(
@@ -10994,6 +11006,9 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
             .with_workspace_backend(workspace_services.clone())
             .with_skill_dirs(claude_dirs.clone())
             .with_auto_save(true)
+            .with_auto_compact(true)
+            .with_max_context_tokens(context_limit as usize)
+            .with_auto_compact_threshold(compact_threshold as f32)
             .with_file_memory(memory_dir())
             .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
             .with_max_tool_rounds(initial_budget.max_tool_rounds)
@@ -11010,25 +11025,37 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         crate::session_llm::resolve_session_llm_client(&code_config, &launch_options, &session_id)
             .map_err(anyhow::Error::msg)?;
     let launch_options = launch_options.with_llm_client(Arc::clone(&llm_client));
-    let session = match agent.resume_session(session_id.as_str(), launch_options.clone()) {
+    let session = match agent
+        .resume_session_async(session_id.as_str(), launch_options.clone())
+        .await
+    {
         Ok(s) => s,
-        Err(_) => agent.session(
-            workspace.clone(),
-            Some(launch_options.with_session_id(session_id.as_str())),
-        )?,
+        Err(_) => {
+            agent
+                .session_async(
+                    workspace.clone(),
+                    Some(launch_options.with_session_id(session_id.as_str())),
+                )
+                .await?
+        }
     };
+    let memory_store = session
+        .memory()
+        .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?
+        .store()
+        .clone();
 
     // DynamicWorkflowRuntime is always available in the TUI because built-in
     // `?` deep research and ultracode dynamic workflows both route through it.
-    session.register_dynamic_workflow_runtime();
+    session.register_dynamic_workflow_runtime()?;
 
     // A3S Runtime offload tool: registered only when signed in to OS, so the
     // model sees `runtime` after login and not before. Auth changes re-sync it via
     // `refresh_after_auth` → `sync_runtime_tool`.
     if let Some(os) = os_session.as_ref() {
-        session.register_dynamic_tool(std::sync::Arc::new(crate::runtime_tool::RuntimeTool::new(
-            os,
-        )));
+        session.register_dynamic_tool(std::sync::Arc::new(
+            crate::runtime_tool::RuntimeTool::new(os),
+        ))?;
     }
 
     let (width, height) = a3s_tui::terminal::Terminal::size().unwrap_or((80, 24));
@@ -11070,7 +11097,6 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .filter(|message| crate::compact::is_compact_message(message))
                     .count() as u32,
             });
-    let compact_threshold = auto_compact_threshold();
     let context_store =
         crate::compact::ContextJsonStore::for_session(store_dir.clone(), &session_id);
     let mut model_context = context_store
@@ -11177,6 +11203,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         agent: agent.clone(),
         code_config,
         store: store.clone(),
+        memory_store,
         confirmation,
         deep_research_report_tool_gate,
         session_id: session_id.clone(),
@@ -12190,9 +12217,10 @@ mod tests {
             .with_goal_tracking(true)
             .with_max_tool_rounds(budget.max_tool_rounds);
         let session = agent
-            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .session_async(dir.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        session.register_dynamic_workflow_runtime().unwrap();
         let names = session.tool_names();
         let _ = std::fs::remove_dir_all(&dir);
         assert!(
@@ -13825,7 +13853,8 @@ mod tests {
             .await
             .unwrap();
         let session = agent
-            .session(dir.to_string_lossy().to_string(), None)
+            .session_async(dir.to_string_lossy().to_string(), None)
+            .await
             .unwrap();
         let names = session.tool_names();
         let _ = std::fs::remove_dir_all(&dir);
@@ -14168,7 +14197,8 @@ mod tests {
             .with_llm_client(llm)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .session_async(dir.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let (mut rx, join) = session
@@ -14235,7 +14265,8 @@ mod tests {
             .with_permission_policy(a3s_code_core::permissions::PermissionPolicy::new())
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .session_async(dir.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let (mut rx, join) = session.stream("Read sample.txt.", None).await.unwrap();
@@ -14375,7 +14406,7 @@ mod tests {
                 continue;
             }
             eprintln!("\n[asset-e2e] creating {label}");
-            let session = real_llm_asset_session(&agent, &workspace, label);
+            let session = real_llm_asset_session(&agent, &workspace, label).await;
             let (answer, saved_path) =
                 real_llm_asset_turn(&session, label, &prompt, || match label {
                     "agent" => verify_real_llm_agent_asset(&agent_root),
@@ -14400,7 +14431,7 @@ mod tests {
         }
     }
 
-    fn real_llm_asset_session(
+    async fn real_llm_asset_session(
         agent: &a3s_code_core::Agent,
         workspace: &std::path::Path,
         label: &str,
@@ -14413,7 +14444,8 @@ mod tests {
             .with_tool_timeout(90_000)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .expect("real LLM asset session")
     }
 
@@ -15053,7 +15085,8 @@ mod tests {
             .with_auto_delegation_enabled(false)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .session_async(dir.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let (mut rx, join) = session
@@ -15143,7 +15176,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(5);
         let session = agent
-            .session(dir.to_string_lossy().to_string(), Some(opts))
+            .session_async(dir.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let result = session

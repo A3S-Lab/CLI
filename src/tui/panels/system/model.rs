@@ -572,7 +572,7 @@ impl App {
                 .with_auto_compact(true)
                 .with_max_context_tokens(self.context_limit as usize)
                 .with_auto_compact_threshold(self.auto_compact.threshold() as f32)
-                .with_file_memory(memory_dir())
+                .with_memory(self.memory_store.clone())
                 // Parallel fan-out available in every mode (not just ultracode).
                 .with_max_parallel_tasks(budget.max_parallel_tasks)
                 .with_auto_delegation_enabled(true)
