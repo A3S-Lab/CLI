@@ -4977,6 +4977,48 @@ fn instant_from_epoch_ms(epoch_ms: u64) -> Instant {
         .unwrap_or(now)
 }
 
+fn should_run_inactivity_review(
+    state: &State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    history_len: usize,
+    last_auto_review_history_len: usize,
+    auto_reviewed: bool,
+    has_pending_input: bool,
+) -> bool {
+    should_check_inactivity_review_history(
+        state,
+        idle_for,
+        has_successful_llm_history,
+        auto_reviewed,
+        has_pending_input,
+    ) && history_len > last_auto_review_history_len
+}
+
+fn should_check_inactivity_review_history(
+    state: &State,
+    idle_for: Duration,
+    has_successful_llm_history: bool,
+    auto_reviewed: bool,
+    has_pending_input: bool,
+) -> bool {
+    !auto_reviewed
+        && state == &State::Idle
+        && idle_for > Duration::from_secs(300)
+        && has_successful_llm_history
+        && !has_pending_input
+}
+
+fn has_successful_llm_history(history: &[a3s_code_core::Message]) -> bool {
+    history
+        .iter()
+        .any(|message| message.role == "assistant" && !message.text().trim().is_empty())
+}
+
+fn submission_rearms_inactivity_review(text: &str) -> bool {
+    !text.trim().is_empty()
+}
+
 fn touch_workspace_file_path_for_manifest(
     manifest: &LocalWorkspaceManifest,
     workspace: &str,
@@ -5322,6 +5364,12 @@ struct App {
     last_activity: Instant,
     /// True once the idle conversation has been auto-reviewed (until next input).
     auto_reviewed: bool,
+    /// True once this session has completed at least one LLM turn that wrote
+    /// non-empty assistant conversation history.
+    has_successful_llm_history: bool,
+    /// Conversation-history length at the last inactivity review. UI-only
+    /// activity does not change it, so it cannot trigger another review.
+    last_auto_review_history_len: usize,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
     /// Deep-research mode: a leading `?` turns the input into a deep-research
@@ -5617,7 +5665,6 @@ impl Model for App {
             // one edit (newlines become real line breaks) instead of N submitted
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
-                self.last_activity = Instant::now();
                 if self.ide.is_some() {
                     self.ide_paste_text(&text);
                     return None;
@@ -5627,8 +5674,6 @@ impl Model for App {
             }
 
             Msg::Term(Event::Key(key)) => {
-                self.last_activity = Instant::now();
-                self.auto_reviewed = false;
                 // Any keypress dismisses the copy highlight.
                 self.selection = None;
                 // Ctrl+C is a global quit key. Keep it before panels, approval
@@ -6181,42 +6226,67 @@ impl Model for App {
                 }
                 // Inactivity auto-review: after a quiet stretch with a real
                 // conversation, summarise it once as a side note (Claude-style).
-                if !self.auto_reviewed
-                    && self.state == State::Idle
-                    && !self.messages.is_empty()
-                    && self.last_activity.elapsed() > Duration::from_secs(300)
-                {
-                    self.auto_reviewed = true;
-                    let agent = self.agent.clone();
-                    let workspace = self.cwd.clone();
-                    let history = self.session.history();
-                    let review = cmd::cmd(move || async move {
-                        let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                            .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                        let prompt = "Briefly review this conversation so far: summarise the \
-                             key decisions and what's done, then list any open threads or next \
-                             steps. Keep it to a few lines.";
-                        let mut answer = String::new();
-                        if let Ok(sess) = agent.session(workspace, Some(tui_session_options(conf)))
-                        {
-                            if let Ok((mut rx, _j)) = sess.stream(prompt, Some(&history)).await {
-                                while let Some(ev) = rx.recv().await {
-                                    match ev {
-                                        AgentEvent::TextDelta { text } => answer.push_str(&text),
-                                        AgentEvent::End { text, .. } => {
-                                            if answer.trim().is_empty() {
-                                                answer = text;
+                let idle_for = self.last_activity.elapsed();
+                if should_check_inactivity_review_history(
+                    &self.state,
+                    idle_for,
+                    self.has_successful_llm_history,
+                    self.auto_reviewed,
+                    false,
+                ) {
+                    let has_pending_input = !self.textarea.value().trim().is_empty();
+                    if !has_pending_input {
+                        let history = self.session.history();
+                        if should_run_inactivity_review(
+                            &self.state,
+                            idle_for,
+                            self.has_successful_llm_history,
+                            history.len(),
+                            self.last_auto_review_history_len,
+                            self.auto_reviewed,
+                            has_pending_input,
+                        ) {
+                            self.auto_reviewed = true;
+                            self.last_auto_review_history_len = history.len();
+                            let agent = self.agent.clone();
+                            let workspace = self.cwd.clone();
+                            let review = cmd::cmd(move || async move {
+                                let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                                    .with_timeout(
+                                        BACKGROUND_CONFIRM_TIMEOUT_MS,
+                                        TimeoutAction::Reject,
+                                    );
+                                let prompt = "Briefly review this conversation so far: summarise the \
+                                     key decisions and what's done, then list any open threads or next \
+                                     steps. Keep it to a few lines.";
+                                let mut answer = String::new();
+                                if let Ok(sess) =
+                                    agent.session(workspace, Some(tui_session_options(conf)))
+                                {
+                                    if let Ok((mut rx, _j)) =
+                                        sess.stream(prompt, Some(&history)).await
+                                    {
+                                        while let Some(ev) = rx.recv().await {
+                                            match ev {
+                                                AgentEvent::TextDelta { text } => {
+                                                    answer.push_str(&text)
+                                                }
+                                                AgentEvent::End { text, .. } => {
+                                                    if answer.trim().is_empty() {
+                                                        answer = text;
+                                                    }
+                                                    break;
+                                                }
+                                                _ => {}
                                             }
-                                            break;
                                         }
-                                        _ => {}
                                     }
                                 }
-                            }
+                                Msg::AutoReview(answer)
+                            });
+                            return Some(cmd::batch(vec![banner_tick(), review]));
                         }
-                        Msg::AutoReview(answer)
-                    });
-                    return Some(cmd::batch(vec![banner_tick(), review]));
+                    }
                 }
                 // Keep the OS access token fresh: refresh proactively before it
                 // expires so the agent's $A3S_OS_TOKEN never goes stale mid-session.
@@ -7551,7 +7621,7 @@ impl App {
 
     fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if !submission_rearms_inactivity_review(trimmed) {
             return None;
         }
         // No input while compacting or upgrading.
@@ -7559,6 +7629,8 @@ impl App {
             self.textarea.clear();
             return None;
         }
+        self.last_activity = Instant::now();
+        self.auto_reviewed = false;
         // Shell mode (`!`) runs a shell command directly (not through the agent).
         if self.shell_mode {
             self.shell_mode = false;
@@ -8260,6 +8332,9 @@ impl App {
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
                         self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
+                        self.has_successful_llm_history = false;
+                        self.last_auto_review_history_len = 0;
+                        self.auto_reviewed = false;
                     }
                     Err(_) => self.session_id = prev_id,
                 }
@@ -9579,6 +9654,10 @@ impl App {
                 if self.model.is_none() {
                     self.model = meta.and_then(|m| m.response_model.or(m.request_model));
                 }
+                if !review_text.trim().is_empty() {
+                    self.has_successful_llm_history = true;
+                    self.auto_reviewed = false;
+                }
                 // Count the turn, idle, then continue /loop or drain the queue.
                 // A captured sleep report's save runs alongside.
                 return match (sleep_save, self.complete_turn()) {
@@ -10746,6 +10825,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     // Seed the transcript with any resumed conversation (user + assistant text).
     let resumed = session.history();
+    let has_resumed_successful_llm_history = has_successful_llm_history(&resumed);
     let mut initial_messages: Vec<String> = resumed
         .iter()
         .filter_map(|m| {
@@ -10869,6 +10949,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         quit_armed: None,
         last_activity: Instant::now(),
         auto_reviewed: false,
+        has_successful_llm_history: has_resumed_successful_llm_history,
+        last_auto_review_history_len: 0,
         shell_mode: false,
         research_mode: false,
         review_pending: false,
@@ -11313,6 +11395,132 @@ mod tests {
             )),
             "{dbg}"
         );
+    }
+
+    #[test]
+    fn inactivity_review_requires_successful_llm_history() {
+        assert!(!should_run_inactivity_review(
+            &State::Idle,
+            Duration::from_secs(301),
+            false,
+            0,
+            0,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_history_is_checked_only_after_cheap_guards() {
+        assert!(!should_check_inactivity_review_history(
+            &State::Idle,
+            Duration::from_secs(301),
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            &State::Streaming,
+            Duration::from_secs(301),
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            &State::Idle,
+            Duration::from_secs(300),
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            true,
+            false,
+        ));
+        assert!(!should_check_inactivity_review_history(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            false,
+            true,
+        ));
+        assert!(should_check_inactivity_review_history(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_runs_after_successful_history_is_idle() {
+        assert!(should_run_inactivity_review(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            0,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_waits_for_new_history_after_review() {
+        assert!(!should_run_inactivity_review(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            2,
+            2,
+            false,
+            false,
+        ));
+        assert!(should_run_inactivity_review(
+            &State::Idle,
+            Duration::from_secs(301),
+            true,
+            4,
+            2,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn inactivity_review_keeps_existing_idle_boundary() {
+        assert!(!should_run_inactivity_review(
+            &State::Idle,
+            Duration::from_secs(300),
+            true,
+            2,
+            0,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn successful_llm_history_requires_non_empty_assistant_message() {
+        assert!(!has_successful_llm_history(&[]));
+        assert!(!has_successful_llm_history(&[Message::user("hello")]));
+        assert!(!has_successful_llm_history(&[Message::assistant("   ")]));
+        assert!(has_successful_llm_history(&[
+            Message::user("hello"),
+            Message::assistant("hi"),
+        ]));
+    }
+
+    #[test]
+    fn inactivity_review_rearms_only_for_non_empty_submission() {
+        assert!(!submission_rearms_inactivity_review(""));
+        assert!(!submission_rearms_inactivity_review(" \n\t"));
+        assert!(submission_rearms_inactivity_review("continue"));
+        assert!(submission_rearms_inactivity_review("/help"));
     }
 
     #[test]
