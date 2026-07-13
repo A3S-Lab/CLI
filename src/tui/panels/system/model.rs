@@ -548,6 +548,30 @@ impl App {
         }
     }
 
+    fn current_prompt_slots(&self) -> Option<SystemPromptSlots> {
+        let mut extra_parts = Vec::new();
+        if let Some(instructions) = &self.instructions {
+            extra_parts.push(instructions.clone());
+        }
+        if let Some(session) = &self.os_session {
+            extra_parts.push(os_platform_guide(&session.address));
+        }
+        let extra = (!extra_parts.is_empty()).then(|| extra_parts.join("\n\n"));
+        let guideline = EFFORT_LEVELS[self.effort].guideline;
+        if extra.is_none() && guideline.is_none() {
+            return None;
+        }
+
+        let mut slots = SystemPromptSlots::default();
+        if let Some(extra) = extra {
+            slots = slots.with_extra(extra);
+        }
+        if let Some(guideline) = guideline {
+            slots = slots.with_guidelines(guideline);
+        }
+        Some(slots)
+    }
+
     /// Switch the active model by resuming the session under it (history kept).
     /// Base session options carrying the current effort. `ultracode` adds a
     /// planning + goal tracking + a wider tool-round budget so a turn plans,
@@ -590,30 +614,8 @@ impl App {
                 .with_max_continuation_turns(budget.max_continuation_turns),
             &self.workspace_manifest,
         );
-        // Keep project instructions (CLAUDE.md) across model/effort rebuilds,
-        // injected into the system prompt. When signed in, also steer the model
-        // to the progressive-API skill for OS questions (else "OS" reads as the
-        // local operating system → `whoami`).
-        let mut extra_parts: Vec<String> = Vec::new();
-        if let Some(i) = &self.instructions {
-            extra_parts.push(i.clone());
-        }
-        if let Some(s) = &self.os_session {
-            extra_parts.push(os_platform_guide(&s.address));
-        }
-        let extra = (!extra_parts.is_empty()).then(|| extra_parts.join("\n\n"));
         let ultra = self.effort == ULTRACODE;
-        // The per-level depth steer (low → max, and ultracode's own) — the lever
-        // that scales effort on models with no thinking budget (GPT/GLM/OS).
-        let guideline = EFFORT_LEVELS[self.effort].guideline;
-        if extra.is_some() || guideline.is_some() {
-            let mut slots = SystemPromptSlots::default();
-            if let Some(e) = extra {
-                slots = slots.with_extra(e);
-            }
-            if let Some(g) = guideline {
-                slots = slots.with_guidelines(g);
-            }
+        if let Some(slots) = self.current_prompt_slots() {
             opts = opts.with_prompt_slots(slots);
         }
         // Extended thinking is Anthropic-only; only request it when asked.
@@ -633,6 +635,49 @@ impl App {
         // Signed in via a /model account tab → route through that account client.
         if let Some(client) = &self.llm_override {
             opts = opts.with_llm_client(client.clone());
+        }
+        opts
+    }
+
+    /// Ephemeral `/btw` session options. The side thread sees the same model,
+    /// effort guidance, skills and workspace context, but it has no session
+    /// store, session id, memory extraction, planning or delegation. Its full
+    /// conversation therefore never enters the main timeline or durable store.
+    pub(crate) fn btw_session_opts(
+        &self,
+        confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    ) -> SessionOptions {
+        let budget = budget_plan_for_effort_index(
+            self.effort,
+            Some(self.context_limit),
+            BudgetWorkload::Interactive,
+        );
+        let mut opts = with_recent_workspace_context(
+            tui_session_options(confirmation)
+                .with_session_store(Arc::new(a3s_code_core::store::MemorySessionStore::new()))
+                .with_workspace_backend(self.workspace_services.clone())
+                .with_skill_dirs(self.skill_dirs())
+                .with_auto_save(false)
+                .with_auto_compact(true)
+                .with_max_context_tokens(self.context_limit as usize)
+                .with_auto_compact_threshold(self.auto_compact.threshold() as f32)
+                .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+                .with_goal_tracking(false)
+                .with_memory(Arc::new(a3s_memory::InMemoryStore::new()))
+                .with_auto_delegation_enabled(false)
+                .with_auto_parallel_delegation(false)
+                .with_manual_delegation_enabled(false)
+                .with_max_parallel_tasks(1)
+                .with_max_tool_rounds(budget.max_tool_rounds.clamp(4, 16))
+                .with_max_continuation_turns(1)
+                .with_llm_client(self.llm_client.clone()),
+            &self.workspace_manifest,
+        );
+        if let Some(model) = &self.model {
+            opts = opts.with_model(model);
+        }
+        if let Some(slots) = self.current_prompt_slots() {
+            opts = opts.with_prompt_slots(slots);
         }
         opts
     }

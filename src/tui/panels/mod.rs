@@ -35,7 +35,7 @@ pub(crate) mod loop_engineering;
 
 // Context and memory.
 #[path = "context/btw.rs"]
-mod btw;
+pub(crate) mod btw;
 #[path = "context/ctx.rs"]
 pub(crate) mod ctx;
 #[path = "context/memory.rs"]

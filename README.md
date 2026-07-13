@@ -693,7 +693,7 @@ These commands are available outside the asset-specific flows:
 | `/ctx save <n>` | Promote a previous session hit into durable memory. |
 | `/sleep` | Consolidate the day's work into memory, including experience, preferences, and knowledge. |
 | `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. |
-| `/btw <question>` | Ask a background side-question outside the main chat path. |
+| `/btw <question>` | Ask an ephemeral side-question without changing the main timeline; `Esc` cancels, `←`/`→` browse in-memory answers, and `c` copies raw Markdown. |
 | `/goal <text>` | Set a persistent goal for the current session or active asset mode. |
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |

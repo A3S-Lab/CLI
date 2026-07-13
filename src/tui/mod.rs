@@ -41,6 +41,7 @@ use a3s_tui::{
     AgentChrome, Event, KeyCode, KeyModifiers, Model, ProgramBuilder, Theme as TuiTheme,
 };
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use crate::top::{collect_processes, render_process_table, ProcessRow, ProcessTableView};
 
@@ -309,6 +310,10 @@ fn slash_tail<'a>(input: &'a str, command: &str) -> Option<&'a str> {
     input
         .strip_prefix(command)
         .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn is_btw_input(input: &str) -> bool {
+    slash_tail(input, "/btw").is_some()
 }
 
 fn os_asset_category_query(category: &str, query: &str) -> String {
@@ -4464,8 +4469,12 @@ enum Msg {
         login_at_ms: u64,
         result: Result<Vec<crate::a3s_os::GatewayModel>, String>,
     },
-    /// Answer from a `/btw` background side-thread.
-    SideNote(String),
+    /// Completion from a `/btw` background side-thread. `request_id` prevents
+    /// a cancelled/older request from replacing the active panel.
+    BtwFinished {
+        request_id: u64,
+        result: Result<String, String>,
+    },
     /// Refreshed process snapshot for the `/top` panel.
     TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
@@ -5606,8 +5615,11 @@ struct App {
     gradient_frame: usize,
     /// Ultracode confirm animation playing in the /effort panel before it closes.
     effort_anim: Option<Instant>,
-    /// Active `/btw` side-chat shown as a panel: (question, answer-once-ready).
-    btw: Option<(String, Option<String>)>,
+    /// Active `/btw` side-chat panel. Completed answers remain only in the
+    /// process-local history below and are never written to the main timeline.
+    btw: Option<panels::btw::BtwPanelState>,
+    btw_history: Vec<panels::btw::BtwHistoryEntry>,
+    btw_request_id: u64,
     viewport: Viewport,
     textarea: Textarea,
     spinner: Spinner,
@@ -5827,10 +5839,34 @@ impl Model for App {
                     );
                     return None;
                 }
-                // Esc closes the /btw side-chat panel.
-                if self.btw.is_some() && key.code == KeyCode::Esc {
-                    self.btw = None;
-                    return None;
+                // `/btw` uses only a few overlay-local shortcuts. Every other
+                // key continues through to the live composer/main task.
+                if let Some(btw) = self.btw.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            btw.cancel();
+                            self.btw = None;
+                            return None;
+                        }
+                        KeyCode::Left => {
+                            btw.select_previous();
+                            return None;
+                        }
+                        KeyCode::Right => {
+                            btw.select_next();
+                            return None;
+                        }
+                        KeyCode::Char('c')
+                            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                        {
+                            if let Some(answer) = btw.copy_text().map(str::to_string) {
+                                copy_to_clipboard(&answer);
+                                btw.mark_copied();
+                            }
+                            return None;
+                        }
+                        _ => {}
+                    }
                 }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
@@ -6743,9 +6779,15 @@ impl Model for App {
                 self.clamp_open_model_menu_selection();
             }
 
-            Msg::SideNote(text) => {
-                if let Some((q, _)) = self.btw.take() {
-                    self.btw = Some((q, Some(text.trim().to_string())));
+            Msg::BtwFinished { request_id, result } => {
+                if let Some(panel) = self.btw.as_mut() {
+                    if let Some(entry) = panel.finish(request_id, result) {
+                        self.btw_history.push(entry);
+                        if self.btw_history.len() > panels::btw::BTW_HISTORY_LIMIT {
+                            let overflow = self.btw_history.len() - panels::btw::BTW_HISTORY_LIMIT;
+                            self.btw_history.drain(..overflow);
+                        }
+                    }
                 }
             }
 
@@ -6939,7 +6981,7 @@ impl Model for App {
             ("✦", TN_CYAN, TN_CYAN)
         } else if self.okf_dev.is_some() {
             ("⌁", TN_CYAN, TN_CYAN)
-        } else if inp.starts_with("/btw") {
+        } else if is_btw_input(&inp) {
             ("❯", TN_YELLOW, TN_YELLOW)
         } else {
             ("❯", ACCENT, TN_GRAY)
@@ -7007,7 +7049,7 @@ impl Model for App {
             || sym == "◇"
             || sym == "◆"
             || sym == "⌁"
-            || inp.starts_with("/btw");
+            || is_btw_input(&inp);
         let input_view = input_prompt_line(sym, icolor, &typed, tint_input, width);
 
         // Bottom status bar (Claude-style, two lines):
@@ -8007,37 +8049,35 @@ impl App {
                 self.push_line(&Style::new().fg(TN_GRAY).render("  usage: /btw <question>"));
                 return None;
             }
-            self.btw = Some((q.clone(), None));
+            if let Some(previous) = self.btw.take() {
+                previous.cancel();
+            }
+            self.btw_request_id = self.btw_request_id.wrapping_add(1).max(1);
+            let request_id = self.btw_request_id;
+            let cancellation = CancellationToken::new();
+            self.btw = Some(panels::btw::BtwPanelState::start(
+                request_id,
+                q.clone(),
+                &self.btw_history,
+                cancellation.clone(),
+            ));
             let agent = self.agent.clone();
             let workspace = self.cwd.clone();
             let history = background_llm_history(&self.model_timeline);
+            let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
+                .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
+            let options = self.btw_session_opts(conf);
             return Some(cmd::cmd(move || async move {
-                // Side-thread is a quick Q&A; auto-reject tool prompts (no UI).
-                let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                    .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                let sess = match agent
-                    .session_async(workspace, Some(tui_session_options(conf)))
-                    .await
-                {
-                    Ok(s) => s,
-                    Err(e) => return Msg::SideNote(format!("(/btw failed: {e})")),
-                };
-                let mut answer = String::new();
-                if let Ok((mut rx, _join)) = sess.stream(&q, Some(&history)).await {
-                    while let Some(ev) = rx.recv().await {
-                        match ev {
-                            AgentEvent::TextDelta { text } => answer.push_str(&text),
-                            AgentEvent::End { text, .. } => {
-                                if answer.trim().is_empty() {
-                                    answer = text;
-                                }
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Msg::SideNote(answer)
+                let result = panels::btw::run_btw_request(
+                    agent,
+                    workspace,
+                    options,
+                    q,
+                    history,
+                    cancellation,
+                )
+                .await;
+                Msg::BtwFinished { request_id, result }
             }));
         }
         // `/goal [text|clear]` — a persistent goal prepended to every prompt.
@@ -11288,6 +11328,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         gradient_frame: 0,
         effort_anim: None,
         btw: None,
+        btw_history: Vec::new(),
+        btw_request_id: 0,
         viewport: Viewport::new(width.saturating_sub(1), height.saturating_sub(7)),
         textarea: Textarea::new()
             .with_height(1)
@@ -15451,6 +15493,11 @@ mod tests {
                 "{cmd}-token must remain a normal message, not {cmd}"
             );
         }
+
+        assert!(is_btw_input("/btw"));
+        assert!(is_btw_input("/btw explain this"));
+        assert!(!is_btw_input("/btwx"));
+        assert!(!is_btw_input("/btw-token"));
     }
 
     #[test]
