@@ -1,0 +1,80 @@
+name: Publish a3s-tui
+
+on:
+  workflow_dispatch:
+    inputs:
+      tui_ref:
+        description: "A3S-Lab/TUI release tag to publish"
+        required: true
+        default: "v0.1.7"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish a3s-tui
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release ref
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ inputs.tui_ref }}"
+          if ! [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tui_ref must be a semantic version tag, got: $REF" >&2
+            exit 1
+          fi
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "version=${REF#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          repository: A3S-Lab/TUI
+          ref: ${{ steps.release.outputs.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Validate package version
+        env:
+          EXPECTED_VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+          if [ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "TUI package version ($PACKAGE_VERSION) does not match requested version ($EXPECTED_VERSION)" >&2
+            exit 1
+          fi
+
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
+      - name: Verify package
+        run: cargo package --locked
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          OUTPUT="$(cargo publish --locked 2>&1)"
+          STATUS=$?
+          set -e
+          echo "$OUTPUT"
+          if [ "$STATUS" -eq 0 ]; then
+            exit 0
+          fi
+          if echo "$OUTPUT" | grep -Eqi 'already (uploaded|exists)|cannot publish over'; then
+            echo "a3s-tui ${{ steps.release.outputs.version }} is already published; treating as success."
+            exit 0
+          fi
+          exit "$STATUS"
