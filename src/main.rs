@@ -12,6 +12,7 @@ mod codex;
 mod compact;
 mod config;
 mod runtime_tool;
+mod session_llm;
 mod timeline;
 mod tools;
 mod top;
