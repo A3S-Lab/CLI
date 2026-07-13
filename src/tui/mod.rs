@@ -5396,6 +5396,7 @@ fn take_pending_tool_label(
 
 struct App {
     session: Arc<AgentSession>,
+    llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
     /// CLI-owned model timeline. Compact summaries live here, not in code/core.
     model_timeline: Vec<a3s_code_core::Message>,
     timeline_store: crate::timeline::TimelineJsonlStore,
@@ -5404,6 +5405,7 @@ struct App {
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
+    code_config: a3s_code_core::CodeConfig,
     store: Arc<dyn a3s_code_core::store::SessionStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
@@ -6766,8 +6768,8 @@ impl Model for App {
                         let prev = std::mem::replace(&mut self.session_id, new_id);
                         let model = self.model.clone();
                         match self.rebuild_session(model.as_deref()) {
-                            Ok((s, _)) => {
-                                self.replace_session(s);
+                            Ok((s, llm_client, _)) => {
+                                self.replace_session(s, llm_client);
                                 let short: String = self.session_id.chars().take(8).collect();
                                 self.push_line(&gutter(
                                 TN_CYAN,
@@ -8456,8 +8458,8 @@ impl App {
                 let prev_id = std::mem::replace(&mut self.session_id, new_session_id());
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
-                    Ok((s, _)) => {
-                        self.replace_session(s);
+                    Ok((s, llm_client, _)) => {
+                        self.replace_session(s, llm_client);
                         self.output_tokens = 0;
                         self.last_prompt_tokens = 0;
                         self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
@@ -8600,8 +8602,8 @@ impl App {
                 self.skill_count = count_skill_files(&dirs);
                 let model = self.model.clone();
                 match self.rebuild_session(model.as_deref()) {
-                    Ok((session, _)) => {
-                        self.replace_session(session);
+                    Ok((session, llm_client, _)) => {
+                        self.replace_session(session, llm_client);
                         self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                             "  ↻ reloaded — {} skills available",
                             self.skills.len()
@@ -8786,7 +8788,7 @@ impl App {
             return None;
         }
         self.compacting = Some(Instant::now());
-        let llm_client = self.session.llm_client();
+        let llm_client = Arc::clone(&self.llm_client);
         let timeline_store = self.timeline_store.clone();
         Some(cmd::cmd(move || async move {
             Msg::Compacted {
@@ -10207,8 +10209,8 @@ impl App {
         self.os_gateway_models_loading = false;
         self.os_gateway_error = None;
         if self.state == State::Idle {
-            if let Ok((s, _)) = self.rebuild_session(self.model.as_deref()) {
-                self.replace_session(s);
+            if let Ok((s, llm_client, _)) = self.rebuild_session(self.model.as_deref()) {
+                self.replace_session(s, llm_client);
             }
         }
         // Login/logout flips whether the A3S Runtime `runtime` tool is available.
@@ -10222,8 +10224,13 @@ impl App {
     /// unregister it while signed out — so it only appears in the model's toolset
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
-    fn replace_session(&mut self, session: AgentSession) {
+    fn replace_session(
+        &mut self,
+        session: AgentSession,
+        llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
+    ) {
         self.session = Arc::new(session);
+        self.llm_client = llm_client;
         self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
     }
@@ -10812,21 +10819,19 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let workspace = std::env::current_dir()?.to_string_lossy().to_string();
 
     // Configured "provider/model" ids (+ context windows) + the default model.
+    let code_config = a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(
+        &config_path,
+    ))
+    .map_err(|error| anyhow::anyhow!("failed to load config from {config_path}: {error}"))?;
     let mut models: Vec<String> = Vec::new();
     let mut model_ctx: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let mut default_model: Option<String> = None;
-    let mut os_config: Option<OsConfig> = None;
-    if let Ok(cfg) =
-        a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(&config_path))
-    {
-        for (p, m) in cfg.list_models() {
-            let id = format!("{}/{}", p.name, m.id);
-            model_ctx.insert(id.clone(), m.limit.context);
-            models.push(id);
-        }
-        default_model = cfg.default_model.clone();
-        os_config = cfg.os.clone();
+    for (p, m) in code_config.list_models() {
+        let id = format!("{}/{}", p.name, m.id);
+        model_ctx.insert(id.clone(), m.limit.context);
+        models.push(id);
     }
+    let default_model = code_config.default_model.clone();
+    let os_config = code_config.os.clone();
 
     // Persistent, resumable session: stored under <cwd>/.a3s/tui-sessions and
     // keyed by a fixed id, so relaunching in the same directory continues the
@@ -10961,57 +10966,37 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let initial_files = initial_manifest.file_paths();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
     let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
-    let session = match agent.resume_session(
-        session_id.as_str(),
-        apply_launch_model_options(
-            with_instr(with_recent_workspace_context(
-                tui_session_options_with_gate(
-                    confirmation.clone(),
-                    deep_research_report_tool_gate.clone(),
-                )
-                .with_session_store(store.clone())
-                .with_workspace_backend(workspace_services.clone())
-                .with_skill_dirs(claude_dirs.clone())
-                .with_auto_save(true)
-                .with_file_memory(memory_dir())
-                .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true)
-                .with_manual_delegation_enabled(true),
-                &workspace_manifest,
-            )),
-            launch_model.as_deref(),
-            launch_llm_override.as_ref(),
-        ),
-    ) {
+    let launch_options = apply_launch_model_options(
+        with_instr(with_recent_workspace_context(
+            tui_session_options_with_gate(
+                confirmation.clone(),
+                deep_research_report_tool_gate.clone(),
+            )
+            .with_session_store(store.clone())
+            .with_workspace_backend(workspace_services.clone())
+            .with_skill_dirs(claude_dirs.clone())
+            .with_auto_save(true)
+            .with_file_memory(memory_dir())
+            .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
+            .with_max_tool_rounds(initial_budget.max_tool_rounds)
+            .with_max_continuation_turns(initial_budget.max_continuation_turns)
+            .with_auto_delegation_enabled(true)
+            .with_auto_parallel_delegation(true)
+            .with_manual_delegation_enabled(true),
+            &workspace_manifest,
+        )),
+        launch_model.as_deref(),
+        launch_llm_override.as_ref(),
+    );
+    let llm_client =
+        crate::session_llm::resolve_session_llm_client(&code_config, &launch_options, &session_id)
+            .map_err(anyhow::Error::msg)?;
+    let launch_options = launch_options.with_llm_client(Arc::clone(&llm_client));
+    let session = match agent.resume_session(session_id.as_str(), launch_options.clone()) {
         Ok(s) => s,
         Err(_) => agent.session(
             workspace.clone(),
-            Some(apply_launch_model_options(
-                with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate(
-                        confirmation.clone(),
-                        deep_research_report_tool_gate.clone(),
-                    )
-                    .with_session_store(store.clone())
-                    .with_session_id(session_id.as_str())
-                    .with_workspace_backend(workspace_services.clone())
-                    .with_skill_dirs(claude_dirs.clone())
-                    .with_auto_save(true)
-                    .with_file_memory(memory_dir())
-                    .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
-                    .with_max_tool_rounds(initial_budget.max_tool_rounds)
-                    .with_max_continuation_turns(initial_budget.max_continuation_turns)
-                    .with_auto_delegation_enabled(true)
-                    .with_auto_parallel_delegation(true)
-                    .with_manual_delegation_enabled(true),
-                    &workspace_manifest,
-                )),
-                launch_model.as_deref(),
-                launch_llm_override.as_ref(),
-            )),
+            Some(launch_options.with_session_id(session_id.as_str())),
         )?,
     };
 
@@ -11166,11 +11151,13 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
 
     let mut app = App {
         session,
+        llm_client,
         model_timeline: timeline_messages,
         timeline_store,
         model_context,
         context_store,
         agent: agent.clone(),
+        code_config,
         store: store.clone(),
         confirmation,
         deep_research_report_tool_gate,
@@ -11341,8 +11328,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // /effort switch does). Best-effort: keep the launch session if it can't
     // rebuild. (Resumes the same id, so transcript history is preserved.)
     let launch_model = app.model.clone();
-    if let Ok((s, _)) = app.rebuild_session(launch_model.as_deref()) {
-        app.replace_session(s);
+    if let Ok((s, llm_client, _)) = app.rebuild_session(launch_model.as_deref()) {
+        app.replace_session(s, llm_client);
     }
 
     ProgramBuilder::new(app)

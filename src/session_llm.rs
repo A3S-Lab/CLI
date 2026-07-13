@@ -11,6 +11,17 @@ pub(crate) fn resolve_config_llm_client(
     prepare_config_llm_config(code_config, options, session_id).map(create_client_with_config)
 }
 
+pub(crate) fn resolve_session_llm_client(
+    code_config: &CodeConfig,
+    options: &SessionOptions,
+    session_id: &str,
+) -> Result<Arc<dyn LlmClient>, String> {
+    match options.llm_client.as_ref() {
+        Some(client) => Ok(Arc::clone(client)),
+        None => resolve_config_llm_client(code_config, options, session_id),
+    }
+}
+
 fn prepare_config_llm_config(
     code_config: &CodeConfig,
     options: &SessionOptions,
@@ -76,9 +87,37 @@ fn env_usize(name: &str) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use a3s_code_core::{CodeConfig, SessionOptions};
+    use std::sync::Arc;
 
-    use super::prepare_config_llm_config;
+    use a3s_code_core::llm::ToolDefinition;
+    use a3s_code_core::{CodeConfig, LlmClient, LlmResponse, Message, SessionOptions};
+    use async_trait::async_trait;
+
+    use super::{prepare_config_llm_config, resolve_session_llm_client};
+
+    struct OverrideClient;
+
+    #[async_trait]
+    impl LlmClient for OverrideClient {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> {
+            unreachable!("client identity test does not send requests")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+            _cancel_token: tokio_util::sync::CancellationToken,
+        ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
+            unreachable!("client identity test does not send requests")
+        }
+    }
 
     fn test_config() -> CodeConfig {
         CodeConfig::from_acl(
@@ -142,5 +181,16 @@ mod tests {
 
         assert!(error.contains("openai"));
         assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn session_override_is_retained_by_identity() {
+        let override_client: Arc<dyn LlmClient> = Arc::new(OverrideClient);
+        let options = SessionOptions::new().with_llm_client(Arc::clone(&override_client));
+
+        let resolved = resolve_session_llm_client(&test_config(), &options, "session-override")
+            .expect("resolve override client");
+
+        assert!(Arc::ptr_eq(&override_client, &resolved));
     }
 }
