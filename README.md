@@ -703,6 +703,12 @@ These commands are available outside the asset-specific flows:
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
 
+A3S Code auto-discovers `SKILL.md` skills from project and user roots:
+`.a3s/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`, plus
+plugin-bundled `plugins/**/skills` directories under `.agents`, `.codex`, and
+`.claude`. Discovered skills appear in `/plugin` and are selected on demand by
+the skill matcher for the current request.
+
 ### Agents, Research, and Loops
 
 | Command | What it does |
@@ -780,6 +786,21 @@ still execute inside a3s-code. The adapter accepts Claude Code-style
 `<function_calls>` output and tool names such as `Read` or `Bash`, normalizes
 common argument aliases like `path` to a3s's `file_path`, and feeds tool results
 back into the next Claude turn as structured history.
+
+When Codex CLI is logged in (`codex login`), the Codex tab can switch the
+current session to Codex account models using `$CODEX_HOME/auth.json` or
+`~/.codex/auth.json`. Codex auth can also be used as a normal config provider:
+
+```acl
+default_model = "codex/model-slug"
+
+providers "codex" {
+  models "model-slug" {
+    name = "Codex model"
+    toolCall = true
+  }
+}
+```
 
 ## Testing
 

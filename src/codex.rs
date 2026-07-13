@@ -1,10 +1,9 @@
-//! A custom `LlmClient` that runs models on a local **Codex / ChatGPT account**
-//! login (`~/.codex/auth.json`), talking to the ChatGPT backend's Responses API.
+//! Codex / ChatGPT-account LLM client.
 //!
-//! a3s-code only ships an OpenAI Chat-Completions client, which can't drive the
-//! ChatGPT backend (different wire format). This implements the trait directly:
-//! build a Responses-API request, attach the account Bearer + account-id headers,
-//! and map the SSE event stream onto a3s-code's `StreamEvent`s.
+//! This provider reads the local Codex CLI login (`$CODEX_HOME/auth.json` or
+//! `~/.codex/auth.json`) and talks to the ChatGPT Codex Responses backend. It
+//! exists because the ChatGPT-account backend uses a different wire format from
+//! OpenAI chat completions.
 
 use a3s_code_core::llm::{
     default_http_client, ContentBlock, HttpClient, LlmClient, LlmResponse, LlmResponseMeta,
@@ -13,6 +12,7 @@ use a3s_code_core::llm::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -21,42 +21,71 @@ const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const UA: &str = "codex_cli_rs (a3s)";
 
-/// The user-facing Codex models from the local cache (`~/.codex/models_cache.json`),
-/// `visibility == "list"`, ordered by the CLI's `priority`. Falls back to a
-/// single sane default if the cache is missing.
-pub fn codex_models() -> Vec<String> {
+pub(crate) fn codex_home() -> Option<PathBuf> {
+    if let Some(configured) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Some(expand_home_path(PathBuf::from(configured)));
+    }
+    std::env::var_os("HOME").map(|home| Path::new(&home).join(".codex"))
+}
+
+pub(crate) fn codex_auth_path() -> Option<PathBuf> {
+    codex_home().map(|home| home.join("auth.json"))
+}
+
+fn codex_models_cache_path() -> Option<PathBuf> {
+    codex_home().map(|home| home.join("models_cache.json"))
+}
+
+fn expand_home_path(path: PathBuf) -> PathBuf {
+    let Some(raw) = path.to_str() else {
+        return path;
+    };
+    let Some(rest) = raw.strip_prefix("~/") else {
+        return path;
+    };
+    std::env::var_os("HOME")
+        .map(|home| Path::new(&home).join(rest))
+        .unwrap_or(path)
+}
+
+/// User-facing Codex models from `models_cache.json`, ordered by priority.
+pub(crate) fn codex_models() -> Vec<String> {
     fn from_cache() -> Option<Vec<String>> {
-        let home = std::env::var_os("HOME")?;
-        let path = std::path::Path::new(&home).join(".codex/models_cache.json");
+        let path = codex_models_cache_path()?;
         let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
         let mut list: Vec<(i64, String)> = v
             .get("models")?
             .as_array()?
             .iter()
-            .filter_map(|m| {
-                if m.get("visibility").and_then(|x| x.as_str()) != Some("list") {
+            .filter_map(|model| {
+                if model.get("visibility").and_then(|value| value.as_str()) != Some("list") {
                     return None;
                 }
-                let slug = m.get("slug").and_then(|x| x.as_str())?.to_string();
-                let prio = m.get("priority").and_then(|x| x.as_i64()).unwrap_or(999);
-                Some((prio, slug))
+                let slug = model
+                    .get("slug")
+                    .and_then(|value| value.as_str())?
+                    .to_string();
+                let priority = model
+                    .get("priority")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or(999);
+                Some((priority, slug))
             })
             .collect();
-        list.sort_by_key(|(p, _)| *p);
-        let out: Vec<String> = list.into_iter().map(|(_, s)| s).collect();
+        list.sort_by_key(|(priority, _)| *priority);
+        let out: Vec<String> = list.into_iter().map(|(_, slug)| slug).collect();
         (!out.is_empty()).then_some(out)
     }
     from_cache().unwrap_or_else(|| vec!["gpt-5.5".to_string()])
 }
 
 pub(crate) fn codex_model_context(model: &str) -> Option<u32> {
-    let home = std::env::var_os("HOME")?;
-    let path = std::path::Path::new(&home).join(".codex/models_cache.json");
+    let path = codex_models_cache_path()?;
     let v: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
     v.get("models")?
         .as_array()?
         .iter()
-        .find(|m| m.get("slug").and_then(|x| x.as_str()) == Some(model))
+        .find(|entry| entry.get("slug").and_then(|value| value.as_str()) == Some(model))
         .and_then(parse_model_context)
 }
 
@@ -69,19 +98,23 @@ fn parse_model_context(model: &Value) -> Option<u32> {
         "max_input_tokens",
     ];
     for key in KEYS {
-        if let Some(n) = model.get(key).and_then(|v| v.as_u64()).filter(|n| *n > 0) {
+        if let Some(n) = model
+            .get(key)
+            .and_then(|value| value.as_u64())
+            .filter(|n| *n > 0)
+        {
             return Some(n as u32);
         }
     }
     model
         .get("model_info")
         .and_then(|info| info.get("max_input_tokens"))
-        .and_then(|v| v.as_u64())
+        .and_then(|value| value.as_u64())
         .filter(|n| *n > 0)
         .map(|n| n as u32)
 }
 
-pub struct CodexClient {
+pub(crate) struct CodexClient {
     access_token: String,
     account_id: String,
     model: String,
@@ -90,33 +123,36 @@ pub struct CodexClient {
 }
 
 impl CodexClient {
-    /// Read `~/.codex/auth.json` for the access token + ChatGPT account id and
-    /// bind to `model`. Errors if the user isn't logged into the Codex CLI.
-    pub fn from_codex_login(model: &str, session_id: &str) -> Result<Self> {
-        let home = std::env::var_os("HOME").ok_or_else(|| anyhow!("HOME unset"))?;
-        let path = std::path::Path::new(&home).join(".codex/auth.json");
+    /// Read Codex CLI auth and bind to `model`.
+    pub(crate) fn from_codex_login(model: &str, session_id: &str) -> Result<Self> {
+        let path = codex_auth_path().ok_or_else(|| anyhow!("HOME unset and CODEX_HOME unset"))?;
         let raw = std::fs::read_to_string(&path)
             .with_context(|| format!("read {} (run `codex login`)", path.display()))?;
-        let v: Value = serde_json::from_str(&raw).context("parse ~/.codex/auth.json")?;
+        let value: Value =
+            serde_json::from_str(&raw).with_context(|| format!("parse {}", path.display()))?;
 
-        let access_token = v
+        let access_token = value
             .pointer("/tokens/access_token")
-            .or_else(|| v.get("access_token"))
-            .and_then(|x| x.as_str())
-            .ok_or_else(|| anyhow!("no access_token in ~/.codex/auth.json — run `codex login`"))?
+            .or_else(|| value.get("access_token"))
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| anyhow!("no access_token in {} - run `codex login`", path.display()))?
             .to_string();
 
-        let account_id = v
+        let account_id = value
             .pointer("/tokens/account_id")
-            .and_then(|x| x.as_str())
+            .and_then(|value| value.as_str())
             .map(str::to_string)
             .or_else(|| {
-                v.pointer("/tokens/id_token")
-                    .and_then(|x| x.as_str())
+                value
+                    .pointer("/tokens/id_token")
+                    .and_then(|value| value.as_str())
                     .and_then(account_id_from_id_token)
             })
             .ok_or_else(|| {
-                anyhow!("no ChatGPT account id in ~/.codex/auth.json — re-run `codex login`")
+                anyhow!(
+                    "no ChatGPT account id in {} - re-run `codex login`",
+                    path.display()
+                )
             })?;
 
         Ok(Self {
@@ -157,13 +193,12 @@ impl LlmClient for CodexClient {
         system: Option<&str>,
         tools: &[ToolDefinition],
     ) -> Result<LlmResponse> {
-        // The backend only streams; drive the streaming path and wait for Done.
         let mut rx = self
             .complete_streaming(messages, system, tools, CancellationToken::new())
             .await?;
-        while let Some(ev) = rx.recv().await {
-            if let StreamEvent::Done(resp) = ev {
-                return Ok(resp);
+        while let Some(event) = rx.recv().await {
+            if let StreamEvent::Done(response) = event {
+                return Ok(response);
             }
         }
         Err(anyhow!("codex stream closed before response.completed"))
@@ -189,22 +224,22 @@ impl LlmClient for CodexClient {
             ("User-Agent", UA),
         ];
 
-        let resp = self
+        let response = self
             .http
             .post_streaming(&url, headers, &body, cancel_token.clone())
             .await?;
-        if !(200..300).contains(&resp.status) {
+        if !(200..300).contains(&response.status) {
             return Err(anyhow!(
                 "codex /responses HTTP {}: {}",
-                resp.status,
-                resp.error_body
+                response.status,
+                response.error_body
             ));
         }
 
         let (tx, rx) = mpsc::channel(128);
         let model = self.model.clone();
-        let url2 = url.clone();
-        let mut stream = resp.byte_stream;
+        let request_url = url.clone();
+        let mut stream = response.byte_stream;
 
         tokio::spawn(async move {
             use futures::StreamExt;
@@ -213,12 +248,11 @@ impl LlmClient for CodexClient {
             let mut reasoning = String::new();
             let mut response_id: Option<String> = None;
             let mut usage = TokenUsage::default();
-            // item_id -> (call_id, name, args) — Vec to stay dep-free.
             let mut calls: Vec<(String, (String, String, String))> = Vec::new();
 
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
-                    Ok(c) => c,
+                    Ok(chunk) => chunk,
                     Err(_) => break,
                 };
                 buf.push_str(&String::from_utf8_lossy(&chunk));
@@ -232,33 +266,41 @@ impl LlmClient for CodexClient {
                         else {
                             continue;
                         };
-                        let Ok(ev) = serde_json::from_str::<Value>(data.trim()) else {
+                        let Ok(event) = serde_json::from_str::<Value>(data.trim()) else {
                             continue;
                         };
-                        match ev.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                        match event
+                            .get("type")
+                            .and_then(|kind| kind.as_str())
+                            .unwrap_or("")
+                        {
                             "response.created" => {
-                                response_id = ev
+                                response_id = event
                                     .pointer("/response/id")
-                                    .and_then(|x| x.as_str())
+                                    .and_then(|value| value.as_str())
                                     .map(str::to_string);
                             }
                             "response.output_text.delta" => {
-                                if let Some(d) = ev.get("delta").and_then(|x| x.as_str()) {
-                                    text.push_str(d);
-                                    let _ = tx.send(StreamEvent::TextDelta(d.to_string())).await;
+                                if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                                    text.push_str(delta);
+                                    let _ =
+                                        tx.send(StreamEvent::TextDelta(delta.to_string())).await;
                                 }
                             }
                             "response.reasoning_text.delta"
                             | "response.reasoning_summary_text.delta" => {
-                                if let Some(d) = ev.get("delta").and_then(|x| x.as_str()) {
-                                    reasoning.push_str(d);
-                                    let _ =
-                                        tx.send(StreamEvent::ReasoningDelta(d.to_string())).await;
+                                if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                                    reasoning.push_str(delta);
+                                    let _ = tx
+                                        .send(StreamEvent::ReasoningDelta(delta.to_string()))
+                                        .await;
                                 }
                             }
                             "response.output_item.added" => {
-                                let item = ev.get("item");
-                                if item.and_then(|i| i.get("type")).and_then(|t| t.as_str())
+                                let item = event.get("item");
+                                if item
+                                    .and_then(|value| value.get("type"))
+                                    .and_then(|value| value.as_str())
                                     == Some("function_call")
                                 {
                                     let id = item_str(item, "id");
@@ -273,19 +315,23 @@ impl LlmClient for CodexClient {
                             }
                             "response.function_call_arguments.delta" => {
                                 let item_id =
-                                    ev.get("item_id").and_then(|x| x.as_str()).unwrap_or("");
-                                if let Some(d) = ev.get("delta").and_then(|x| x.as_str()) {
-                                    if let Some(e) = calls.iter_mut().find(|(k, _)| k == item_id) {
-                                        e.1 .2.push_str(d);
+                                    event.get("item_id").and_then(|v| v.as_str()).unwrap_or("");
+                                if let Some(delta) = event.get("delta").and_then(|v| v.as_str()) {
+                                    if let Some(entry) =
+                                        calls.iter_mut().find(|(key, _)| key == item_id)
+                                    {
+                                        entry.1 .2.push_str(delta);
                                     }
                                     let _ = tx
-                                        .send(StreamEvent::ToolUseInputDelta(d.to_string()))
+                                        .send(StreamEvent::ToolUseInputDelta(delta.to_string()))
                                         .await;
                                 }
                             }
                             "response.output_item.done" => {
-                                let item = ev.get("item");
-                                if item.and_then(|i| i.get("type")).and_then(|t| t.as_str())
+                                let item = event.get("item");
+                                if item
+                                    .and_then(|value| value.get("type"))
+                                    .and_then(|value| value.as_str())
                                     == Some("function_call")
                                 {
                                     let id = item_str(item, "id");
@@ -294,31 +340,38 @@ impl LlmClient for CodexClient {
                                         item_str(item, "name"),
                                         item_str(item, "arguments"),
                                     );
-                                    if let Some(e) = calls.iter_mut().find(|(k, _)| *k == id) {
-                                        e.1 = entry; // authoritative final copy
+                                    if let Some(existing) =
+                                        calls.iter_mut().find(|(key, _)| *key == id)
+                                    {
+                                        existing.1 = entry;
                                     } else {
                                         calls.push((id, entry));
                                     }
                                 }
                             }
                             "response.completed" => {
-                                if let Some(u) = ev.pointer("/response/usage") {
-                                    usage.prompt_tokens =
-                                        u.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.completion_tokens = u
-                                        .get("output_tokens")
-                                        .and_then(|x| x.as_u64())
+                                if let Some(raw_usage) = event.pointer("/response/usage") {
+                                    usage.prompt_tokens = raw_usage
+                                        .get("input_tokens")
+                                        .and_then(|value| value.as_u64())
                                         .unwrap_or(0)
                                         as usize;
-                                    usage.total_tokens =
-                                        u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0)
-                                            as usize;
-                                    usage.cache_read_tokens = u
+                                    usage.completion_tokens = raw_usage
+                                        .get("output_tokens")
+                                        .and_then(|value| value.as_u64())
+                                        .unwrap_or(0)
+                                        as usize;
+                                    usage.total_tokens = raw_usage
+                                        .get("total_tokens")
+                                        .and_then(|value| value.as_u64())
+                                        .unwrap_or(0)
+                                        as usize;
+                                    usage.cache_read_tokens = raw_usage
                                         .pointer("/input_tokens_details/cached_tokens")
-                                        .and_then(|x| x.as_u64())
-                                        .map(|v| v as usize);
+                                        .and_then(|value| value.as_u64())
+                                        .map(|value| value as usize);
                                 }
+
                                 let mut content = Vec::new();
                                 if !text.is_empty() {
                                     content.push(ContentBlock::Text {
@@ -333,7 +386,7 @@ impl LlmClient for CodexClient {
                                         input: parse_args(&args),
                                     });
                                 }
-                                let resp = LlmResponse {
+                                let response = LlmResponse {
                                     message: Message {
                                         role: "assistant".into(),
                                         content,
@@ -348,18 +401,15 @@ impl LlmClient for CodexClient {
                                     meta: Some(LlmResponseMeta {
                                         provider: Some("codex".into()),
                                         request_model: Some(model.clone()),
-                                        request_url: Some(url2.clone()),
+                                        request_url: Some(request_url.clone()),
                                         response_id: response_id.clone(),
                                         ..Default::default()
                                     }),
                                 };
-                                let _ = tx.send(StreamEvent::Done(resp)).await;
+                                let _ = tx.send(StreamEvent::Done(response)).await;
                                 return;
                             }
-                            "response.failed" | "error" => {
-                                // Drop tx → channel closes, which the core treats as an error.
-                                return;
-                            }
+                            "response.failed" | "error" => return,
                             _ => {}
                         }
                     }
@@ -372,20 +422,19 @@ impl LlmClient for CodexClient {
 }
 
 fn item_str(item: Option<&Value>, key: &str) -> String {
-    item.and_then(|i| i.get(key))
-        .and_then(|x| x.as_str())
+    item.and_then(|value| value.get(key))
+        .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_string()
 }
 
-fn parse_args(s: &str) -> Value {
-    if s.trim().is_empty() {
+fn parse_args(value: &str) -> Value {
+    if value.trim().is_empty() {
         return json!({});
     }
-    serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+    serde_json::from_str(value).unwrap_or_else(|_| json!({}))
 }
 
-/// base64url-decode the JWT payload + read the ChatGPT account-id claim.
 fn account_id_from_id_token(jwt: &str) -> Option<String> {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let payload = jwt.split('.').nth(1)?;
@@ -393,25 +442,25 @@ fn account_id_from_id_token(jwt: &str) -> Option<String> {
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
     claims
         .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
-        .and_then(|x| x.as_str())
+        .and_then(|value| value.as_str())
         .map(str::to_string)
 }
 
 fn convert_messages(messages: &[Message]) -> Vec<Value> {
     let mut out = Vec::new();
-    for m in messages {
-        for b in &m.content {
-            match b {
+    for message in messages {
+        for block in &message.content {
+            match block {
                 ContentBlock::Text { text } => {
-                    let kind = if m.role == "assistant" {
+                    let kind = if message.role == "assistant" {
                         "output_text"
                     } else {
                         "input_text"
                     };
                     out.push(json!({
                         "type": "message",
-                        "role": m.role,
-                        "content": [ { "type": kind, "text": text } ],
+                        "role": message.role,
+                        "content": [{"type": kind, "text": text}],
                     }));
                 }
                 ContentBlock::ToolUse { id, name, input } => {
@@ -436,11 +485,14 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                 ContentBlock::Image { source } => {
                     out.push(json!({
                         "type": "message",
-                        "role": m.role,
-                        "content": [ {
+                        "role": message.role,
+                        "content": [{
                             "type": "input_image",
-                            "image_url": format!("data:{};base64,{}", source.media_type, source.data),
-                        } ],
+                            "image_url": format!(
+                                "data:{};base64,{}",
+                                source.media_type, source.data
+                            ),
+                        }],
                     }));
                 }
             }
@@ -452,12 +504,12 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
 fn convert_tools(tools: &[ToolDefinition]) -> Vec<Value> {
     tools
         .iter()
-        .map(|t| {
+        .map(|tool| {
             json!({
                 "type": "function",
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.parameters,
             })
         })
         .collect()

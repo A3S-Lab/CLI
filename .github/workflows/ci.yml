@@ -31,3 +31,7 @@ jobs:
         shell: bash
         run: bash .github/scripts/use-published-a3s-crates.sh
       - run: cargo build --release
+        env:
+          # Cross-platform PR validation does not need LTO, and rustc 1.97 can
+          # segfault while optimizing chromiumoxide_cdp on macOS arm64.
+          CARGO_PROFILE_RELEASE_LTO: "false"
