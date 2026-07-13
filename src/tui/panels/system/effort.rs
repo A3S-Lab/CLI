@@ -115,17 +115,18 @@ fn center_visible_line(rendered: &str, width: usize) -> String {
 }
 
 impl App {
-    pub(crate) fn confirm_effort_selection(&mut self, selected: usize) {
+    pub(crate) fn confirm_effort_selection(&mut self, selected: usize) -> Option<Cmd<Msg>> {
         let selected = selected.min(EFFORT_LEVELS.len().saturating_sub(1));
-        self.effort = selected;
         if selected == ULTRACODE {
             // Play a flourish in the panel, then close + apply
             // (handled on the banner tick).
+            self.effort_panel = Some(selected);
             self.effort_anim = Some(Instant::now());
             self.gradient_frame = 0;
+            None
         } else {
             self.effort_panel = None;
-            self.apply_effort();
+            self.apply_effort(selected)
         }
     }
 

@@ -283,7 +283,7 @@ input prefixes:
 
 | Area | What A3S Code TUI provides |
 | --- | --- |
-| Coding loop | Chat with the coding agent, stream tool calls, approve or deny tools, switch `/auto`, run direct shell turns with `!`, set a persistent `/goal`, ask background side-questions with `/btw`, and fork or clear sessions when needed. |
+| Coding loop | Chat with the coding agent, stream tool calls, approve or deny tools, switch `/auto`, run direct shell turns with `!`, run a durable Ultracode `/goal`, ask background side-questions with `/btw`, and fork or clear sessions when needed. |
 | Workspace UI | `/ide` opens a superfile-style file tree and editor with terminal-stable monochrome file marks, `/config` edits the config file in the same editor, and file edits render bounded diffs through the shared `DiffView` component. Markdown code blocks retain multi-color syntax roles for known languages while unknown or oversized blocks stay plain. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
@@ -424,6 +424,10 @@ and stronger model-agnostic rigor guidance. Anthropic models receive the
 thinking budget directly; GPT, GLM, OS Gateway, and account-backed models use
 the same profile through prompt guidance, tool-round limits, and continuation
 limits.
+
+These changes use an asynchronous atomic session replacement: the current
+session remains live if the new configuration cannot be built, and is closed
+only after the replacement is ready with the same persisted identity.
 
 | Level | Thinking budget | Tool rounds | Continuations | Intended behavior |
 | --- | ---: | ---: | ---: | --- |
@@ -694,7 +698,7 @@ These commands are available outside the asset-specific flows:
 | `/sleep` | Consolidate the day's work into memory, including experience, preferences, and knowledge. |
 | `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. |
 | `/btw <question>` | Ask an ephemeral side-question without changing the main timeline; `Esc` cancels, `←`/`→` browse in-memory answers, and `c` copies raw Markdown. |
-| `/goal <text>` | Set a persistent goal for the current session or active asset mode. |
+| `/goal <text>` | Start a durable goal run: switch to `ultracode`, create `.a3s/loops/goal-*` with state/log/budget and maker/verifier skills, force planning, and continue until Core emits a matching verified `GoalAchieved`. Esc or `/goal clear` cancels the run and invalidates pending retries. |
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` | Branch the current transcript into a new session id. |
@@ -713,7 +717,7 @@ the skill matcher for the current request.
 
 | Command | What it does |
 | --- | --- |
-| `/agent` | Select a local agent package from `agent_dir` with keyboard, wheel, or click, then enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped development goal and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
+| `/agent` | Select a local agent package from `agent_dir` with keyboard, wheel, or click, then enter local multi-turn agent-development mode. The TUI shows the active agent; press Esc or run `/agent off` to return to normal mode. While active, `/goal` becomes an agent-scoped durable goal loop and `/loop` runs local agent-scoped loop engineering. No OS WebIDE or RemoteUI is opened for this local VibeCoding flow. |
 | `/agent <description>` | Draft a package directory with a Markdown/YAML agent entrypoint under `agent_dir`, then use `/agent` to iterate on it. |
 | `/agent clone <git-url>` | Clone an existing agent asset source into `agent_dir`, then use `/agent` to select it. |
 | `/agent list [query]` | Browse OS agent assets through the asset-scoped list panel. |

@@ -85,6 +85,26 @@ impl TimelineJsonlStore {
         )
     }
 
+    pub(crate) fn copy_for_session(
+        &self,
+        store_dir: impl Into<PathBuf>,
+        session_id: &str,
+    ) -> anyhow::Result<Self> {
+        let target = Self::for_session(store_dir, session_id);
+        if !self.path.exists() {
+            return Ok(target);
+        }
+        if let Some(parent) = target
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&self.path, &target.path)?;
+        Ok(target)
+    }
+
     pub(crate) fn append(&self, event: &TranscriptEvent) -> anyhow::Result<()> {
         if let Some(parent) = self
             .path

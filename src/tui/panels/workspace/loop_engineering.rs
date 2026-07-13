@@ -7,9 +7,9 @@ use a3s_tui::components::{DetailPanel, DetailRow, KeyValue, SectionHeader};
 use std::path::{Path, PathBuf};
 
 const DEFAULT_PATTERN: &str = "daily-triage";
-const LOOP_CONFIG: &str = "loop.toml";
-const STATE_FILE: &str = "STATE.md";
-const RUN_LOG_FILE: &str = "RUN_LOG.md";
+pub(crate) const LOOP_CONFIG: &str = "loop.toml";
+pub(crate) const STATE_FILE: &str = "STATE.md";
+pub(crate) const RUN_LOG_FILE: &str = "RUN_LOG.md";
 
 fn loop_line(rendered: &str, width: usize) -> String {
     if width == 0 {
@@ -151,7 +151,7 @@ fn loop_detail_lines(selected: Option<&LoopSummary>, note: &str, width: usize) -
 
     lines
 }
-const BUDGET_FILE: &str = "budget.toml";
+pub(crate) const BUDGET_FILE: &str = "budget.toml";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LoopSpec {
@@ -335,7 +335,7 @@ fn known_pattern(name: &str) -> bool {
     pattern(name).is_some()
 }
 
-fn slug(s: &str) -> String {
+pub(crate) fn slug(s: &str) -> String {
     let mut out = String::new();
     let mut dash = false;
     for ch in s.chars().flat_map(|c| c.to_lowercase()) {
@@ -371,7 +371,7 @@ fn list_literal(items: &[String]) -> String {
     )
 }
 
-fn spec_text(spec: &LoopSpec) -> String {
+pub(crate) fn spec_text(spec: &LoopSpec) -> String {
     format!(
         "id = \"{}\"\npattern = \"{}\"\ngoal = \"{}\"\nlevel = \"{}\"\ncadence = \"{}\"\nos_runtime = {}\nworktree = {}\nmaker_agent = \"{}\"\nchecker_agent = \"{}\"\nbudget_tokens_per_day = {}\nmax_iterations_per_run = {}\ndenylist = {}\nconnectors = {}\n",
         spec.id,
@@ -559,7 +559,7 @@ fn parse_list(v: &str) -> Vec<String> {
         .collect()
 }
 
-fn read_spec(path: &Path) -> Result<LoopSpec, String> {
+pub(crate) fn read_spec(path: &Path) -> Result<LoopSpec, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     parse_spec(&text, path.parent().unwrap_or(Path::new(".")).to_path_buf())
 }
@@ -726,11 +726,14 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
         "configure separate maker_agent and checker_agent",
     );
     let agent_loop = spec.level == "A2";
+    let goal_loop = spec.level == "G1";
     add(
         10,
-        spec.worktree || agent_loop,
+        spec.worktree || agent_loop || goal_loop,
         if agent_loop {
             "agent asset scope requested"
+        } else if goal_loop {
+            "goal scope is guarded by the active session"
         } else {
             "worktree isolation requested"
         },
@@ -742,13 +745,15 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
     );
     add(
         10,
-        if agent_loop {
+        if agent_loop || goal_loop {
             !spec.os_runtime && !spec.connectors.iter().any(|c| c == "os-runtime")
         } else {
             spec.os_runtime && spec.connectors.iter().any(|c| c == "os-runtime")
         },
         if agent_loop {
             "local agent loop runtime"
+        } else if goal_loop {
+            "local goal loop runtime"
         } else {
             "OS Runtime connector enabled"
         },
@@ -758,17 +763,31 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
             "enable os_runtime/connectors=[\"os-runtime\"]"
         },
     );
+    let skill_pair = if goal_loop {
+        exists_nonempty(&spec.dir.join("skills").join("maker.md"))
+            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
+    } else {
+        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
+            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
+    };
     add(
         15,
-        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md")),
-        "triage and verifier skills",
-        "add skills/triage.md and skills/verifier.md",
+        skill_pair,
+        if goal_loop {
+            "maker and verifier skills"
+        } else {
+            "triage and verifier skills"
+        },
+        if goal_loop {
+            "add skills/maker.md and skills/verifier.md"
+        } else {
+            "add skills/triage.md and skills/verifier.md"
+        },
     );
     if spec.level == "L3" && score < 90 {
         warnings.push("L3 requested but readiness is below unattended threshold".to_string());
     }
-    if spec.level != "L1" && spec.level != "A2" && !spec.worktree {
+    if spec.level != "L1" && spec.level != "A2" && spec.level != "G1" && !spec.worktree {
         warnings.push("acting loops should use worktree isolation".to_string());
     }
     let level = if score >= 90 {

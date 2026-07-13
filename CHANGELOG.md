@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.9] - 2026-07-14
+
 ### Changed
 
+- Rebuilt `/goal` as a durable Ultracode goal loop. Setting a goal now creates
+  a complete `.a3s/loops/goal-*` Loop Engineering workspace, forces planning
+  and goal tracking, runs separate maker/verifier guidance, and continues
+  across normal ends and retryable errors until a matching `GoalAchieved`
+  arrives. Esc and `/goal clear` invalidate delayed retries immediately, and
+  normal Ultracode message-gated planning is restored when the goal closes.
 - Aligned fenced Markdown code with Codex-style terminal highlighting: known
   languages retain distinct token colors, unknown languages stay plain, CRLF
   is normalized, and 512 KiB / 10,000-line guardrails avoid render stalls.
@@ -27,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   before overflow, and can compact repeatedly throughout a long-running task.
   Core summaries are written back to each host's durable timeline so later
   turns continue from the latest generation instead of compacting it again.
+- Moved model, effort, Ultracode, goal, auth, reload, fork, and clear session
+  changes onto an async atomic replacement path. The UI no longer blocks the
+  Tokio runtime, failed reconfiguration keeps the old session usable, and
+  `/goal` can reliably enter forced-planning Ultracode before its first turn.
 
 ## [0.7.8] - 2026-07-09
 

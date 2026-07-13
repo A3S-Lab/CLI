@@ -271,7 +271,7 @@ const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/effort", "adjust model effort (low … max)"),
     ("/compact", "summarize + compact the conversation context"),
-    ("/goal", "set a north-star goal the agent keeps in mind"),
+    ("/goal", "run a durable Ultracode goal until verified"),
     (
         "/loop",
         "engineered loop dashboard · agent-aware in /agent mode · /loop <task> quick loop",
@@ -4401,6 +4401,105 @@ enum State {
     Idle,
     Streaming,
     Awaiting,
+    Rebuilding,
+}
+
+struct RebuiltSession {
+    session: AgentSession,
+    llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
+    thinking_dropped: bool,
+}
+
+enum SessionRebuildTarget {
+    Replace {
+        current: Arc<AgentSession>,
+    },
+    Resume {
+        session_id: String,
+        current: Arc<AgentSession>,
+    },
+    Fresh {
+        session_id: String,
+        current: Arc<AgentSession>,
+    },
+}
+
+struct SessionRebuildPlan {
+    agent: Arc<Agent>,
+    workspace: String,
+    target: SessionRebuildTarget,
+    attempts: Vec<(SessionOptions, Arc<dyn a3s_code_core::llm::LlmClient>, bool)>,
+}
+
+impl SessionRebuildPlan {
+    async fn run(self) -> Result<RebuiltSession, String> {
+        let mut failures = Vec::new();
+        for (options, llm_client, thinking_dropped) in self.attempts {
+            let result = match &self.target {
+                SessionRebuildTarget::Replace { current } => {
+                    self.agent.replace_session_async(current, options).await
+                }
+                SessionRebuildTarget::Resume { session_id, .. } => {
+                    self.agent.resume_session_async(session_id, options).await
+                }
+                SessionRebuildTarget::Fresh { .. } => {
+                    self.agent
+                        .session_async(self.workspace.clone(), Some(options))
+                        .await
+                }
+            };
+            match result {
+                Ok(session) => {
+                    if let SessionRebuildTarget::Resume { current, .. }
+                    | SessionRebuildTarget::Fresh { current, .. } = &self.target
+                    {
+                        current.close().await;
+                    }
+                    return Ok(RebuiltSession {
+                        session,
+                        llm_client,
+                        thinking_dropped,
+                    });
+                }
+                Err(error) => failures.push(error.to_string()),
+            }
+        }
+        failures.dedup();
+        Err(if failures.is_empty() {
+            "could not rebuild the session".to_string()
+        } else {
+            format!("could not rebuild the session: {}", failures.join("; "))
+        })
+    }
+}
+
+enum PendingSessionChange {
+    ApplyEffort {
+        previous_effort: usize,
+    },
+    ModelSwitch {
+        model: String,
+        source: ModelSelectionSource,
+        success_message: String,
+        failure_prefix: &'static str,
+        previous_override: Option<Arc<dyn a3s_code_core::llm::LlmClient>>,
+        previous_context_limit: u32,
+    },
+    GoalStart {
+        generation: u64,
+        previous_effort: usize,
+        previous_goal: Option<String>,
+        previous_goal_since: Option<Instant>,
+    },
+    GoalRestore,
+    Reload,
+    RefreshAuth,
+    Fork {
+        session_id: String,
+    },
+    Clear {
+        session_id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4440,7 +4539,9 @@ enum Msg {
     BannerTick,
     ModalConfirm(usize),
     Resume,
-    Interrupted,
+    Interrupted {
+        goal_cancelled: bool,
+    },
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
@@ -4475,6 +4576,14 @@ enum Msg {
         request_id: u64,
         result: Result<String, String>,
     },
+    /// Host-owned continuation for an active `/goal`. The generation makes a
+    /// delayed retry inert after Esc, `/goal clear`, or a replacement goal.
+    GoalContinue {
+        generation: u64,
+        prompt: String,
+    },
+    /// A streaming `/goal clear` finished cancelling and joining the old run.
+    GoalCleared,
     /// Refreshed process snapshot for the `/top` panel.
     TopData(Vec<ProcessRow>),
     /// Tick to re-fetch the `/top` snapshot.
@@ -4521,6 +4630,9 @@ enum Msg {
         trigger: CompactTrigger,
         result: Result<Option<String>, String>,
     },
+    /// An async model/effort/session reconfiguration finished. The old session
+    /// remains usable until this message carries a successful replacement.
+    SessionRebuilt(Box<Result<RebuiltSession, String>>),
     /// Startup update check completed with the latest published version (if any).
     UpdateCheck(Option<String>),
 }
@@ -5419,8 +5531,9 @@ struct App {
     agent: Arc<Agent>,
     code_config: a3s_code_core::CodeConfig,
     store: Arc<dyn a3s_code_core::store::SessionStore>,
+    session_store_dir: PathBuf,
     /// File-backed memory store initialized by the async launch path and reused
-    /// by synchronous model/effort session rebuilds.
+    /// by async model/effort session rebuilds.
     memory_store: Arc<dyn a3s_memory::MemoryStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
@@ -5587,6 +5700,11 @@ struct App {
     /// When the current `/goal` was set — drives the "Pursuing goal (1h 32m)"
     /// elapsed timer in the status bar. `None` whenever `goal` is `None`.
     goal_since: Option<Instant>,
+    /// Durable `/goal` execution state. Unlike `/loop`, this has no turn cap:
+    /// only a matching Core GoalAchieved event can close it.
+    goal_run: Option<panels::goal_engineering::GoalRunState>,
+    /// Monotonic invalidation token for delayed goal retries.
+    goal_generation: u64,
     /// Remaining auto-continue turns for `/loop` (0 = off).
     loop_remaining: usize,
     /// ECS-style projection of live runtime entities (tools/subagents) plus
@@ -5615,6 +5733,8 @@ struct App {
     gradient_frame: usize,
     /// Ultracode confirm animation playing in the /effort panel before it closes.
     effort_anim: Option<Instant>,
+    /// The semantic continuation waiting for an async session replacement.
+    pending_session_change: Option<PendingSessionChange>,
     /// Active `/btw` side-chat panel. Completed answers remain only in the
     /// process-local history below and are never written to the main timeline.
     btw: Option<panels::btw::BtwPanelState>,
@@ -5868,6 +5988,32 @@ impl Model for App {
                         _ => {}
                     }
                 }
+                // Esc is the goal kill switch even while a tool confirmation
+                // overlay owns the keyboard. Rejecting one tool is not enough:
+                // it would let the next unbounded goal iteration restart.
+                if self.goal_run.is_some()
+                    && self.state == State::Awaiting
+                    && key.code == KeyCode::Esc
+                {
+                    self.cancel_goal_state("interrupted by Esc");
+                    self.interrupting = true;
+                    self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupting…"));
+                    let session = self.session.clone();
+                    let join = self.stream_join.take();
+                    let host_abort = self.host_tool_abort.take();
+                    return Some(cmd::cmd(move || async move {
+                        if let Some(host_abort) = host_abort {
+                            host_abort.abort();
+                        }
+                        session.cancel().await;
+                        if let Some(join) = join {
+                            let _ = join.await;
+                        }
+                        Msg::Interrupted {
+                            goal_cancelled: true,
+                        }
+                    }));
+                }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
                     return self.handle_help_key(&key);
@@ -5968,7 +6114,7 @@ impl Model for App {
                             self.effort_panel = Some((sel + 1).min(EFFORT_LEVELS.len() - 1))
                         }
                         KeyCode::Enter => {
-                            self.confirm_effort_selection(sel);
+                            return self.confirm_effort_selection(sel);
                         }
                         KeyCode::Esc => {
                             self.effort_panel = None;
@@ -6057,11 +6203,24 @@ impl Model for App {
                     self.textarea.clear();
                     return None;
                 }
+                if self.state == State::Rebuilding
+                    && self.goal_run.is_some()
+                    && key.code == KeyCode::Esc
+                {
+                    self.cancel_goal_state("interrupted by Esc");
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  ⎋ goal loop interrupted"),
+                    );
+                    return None;
+                }
                 // Esc interrupts the in-progress run (input stays usable otherwise).
                 if self.state == State::Streaming && key.code == KeyCode::Esc {
                     if self.interrupting {
                         return None;
                     }
+                    let goal_cancelled = self.cancel_goal_state("interrupted by Esc");
                     self.interrupting = true;
                     self.push_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupting…"));
                     let session = self.session.clone();
@@ -6075,8 +6234,21 @@ impl Model for App {
                         if let Some(join) = join {
                             let _ = join.await;
                         }
-                        Msg::Interrupted
+                        Msg::Interrupted { goal_cancelled }
                     }));
+                }
+                // During goal retry backoff the app is idle, but the goal is
+                // still active. Esc invalidates the pending generation and
+                // restores normal Ultracode planning immediately.
+                if self.state == State::Idle && self.goal_run.is_some() && key.code == KeyCode::Esc
+                {
+                    self.cancel_goal_state("interrupted by Esc");
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  ⎋ goal loop interrupted"),
+                    );
+                    return self.restore_goal_planning_mode();
                 }
                 if self.state == State::Idle && self.agent_dev.is_some() && key.code == KeyCode::Esc
                 {
@@ -6274,6 +6446,19 @@ impl Model for App {
 
             Msg::Submit(text) => return self.on_submit(text),
 
+            Msg::GoalContinue { generation, prompt } => {
+                return self.handle_goal_continue(generation, prompt);
+            }
+
+            Msg::GoalCleared => {
+                self.finalize_streaming();
+                self.review_pending = false;
+                self.sleep_pending = false;
+                self.pending_tool = None;
+                self.finish();
+                return self.restore_goal_planning_mode();
+            }
+
             Msg::StreamStarted(rx, join) => {
                 self.rx = Some(rx.clone());
                 self.stream_join = Some(join);
@@ -6303,8 +6488,11 @@ impl Model for App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
-                self.restore_autonomy();
                 self.finish();
+                if self.goal_run.is_some() {
+                    return self.continue_goal_run(Some(e));
+                }
+                self.restore_autonomy();
                 // Don't strand messages queued while this turn was starting.
                 return self.drain_queue();
             }
@@ -6321,7 +6509,7 @@ impl Model for App {
                 self.file_sel = self.file_sel.min(self.files.len().saturating_sub(1));
             }
 
-            Msg::Interrupted => {
+            Msg::Interrupted { goal_cancelled } => {
                 // Esc force-aborted the turn. The cancel command awaited the
                 // stream join first, so core has committed the interrupted
                 // history before any queued continuation starts.
@@ -6330,8 +6518,12 @@ impl Model for App {
                 self.loop_remaining = 0; // Esc also stops a /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
+                self.pending_tool = None;
                 self.restore_autonomy();
                 self.finish();
+                if goal_cancelled {
+                    return self.restore_goal_planning_mode();
+                }
                 return self.drain_queue();
             }
 
@@ -6362,8 +6554,10 @@ impl Model for App {
             Msg::SpinnerTick => {
                 self.spinner.tick();
                 self.blink_tick = self.blink_tick.wrapping_add(1);
-                if self.state == State::Streaming {
-                    self.update_viewport_with_stream();
+                if matches!(self.state, State::Streaming | State::Rebuilding) {
+                    if self.state == State::Streaming {
+                        self.update_viewport_with_stream();
+                    }
                     return Some(spinner_tick());
                 }
             }
@@ -6391,8 +6585,10 @@ impl Model for App {
                 if let Some(t) = self.effort_anim {
                     if t.elapsed() > Duration::from_millis(1100) {
                         self.effort_anim = None;
-                        self.effort_panel = None;
-                        self.apply_effort();
+                        let selected = self.effort_panel.take().unwrap_or(ULTRACODE);
+                        if let Some(apply) = self.apply_effort(selected) {
+                            return Some(cmd::batch(vec![banner_tick(), apply]));
+                        }
                     }
                 }
                 // Inactivity auto-review: after a quiet stretch with a real
@@ -6534,6 +6730,8 @@ impl Model for App {
                     return self.complete_turn();
                 }
             }
+
+            Msg::SessionRebuilt(result) => return self.complete_session_rebuild(*result),
 
             Msg::UpdateCheck(latest) => {
                 let current = crate::update::current_version();
@@ -6683,7 +6881,7 @@ impl Model for App {
                     if let Some(s) = &self.os_session {
                         crate::a3s_os::export_os_env(s);
                     }
-                    self.refresh_after_auth();
+                    let refresh = self.refresh_after_auth();
                     self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                         "  ✓ signed in to OS as {label} · capabilities skill active"
                     )));
@@ -6691,10 +6889,15 @@ impl Model for App {
                     // git-over-SSH works without manual key setup (idempotent,
                     // best-effort — never blocks the completed login).
                     if let Some(s) = self.os_session.clone() {
-                        return Some(cmd::cmd(move || async move {
+                        let ssh = cmd::cmd(move || async move {
                             Msg::SshKeySynced(crate::a3s_os::sync_ssh_key(s).await)
-                        }));
+                        });
+                        return Some(match refresh {
+                            Some(refresh) => cmd::batch(vec![refresh, ssh]),
+                            None => ssh,
+                        });
                     }
+                    return refresh;
                 }
                 Err(error) => self.push_line(
                     &Style::new()
@@ -6803,39 +7006,24 @@ impl Model for App {
                     return Some(cmd::cmd(|| async { Msg::TopData(fetch_top().await) }));
                 }
             }
-            Msg::Forked(result) => {
-                match result {
-                    Ok(new_id) => {
-                        // Swap the active session to the fork (which carries the copied
-                        // history). Set the id first — rebuild_session keys off it — and
-                        // revert on failure so id and session never desync. The
-                        // transcript stays on screen: the fork continues from here.
-                        let prev = std::mem::replace(&mut self.session_id, new_id);
-                        let model = self.model.clone();
-                        match self.rebuild_session(model.as_deref()) {
-                            Ok((s, llm_client, _)) => {
-                                self.replace_session(s, llm_client);
-                                let short: String = self.session_id.chars().take(8).collect();
-                                self.push_line(&gutter(
-                                TN_CYAN,
-                                &format!("⑂ forked into a new session ({short}) — the original is kept"),
-                            ));
-                            }
-                            Err(e) => {
-                                self.session_id = prev;
-                                self.push_line(
-                                    &Style::new()
-                                        .fg(TN_RED)
-                                        .render(&format!("  fork failed: {e}")),
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}")))
-                    }
+            Msg::Forked(result) => match result {
+                Ok(new_id) => {
+                    let model = self.model.clone();
+                    return self.begin_session_rebuild(
+                        PendingSessionChange::Fork {
+                            session_id: new_id.clone(),
+                        },
+                        SessionRebuildTarget::Resume {
+                            session_id: new_id,
+                            current: Arc::clone(&self.session),
+                        },
+                        model.as_deref(),
+                    );
                 }
-            }
+                Err(e) => {
+                    self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  /fork: {e}")))
+                }
+            },
             Msg::MemoryLoaded(data) => {
                 if let Some(m) = &mut self.memory {
                     let source = if data.loaded_from_session {
@@ -7039,6 +7227,14 @@ impl Model for App {
                 }
                 // The approval options panel (overlay_approval) is the UI now.
                 State::Awaiting => String::new(),
+                State::Rebuilding => {
+                    let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
+                    let spark = Style::new().fg(ACCENT).render(&g.to_string());
+                    format!(
+                        "  {spark} {}",
+                        shimmer("Updating session…", self.blink_tick as usize)
+                    )
+                }
                 State::Idle => String::new(),
             }
         };
@@ -7912,6 +8108,12 @@ impl App {
             self.relayout();
             return None;
         }
+        // `/goal clear` is intentionally available during a running goal. It
+        // invalidates delayed retries immediately, then cancels and joins the
+        // active stream before restoring normal Ultracode planning.
+        if trimmed == "/goal clear" {
+            return self.clear_goal_command();
+        }
         // Block session-mutating commands while a turn is streaming.
         if self.state != State::Idle {
             let cmd0 = trimmed.split_whitespace().next().unwrap_or("");
@@ -7950,10 +8152,11 @@ impl App {
                         let label = session.display_label();
                         crate::a3s_os::export_os_env(&session);
                         self.os_session = Some(session);
-                        self.refresh_after_auth();
+                        let refresh = self.refresh_after_auth();
                         self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                             "  ✓ signed in to OS as {label} · capabilities skill active"
                         )));
+                        return refresh;
                     }
                     Err(error) => self.push_line(
                         &Style::new()
@@ -8002,12 +8205,13 @@ impl App {
                     self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
-                    self.refresh_after_auth();
+                    let refresh = self.refresh_after_auth();
                     self.push_line(
                         &Style::new()
                             .fg(TN_GREEN)
                             .render("  ✓ signed out from OS · capabilities skill removed"),
                     );
+                    return refresh;
                 }
                 Ok(false) => {
                     self.os_session = None;
@@ -8015,8 +8219,9 @@ impl App {
                     self.runtime_activity = None;
                     crate::a3s_os::remove_capability_skill_dir();
                     crate::a3s_os::clear_os_env();
-                    self.refresh_after_auth();
+                    let refresh = self.refresh_after_auth();
                     self.push_line(&Style::new().fg(TN_GRAY).render("  no OS login was stored"));
+                    return refresh;
                 }
                 Err(error) => self.push_line(
                     &Style::new()
@@ -8097,29 +8302,9 @@ impl App {
                     ),
                 }
             } else if g == "clear" {
-                self.goal = None;
-                self.goal_since = None;
-                self.push_line(&Style::new().fg(TN_GRAY).render("  goal cleared"));
-                return None;
+                return self.clear_goal_command();
             } else {
-                if let Some(dev) = self.agent_dev.clone() {
-                    let scoped = panels::agent::agent_goal_label(&dev, g);
-                    self.goal = Some(scoped.clone());
-                    self.goal_since = Some(Instant::now());
-                    self.push_line(&gutter(
-                        TN_CYAN,
-                        &format!("◎\u{200A}agent goal set: {} · {g}", dev.name),
-                    ));
-                    let prompt = panels::agent::agent_dev_prompt(&dev, g);
-                    let display = format!("◇ {} goal: {}", dev.name, truncate(g, 54));
-                    return self.start_stream_inner(prompt, display, true, true, false);
-                }
-                // Set the persistent goal AND start working toward it now (the
-                // goal is prepended to this and every later prompt).
-                self.goal = Some(g.to_string());
-                self.goal_since = Some(Instant::now());
-                self.push_line(&gutter(TN_CYAN, &format!("◎\u{200A}goal set: {g}")));
-                return Some(cmd::msg(Msg::Submit(g.to_string())));
+                return self.start_goal_run(g);
             }
             return None;
         }
@@ -8461,56 +8646,22 @@ impl App {
                 }));
             }
             "/clear" => {
-                self.messages.clear();
-                self.plan.clear();
-                self.runtime.clear_turn_entities();
-                self.queue.clear();
-                self.completed = 0;
                 self.textarea.clear();
-                // A fresh conversation can't deliver the old review's report
-                // or sleep consolidation, and must not inherit a staged `/ctx`
-                // window or stale hits.
-                self.review_pending = false;
-                self.sleep_pending = false;
-                self.restore_autonomy();
-                self.pending_ctx = None;
-                self.ctx_hits.clear();
-                self.agent_dev = None;
-                self.pending_flow_subcommand = None;
-                self.pending_agent_subcommand = None;
-                self.mcp_dev = None;
-                self.pending_mcp_subcommand = None;
-                self.skill_dev = None;
-                self.pending_skill_subcommand = None;
-                self.okf_picker = None;
-                self.pending_okf_subcommand = None;
-                self.okf_dev = None;
-                self.asset_list = None;
-                self.runtime_activity = None;
-                self.kb = None;
-                // Actually reset the conversation, not just the screen: swap in a
-                // fresh session (new id, no history, no carried compact summary)
-                // and zero the token/ctx counters. /clear is idle-only (guarded
-                // above), so replacing the session is safe. Set the id first
-                // (rebuild_session keys off it) and revert it if the rebuild fails
-                // so id and session never desync.
-                let prev_id = std::mem::replace(&mut self.session_id, new_session_id());
+                self.cancel_goal_state("cleared by /clear");
+                self.goal = None;
+                self.goal_since = None;
+                let session_id = new_session_id();
                 let model = self.model.clone();
-                match self.rebuild_session(model.as_deref()) {
-                    Ok((s, llm_client, _)) => {
-                        self.replace_session(s, llm_client);
-                        self.output_tokens = 0;
-                        self.last_prompt_tokens = 0;
-                        self.ctx_warned_tier = 0; // fresh window: re-arm fill warnings
-                        self.has_successful_llm_history = false;
-                        self.last_auto_review_history_len = 0;
-                        self.auto_reviewed = false;
-                    }
-                    Err(_) => self.session_id = prev_id,
-                }
-                self.relayout();
-                self.rebuild_viewport();
-                return None;
+                return self.begin_session_rebuild(
+                    PendingSessionChange::Clear {
+                        session_id: session_id.clone(),
+                    },
+                    SessionRebuildTarget::Fresh {
+                        session_id,
+                        current: Arc::clone(&self.session),
+                    },
+                    model.as_deref(),
+                );
             }
             "/init" => {
                 // Agent-driven: analyze the workspace and write AGENTS.md (auto-loaded
@@ -8640,23 +8791,13 @@ impl App {
                 self.skills = load_skills(&dirs);
                 self.skill_count = count_skill_files(&dirs);
                 let model = self.model.clone();
-                match self.rebuild_session(model.as_deref()) {
-                    Ok((session, llm_client, _)) => {
-                        self.replace_session(session, llm_client);
-                        self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
-                            "  ↻ reloaded — {} skills available",
-                            self.skills.len()
-                        )));
-                    }
-                    Err(error) => {
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_RED)
-                                .render(&format!("  reload failed: {error}")),
-                        );
-                    }
-                }
-                return None;
+                return self.begin_session_rebuild(
+                    PendingSessionChange::Reload,
+                    SessionRebuildTarget::Replace {
+                        current: Arc::clone(&self.session),
+                    },
+                    model.as_deref(),
+                );
             }
             "/update" => {
                 self.textarea.clear();
@@ -8706,6 +8847,11 @@ impl App {
         // invisibly — the display bubble above stays clean. Travels with the
         // message whether it runs now or is queued.
         let loop_cont = std::mem::take(&mut self.loop_continuation);
+        if !loop_cont {
+            if let Some(run) = self.goal_run.as_mut() {
+                run.pause_achievement_for_user_turn();
+            }
+        }
         let prompt = match (loop_cont, self.pending_ctx.take()) {
             (false, Some(c)) => format!("{c}\n\n{trimmed}"),
             _ => trimmed.to_string(),
@@ -9304,8 +9450,27 @@ impl App {
             self.completed += 1;
         }
         self.warn_missing_runtime_evidence();
-        let synthesis = self.prepare_ultracode_synthesis();
+        // Goal iterations are evaluated by Core before End. A generic hidden
+        // synthesis turn must not replace that event gate or consume the turn
+        // as if it were complete.
+        let synthesis = self
+            .goal_run
+            .is_none()
+            .then(|| self.prepare_ultracode_synthesis())
+            .flatten();
         self.finish();
+        if self.goal_run.as_ref().is_some_and(|run| run.achieved) {
+            return self.finish_achieved_goal();
+        }
+        if self.goal_run.is_some() {
+            // User messages queued while the iteration ran are still executed
+            // under the same forced-planning goal session. Otherwise schedule
+            // the next host-owned iteration without a fixed cap.
+            if !self.queue.is_empty() {
+                return self.drain_queue();
+            }
+            return self.continue_goal_run(None);
+        }
         if let Some((prompt, display_task)) = synthesis {
             return self.start_ultracode_synthesis(prompt, display_task);
         }
@@ -9956,10 +10121,22 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation
-                self.restore_autonomy();
                 self.finish();
+                if self.goal_run.is_some() {
+                    return self.continue_goal_run(Some(message));
+                }
+                self.restore_autonomy();
                 // Don't strand messages queued while this turn was running.
                 return self.drain_queue();
+            }
+            AgentEvent::GoalExtracted { goal } => {
+                self.record_goal_extracted(&goal);
+            }
+            AgentEvent::GoalProgress { progress, .. } => {
+                self.record_goal_progress(progress);
+            }
+            AgentEvent::GoalAchieved { goal, .. } => {
+                self.record_goal_achieved(&goal);
             }
             // Planning mode: capture the plan and live task-status updates for
             // the pinned TODO panel above the input.
@@ -10266,22 +10443,340 @@ impl App {
         dirs
     }
 
+    fn prepare_session_rebuild(
+        &self,
+        target: SessionRebuildTarget,
+        model: Option<&str>,
+    ) -> Result<SessionRebuildPlan, String> {
+        let session_id = match &target {
+            SessionRebuildTarget::Replace { current } => current.session_id(),
+            SessionRebuildTarget::Resume { session_id, .. }
+            | SessionRebuildTarget::Fresh { session_id, .. } => session_id,
+        };
+        let mut attempts = Vec::new();
+        let mut failures = Vec::new();
+        for thinking in [true, false] {
+            let options = self.effort_session_opts_for(thinking, session_id);
+            let options = match model {
+                Some(model) => options.with_model(model),
+                None => options,
+            };
+            match crate::session_llm::resolve_session_llm_client(
+                &self.code_config,
+                &options,
+                session_id,
+            ) {
+                Ok(llm_client) => attempts.push((
+                    options.with_llm_client(Arc::clone(&llm_client)),
+                    llm_client,
+                    !thinking,
+                )),
+                Err(error) => failures.push(error),
+            }
+        }
+        if attempts.is_empty() {
+            failures.dedup();
+            return Err(if failures.is_empty() {
+                "could not resolve the session model".to_string()
+            } else {
+                failures.join("; ")
+            });
+        }
+        Ok(SessionRebuildPlan {
+            agent: Arc::clone(&self.agent),
+            workspace: self.cwd.clone(),
+            target,
+            attempts,
+        })
+    }
+
+    pub(crate) fn begin_session_rebuild(
+        &mut self,
+        change: PendingSessionChange,
+        target: SessionRebuildTarget,
+        model: Option<&str>,
+    ) -> Option<Cmd<Msg>> {
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  finish the current turn before updating the session"),
+            );
+            return None;
+        }
+        let plan = self.prepare_session_rebuild(target, model);
+        self.pending_session_change = Some(change);
+        self.state = State::Rebuilding;
+        self.spinner.start();
+        self.relayout();
+        let rebuild = match plan {
+            Ok(plan) => {
+                cmd::cmd(move || async move { Msg::SessionRebuilt(Box::new(plan.run().await)) })
+            }
+            Err(error) => cmd::msg(Msg::SessionRebuilt(Box::new(Err(error)))),
+        };
+        Some(cmd::batch(vec![rebuild, spinner_tick()]))
+    }
+
+    fn complete_session_rebuild(
+        &mut self,
+        result: Result<RebuiltSession, String>,
+    ) -> Option<Cmd<Msg>> {
+        let change = self.pending_session_change.take()?;
+        self.state = State::Idle;
+        self.spinner.stop();
+        self.relayout();
+
+        match (change, result) {
+            (PendingSessionChange::ApplyEffort { .. }, Ok(rebuilt)) => {
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                self.finish_effort_application(rebuilt.thinking_dropped);
+                self.drain_queue()
+            }
+            (PendingSessionChange::ApplyEffort { previous_effort }, Err(error)) => {
+                self.effort = previous_effort;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  failed to set effort: {error}")),
+                );
+                self.drain_queue()
+            }
+            (
+                PendingSessionChange::ModelSwitch {
+                    model,
+                    source,
+                    success_message,
+                    failure_prefix: _,
+                    previous_override: _,
+                    previous_context_limit: _,
+                },
+                Ok(rebuilt),
+            ) => {
+                self.commit_model_switch(rebuilt.session, rebuilt.llm_client, model, source);
+                self.push_line(&Style::new().fg(TN_GREEN).render(&success_message));
+                self.drain_queue()
+            }
+            (
+                PendingSessionChange::ModelSwitch {
+                    failure_prefix,
+                    previous_override,
+                    previous_context_limit,
+                    ..
+                },
+                Err(error),
+            ) => {
+                self.llm_override = previous_override;
+                self.context_limit = previous_context_limit;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  {failure_prefix}: {error}")),
+                );
+                self.drain_queue()
+            }
+            (PendingSessionChange::GoalStart { generation, .. }, Ok(rebuilt)) => {
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                if self
+                    .goal_run
+                    .as_ref()
+                    .is_some_and(|run| run.is_generation(generation))
+                {
+                    self.finish_goal_start()
+                } else {
+                    self.restore_goal_planning_mode()
+                }
+            }
+            (
+                PendingSessionChange::GoalStart {
+                    generation,
+                    previous_effort,
+                    previous_goal,
+                    previous_goal_since,
+                },
+                Err(error),
+            ) => {
+                let still_active = self
+                    .goal_run
+                    .as_ref()
+                    .is_some_and(|run| run.is_generation(generation));
+                self.goal_run = None;
+                self.effort = previous_effort;
+                if still_active {
+                    self.goal = previous_goal;
+                    self.goal_since = previous_goal_since;
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  /goal could not enable Ultracode: {error}")),
+                    );
+                }
+                self.drain_queue()
+            }
+            (PendingSessionChange::GoalRestore, Ok(rebuilt)) => {
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                self.drain_queue()
+            }
+            (PendingSessionChange::GoalRestore, Err(error)) => {
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  goal stopped, but session mode refresh failed: {error}"
+                )));
+                self.drain_queue()
+            }
+            (PendingSessionChange::Reload, Ok(rebuilt)) => {
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                    "  ↻ reloaded — {} skills available",
+                    self.skills.len()
+                )));
+                self.drain_queue()
+            }
+            (PendingSessionChange::Reload, Err(error)) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  reload failed: {error}")),
+                );
+                self.drain_queue()
+            }
+            (PendingSessionChange::RefreshAuth, Ok(rebuilt)) => {
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                self.sync_runtime_tool();
+                self.drain_queue()
+            }
+            (PendingSessionChange::RefreshAuth, Err(error)) => {
+                self.sync_runtime_tool();
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  account changed, but session capabilities could not refresh: {error}"
+                )));
+                self.drain_queue()
+            }
+            (PendingSessionChange::Fork { session_id }, Ok(rebuilt)) => {
+                let timeline = self
+                    .timeline_store
+                    .copy_for_session(&self.session_store_dir, &session_id)
+                    .unwrap_or_else(|_| {
+                        crate::timeline::TimelineJsonlStore::for_session(
+                            self.session_store_dir.clone(),
+                            &session_id,
+                        )
+                    });
+                self.session_id = session_id.clone();
+                self.timeline_store = timeline;
+                self.context_store = crate::compact::ContextJsonStore::for_session(
+                    self.session_store_dir.clone(),
+                    &session_id,
+                );
+                let _ = self.context_store.save(&self.model_context);
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                let short: String = session_id.chars().take(8).collect();
+                self.push_line(&gutter(
+                    TN_CYAN,
+                    &format!("⑂ forked into a new session ({short}) — the original is kept"),
+                ));
+                self.drain_queue()
+            }
+            (PendingSessionChange::Fork { .. }, Err(error)) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  fork failed: {error}")),
+                );
+                self.drain_queue()
+            }
+            (PendingSessionChange::Clear { session_id }, Ok(rebuilt)) => {
+                self.session_id = session_id;
+                self.replace_session(rebuilt.session, rebuilt.llm_client);
+                self.finish_clear_session();
+                None
+            }
+            (PendingSessionChange::Clear { .. }, Err(error)) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  clear failed: {error}")),
+                );
+                self.drain_queue()
+            }
+        }
+    }
+
+    fn finish_clear_session(&mut self) {
+        self.messages.clear();
+        self.model_timeline.clear();
+        self.plan.clear();
+        self.runtime.clear_turn_entities();
+        self.queue.clear();
+        self.completed = 0;
+        self.textarea.clear();
+        self.review_pending = false;
+        self.sleep_pending = false;
+        self.goal = None;
+        self.goal_since = None;
+        self.restore_autonomy();
+        self.pending_ctx = None;
+        self.ctx_hits.clear();
+        self.agent_dev = None;
+        self.pending_flow_subcommand = None;
+        self.pending_agent_subcommand = None;
+        self.mcp_dev = None;
+        self.pending_mcp_subcommand = None;
+        self.skill_dev = None;
+        self.pending_skill_subcommand = None;
+        self.okf_picker = None;
+        self.pending_okf_subcommand = None;
+        self.okf_dev = None;
+        self.asset_list = None;
+        self.runtime_activity = None;
+        self.kb = None;
+        self.output_tokens = 0;
+        self.last_prompt_tokens = 0;
+        self.ctx_warned_tier = 0;
+        self.has_successful_llm_history = false;
+        self.last_auto_review_history_len = 0;
+        self.auto_reviewed = false;
+        self.timeline_store = crate::timeline::TimelineJsonlStore::for_session(
+            self.session_store_dir.clone(),
+            &self.session_id,
+        );
+        self.context_store = crate::compact::ContextJsonStore::for_session(
+            self.session_store_dir.clone(),
+            &self.session_id,
+        );
+        self.model_context = crate::compact::ModelContextState::rebuild_from_timeline_with_metadata(
+            &[],
+            crate::compact::ProjectionBudget::for_token_limit(self.context_limit as usize),
+            crate::timeline::TimelineMetadata::default(),
+            0,
+            self.context_limit,
+            self.auto_compact.threshold(),
+        );
+        let _ = self.context_store.save(&self.model_context);
+        self.auto_compact = crate::compact::auto_compact::AutoCompactController::new(
+            crate::config::auto_compact_threshold(),
+            self.context_limit,
+        );
+        self.relayout();
+        self.rebuild_viewport();
+    }
+
     /// After an OS login/logout, rebuild the session so the login-gated
     /// skill loads/unloads immediately, and refresh the start-screen skill list.
-    fn refresh_after_auth(&mut self) {
+    fn refresh_after_auth(&mut self) -> Option<Cmd<Msg>> {
         self.os_gateway_models = None;
         self.os_gateway_models_loading = false;
         self.os_gateway_error = None;
-        if self.state == State::Idle {
-            if let Ok((s, llm_client, _)) = self.rebuild_session(self.model.as_deref()) {
-                self.replace_session(s, llm_client);
-            }
-        }
-        // Login/logout flips whether the A3S Runtime `runtime` tool is available.
-        self.sync_runtime_tool();
         let dirs = self.skill_dirs();
         self.skill_count = count_skill_files(&dirs);
         self.skills = load_skills(&dirs);
+        let model = self.model.clone();
+        self.begin_session_rebuild(
+            PendingSessionChange::RefreshAuth,
+            SessionRebuildTarget::Replace {
+                current: Arc::clone(&self.session),
+            },
+            model.as_deref(),
+        )
     }
 
     /// Register the A3S Runtime `runtime` offload tool while signed in to OS,
@@ -11242,6 +11737,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         agent: agent.clone(),
         code_config,
         store: store.clone(),
+        session_store_dir: store_dir.clone(),
         memory_store,
         confirmation,
         deep_research_report_tool_gate,
@@ -11313,6 +11809,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         pending_images: Vec::new(),
         goal: None,
         goal_since: None,
+        goal_run: None,
+        goal_generation: 0,
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
         turn_had_agent_activity: false,
@@ -11326,6 +11824,7 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         gradient_until: None,
         gradient_frame: 0,
         effort_anim: None,
+        pending_session_change: None,
         btw: None,
         btw_history: Vec::new(),
         btw_request_id: 0,
@@ -11410,12 +11909,16 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
     // Apply the current effort (default `high`) to the launch session so the
     // FIRST turn already runs at the chosen depth. The session built above is
     // effort-naive — the scaled tool-round budget and the depth guideline live
-    // only in effort_session_opts (reached via rebuild_session, as every
-    // /effort switch does). Best-effort: keep the launch session if it can't
-    // rebuild. (Resumes the same id, so transcript history is preserved.)
+    // only in effort_session_opts (reached by every /effort switch). Best-effort:
+    // keep the launch session if its atomic async replacement cannot be built.
     let launch_model = app.model.clone();
-    if let Ok((s, llm_client, _)) = app.rebuild_session(launch_model.as_deref()) {
-        app.replace_session(s, llm_client);
+    let launch_target = SessionRebuildTarget::Replace {
+        current: Arc::clone(&app.session),
+    };
+    if let Ok(plan) = app.prepare_session_rebuild(launch_target, launch_model.as_deref()) {
+        if let Ok(rebuilt) = plan.run().await {
+            app.replace_session(rebuilt.session, rebuilt.llm_client);
+        }
     }
 
     ProgramBuilder::new(app)

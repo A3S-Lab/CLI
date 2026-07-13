@@ -28,6 +28,8 @@ pub(crate) mod okf;
 // Local workspace.
 #[path = "workspace/files.rs"]
 mod files;
+#[path = "workspace/goal_engineering.rs"]
+pub(crate) mod goal_engineering;
 #[path = "workspace/ide.rs"]
 mod ide;
 #[path = "workspace/loop_engineering.rs"]
