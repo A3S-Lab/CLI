@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use a3s_code_core::{Agent, AgentSession, CodeConfig};
+use a3s_code_core::{Agent, AgentSession, CodeConfig, LlmClient};
 use tokio::sync::Mutex;
 
 use crate::budget::DEFAULT_CODE_WEB_EFFORT_ID;
@@ -22,11 +22,22 @@ impl Default for CodeWebSessionControls {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub(in crate::api::code_web) struct CodeWebSessionContext {
     pub(in crate::api::code_web) compact_summary: Option<String>,
     pub(in crate::api::code_web) auto_compact:
         Option<crate::compact::auto_compact::AutoCompactController>,
+    pub(in crate::api::code_web) llm_client: Option<Arc<dyn LlmClient>>,
+}
+
+impl CodeWebSessionContext {
+    pub(in crate::api::code_web) fn set_llm_client(&mut self, client: Arc<dyn LlmClient>) {
+        self.llm_client = Some(client);
+    }
+
+    pub(in crate::api::code_web) fn llm_client(&self) -> Option<Arc<dyn LlmClient>> {
+        self.llm_client.clone()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -98,5 +109,63 @@ impl CodeWebState {
 
     pub(in crate::api::code_web) async fn close(&self) {
         self.agent.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use a3s_code_core::llm::{StreamEvent, ToolDefinition};
+    use a3s_code_core::{LlmClient, LlmResponse, Message};
+    use async_trait::async_trait;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    struct TestClient;
+
+    #[async_trait]
+    impl LlmClient for TestClient {
+        async fn complete(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+        ) -> anyhow::Result<LlmResponse> {
+            unreachable!("client identity test does not send requests")
+        }
+
+        async fn complete_streaming(
+            &self,
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
+            _cancel_token: CancellationToken,
+        ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+            unreachable!("client identity test does not send requests")
+        }
+    }
+
+    #[test]
+    fn session_context_replaces_and_clears_llm_client_by_identity() {
+        let first: Arc<dyn LlmClient> = Arc::new(TestClient);
+        let second: Arc<dyn LlmClient> = Arc::new(TestClient);
+        let mut context = CodeWebSessionContext::default();
+
+        context.set_llm_client(Arc::clone(&first));
+        assert!(Arc::ptr_eq(
+            &first,
+            &context.llm_client().expect("first client")
+        ));
+
+        context.set_llm_client(Arc::clone(&second));
+        assert!(Arc::ptr_eq(
+            &second,
+            &context.llm_client().expect("replacement client")
+        ));
+
+        let mut contexts = HashMap::from([("session".to_string(), context)]);
+        contexts.remove("session");
+        assert!(!contexts.contains_key("session"));
     }
 }

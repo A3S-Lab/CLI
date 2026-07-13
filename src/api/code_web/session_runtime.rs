@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_boot::{BootError, Result as BootResult};
-use a3s_code_core::{AgentSession, CodeConfig, SessionOptions, SystemPromptSlots};
+use a3s_code_core::host_env::HostEnv;
+use a3s_code_core::{AgentSession, CodeConfig, LlmClient, SessionOptions, SystemPromptSlots};
 use serde_json::{json, Value};
 
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState};
@@ -62,7 +63,7 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     session_id: Option<&str>,
     model: Option<String>,
     effort: &str,
-) -> (SessionOptions, CodeWebSessionRuntime) {
+) -> BootResult<(SessionOptions, CodeWebSessionRuntime, Arc<dyn LlmClient>)> {
     let runtime = code_web_session_runtime_for_workspace(state, workspace).await;
     let context_limit = code_web_context_limit_for_model(state, model.as_deref());
     let budget =
@@ -76,9 +77,10 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_max_parallel_tasks(budget.max_parallel_tasks)
         .with_max_continuation_turns(budget.max_continuation_turns);
 
-    if let Some(session_id) = session_id {
-        options = options.with_session_id(session_id.to_string());
-    }
+    let session_id = session_id
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| HostEnv::default().next_id());
+    options = options.with_session_id(session_id.clone());
     if let Some(model) = model {
         options = options.with_model(model);
     }
@@ -88,7 +90,15 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         );
     }
 
-    (options, runtime)
+    let llm_client = crate::session_llm::resolve_session_llm_client(
+        &state.code_config_snapshot(),
+        &options,
+        &session_id,
+    )
+    .map_err(BootError::Internal)?;
+    options = options.with_llm_client(Arc::clone(&llm_client));
+
+    Ok((options, runtime, llm_client))
 }
 
 pub(in crate::api::code_web) fn code_web_context_limit_for_model(
@@ -136,14 +146,14 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
         let settings = session_settings(state, &session_id).await;
         let controls = session_controls(state, &session_id).await;
         let model = effective_session_model(state, &settings);
-        let (options, runtime) = code_web_session_options(
+        let (options, runtime, llm_client) = code_web_session_options(
             state,
             &workspace,
             Some(&session_id),
             model,
             &controls.effort,
         )
-        .await;
+        .await?;
         let new_session = Arc::new(
             state
                 .agent
@@ -157,6 +167,13 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
             .lock()
             .await
             .insert(session_id.clone(), new_session);
+        state
+            .session_contexts
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .set_llm_client(llm_client);
         rebuilt.push(json!({
             "sessionId": session_id,
             "workspace": workspace.display().to_string(),

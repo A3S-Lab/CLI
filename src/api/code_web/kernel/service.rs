@@ -387,7 +387,7 @@ impl KernelService {
             .map_err(|error| BootError::Internal(error.to_string()))?;
 
         let controls = self.session_controls_snapshot(session_id).await;
-        let new_session = self
+        let (new_session, llm_client) = self
             .create_agent_session(
                 &workspace,
                 Some(session_id),
@@ -409,7 +409,11 @@ impl KernelService {
             .session_contexts
             .lock()
             .await
-            .insert(session_id.to_string(), CodeWebSessionContext::default());
+            .insert(session_id.to_string(), {
+                let mut context = CodeWebSessionContext::default();
+                context.set_llm_client(llm_client);
+                context
+            });
         Ok(json!({
             "sessionId": session_id,
             "cleared": true,
@@ -545,7 +549,8 @@ impl KernelService {
             return Err(BootError::BadRequest("nothing to compact yet".to_string()));
         }
 
-        let summary = crate::compact::compact_timeline(session.llm_client(), &timeline_store)
+        let llm_client = self.session_llm_client(session_id).await?;
+        let summary = crate::compact::compact_timeline(llm_client, &timeline_store)
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
         let summary =
@@ -665,12 +670,12 @@ impl KernelService {
         let model = self.effective_model(&source_settings);
         let target_settings = source_settings.clone();
         let source_controls = self.session_controls_snapshot(session_id).await;
-        let target_session = self
+        let (target_session, llm_client) = self
             .create_agent_session(&workspace, None, model.clone(), &source_controls.effort)
             .await?;
         let target_session_id = target_session.session_id().to_string();
         let source_context = self.session_context_snapshot(session_id).await;
-        let target_context = CodeWebSessionContext {
+        let mut target_context = CodeWebSessionContext {
             compact_summary: build_fork_context(
                 session_id,
                 &focus,
@@ -680,6 +685,7 @@ impl KernelService {
             ),
             ..CodeWebSessionContext::default()
         };
+        target_context.set_llm_client(llm_client);
         let target_messages =
             fork_messages(session_id, &target_session_id, &source_messages, &focus);
 
@@ -868,7 +874,7 @@ impl KernelService {
             .filter(|id| !id.is_empty());
         let default_controls = CodeWebSessionControls::default();
 
-        let session = self
+        let (session, llm_client) = self
             .create_agent_session(
                 &workspace,
                 requested_session_id,
@@ -898,7 +904,8 @@ impl KernelService {
             .lock()
             .await
             .entry(session.session_id().to_string())
-            .or_default();
+            .or_default()
+            .set_llm_client(llm_client);
         self.state
             .session_settings
             .lock()
@@ -936,6 +943,23 @@ impl KernelService {
             .entry(session_id.to_string())
             .or_default()
             .clone()
+    }
+
+    async fn session_llm_client(
+        &self,
+        session_id: &str,
+    ) -> BootResult<Arc<dyn a3s_code_core::LlmClient>> {
+        self.state
+            .session_contexts
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(CodeWebSessionContext::llm_client)
+            .ok_or_else(|| {
+                BootError::Internal(format!(
+                    "session `{session_id}` has no registered LLM client"
+                ))
+            })
     }
 
     async fn session_settings_snapshot(&self, session_id: &str) -> CodeWebSessionSettings {
@@ -997,10 +1021,10 @@ impl KernelService {
         session_id: Option<&str>,
         model: Option<String>,
         effort: &str,
-    ) -> BootResult<Arc<AgentSession>> {
-        let (options, runtime) =
+    ) -> BootResult<(Arc<AgentSession>, Arc<dyn a3s_code_core::LlmClient>)> {
+        let (options, runtime, llm_client) =
             code_web_session_options(self.state.as_ref(), workspace, session_id, model, effort)
-                .await;
+                .await?;
         let session = Arc::new(
             self.state
                 .agent
@@ -1008,7 +1032,7 @@ impl KernelService {
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(session.as_ref(), &runtime);
-        Ok(session)
+        Ok((session, llm_client))
     }
 
     async fn session_response_model(&self, session_id: &str) -> Option<String> {
@@ -1072,7 +1096,7 @@ impl KernelService {
 
         old_session.close().await;
         let controls = self.session_controls_snapshot(session_id).await;
-        let new_session = self
+        let (new_session, llm_client) = self
             .create_agent_session(
                 &workspace,
                 Some(session_id),
@@ -1085,6 +1109,13 @@ impl KernelService {
             .lock()
             .await
             .insert(session_id.to_string(), new_session);
+        self.state
+            .session_contexts
+            .lock()
+            .await
+            .entry(session_id.to_string())
+            .or_default()
+            .set_llm_client(llm_client);
         Ok(())
     }
 
@@ -1200,17 +1231,21 @@ impl KernelService {
             code_web_store_dir(session.workspace()),
             session_id,
         );
-        let result =
-            match crate::compact::compact_timeline(session.llm_client(), &timeline_store).await {
-                Ok(Some(summary)) => {
-                    self.finalize_code_web_compact(session_id, session, &summary)
-                        .await
+        let result = match self.session_llm_client(session_id).await {
+            Ok(llm_client) => {
+                match crate::compact::compact_timeline(llm_client, &timeline_store).await {
+                    Ok(Some(summary)) => {
+                        self.finalize_code_web_compact(session_id, session, &summary)
+                            .await
+                    }
+                    Ok(None) => Err(BootError::Internal(
+                        "automatic compact found an empty timeline".to_string(),
+                    )),
+                    Err(error) => Err(BootError::Internal(error)),
                 }
-                Ok(None) => Err(BootError::Internal(
-                    "automatic compact found an empty timeline".to_string(),
-                )),
-                Err(error) => Err(BootError::Internal(error)),
-            };
+            }
+            Err(error) => Err(error),
+        };
 
         let mut contexts = self.state.session_contexts.lock().await;
         let context = contexts.entry(session_id.to_string()).or_default();
@@ -1245,7 +1280,7 @@ impl KernelService {
         .map_err(|error| BootError::Internal(error.to_string()))?;
 
         let controls = self.session_controls_snapshot(session_id).await;
-        let new_session = self
+        let (new_session, llm_client) = self
             .create_agent_session(
                 &workspace,
                 Some(session_id),
@@ -1267,13 +1302,10 @@ impl KernelService {
                 compact_visible_messages_after_success(session_id, current_messages, summary),
             );
         }
-        self.state
-            .session_contexts
-            .lock()
-            .await
-            .entry(session_id.to_string())
-            .or_default()
-            .compact_summary = Some(summary.to_string());
+        let mut contexts = self.state.session_contexts.lock().await;
+        let context = contexts.entry(session_id.to_string()).or_default();
+        context.compact_summary = Some(summary.to_string());
+        context.set_llm_client(llm_client);
         Ok(())
     }
 
