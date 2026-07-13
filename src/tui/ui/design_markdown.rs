@@ -323,7 +323,7 @@ mod tests {
         );
         let plain = strip_ansi(&rendered);
 
-        assert!(plain.contains("rust"));
+        assert!(!plain.contains("```"));
         assert!(plain.contains("let value"));
         assert_bounded(&rendered, 36);
     }
