@@ -897,11 +897,14 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
         "configure separate maker_agent and checker_agent",
     );
     let agent_loop = spec.level == "A2";
+    let goal_loop = spec.level == "G1";
     add(
         10,
-        spec.worktree || agent_loop,
+        spec.worktree || agent_loop || goal_loop,
         if agent_loop {
             "agent asset scope requested"
+        } else if goal_loop {
+            "goal scope is guarded by the active session"
         } else {
             "worktree isolation requested"
         },
@@ -913,13 +916,15 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
     );
     add(
         10,
-        if agent_loop {
+        if agent_loop || goal_loop {
             !spec.os_runtime && !spec.connectors.iter().any(|c| c == "os-runtime")
         } else {
             spec.os_runtime && spec.connectors.iter().any(|c| c == "os-runtime")
         },
         if agent_loop {
             "local agent loop runtime"
+        } else if goal_loop {
+            "local goal loop runtime"
         } else {
             "OS Runtime connector enabled"
         },
@@ -929,17 +934,31 @@ pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
             "enable os_runtime/connectors=[\"os-runtime\"]"
         },
     );
+    let skill_pair = if goal_loop {
+        exists_nonempty(&spec.dir.join("skills").join("maker.md"))
+            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
+    } else {
+        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
+            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
+    };
     add(
         15,
-        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md")),
-        "triage and verifier skills",
-        "add skills/triage.md and skills/verifier.md",
+        skill_pair,
+        if goal_loop {
+            "maker and verifier skills"
+        } else {
+            "triage and verifier skills"
+        },
+        if goal_loop {
+            "add skills/maker.md and skills/verifier.md"
+        } else {
+            "add skills/triage.md and skills/verifier.md"
+        },
     );
     if spec.level == "L3" && score < 90 {
         warnings.push("L3 requested but readiness is below unattended threshold".to_string());
     }
-    if spec.level != "L1" && spec.level != "A2" && !spec.worktree {
+    if spec.level != "L1" && spec.level != "A2" && spec.level != "G1" && !spec.worktree {
         warnings.push("acting loops should use worktree isolation".to_string());
     }
     let level = if score >= 90 {

@@ -8163,6 +8163,9 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 #[test]
 fn removed_top_level_aliases_stay_unregistered() {
     let removed = [
+        "/output".to_string(),
+        "/top".to_string(),
+        "/btw".to_string(),
         "/view".to_string(),
         "/mouse".to_string(),
         "/plugins".to_string(),

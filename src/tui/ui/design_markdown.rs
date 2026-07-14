@@ -1566,7 +1566,9 @@ fn design_fg_for_rgb(r: u8, g: u8, b: u8) -> Color {
         (122, 162, 247) | (125, 207, 255) => ACCENT,
         // Upstream table borders / low-emphasis syntax are muted structure.
         (86, 95, 137) | (128, 128, 128) => TN_GRAY,
-        _ => TN_FG,
+        // Syntax themes intentionally use a wider palette. Preserve unknown
+        // foregrounds instead of flattening every token to the body color.
+        _ => Color::Rgb(r, g, b),
     }
 }
 
@@ -2929,5 +2931,35 @@ mod tests {
         assert!(!rendered.contains("\x1b[32m"), "{rendered:?}");
         assert!(!rendered.contains("\x1b[4;34m"), "{rendered:?}");
         assert_bounded(&rendered, 72);
+    }
+
+    #[test]
+    fn syntax_tokens_keep_their_distinct_rgb_foregrounds() {
+        let rendered = Markdown::new().with_width(96).render(
+            "```rust\nfn greet() { let answer = format_value(\"hello\", 42); // note\n}\n```",
+        );
+        let colors = ["fn", "greet", "hello", "42", "//"].map(|token| {
+            foreground_rgb_before(&rendered, token)
+                .unwrap_or_else(|| panic!("missing foreground for {token:?} in {rendered:?}"))
+        });
+
+        for (index, color) in colors.iter().enumerate() {
+            assert!(
+                !colors[..index].contains(color),
+                "token colors must remain distinct: {colors:?}"
+            );
+        }
+    }
+
+    fn foreground_rgb_before(rendered: &str, token: &str) -> Option<(u8, u8, u8)> {
+        let token_start = rendered.find(token)?;
+        let prefix = &rendered[..token_start];
+        let marker = "\x1b[38;2;";
+        let start = prefix.rfind(marker)? + marker.len();
+        let end = rendered[start..].find('m')? + start;
+        let mut channels = rendered[start..end]
+            .split(';')
+            .filter_map(|part| part.parse::<u8>().ok());
+        Some((channels.next()?, channels.next()?, channels.next()?))
     }
 }
