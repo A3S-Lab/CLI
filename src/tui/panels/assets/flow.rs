@@ -21,7 +21,6 @@ use a3s_tui::event::MouseEvent;
 /// Canonical visible source path where the designer loads/saves a workflow
 /// inside the asset source workspace. `.a3s/` is reserved for `asset.acl`.
 pub(crate) const DESIGN_DOCUMENT_PATH: &str = "flow.json";
-const FLOW_OVERLAY_ROWS_BELOW: usize = 5;
 
 /// `/flow` selection panel: the DAG JSONs under the flows folder + cursor.
 pub(crate) struct FlowPanel {
@@ -813,13 +812,13 @@ fn flow_picker_panel(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT);
+        .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 3))
 }
 
-fn flow_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn flow_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(FLOW_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -1487,14 +1486,18 @@ impl App {
                         Some(FlowSubcommand::Status) => FlowOsAction::Status,
                         _ => unreachable!(),
                     };
-                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                        "  ⧉ {file} → OS Workflow as a Service {}…",
-                        os_action.label()
-                    )));
+                    let status_entry =
+                        self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
+                            "  ⧉ {file} → OS Workflow as a Service {}…",
+                            os_action.label()
+                        )));
                     return Some(cmd::cmd(move || async move {
                         let result =
                             publish_flow_to_os(session, file, String::new(), os_action).await;
-                        Msg::FlowOsCompleted(result)
+                        Msg::FlowOsCompleted {
+                            status_entry,
+                            result,
+                        }
                     }));
                 }
                 let design = match std::fs::read_to_string(&path) {
@@ -1517,10 +1520,8 @@ impl App {
                 }
                 match pending {
                     Some(FlowSubcommand::Review(_)) => {
-                        self.messages.push(user_bubble(
-                            &format!("/flow review {file}"),
-                            self.viewport_content_width(),
-                        ));
+                        self.messages
+                            .push(TranscriptEntry::user(format!("/flow review {file}")));
                         self.engage_autonomy(4);
                         self.review_pending = true;
                         let prompt = flow_review_prompt(&path, &design);
@@ -1549,10 +1550,11 @@ impl App {
                             FlowSubcommand::Deploy => FlowOsAction::Deploy,
                             _ => unreachable!(),
                         };
-                        self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                            "  ⧉ {file} → OS Workflow as a Service {}…",
-                            os_action.label()
-                        )));
+                        let status_entry =
+                            self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
+                                "  ⧉ {file} → OS Workflow as a Service {}…",
+                                os_action.label()
+                            )));
                         let local_path = path.clone();
                         return Some(cmd::cmd(move || async move {
                             let result = publish_flow_to_os_with_local_path(
@@ -1563,14 +1565,17 @@ impl App {
                                 os_action,
                             )
                             .await;
-                            Msg::FlowOsCompleted(result)
+                            Msg::FlowOsCompleted {
+                                status_entry,
+                                result,
+                            }
                         }));
                     }
                 }
                 let Some(session) = self.os_session.clone() else {
                     return None; // opener is login-gated; belt and suspenders
                 };
-                self.push_line(
+                let status_entry = self.push_tracked_line(
                     &Style::new()
                         .fg(TN_GRAY)
                         .render(&format!("  ⧉ {file} → OS Workflow as a Service designer…")),
@@ -1585,7 +1590,10 @@ impl App {
                         FlowOsAction::Design,
                     )
                     .await;
-                    Msg::FlowOsCompleted(result)
+                    Msg::FlowOsCompleted {
+                        status_entry,
+                        result,
+                    }
                 }));
             }
             _ => {}
@@ -1615,7 +1623,8 @@ impl App {
         if row_count == 0 {
             return None;
         }
-        let y_offset = flow_overlay_y_offset(self.height as usize, row_count);
+        let y_offset =
+            flow_overlay_y_offset(self.height as usize, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -1650,7 +1659,11 @@ impl App {
         }
     }
 
-    pub(crate) fn on_flow_os_completed(&mut self, res: Result<FlowOsResult, String>) {
+    pub(crate) fn on_flow_os_completed(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<FlowOsResult, String>,
+    ) {
         match res {
             Ok(result) => {
                 let lifecycle = asset_lifecycle::workflow_flow_lifecycle();
@@ -1663,15 +1676,18 @@ impl App {
                 debug_assert_eq!(lifecycle.stages, asset_lifecycle::WORKFLOW_STAGES);
                 let service = asset_lifecycle::service_label(lifecycle.service);
                 self.last_view = Some(result.view.clone());
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "⧉ /flow {} · `{}` ({})",
-                        result.action.label(),
-                        result.asset_name,
-                        result.asset_id
+                self.replace_tracked_line(
+                    status_entry,
+                    &gutter(
+                        TN_CYAN,
+                        &format!(
+                            "⧉ /flow {} · `{}` ({})",
+                            result.action.label(),
+                            result.asset_name,
+                            result.asset_id
+                        ),
                     ),
-                ));
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GRAY)
@@ -1690,7 +1706,8 @@ impl App {
                 }
             }
             Err(e) => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_RED)
                         .render(&format!("  /flow OS operation failed: {e}")),
@@ -2369,7 +2386,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = flow_picker_lines(&flows, 0, &root, width, height).len();
-        let y_offset = flow_overlay_y_offset(height, row_count);
+        let y_offset = flow_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = flow_picker_panel(&flows, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2395,7 +2412,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = flow_picker_lines(&flows, 0, &root, width, height).len();
-        let y_offset = flow_overlay_y_offset(height, row_count);
+        let y_offset = flow_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = flow_picker_panel(&flows, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2407,6 +2424,11 @@ mod tests {
         });
 
         assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
+    }
+
+    #[test]
+    fn flow_overlay_offset_moves_up_with_more_rows_below() {
+        assert!(flow_overlay_y_offset(24, 8, 7) < flow_overlay_y_offset(24, 8, 5));
     }
 
     #[test]

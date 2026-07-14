@@ -3,7 +3,7 @@ use a3s_code_core::llm::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::time::Instant;
+use std::{collections::BTreeMap, time::Instant};
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -18,9 +18,7 @@ pub(crate) struct AnthropicEventMapper {
     meta: StreamMeta,
     content_blocks: Vec<ContentBlock>,
     text_content: String,
-    current_tool_id: String,
-    current_tool_name: String,
-    current_tool_input: String,
+    active_tools: BTreeMap<usize, ActiveTool>,
     usage: TokenUsage,
     stop_reason: Option<String>,
     response_id: Option<String>,
@@ -29,15 +27,19 @@ pub(crate) struct AnthropicEventMapper {
     first_token_ms: Option<u64>,
 }
 
+struct ActiveTool {
+    id: String,
+    name: String,
+    input: String,
+}
+
 impl AnthropicEventMapper {
     pub fn new(meta: StreamMeta) -> Self {
         Self {
             meta,
             content_blocks: Vec::new(),
             text_content: String::new(),
-            current_tool_id: String::new(),
-            current_tool_name: String::new(),
-            current_tool_input: String::new(),
+            active_tools: BTreeMap::new(),
             usage: TokenUsage::default(),
             stop_reason: None,
             response_id: None,
@@ -61,7 +63,10 @@ impl AnthropicEventMapper {
                 self.usage.cache_read_tokens = message.usage.cache_read_input_tokens;
                 self.usage.cache_write_tokens = message.usage.cache_creation_input_tokens;
             }
-            AnthropicStreamEvent::ContentBlockStart { content_block, .. } => match content_block {
+            AnthropicStreamEvent::ContentBlockStart {
+                index,
+                content_block,
+            } => match content_block {
                 AnthropicContentBlock::Text { text } => {
                     let _ = text;
                 }
@@ -71,22 +76,33 @@ impl AnthropicEventMapper {
                             text: std::mem::take(&mut self.text_content),
                         });
                     }
-                    self.current_tool_id = id.clone();
-                    self.current_tool_name = name.clone();
-                    self.current_tool_input = initial_tool_input_json(&input).unwrap_or_default();
-                    let _ = tx.send(StreamEvent::ToolUseStart { id, name }).await;
-                    if !self.current_tool_input.is_empty() {
+                    let initial_input = initial_tool_input_json(&input).unwrap_or_default();
+                    self.active_tools.insert(
+                        index,
+                        ActiveTool {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: initial_input.clone(),
+                        },
+                    );
+                    let _ = tx
+                        .send(StreamEvent::ToolUseStart {
+                            id: id.clone(),
+                            name,
+                        })
+                        .await;
+                    if !initial_input.is_empty() {
                         self.mark_first_token();
                         let _ = tx
                             .send(StreamEvent::ToolUseInputDelta {
-                                id: None,
-                                delta: self.current_tool_input.clone(),
+                                id: Some(id),
+                                delta: initial_input,
                             })
                             .await;
                     }
                 }
             },
-            AnthropicStreamEvent::ContentBlockDelta { delta, .. } => match delta {
+            AnthropicStreamEvent::ContentBlockDelta { index, delta } => match delta {
                 AnthropicDelta::TextDelta { text } => {
                     self.mark_first_token();
                     self.text_content.push_str(&text);
@@ -94,25 +110,28 @@ impl AnthropicEventMapper {
                 }
                 AnthropicDelta::InputJsonDelta { partial_json } => {
                     self.mark_first_token();
-                    self.current_tool_input.push_str(&partial_json);
+                    let id = self.active_tools.get_mut(&index).map(|tool| {
+                        tool.input.push_str(&partial_json);
+                        tool.id.clone()
+                    });
                     let _ = tx
                         .send(StreamEvent::ToolUseInputDelta {
-                            id: None,
+                            id,
                             delta: partial_json,
                         })
                         .await;
                 }
             },
-            AnthropicStreamEvent::ContentBlockStop if !self.current_tool_id.is_empty() => {
-                let input = parse_tool_input(&self.current_tool_input);
+            AnthropicStreamEvent::ContentBlockStop { index } => {
+                let Some(tool) = self.active_tools.remove(&index) else {
+                    return false;
+                };
+                let input = parse_tool_input(&tool.input);
                 self.content_blocks.push(ContentBlock::ToolUse {
-                    id: self.current_tool_id.clone(),
-                    name: self.current_tool_name.clone(),
+                    id: tool.id,
+                    name: tool.name,
                     input,
                 });
-                self.current_tool_id.clear();
-                self.current_tool_name.clear();
-                self.current_tool_input.clear();
             }
             AnthropicStreamEvent::MessageDelta {
                 delta,
@@ -151,7 +170,7 @@ impl AnthropicEventMapper {
                 let _ = tx.send(StreamEvent::Done(response)).await;
                 return true;
             }
-            AnthropicStreamEvent::ContentBlockStop | AnthropicStreamEvent::Ping => {}
+            AnthropicStreamEvent::Ping => {}
             AnthropicStreamEvent::Error => return true,
         }
         false
@@ -231,12 +250,13 @@ pub(crate) enum AnthropicStreamEvent {
     MessageStart { message: AnthropicMessageStart },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
+        index: usize,
         content_block: AnthropicContentBlock,
     },
     #[serde(rename = "content_block_delta")]
-    ContentBlockDelta { delta: AnthropicDelta },
+    ContentBlockDelta { index: usize, delta: AnthropicDelta },
     #[serde(rename = "content_block_stop")]
-    ContentBlockStop,
+    ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
     MessageDelta {
         delta: AnthropicMessageDeltaData,
@@ -294,9 +314,67 @@ mod tests {
         assert!(matches!(
             event,
             AnthropicStreamEvent::ContentBlockDelta {
+                index: 0,
                 delta: AnthropicDelta::TextDelta { text }
             } if text == "hi"
         ));
         assert!(parse_claude_cli_stream_event(r#"{"type":"system"}"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn maps_interleaved_tool_deltas_to_their_call_ids() {
+        let mut mapper = AnthropicEventMapper::new(StreamMeta {
+            provider: "test",
+            request_model: "claude-test".into(),
+            request_url: "test://messages".into(),
+            started_at: Instant::now(),
+        });
+        let (tx, mut rx) = mpsc::channel(16);
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool_a","name":"read","input":{}}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tool_b","name":"search","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"beta\"}"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"alpha\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+
+        for event in events {
+            let event = parse_sse_data(event).expect("valid Anthropic event");
+            if mapper.handle(event, &tx).await {
+                break;
+            }
+        }
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ToolUseStart { id, name })
+                if id == "tool_a" && name == "read"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ToolUseStart { id, name })
+                if id == "tool_b" && name == "search"
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ToolUseInputDelta { id: Some(id), delta })
+                if id == "tool_b" && delta == r#"{"query":"beta"}"#
+        ));
+        assert!(matches!(
+            rx.recv().await,
+            Some(StreamEvent::ToolUseInputDelta { id: Some(id), delta })
+                if id == "tool_a" && delta == r#"{"path":"alpha"}"#
+        ));
+        let Some(StreamEvent::Done(response)) = rx.recv().await else {
+            panic!("expected done event");
+        };
+        let calls = response.tool_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].id, "tool_a");
+        assert_eq!(calls[0].args, json!({"path": "alpha"}));
+        assert_eq!(calls[1].id, "tool_b");
+        assert_eq!(calls[1].args, json!({"query": "beta"}));
     }
 }

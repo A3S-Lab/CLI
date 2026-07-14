@@ -137,16 +137,16 @@ const DIFF_THEME: SyntaxTheme = SyntaxTheme {
     func: CODEX_FUNCTION,
 };
 
-/// Built-in themes; index 0 (Geist Dark) is the default.
+/// Built-in themes; index 0 (Codex Dark) is the default.
 pub(crate) const THEMES: &[SyntaxTheme] = &[
     SyntaxTheme {
-        name: "Geist Dark",
-        comment: Color::Rgb(143, 143, 143),
-        string: Color::Rgb(80, 227, 194),
-        number: Color::Rgb(245, 166, 35),
-        keyword: Color::Rgb(151, 71, 255),
-        typ: Color::Rgb(0, 223, 216),
-        func: Color::Rgb(0, 112, 243),
+        name: "Codex Dark",
+        comment: CODEX_COMMENT,
+        string: CODEX_STRING,
+        number: CODEX_NUMBER,
+        keyword: CODEX_KEYWORD,
+        typ: CODEX_TYPE,
+        func: CODEX_FUNCTION,
     },
     SyntaxTheme {
         name: "Atom One Dark",
@@ -296,33 +296,21 @@ fn push_span(spans: &mut Vec<SyntaxSpan>, content: String, color: Option<Color>)
     }
 }
 
-pub(crate) fn lang_from_path(path: &str) -> Option<&'static str> {
-    let ext = path.rsplit('.').next()?;
-    Some(match ext {
-        "rs" => "rust",
-        "py" => "python",
-        "js" | "mjs" | "cjs" => "javascript",
-        "ts" | "tsx" => "typescript",
-        "go" => "go",
-        "json" => "json",
-        "toml" => "toml",
-        "yaml" | "yml" => "yaml",
-        "md" => "markdown",
-        "sh" | "bash" => "bash",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "hpp" => "cpp",
-        "java" => "java",
-        "rb" => "ruby",
-        "html" => "html",
-        "css" => "css",
-        "sql" => "sql",
-        _ => return None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_dark_is_the_default_and_matches_diff_syntax_tokens() {
+        let default = &THEMES[0];
+        assert_eq!(default.name, "Codex Dark");
+        assert_eq!(default.comment, DIFF_THEME.comment);
+        assert_eq!(default.string, DIFF_THEME.string);
+        assert_eq!(default.number, DIFF_THEME.number);
+        assert_eq!(default.keyword, DIFF_THEME.keyword);
+        assert_eq!(default.typ, DIFF_THEME.typ);
+        assert_eq!(default.func, DIFF_THEME.func);
+    }
 
     #[test]
     fn codex_tokens_match_the_reference_diff_palette() {

@@ -14,7 +14,6 @@ use a3s_tui::event::MouseEvent;
 
 const MAX_MCP_SOURCE_FILES: usize = 200;
 const MAX_MCP_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
-const MCP_OVERLAY_ROWS_BELOW: usize = 5;
 
 #[derive(Clone)]
 pub(crate) struct McpProject {
@@ -1829,13 +1828,13 @@ fn mcp_picker_panel(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT);
+        .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 3))
 }
 
-fn mcp_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn mcp_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(MCP_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -1916,19 +1915,26 @@ pub(crate) fn mcp_review_prompt(session: &McpDevSession) -> String {
 }
 
 impl App {
-    pub(crate) fn on_mcp_os_completed(&mut self, res: Result<McpOsResult, String>) {
+    pub(crate) fn on_mcp_os_completed(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<McpOsResult, String>,
+    ) {
         match res {
             Ok(result) => {
                 self.last_view = Some(result.view.clone());
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "◆ /mcp {} · `{}` ({})",
-                        result.action.label(),
-                        result.asset_name,
-                        result.asset_id
+                self.replace_tracked_line(
+                    status_entry,
+                    &gutter(
+                        TN_CYAN,
+                        &format!(
+                            "◆ /mcp {} · `{}` ({})",
+                            result.action.label(),
+                            result.asset_name,
+                            result.asset_id
+                        ),
                     ),
-                ));
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GRAY)
@@ -1949,7 +1955,8 @@ impl App {
                 }
             }
             Err(e) => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_RED)
                         .render(&format!("  /mcp OS operation failed: {e}")),
@@ -2030,7 +2037,8 @@ impl App {
         if row_count == 0 {
             return None;
         }
-        let y_offset = mcp_overlay_y_offset(self.height as usize, row_count);
+        let y_offset =
+            mcp_overlay_y_offset(self.height as usize, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -2858,7 +2866,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = mcp_picker_lines(&projects, 0, &root, width, height).len();
-        let y_offset = mcp_overlay_y_offset(height, row_count);
+        let y_offset = mcp_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = mcp_picker_panel(&projects, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2889,7 +2897,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = mcp_picker_lines(&projects, 0, &root, width, height).len();
-        let y_offset = mcp_overlay_y_offset(height, row_count);
+        let y_offset = mcp_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = mcp_picker_panel(&projects, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2901,6 +2909,11 @@ mod tests {
         });
 
         assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
+    }
+
+    #[test]
+    fn mcp_overlay_offset_moves_up_with_more_rows_below() {
+        assert!(mcp_overlay_y_offset(24, 8, 7) < mcp_overlay_y_offset(24, 8, 5));
     }
 
     #[test]

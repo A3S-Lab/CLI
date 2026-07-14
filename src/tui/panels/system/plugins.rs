@@ -5,8 +5,6 @@ use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 use std::collections::HashSet;
 
-const PLUGIN_OVERLAY_ROWS_BELOW: usize = 5;
-
 fn plugin_panel_max_items(height: usize) -> usize {
     height.saturating_sub(8).clamp(3, 12)
 }
@@ -54,7 +52,7 @@ fn plugin_panel(
     .text_color(TN_GRAY)
     .muted_color(TN_GRAY)
     .checked_color(TN_GREEN)
-    .selected_colors(Color::BrightWhite, ACCENT);
+    .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 3))
 }
 
@@ -81,9 +79,9 @@ fn plugin_panel_lines(
         .collect()
 }
 
-fn plugin_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn plugin_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(PLUGIN_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -123,7 +121,7 @@ impl App {
         if row_count == 0 {
             return;
         }
-        let y_offset = plugin_overlay_y_offset(height, row_count);
+        let y_offset = plugin_overlay_y_offset(height, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -228,7 +226,7 @@ mod tests {
         ];
         let disabled = HashSet::new();
         let row_count = plugin_panel_lines(&skills, &disabled, 0, 48, 20).len();
-        let y_offset = plugin_overlay_y_offset(20, row_count);
+        let y_offset = plugin_overlay_y_offset(20, row_count, 5);
         let (mut panel, _) = plugin_panel(&skills, &disabled, 0, 48, 20).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -252,7 +250,7 @@ mod tests {
         ];
         let disabled = HashSet::new();
         let row_count = plugin_panel_lines(&skills, &disabled, 0, 48, 20).len();
-        let y_offset = plugin_overlay_y_offset(20, row_count);
+        let y_offset = plugin_overlay_y_offset(20, row_count, 5);
         let (mut panel, _) = plugin_panel(&skills, &disabled, 0, 48, 20).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -265,5 +263,11 @@ mod tests {
 
         assert_eq!(msg, None);
         assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn plugin_overlay_moves_above_dynamic_composer_rows() {
+        assert_eq!(plugin_overlay_y_offset(24, 6, 5), 13);
+        assert_eq!(plugin_overlay_y_offset(24, 6, 9), 9);
     }
 }

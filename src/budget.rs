@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 
 const DEFAULT_CONTEXT_LIMIT: u32 = 200_000;
+pub(crate) const AUTO_COMPACT_THRESHOLD: f64 = crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD;
 const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 1_200;
 const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 12;
 const DEEP_RESEARCH_MIN_PARALLEL_TASKS: usize = 4;
@@ -179,6 +180,14 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
 
 pub(crate) fn effort_profile_by_index(index: usize) -> &'static BudgetProfile {
     &EFFORT_LEVELS[index.min(EFFORT_LEVELS.len().saturating_sub(1))]
+}
+
+/// Runtime-driven delegation is an orchestration capability, not a reasoning
+/// level. Keep Codex's native low/medium/high/xhigh/max effort mapping intact
+/// and enable automatic child-agent fan-out only for the explicit ultracode
+/// product mode. Manual `task` and `parallel_task` calls remain available.
+pub(crate) fn effort_uses_automatic_delegation(index: usize) -> bool {
+    index == ULTRACODE_INDEX
 }
 
 pub(crate) fn normalize_effort(value: &str) -> Option<&'static BudgetProfile> {
@@ -359,6 +368,19 @@ mod tests {
     }
 
     #[test]
+    fn automatic_delegation_is_reserved_for_ultracode() {
+        for (index, profile) in EFFORT_LEVELS.iter().enumerate() {
+            assert_eq!(
+                effort_uses_automatic_delegation(index),
+                profile.id == "ultracode",
+                "unexpected automatic delegation policy for {}",
+                profile.id
+            );
+        }
+        assert!(!effort_uses_automatic_delegation(EFFORT_LEVELS.len()));
+    }
+
+    #[test]
     fn deep_research_budget_has_a_safe_child_floor() {
         let low = budget_plan_for_effort_id("low", Some(128_000), BudgetWorkload::DeepResearch);
         assert!(low.deep_research_child_steps >= DEEP_RESEARCH_MIN_CHILD_STEPS);
@@ -368,6 +390,11 @@ mod tests {
         assert!(low.workflow_max_output_bytes >= DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES);
         assert!(low.deep_research_child_steps > 30);
         assert!(low.workflow_max_tool_calls > 30);
+    }
+
+    #[test]
+    fn auto_compact_uses_the_model_specific_core_window() {
+        assert!((AUTO_COMPACT_THRESHOLD - 0.85).abs() < f64::EPSILON);
     }
 
     #[test]

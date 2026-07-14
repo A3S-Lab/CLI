@@ -1,8 +1,8 @@
 //! `a3s top` — a ctop-style monitor for boxes, coding agents, and diagnostics.
 //!
 //! The first milestone intentionally keeps collectors independent from the TUI
-//! layer. That lets the same snapshot model later feed `--json`, remote
-//! dashboards, or the lightweight `/top` panel inside `a3s code`.
+//! layer. That lets the same snapshot model feed `--json` and remote
+//! dashboards without coupling collection to presentation.
 
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
@@ -31,7 +31,7 @@ mod view;
 pub(crate) use collect::{collect_processes, AgentKind, ProcessRow, Risk};
 #[cfg(test)]
 use collect::{detect_agent, parse_lsof_cwd, parse_process_line, process_risk};
-pub(crate) use view::{process_data_table, render_process_table, ProcessTableView};
+pub(crate) use view::{render_process_table, ProcessTableView};
 
 const ACCENT: Color = Color::Rgb(122, 162, 247);
 const GREEN: Color = Color::Rgb(158, 206, 106);
@@ -7753,7 +7753,7 @@ fn observer_paths_from_auto() -> Vec<PathBuf> {
     }
 
     for path in recent_files_with_extension(
-        &home.join(".a3s").join("tui-sessions").join("runs"),
+        &home.join(".a3s").join("tui").join("sessions").join("runs"),
         "json",
         1,
         OBSERVER_AUTO_MAX_FILES_PER_AGENT,
@@ -15058,7 +15058,8 @@ mod tests {
             .join("rollout.jsonl");
         let a3s = root
             .join(".a3s")
-            .join("tui-sessions")
+            .join("tui")
+            .join("sessions")
             .join("runs")
             .join("tui-default.json");
         let a3s_workspace = root

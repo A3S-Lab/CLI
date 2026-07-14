@@ -252,7 +252,7 @@ impl App {
                 )));
                 return None;
             };
-            self.push_line(
+            let status_entry = self.push_tracked_line(
                 &Style::new()
                     .fg(TN_GRAY)
                     .render(&format!("  ⧉ pulling context for #{n} {}", hit.title)),
@@ -262,17 +262,20 @@ impl App {
                     .args(["show", "event", &hit.event_id, "--window", "5"])
                     .output()
                     .await;
-                Msg::CtxWindow(match out {
-                    Ok(o) if o.status.success() => {
-                        Ok((hit.title, String::from_utf8_lossy(&o.stdout).into_owned()))
-                    }
-                    Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
-                    Err(e) => Err(e.to_string()),
-                })
+                Msg::CtxWindow {
+                    status_entry,
+                    result: match out {
+                        Ok(o) if o.status.success() => {
+                            Ok((hit.title, String::from_utf8_lossy(&o.stdout).into_owned()))
+                        }
+                        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+                        Err(e) => Err(e.to_string()),
+                    },
+                }
             }));
         }
         // `/ctx <query>` — search.
-        self.push_line(
+        let status_entry = self.push_tracked_line(
             &Style::new()
                 .fg(TN_GRAY)
                 .render(&format!("  ⌕ searching past sessions: {arg}")),
@@ -294,19 +297,29 @@ impl App {
                 ])
                 .output()
                 .await;
-            Msg::CtxResults(match out {
-                Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).into_owned()),
-                Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
-                Err(e) => Err(e.to_string()),
-            })
+            Msg::CtxResults {
+                status_entry,
+                result: match out {
+                    Ok(o) if o.status.success() => {
+                        Ok(String::from_utf8_lossy(&o.stdout).into_owned())
+                    }
+                    Ok(o) => Err(String::from_utf8_lossy(&o.stderr).into_owned()),
+                    Err(e) => Err(e.to_string()),
+                },
+            }
         }))
     }
 
     /// Render search results into the transcript and remember them for `/ctx <n>`.
-    pub(crate) fn on_ctx_results(&mut self, res: Result<String, String>) {
+    pub(crate) fn on_ctx_results(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<String, String>,
+    ) {
         match res.and_then(|json| parse_ctx_search(&json)) {
             Ok(hits) if hits.is_empty() => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_GRAY)
                         .render("  no matches in past sessions"),
@@ -320,11 +333,12 @@ impl App {
                 hits.truncate(8);
                 let w = (self.width as usize).saturating_sub(6);
                 let lines = ctx_search_result_lines(&hits, w);
-                self.push_line(&lines.join("\n"));
+                self.replace_tracked_line(status_entry, &lines.join("\n"));
                 self.ctx_hits = hits;
             }
             Err(e) => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_RED)
                         .render(&format!("  ctx search failed: {e}")),
@@ -334,15 +348,23 @@ impl App {
     }
 
     /// A pulled transcript window arrived: stage it for the next message.
-    pub(crate) fn on_ctx_window(&mut self, res: Result<(String, String), String>) {
+    pub(crate) fn on_ctx_window(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<(String, String), String>,
+    ) {
         match res {
             Ok((title, window)) => {
                 self.pending_ctx = Some(ctx_context_block(&title, &window));
-                self.push_line(&Style::new().fg(TN_GREEN).render(
-                    "  ✔ context staged — it will be attached to your next message (one-shot)",
-                ));
+                self.replace_tracked_line(
+                    status_entry,
+                    &Style::new().fg(TN_GREEN).render(
+                        "  ✔ context staged — it will be attached to your next message (one-shot)",
+                    ),
+                );
             }
-            Err(e) => self.push_line(
+            Err(e) => self.replace_tracked_line(
+                status_entry,
                 &Style::new()
                     .fg(TN_RED)
                     .render(&format!("  ctx show failed: {e}")),

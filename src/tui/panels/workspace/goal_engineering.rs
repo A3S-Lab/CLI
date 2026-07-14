@@ -389,24 +389,22 @@ impl App {
         self.goal = Some(run.spec.goal.clone());
         self.goal_since = Some(Instant::now());
         self.goal_run = Some(run);
-        self.effort = ULTRACODE;
 
-        let model = self.model.clone();
-        self.begin_session_rebuild(
-            PendingSessionChange::GoalStart {
+        let mut profile = self.session_rebuild_profile();
+        profile.effort = ULTRACODE;
+        self.start_session_rebuild(
+            profile,
+            SessionRebuildAction::GoalStart {
                 generation: self.goal_generation,
                 previous_effort,
                 previous_goal,
                 previous_goal_since,
             },
-            SessionRebuildTarget::Replace {
-                current: Arc::clone(&self.session),
-            },
-            model.as_deref(),
         )
     }
 
     pub(crate) fn finish_goal_start(&mut self) -> Option<Cmd<Msg>> {
+        self.effort = ULTRACODE;
         self.mode = Mode::Auto;
         self.autonomy_restore = None;
         self.loop_remaining = 0;
@@ -555,14 +553,8 @@ impl App {
         if self.state != State::Idle {
             return None;
         }
-        let model = self.model.clone();
-        self.begin_session_rebuild(
-            PendingSessionChange::GoalRestore,
-            SessionRebuildTarget::Replace {
-                current: Arc::clone(&self.session),
-            },
-            model.as_deref(),
-        )
+        let profile = self.session_rebuild_profile();
+        self.start_session_rebuild(profile, SessionRebuildAction::GoalRestore)
     }
 
     pub(crate) fn clear_goal_command(&mut self) -> Option<Cmd<Msg>> {
@@ -575,12 +567,7 @@ impl App {
             return None;
         }
         self.push_line(&Style::new().fg(TN_GRAY).render("  goal loop cleared"));
-        if self.state == State::Rebuilding
-            && matches!(
-                self.pending_session_change,
-                Some(PendingSessionChange::GoalStart { .. })
-            )
-        {
+        if self.session_rebuild_pending.is_some() {
             // The atomic build cannot be force-aborted through the TEA command
             // handle. Its completion observes the invalidated generation and
             // immediately restores ordinary Ultracode planning instead of

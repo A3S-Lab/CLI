@@ -1,6 +1,6 @@
-//! Process model + collector shared by `a3s top` and the `/top` panel in
-//! `a3s code`. Kept independent from the TUI layer so the same `ProcessRow`
-//! snapshot feeds both renderers (and `--json`).
+//! Process model + collector for `a3s top`. Kept independent from the TUI
+//! layer so the same `ProcessRow` snapshot also feeds `--json` and remote
+//! consumers.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};

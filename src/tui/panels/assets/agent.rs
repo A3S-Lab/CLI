@@ -17,8 +17,6 @@ use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const AGENT_OVERLAY_ROWS_BELOW: usize = 5;
-
 #[derive(Clone)]
 pub(crate) struct AgentFile {
     /// Package-relative path used as the local asset id.
@@ -564,13 +562,13 @@ fn agent_picker_panel(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT);
+        .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 3))
 }
 
-fn agent_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn agent_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(AGENT_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -1294,6 +1292,250 @@ fn declared_agent_kind(package_path: &std::path::Path) -> Option<AgentOsKind> {
             _ => None,
         }
     })
+}
+
+#[derive(Default)]
+struct AgentAclRuntimeEnv {
+    env: Vec<serde_json::Value>,
+    required_secrets: Vec<String>,
+}
+
+#[derive(Default)]
+struct AgentAclEnvItem {
+    name: Option<String>,
+    value: Option<String>,
+    secret_ref: Option<String>,
+    required: Option<bool>,
+}
+
+fn merge_agent_acl_runtime_env(
+    runtime_binding: &mut serde_json::Value,
+    package_path: &std::path::Path,
+) {
+    let acl_env = parse_agent_acl_runtime_env(package_path);
+    if acl_env.env.is_empty() && acl_env.required_secrets.is_empty() {
+        return;
+    }
+
+    let mut env_by_name = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    if let Some(existing) = runtime_binding
+        .get("env")
+        .and_then(|value| value.as_array())
+    {
+        for item in existing {
+            if let Some(name) = item.get("name").and_then(|value| value.as_str()) {
+                env_by_name.insert(name.to_string(), item.clone());
+            }
+        }
+    }
+    for item in acl_env.env {
+        if let Some(name) = item.get("name").and_then(|value| value.as_str()) {
+            env_by_name.insert(name.to_string(), item);
+        }
+    }
+
+    let mut required = std::collections::BTreeSet::<String>::new();
+    if let Some(existing) = runtime_binding
+        .get("requiredSecrets")
+        .and_then(|value| value.as_array())
+    {
+        for item in existing {
+            if let Some(name) = item.as_str() {
+                required.insert(name.to_string());
+            }
+        }
+    }
+    required.extend(acl_env.required_secrets);
+    for item in env_by_name.values() {
+        let required_env = item
+            .get("required")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        if required_env {
+            if let Some(secret_ref) = item.get("secretRef").and_then(|value| value.as_str()) {
+                required.insert(secret_ref.to_string());
+            }
+        }
+    }
+
+    if let Some(obj) = runtime_binding.as_object_mut() {
+        obj.insert(
+            "env".to_string(),
+            serde_json::Value::Array(env_by_name.into_values().collect()),
+        );
+        obj.insert(
+            "requiredSecrets".to_string(),
+            serde_json::Value::Array(
+                required
+                    .into_iter()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+}
+
+fn parse_agent_acl_runtime_env(package_path: &std::path::Path) -> AgentAclRuntimeEnv {
+    let Ok(acl) = std::fs::read_to_string(package_path.join(asset_lifecycle::ASSET_ACL_PATH))
+    else {
+        return AgentAclRuntimeEnv::default();
+    };
+
+    let mut out = AgentAclRuntimeEnv::default();
+    let mut current: Option<AgentAclEnvItem> = None;
+    for raw_line in acl.lines() {
+        let line = raw_line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line == "[[runtime.env]]" {
+            push_agent_acl_env_item(&mut out, current.take());
+            current = Some(AgentAclEnvItem::default());
+            continue;
+        }
+        if line.starts_with('[') {
+            push_agent_acl_env_item(&mut out, current.take());
+            continue;
+        }
+
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let value = raw_value.trim();
+        if let Some(item) = current.as_mut() {
+            match key {
+                "name" => item.name = parse_agent_acl_string(value),
+                "value" => item.value = parse_agent_acl_string(value),
+                "secret_ref" | "secretRef" => item.secret_ref = parse_agent_acl_string(value),
+                "required" => item.required = parse_agent_acl_bool(value),
+                _ => {}
+            }
+        } else if matches!(key, "required_secrets" | "requiredSecrets") {
+            out.required_secrets
+                .extend(parse_agent_acl_string_array(value));
+        }
+    }
+    push_agent_acl_env_item(&mut out, current.take());
+    out
+}
+
+fn push_agent_acl_env_item(out: &mut AgentAclRuntimeEnv, item: Option<AgentAclEnvItem>) {
+    let Some(item) = item else {
+        return;
+    };
+    let Some(name) = item.name.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".to_string(), serde_json::Value::String(name));
+    if let Some(value) = item.value.filter(|value| !value.trim().is_empty()) {
+        obj.insert("value".to_string(), serde_json::Value::String(value));
+    }
+    if let Some(secret_ref) = item.secret_ref.filter(|value| !value.trim().is_empty()) {
+        obj.insert(
+            "secretRef".to_string(),
+            serde_json::Value::String(secret_ref.clone()),
+        );
+        if item.required.unwrap_or(true) {
+            out.required_secrets.push(secret_ref);
+        }
+    }
+    obj.insert(
+        "required".to_string(),
+        serde_json::Value::Bool(item.required.unwrap_or(true)),
+    );
+    out.env.push(serde_json::Value::Object(obj));
+}
+
+fn parse_agent_acl_string(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches(',').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('"') {
+        serde_json::from_str::<String>(trimmed).ok()
+    } else {
+        Some(trimmed.trim_matches('"').to_string())
+    }
+}
+
+fn parse_agent_acl_bool(value: &str) -> Option<bool> {
+    match value.trim().trim_end_matches(',').trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_agent_acl_string_array(value: &str) -> Vec<String> {
+    let trimmed = value.trim().trim_end_matches(',').trim();
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Vec::new();
+    }
+    let inner = &trimmed[1..trimmed.len().saturating_sub(1)];
+    inner
+        .split(',')
+        .filter_map(parse_agent_acl_string)
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn render_agent_acl_runtime_env(runtime_binding: &serde_json::Value) -> String {
+    let env = runtime_binding
+        .get("env")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut required = std::collections::BTreeSet::<String>::new();
+    if let Some(items) = runtime_binding
+        .get("requiredSecrets")
+        .and_then(|value| value.as_array())
+    {
+        for item in items {
+            if let Some(name) = item.as_str() {
+                required.insert(name.to_string());
+            }
+        }
+    }
+    if env.is_empty() && required.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    if !required.is_empty() {
+        out.push_str("\nrequired_secrets = [");
+        for (idx, item) in required.iter().enumerate() {
+            if idx > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&agent_acl_string(item));
+        }
+        out.push_str("]\n");
+    }
+    for item in env {
+        let Some(name) = item.get("name").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        out.push_str("\n[[runtime.env]]\n");
+        out.push_str(&format!("name = {}\n", agent_acl_string(name)));
+        if let Some(value) = item.get("value").and_then(|value| value.as_str()) {
+            out.push_str(&format!("value = {}\n", agent_acl_string(value)));
+        }
+        if let Some(secret_ref) = item.get("secretRef").and_then(|value| value.as_str()) {
+            out.push_str(&format!("secret_ref = {}\n", agent_acl_string(secret_ref)));
+        }
+        let required = item
+            .get("required")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        out.push_str(&format!("required = {required}\n"));
+    }
+    out
+}
+
+fn agent_acl_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn agent_config_tools(def: &a3s_code_core::subagent::AgentDefinition) -> Vec<serde_json::Value> {
@@ -3546,7 +3788,7 @@ pub(crate) async fn publish_agent_to_os(
         &dev.definition_rel,
         &asset_source_path,
     );
-    let runtime_binding = agent_runtime_binding_json(
+    let mut runtime_binding = agent_runtime_binding_json(
         kind,
         &def,
         &dev.rel,
@@ -3554,7 +3796,8 @@ pub(crate) async fn publish_agent_to_os(
         &dev.definition_rel,
         &asset_source_path,
     );
-    let asset_acl = agent_asset_acl(
+    merge_agent_acl_runtime_env(&mut runtime_binding, &dev.package_path);
+    let mut asset_acl = agent_asset_acl(
         kind,
         &def,
         &dev.rel,
@@ -3562,6 +3805,7 @@ pub(crate) async fn publish_agent_to_os(
         &dev.definition_rel,
         &asset_source_path,
     );
+    asset_acl.push_str(&render_agent_acl_runtime_env(&runtime_binding));
     asset_lifecycle::write_asset_acl(&dev.package_path, &asset_acl)?;
     let client = http()?;
     sync_agent_contract_metadata(
@@ -3816,20 +4060,27 @@ pub(crate) fn agent_loop_prompt(session: &AgentDevSession, loop_prompt: &str) ->
 }
 
 impl App {
-    pub(crate) fn on_agent_os_completed(&mut self, res: Result<AgentOsResult, String>) {
+    pub(crate) fn on_agent_os_completed(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<AgentOsResult, String>,
+    ) {
         match res {
             Ok(result) => {
                 self.last_view = Some(result.view.clone());
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "◇ /agent {} · {} · `{}` ({})",
-                        result.action.label(),
-                        result.kind.label(),
-                        result.asset_name,
-                        result.asset_id
+                self.replace_tracked_line(
+                    status_entry,
+                    &gutter(
+                        TN_CYAN,
+                        &format!(
+                            "◇ /agent {} · {} · `{}` ({})",
+                            result.action.label(),
+                            result.kind.label(),
+                            result.asset_name,
+                            result.asset_id
+                        ),
                     ),
-                ));
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GRAY)
@@ -3853,7 +4104,8 @@ impl App {
                 }
             }
             Err(e) => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_RED)
                         .render(&format!("  /agent OS operation failed: {e}")),
@@ -3954,7 +4206,8 @@ impl App {
         if row_count == 0 {
             return None;
         }
-        let y_offset = agent_overlay_y_offset(self.height as usize, row_count);
+        let y_offset =
+            agent_overlay_y_offset(self.height as usize, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -4276,7 +4529,7 @@ Be precise.
         let width = 48;
         let height = 18;
         let row_count = agent_picker_lines(&agents, 0, &root, width, height).len();
-        let y_offset = agent_overlay_y_offset(height, row_count);
+        let y_offset = agent_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = agent_picker_panel(&agents, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -4307,7 +4560,7 @@ Be precise.
         let width = 48;
         let height = 18;
         let row_count = agent_picker_lines(&agents, 0, &root, width, height).len();
-        let y_offset = agent_overlay_y_offset(height, row_count);
+        let y_offset = agent_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = agent_picker_panel(&agents, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -4319,6 +4572,11 @@ Be precise.
         });
 
         assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
+    }
+
+    #[test]
+    fn agent_overlay_offset_moves_up_with_more_rows_below() {
+        assert!(agent_overlay_y_offset(24, 8, 7) < agent_overlay_y_offset(24, 8, 5));
     }
 
     #[test]

@@ -1,10 +1,9 @@
 //! `@` file picker: an IDE-style collapsible tree (folders expand on demand).
 
 use super::super::*;
+use super::spf;
 use a3s_tui::components::{TreePicker, TreePickerItem, TreePickerMsg};
 use a3s_tui::event::MouseEvent;
-
-const FILE_MENU_OVERLAY_ROWS_BELOW: usize = 5;
 
 fn file_menu_max_items(height: usize) -> usize {
     height.saturating_sub(9).clamp(4, 12)
@@ -32,12 +31,17 @@ where
         .map(|(path, depth, is_dir)| {
             let name = path.rsplit('/').next().unwrap_or(path);
             if *is_dir {
-                TreePickerItem::branch(format!("{name}/"))
+                let open = dir_is_open(path);
+                let icon = spf::file_icon(name, true, open);
+                TreePickerItem::branch(format!("{} {name}/", icon.glyph))
                     .depth(*depth)
-                    .open(dir_is_open(path))
-                    .color(TN_CYAN)
+                    .open(open)
+                    .color(icon.color)
             } else {
-                TreePickerItem::leaf(name).depth(*depth).color(TN_FG)
+                let icon = spf::file_icon(name, false, false);
+                TreePickerItem::leaf(format!("{} {name}", icon.glyph))
+                    .depth(*depth)
+                    .color(icon.color)
             }
         })
         .collect::<Vec<_>>();
@@ -55,7 +59,7 @@ where
         .branch_color(TN_CYAN)
         .leaf_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT);
+        .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 2))
 }
 
@@ -83,9 +87,9 @@ where
         .collect()
 }
 
-fn file_menu_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn file_menu_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(FILE_MENU_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -225,7 +229,7 @@ impl App {
         if row_count == 0 {
             return;
         }
-        let y_offset = file_menu_overlay_y_offset(height, row_count);
+        let y_offset = file_menu_overlay_y_offset(height, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -347,9 +351,9 @@ mod tests {
             .join("\n");
 
         assert!(plain.contains("@ file"), "{plain}");
-        assert!(plain.contains("▾ src/"), "{plain}");
-        assert!(plain.contains("▸ tui/"), "{plain}");
-        assert!(plain.contains("mod.rs"), "{plain}");
+        assert!(plain.contains("▾ ◈ src/"), "{plain}");
+        assert!(plain.contains("▸ ◆ tui/"), "{plain}");
+        assert!(plain.contains("◈ mod.rs"), "{plain}");
         assert!(
             lines
                 .iter()
@@ -387,7 +391,7 @@ mod tests {
             ("src/main.rs".to_string(), 1, false),
         ];
         let row_count = file_menu_lines(&nodes, 0, 40, 20, |_| true).len();
-        let y_offset = file_menu_overlay_y_offset(20, row_count);
+        let y_offset = file_menu_overlay_y_offset(20, row_count, 5);
         let (mut panel, _) = file_menu_panel(&nodes, 0, 20, |_| true).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -417,7 +421,7 @@ mod tests {
             ("src/main.rs".to_string(), 0, false),
         ];
         let row_count = file_menu_lines(&nodes, 0, 40, 20, |_| false).len();
-        let y_offset = file_menu_overlay_y_offset(20, row_count);
+        let y_offset = file_menu_overlay_y_offset(20, row_count, 5);
         let (mut panel, _) = file_menu_panel(&nodes, 0, 20, |_| false).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -430,5 +434,11 @@ mod tests {
 
         assert_eq!(msg, None);
         assert_eq!(panel.selected_index(), 1);
+    }
+
+    #[test]
+    fn file_overlay_moves_above_dynamic_composer_rows() {
+        assert_eq!(file_menu_overlay_y_offset(24, 6, 5), 13);
+        assert_eq!(file_menu_overlay_y_offset(24, 6, 10), 8);
     }
 }

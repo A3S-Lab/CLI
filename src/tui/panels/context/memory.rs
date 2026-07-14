@@ -464,7 +464,8 @@ fn memory_timeline_lines(
         .time_width(4)
         .badge_width(7)
         .fill_height(true)
-        .selected_fg(Color::Black)
+        .selected_fg(TN_FG)
+        .selected_bg(SURFACE_SELECTED)
         .section_color(TN_GRAY)
         .time_color(TN_GRAY)
         .preview_color(TN_FG)
@@ -601,7 +602,18 @@ mod tests {
         assert!(plain.contains("sem"), "{plain}");
         assert!(plain.contains("fix narrow tui"), "{plain}");
         assert!(plain.contains("L! proc"), "{plain}");
-        assert!(lines.iter().any(|line| line.contains("\x1b[30;")));
+        assert!(
+            lines.iter().any(|line| line.contains("48;2;42;46;52")),
+            "selected memory row should use the neutral surface: {lines:?}"
+        );
+        let selected = lines
+            .iter()
+            .find(|line| a3s_tui::style::strip_ansi(line).contains("fix narrow tui"))
+            .expect("selected procedural memory row");
+        assert!(
+            selected.contains(&TN_GREEN.fg_ansi()),
+            "selected row should retain its procedural semantic color: {selected:?}"
+        );
         assert!(
             lines
                 .iter()

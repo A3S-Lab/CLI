@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
+#[cfg(test)]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use a3s_code_core::llm::{ContentBlock, Message};
@@ -85,26 +87,6 @@ impl TimelineJsonlStore {
         )
     }
 
-    pub(crate) fn copy_for_session(
-        &self,
-        store_dir: impl Into<PathBuf>,
-        session_id: &str,
-    ) -> anyhow::Result<Self> {
-        let target = Self::for_session(store_dir, session_id);
-        if !self.path.exists() {
-            return Ok(target);
-        }
-        if let Some(parent) = target
-            .path
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(&self.path, &target.path)?;
-        Ok(target)
-    }
-
     pub(crate) fn append(&self, event: &TranscriptEvent) -> anyhow::Result<()> {
         if let Some(parent) = self
             .path
@@ -140,6 +122,7 @@ impl TimelineJsonlStore {
         Ok(events)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_tail_page(&self, limit: usize) -> anyhow::Result<TimelinePage> {
         if limit == 0 || !self.path.exists() {
             return Ok(TimelinePage {
@@ -279,6 +262,7 @@ impl TimelineJsonlStore {
     }
 }
 
+#[cfg(test)]
 fn retain_visible_event(
     line: &[u8],
     visible_reversed: &mut Vec<TranscriptEvent>,

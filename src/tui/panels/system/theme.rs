@@ -4,8 +4,6 @@ use super::super::*;
 use a3s_tui::components::{PreviewItem, PreviewPanel, PreviewPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const THEME_OVERLAY_ROWS_BELOW: usize = 5;
-
 fn theme_panel_height() -> usize {
     THEMES.len() + 8
 }
@@ -44,7 +42,7 @@ fn theme_panel(selected: usize) -> PreviewPanel {
         .muted_color(TN_GRAY)
         .divider_color(TN_GRAY)
         .preview_color(TN_FG)
-        .selected_colors(Color::BrightWhite, ACCENT)
+        .selected_colors(TN_FG, SURFACE_SELECTED)
 }
 
 fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
@@ -55,9 +53,9 @@ fn theme_panel_lines(selected: usize, width: usize) -> Vec<String> {
         .collect()
 }
 
-fn theme_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn theme_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(THEME_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -88,7 +86,8 @@ impl App {
         if row_count == 0 {
             return;
         }
-        let y_offset = theme_overlay_y_offset(self.height as usize, row_count);
+        let y_offset =
+            theme_overlay_y_offset(self.height as usize, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -154,7 +153,7 @@ mod tests {
         use a3s_tui::event::{MouseButton, MouseEventKind};
 
         let row_count = theme_panel_lines(0, 48).len();
-        let y_offset = theme_overlay_y_offset(24, row_count);
+        let y_offset = theme_overlay_y_offset(24, row_count, 5);
         let mut panel = theme_panel(0);
         panel.set_y_offset(y_offset);
 
@@ -186,7 +185,7 @@ mod tests {
 
         assert!(THEMES.len() > 1);
         let row_count = theme_panel_lines(0, 48).len();
-        let y_offset = theme_overlay_y_offset(24, row_count);
+        let y_offset = theme_overlay_y_offset(24, row_count, 5);
         let mut panel = theme_panel(0);
         panel.set_y_offset(y_offset);
 
@@ -198,5 +197,11 @@ mod tests {
         });
 
         assert_eq!(msg, Some(PreviewPanelMsg::Selected(1)));
+    }
+
+    #[test]
+    fn theme_overlay_moves_above_dynamic_composer_rows() {
+        assert_eq!(theme_overlay_y_offset(24, 8, 5), 11);
+        assert_eq!(theme_overlay_y_offset(24, 8, 9), 7);
     }
 }

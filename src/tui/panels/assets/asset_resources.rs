@@ -1193,7 +1193,7 @@ fn resource_menu_lines(
         .marker("▸")
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
+        .selected_colors(TN_FG, SURFACE_SELECTED)
         .view(width.min(u16::MAX as usize) as u16, height)
         .lines()
         .map(str::to_string)
