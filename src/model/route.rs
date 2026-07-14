@@ -9,6 +9,8 @@ pub(crate) enum ModelSource {
     Config,
     Claude,
     Codex,
+    #[serde(rename = "codebuddy", alias = "code_buddy", alias = "workbuddy")]
+    CodeBuddy,
     OsGateway,
 }
 
@@ -18,6 +20,7 @@ impl ModelSource {
             Self::Config => "config.acl",
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::CodeBuddy => "WorkBuddy",
             Self::OsGateway => "A3S OS",
         }
     }
@@ -27,7 +30,29 @@ impl ModelSource {
             Self::Config => None,
             Self::Claude => Some("claude-code"),
             Self::Codex => Some("codex"),
+            Self::CodeBuddy => Some("workbuddy"),
             Self::OsGateway => Some("a3s-os"),
+        }
+    }
+
+    pub(crate) const fn from_account_provider(
+        provider: crate::account_providers::AccountProvider,
+    ) -> Self {
+        match provider {
+            crate::account_providers::AccountProvider::Claude => Self::Claude,
+            crate::account_providers::AccountProvider::Codex => Self::Codex,
+            crate::account_providers::AccountProvider::CodeBuddy => Self::CodeBuddy,
+        }
+    }
+
+    pub(crate) const fn account_provider(
+        self,
+    ) -> Option<crate::account_providers::AccountProvider> {
+        match self {
+            Self::Claude => Some(crate::account_providers::AccountProvider::Claude),
+            Self::Codex => Some(crate::account_providers::AccountProvider::Codex),
+            Self::CodeBuddy => Some(crate::account_providers::AccountProvider::CodeBuddy),
+            Self::Config | Self::OsGateway => None,
         }
     }
 }
@@ -72,6 +97,8 @@ impl FromStr for ModelRoute {
         for (prefix, source) in [
             ("claude-code/", ModelSource::Claude),
             ("codex/", ModelSource::Codex),
+            ("workbuddy/", ModelSource::CodeBuddy),
+            ("codebuddy/", ModelSource::CodeBuddy),
             ("a3s-os/", ModelSource::OsGateway),
         ] {
             if let Some(model) = value.strip_prefix(prefix) {
@@ -83,9 +110,16 @@ impl FromStr for ModelRoute {
 }
 
 fn has_reserved_prefix(model: &str) -> bool {
-    ["config", "claude-code", "codex", "a3s-os"]
-        .iter()
-        .any(|prefix| model.split('/').next() == Some(prefix))
+    [
+        "config",
+        "claude-code",
+        "codex",
+        "workbuddy",
+        "codebuddy",
+        "a3s-os",
+    ]
+    .iter()
+    .any(|prefix| model.split('/').next() == Some(prefix))
 }
 
 fn validate_model_id(model: &str) -> anyhow::Result<()> {
@@ -116,6 +150,7 @@ mod tests {
                 "claude-opus-4-6",
             ),
             ("codex/gpt-5.2-codex", ModelSource::Codex, "gpt-5.2-codex"),
+            ("workbuddy/glm-5.1", ModelSource::CodeBuddy, "glm-5.1"),
             ("a3s-os/team/model", ModelSource::OsGateway, "team/model"),
             ("config/codex/custom", ModelSource::Config, "codex/custom"),
         ] {
@@ -131,5 +166,13 @@ mod tests {
         for route in ["", "codex/", "a3s-os//model", "model with spaces"] {
             assert!(route.parse::<ModelRoute>().is_err(), "accepted {route:?}");
         }
+    }
+
+    #[test]
+    fn legacy_codebuddy_route_normalizes_to_workbuddy() {
+        let route: ModelRoute = "codebuddy/glm-5.1".parse().unwrap();
+
+        assert_eq!(route.source, ModelSource::CodeBuddy);
+        assert_eq!(route.to_string(), "workbuddy/glm-5.1");
     }
 }

@@ -1,7 +1,7 @@
 //! `/model` picker (with account tabs) + `/effort` rebuild logic + overlays.
 
 use super::super::*;
-use super::login::{has_local_login, AuthProvider};
+use crate::account_providers::AccountProvider;
 use crate::config::{
     save_model_selection_preference, ModelSelectionPreference, ModelSelectionSource,
 };
@@ -17,14 +17,23 @@ struct ModelTab {
 }
 
 fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, usize) {
-    let current = current.map(crate::claude::canonical_model_name);
     current
-        .as_deref()
         .and_then(|current| {
             tabs.iter().enumerate().find_map(|(tab_idx, tab)| {
+                let current = tab
+                    .source
+                    .account_provider()
+                    .map(|provider| provider.canonical_model(current))
+                    .unwrap_or_else(|| current.to_string());
                 tab.models
                     .iter()
-                    .position(|model| model == current)
+                    .position(|model| {
+                        tab.source
+                            .account_provider()
+                            .map(|provider| provider.canonical_model(model))
+                            .unwrap_or_else(|| model.clone())
+                            == current
+                    })
                     .map(|model_idx| (tab_idx, model_idx))
             })
         })
@@ -35,7 +44,16 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
 const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = TN_CYAN;
+const CODEBUDDY_COLOR: Color = TN_PURPLE;
 const CODEX_MODEL_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn account_provider_color(provider: AccountProvider) -> Color {
+    match provider {
+        AccountProvider::Claude => CLAUDE_COLOR,
+        AccountProvider::Codex => CODEX_COLOR,
+        AccountProvider::CodeBuddy => CODEBUDDY_COLOR,
+    }
+}
 
 fn prompt_guideline_for_effort(
     effort: usize,
@@ -147,6 +165,20 @@ fn should_fetch_os_gateway_models(
         && gateway_models.is_none_or(|models| models.is_empty())
 }
 
+fn should_fetch_account_models(
+    active_tab: Option<&ModelTab>,
+    cached: bool,
+    loading: bool,
+    failed: bool,
+) -> bool {
+    active_tab
+        .and_then(|tab| tab.source.account_provider())
+        .is_some_and(|provider| provider != AccountProvider::Codex)
+        && !cached
+        && !loading
+        && !failed
+}
+
 pub(crate) async fn rebuild_agent_session(
     agent: Arc<Agent>,
     workspace: String,
@@ -253,8 +285,7 @@ async fn rebuild_live_agent_session(request: LiveSessionRebuildRequest) -> Sessi
 }
 
 impl App {
-    /// Tabs: a3s-code always; Claude Code / Codex appear when that local login
-    /// is detected.
+    /// Tabs: a3s-code always; detected local account providers follow.
     fn model_tabs(&self) -> Vec<ModelTab> {
         let mut tabs = vec![ModelTab {
             label: "a3s-code",
@@ -262,24 +293,26 @@ impl App {
             models: self.models.clone(),
             source: ModelSelectionSource::Config,
         }];
-        if has_local_login(AuthProvider::Claude) {
-            tabs.push(ModelTab {
-                label: "Claude Code",
-                color: CLAUDE_COLOR,
-                models: crate::model::catalog::claude_models(),
-                source: ModelSelectionSource::Claude,
-            });
-        }
-        if has_local_login(AuthProvider::Codex) {
-            tabs.push(ModelTab {
-                label: "Codex",
-                color: CODEX_COLOR,
-                models: self
-                    .codex_account_models
+        for provider in AccountProvider::ALL {
+            if !provider.is_available() {
+                continue;
+            }
+            let models = if provider == AccountProvider::Codex {
+                self.codex_account_models
                     .iter()
                     .map(|model| model.slug.clone())
-                    .collect(),
-                source: ModelSelectionSource::Codex,
+                    .collect()
+            } else {
+                self.account_models
+                    .get(&provider)
+                    .cloned()
+                    .unwrap_or_else(|| provider.local_models())
+            };
+            tabs.push(ModelTab {
+                label: provider.label(),
+                color: account_provider_color(provider),
+                models,
+                source: ModelSelectionSource::from_account_provider(provider),
             });
         }
         // Signed in to OS → offer its unified AI gateway (gateway-managed:
@@ -325,7 +358,7 @@ impl App {
     /// The installed Codex CLI owns login refresh, entitlement filtering, and
     /// client-version negotiation; this TUI only consumes its picker catalog.
     pub(crate) fn maybe_refresh_codex_models(&mut self) -> Option<Cmd<Msg>> {
-        if !has_local_login(AuthProvider::Codex)
+        if !AccountProvider::Codex.is_available()
             || self.codex_models_loading
             || self
                 .codex_models_refreshed_at
@@ -337,10 +370,37 @@ impl App {
         self.codex_models_loading = true;
         Some(cmd::cmd(|| async {
             Msg::CodexModels(
-                crate::codex::refresh_codex_models()
+                crate::account_providers::codex::refresh_codex_models()
                     .await
                     .map_err(|error| error.to_string()),
             )
+        }))
+    }
+
+    pub(crate) fn maybe_fetch_active_account_models(&mut self) -> Option<Cmd<Msg>> {
+        let tabs = self.model_tabs();
+        let active_tab = self.model_tab.min(tabs.len().saturating_sub(1));
+        let provider = tabs
+            .get(active_tab)
+            .and_then(|tab| tab.source.account_provider())?;
+        if !should_fetch_account_models(
+            tabs.get(active_tab),
+            self.account_models.contains_key(&provider),
+            self.account_models_loading.contains(&provider),
+            self.account_model_errors.contains_key(&provider),
+        ) {
+            return None;
+        }
+
+        self.account_models_loading.insert(provider);
+        Some(cmd::cmd(move || async move {
+            Msg::AccountModels {
+                provider,
+                result: provider
+                    .discover_models()
+                    .await
+                    .map_err(|error| error.to_string()),
+            }
         }))
     }
 
@@ -370,6 +430,11 @@ impl App {
                 result: crate::a3s_os::fetch_gateway_models(&addr, &token).await,
             }
         }))
+    }
+
+    pub(crate) fn maybe_fetch_active_model_models(&mut self) -> Option<Cmd<Msg>> {
+        self.maybe_fetch_active_account_models()
+            .or_else(|| self.maybe_fetch_active_os_gateway_models())
     }
 
     pub(crate) fn clamp_open_model_menu_selection(&mut self) {
@@ -405,12 +470,12 @@ impl App {
             KeyCode::Left => {
                 self.model_tab = t.saturating_sub(1);
                 self.model_menu = Some(0);
-                Some(self.maybe_fetch_active_os_gateway_models())
+                Some(self.maybe_fetch_active_model_models())
             }
             KeyCode::Right | KeyCode::Tab => {
                 self.model_tab = (t + 1).min(tab_count - 1);
                 self.model_menu = Some(0);
-                Some(self.maybe_fetch_active_os_gateway_models())
+                Some(self.maybe_fetch_active_model_models())
             }
             KeyCode::Enter => Some(self.activate_model_menu_item(&tabs[t], sel.min(last))),
             KeyCode::Esc => {
@@ -448,7 +513,7 @@ impl App {
             Some(TabbedMenuPanelMsg::TabChanged(tab)) => {
                 self.model_tab = tab.min(tabs.len() - 1);
                 self.model_menu = Some(0);
-                self.maybe_fetch_active_os_gateway_models()
+                self.maybe_fetch_active_model_models()
             }
             Some(TabbedMenuPanelMsg::Selected { tab, item }) => tabs
                 .get(tab)
@@ -462,8 +527,12 @@ impl App {
         self.model_menu = None;
         match tab.source {
             ModelSelectionSource::Config => model.and_then(|model| self.switch_model(&model)),
-            ModelSelectionSource::Claude => model.and_then(|model| self.sign_in_claude(&model)),
-            ModelSelectionSource::Codex => model.and_then(|model| self.sign_in_codex(&model)),
+            ModelSelectionSource::Claude
+            | ModelSelectionSource::Codex
+            | ModelSelectionSource::CodeBuddy => model.and_then(|model| {
+                let provider = tab.source.account_provider()?;
+                self.sign_in_account(provider, &model)
+            }),
             ModelSelectionSource::OsGateway => model.and_then(|model| self.use_os_gateway(&model)),
         }
     }
@@ -497,10 +566,12 @@ impl App {
         }
     }
 
-    /// Sign in with the local Claude Code login and switch to one of its models
-    /// by injecting the Claude account client (OAuth Bearer auth).
-    fn sign_in_claude(&mut self, model: &str) -> Option<Cmd<Msg>> {
-        let model = crate::claude::canonical_model_name(model);
+    /// Switch to a model backed by a detected local developer-tool account.
+    fn sign_in_account(&mut self, provider: AccountProvider, model: &str) -> Option<Cmd<Msg>> {
+        if provider == AccountProvider::Codex {
+            return self.sign_in_codex(model);
+        }
+        let model = provider.canonical_model(model);
         if self.state != State::Idle {
             self.push_line(
                 &Style::new()
@@ -509,9 +580,9 @@ impl App {
             );
             return None;
         }
-        match crate::claude::ClaudeClient::from_claude_login(&model) {
+        match provider.client(&model, &self.session_id) {
             Ok(client) => {
-                let llm_override = Some(LlmOverride::Static(Arc::new(client)));
+                let llm_override = Some(LlmOverride::Static(client));
                 let context_limit = self.active_context_limit_for(&model);
                 let mut profile = self.session_rebuild_profile();
                 profile.model = Some(model.clone());
@@ -521,18 +592,17 @@ impl App {
                     profile,
                     SessionRebuildAction::Model {
                         model,
-                        source: ModelSelectionSource::Claude,
+                        source: ModelSelectionSource::from_account_provider(provider),
                         llm_override,
                         context_limit,
                     },
                 )
             }
             Err(error) => {
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  Claude Code sign-in failed: {error}")),
-                );
+                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                    "  {} account unavailable: {error}",
+                    provider.label()
+                )));
                 None
             }
         }
@@ -549,7 +619,7 @@ impl App {
             );
             return None;
         }
-        match crate::codex::CodexClient::from_codex_login_with_effort(
+        match crate::account_providers::codex::CodexClient::from_codex_login_with_effort(
             model,
             &self.session_id,
             EFFORT_LEVELS[self.effort].id,
@@ -903,9 +973,11 @@ impl App {
                         if still_active {
                             self.goal = previous_goal.clone();
                             self.goal_since = *previous_goal_since;
-                            self.push_line(&Style::new().fg(TN_RED).render(&format!(
-                                "  /goal could not enable Ultracode: {error}"
-                            )));
+                            self.push_line(
+                                &Style::new().fg(TN_RED).render(&format!(
+                                    "  /goal could not enable Ultracode: {error}"
+                                )),
+                            );
                         }
                         return self.drain_queue();
                     }
@@ -959,6 +1031,7 @@ impl App {
                     ModelSelectionSource::Config => format!("switched to {model}"),
                     ModelSelectionSource::Claude => format!("Claude Code · {model}"),
                     ModelSelectionSource::Codex => format!("Codex · {model}"),
+                    ModelSelectionSource::CodeBuddy => format!("WorkBuddy · {model}"),
                     ModelSelectionSource::OsGateway => format!("OS Gateway · {model}"),
                 };
                 self.push_line(&Style::new().fg(TN_GREEN).render(&format!("  ⇄ {label}")));
@@ -1399,6 +1472,65 @@ mod tests {
             Some(&[]),
             false,
             true
+        ));
+    }
+
+    #[test]
+    fn account_models_fetch_once_for_cli_backed_account_tabs() {
+        let config_tab = ModelTab {
+            label: "a3s-code",
+            color: A3S_COLOR,
+            models: vec!["openai/gpt-5".into()],
+            source: ModelSelectionSource::Config,
+        };
+        let workbuddy_tab = ModelTab {
+            label: "WorkBuddy",
+            color: CODEBUDDY_COLOR,
+            models: vec!["auto".into()],
+            source: ModelSelectionSource::CodeBuddy,
+        };
+        let codex_tab = ModelTab {
+            label: "Codex",
+            color: CODEX_COLOR,
+            models: vec!["gpt-5.6-sol".into()],
+            source: ModelSelectionSource::Codex,
+        };
+
+        assert!(!should_fetch_account_models(
+            Some(&config_tab),
+            false,
+            false,
+            false
+        ));
+        assert!(should_fetch_account_models(
+            Some(&workbuddy_tab),
+            false,
+            false,
+            false
+        ));
+        assert!(!should_fetch_account_models(
+            Some(&workbuddy_tab),
+            true,
+            false,
+            false
+        ));
+        assert!(!should_fetch_account_models(
+            Some(&workbuddy_tab),
+            false,
+            true,
+            false
+        ));
+        assert!(!should_fetch_account_models(
+            Some(&workbuddy_tab),
+            false,
+            false,
+            true
+        ));
+        assert!(!should_fetch_account_models(
+            Some(&codex_tab),
+            false,
+            false,
+            false
         ));
     }
 

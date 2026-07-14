@@ -14,7 +14,7 @@ pub(crate) const USAGE: &str = "usage:\n\
   a3s model reset\n\
   a3s model config\n\n\
 Routes from config.acl use provider/model. Account routes use\n\
-claude-code/model, codex/model, or a3s-os/model.\n";
+claude-code/model, codex/model, workbuddy/model, or a3s-os/model.\n";
 
 pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {

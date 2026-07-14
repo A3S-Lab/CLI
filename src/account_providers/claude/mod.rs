@@ -7,9 +7,7 @@
 
 mod code_cli;
 mod credentials;
-mod host_tools;
 mod model;
-mod protocol;
 mod raw_messages;
 
 use a3s_code_core::llm::{
@@ -27,7 +25,7 @@ use credentials::ClaudeCredentials;
 use raw_messages::RawMessagesClient;
 
 pub(crate) use credentials::has_claude_login;
-pub(crate) use model::canonical_model_name;
+pub(crate) use model::{canonical_model_name, models};
 
 static PREFER_CLAUDE_CLI_TRANSPORT: AtomicBool = AtomicBool::new(false);
 

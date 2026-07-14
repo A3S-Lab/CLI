@@ -20,6 +20,7 @@ fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Outpu
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_HOME")
+        .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
         .env("RUST_BACKTRACE", "0")
         .output()
@@ -166,6 +167,44 @@ fn codex_login_models_are_selectable_from_the_product_cache() {
     let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
     assert!(preference.contains(r#""source": "codex""#));
     assert!(!preference.contains("codex-secret"));
+}
+
+#[test]
+fn workbuddy_login_models_are_discovered_without_copying_account_state() {
+    let (_workspace, home, config) = fixture();
+    std::fs::create_dir_all(home.join(".workbuddy")).unwrap();
+    std::fs::create_dir_all(home.join("bin")).unwrap();
+    std::fs::write(
+        home.join(".workbuddy/settings.json"),
+        r#"{"privateAccountState":"workbuddy-secret"}"#,
+    )
+    .unwrap();
+    make_executable(
+        &home.join("bin/codebuddy"),
+        "#!/bin/sh\nprintf '%s\\n' 'Currently supported models for your account:' '  - glm-5.1' '  - kimi-k2.7'\n",
+    );
+
+    let list = run(&home, &config, &["model", "list"]);
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("workbuddy/glm-5.1"));
+    assert!(stdout.contains("workbuddy/kimi-k2.7"));
+    assert!(stdout.contains("WorkBuddy"));
+    assert!(!stdout.contains("workbuddy-secret"));
+
+    let selected = run(&home, &config, &["model", "use", "workbuddy/glm-5.1"]);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
+    assert!(preference.contains(r#""source": "codebuddy""#));
+    assert!(!preference.contains("workbuddy-secret"));
 }
 
 #[test]

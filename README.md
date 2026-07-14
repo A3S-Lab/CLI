@@ -303,8 +303,8 @@ a3s account logout a3s-os
 ```
 
 Model routes use one catalog shared by the root CLI and the Code TUI. Custom
-provider models come from `config.acl`; Claude Code, Codex, and A3S OS models
-remain bound to their product-owned credentials:
+provider models come from `config.acl`; Claude Code, Codex, WorkBuddy, and A3S
+OS models remain bound to their product-owned credentials:
 
 ```sh
 a3s model list
@@ -312,16 +312,17 @@ a3s model current
 a3s model use openai/my-model
 a3s model use claude-code/claude-opus-4-6
 a3s model use codex/gpt-5.2-codex
+a3s model use workbuddy/glm-5.1
 a3s model use a3s-os/my-model
 a3s model reset               # return to config.acl's default_model
 a3s model config              # print the active config.acl path
 ```
 
 `a3s model use` writes only `~/.a3s/tui/model-selection.json`; it does not mutate a
-project's `config.acl` or copy Claude, Codex, or A3S OS tokens. The existing
+project's `config.acl` or copy Claude, Codex, WorkBuddy, or A3S OS tokens. The existing
 `a3s code model` command is a compatibility entrypoint to the same catalog.
 Selecting a route probes only that route's credential source; `model list`
-refreshes Codex and A3S OS catalogs concurrently.
+refreshes Codex, WorkBuddy, and A3S OS catalogs concurrently.
 
 List runtime-callable models:
 
@@ -331,12 +332,13 @@ a3s code model
 a3s code model list
 ```
 
-The model commands list `config.acl` models, local Claude/Codex account models,
-and signed-in OS gateway models from the unified gateway. Codex models are
-refreshed through the installed Codex CLI so the list follows the current
-account's picker-visible catalog, with `models_cache.json` as an offline
-fallback. They are not the same thing as digital asset repository entries whose
-category happens to be `model`.
+The model commands list `config.acl` models, local Claude/Codex/WorkBuddy
+account models, and signed-in OS gateway models from the unified gateway.
+Codex models are refreshed through the installed Codex CLI so the list follows
+the current account's picker-visible catalog, with `models_cache.json` as an
+offline fallback. WorkBuddy models are discovered through its installed
+CodeBuddy CLI. They are not the same thing as digital asset repository entries
+whose category happens to be `model`.
 
 Find local asset sources, clone repositories, and inspect OS assets:
 
@@ -1073,12 +1075,27 @@ normalizes the product-only `ultra` label to the Responses wire value `max`.
 The selected profile's host-side budgets and orchestration remain active. If
 live refresh is unavailable, the last local catalog remains usable.
 
+When the WorkBuddy desktop app is installed and signed in, the WorkBuddy tab
+uses the app's bundled CodeBuddy CLI and `~/.workbuddy` account state. A3S does
+not read, copy, persist, or log WorkBuddy's private tokens. Opening the tab
+refreshes the model ids currently enabled for the account; `a3s model list` and
+`a3s code models` use the same discovery path. The app bundle is detected
+automatically on macOS, installed `codebuddy` and `cbc` commands are supported
+on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard installation.
+
+Claude Code and WorkBuddy share the account-CLI stream and A3S host-tool bridge.
+Their own CLI tools are disabled, provider tool-call output is normalized into
+native A3S tool-use events, and tool results return as structured conversation
+history. Codex keeps its direct Responses transport but uses the same account
+provider registry for availability, model selection, persistence, and restore.
+
 ## Testing
 
 ```sh
 cargo test --all-targets
 cargo test --test box_command_soak -- --ignored
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
+A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
 ```
 
 The ignored soak test repeats `a3s box` after a fake first-use install and

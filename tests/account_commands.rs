@@ -15,6 +15,7 @@ fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Outpu
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_HOME")
+        .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
         .env("RUST_BACKTRACE", "0")
         .output()
@@ -75,6 +76,7 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("claude-code\tsigned-out"));
     assert!(stdout.contains("codex\tsigned-out"));
+    assert!(stdout.contains("workbuddy\tsigned-out"));
     assert!(stdout.contains("a3s-os\tsigned-in\thttps://os.example.test"));
     assert!(!stdout.contains("secret"));
 

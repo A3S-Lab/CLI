@@ -45,10 +45,6 @@ mod memory;
 #[path = "context/sleep.rs"]
 pub(crate) mod sleep;
 
-// OS Runtime bridge.
-#[path = "os/login.rs"]
-pub(crate) mod login;
-
 // System UI.
 #[path = "system/banner.rs"]
 mod banner;

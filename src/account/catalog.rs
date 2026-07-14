@@ -1,12 +1,14 @@
 use a3s_code_core::config::CodeConfig;
 use std::path::Path;
 
-use crate::{a3s_os, claude, codex, config};
+use crate::account_providers::AccountProvider;
+use crate::{a3s_os, config};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AccountSource {
     ClaudeCode,
     Codex,
+    WorkBuddy,
     A3sOs,
 }
 
@@ -15,6 +17,7 @@ impl AccountSource {
         match self {
             Self::ClaudeCode => "claude-code",
             Self::Codex => "codex",
+            Self::WorkBuddy => "workbuddy",
             Self::A3sOs => "a3s-os",
         }
     }
@@ -29,21 +32,21 @@ pub(crate) struct AccountStatus {
 }
 
 pub(crate) fn discover() -> Vec<AccountStatus> {
-    vec![
-        AccountStatus {
-            source: AccountSource::ClaudeCode,
-            signed_in: claude::has_claude_login(),
+    let mut accounts = AccountProvider::ALL
+        .into_iter()
+        .map(|provider| AccountStatus {
+            source: match provider {
+                AccountProvider::Claude => AccountSource::ClaudeCode,
+                AccountProvider::Codex => AccountSource::Codex,
+                AccountProvider::CodeBuddy => AccountSource::WorkBuddy,
+            },
+            signed_in: provider.is_available(),
             label: None,
             detail: None,
-        },
-        AccountStatus {
-            source: AccountSource::Codex,
-            signed_in: codex::has_codex_login(),
-            label: None,
-            detail: None,
-        },
-        os_status(),
-    ]
+        })
+        .collect::<Vec<_>>();
+    accounts.push(os_status());
+    accounts
 }
 
 fn os_status() -> AccountStatus {

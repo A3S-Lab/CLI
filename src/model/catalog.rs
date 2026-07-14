@@ -1,8 +1,8 @@
 use a3s_code_core::config::CodeConfig;
-use serde_json::Value;
 use std::path::Path;
 
-use crate::{a3s_os, claude, codex, config};
+use crate::account_providers::{codex, AccountProvider};
+use crate::{a3s_os, config};
 
 use super::route::{ModelRoute, ModelSource};
 
@@ -30,16 +30,18 @@ impl ModelCatalog {
             catalog.config_default = config.default_model.clone();
             catalog.add_config_models(config);
         }
-        catalog.add_claude_models();
+        catalog.add_local_account_models(AccountProvider::Claude);
         let os_config = code_config
             .as_ref()
             .and_then(|config| config.os.as_ref())
             .cloned();
-        let (codex, os) = tokio::join!(
+        let (codex, workbuddy, os) = tokio::join!(
             discover_codex_models(refresh_remote),
+            discover_account_models(AccountProvider::CodeBuddy, refresh_remote),
             discover_os_models(os_config)
         );
         catalog.extend(codex);
+        catalog.extend(workbuddy);
         catalog.extend(os);
         catalog.sort_and_deduplicate();
         catalog
@@ -57,11 +59,22 @@ impl ModelCatalog {
                     format!("{}/{}", provider.name, model.id) == route.model
                 })
             }
-            ModelSource::Claude => {
-                claude::has_claude_login() && claude_models().contains(&route.model)
+            ModelSource::Claude | ModelSource::CodeBuddy => {
+                let Some(provider) = route.source.account_provider() else {
+                    return false;
+                };
+                if !provider.is_available() {
+                    return false;
+                }
+                provider
+                    .discover_models()
+                    .await
+                    .unwrap_or_else(|_| provider.local_models())
+                    .iter()
+                    .any(|model| provider.canonical_model(model) == route.model)
             }
             ModelSource::Codex => {
-                codex::has_codex_login()
+                codex::has_valid_codex_login()
                     && codex::cached_codex_models()
                         .iter()
                         .any(|model| model.slug == route.model)
@@ -110,16 +123,19 @@ impl ModelCatalog {
         }
     }
 
-    fn add_claude_models(&mut self) {
-        if !claude::has_claude_login() {
+    fn add_local_account_models(&mut self, provider: AccountProvider) {
+        if !provider.is_available() {
             return;
         }
-        for model in claude_models() {
-            if let Ok(route) = ModelRoute::new(ModelSource::Claude, &model) {
+        let source = ModelSource::from_account_provider(provider);
+        for model in provider.local_models() {
+            let model = provider.canonical_model(&model);
+            if let Ok(route) = ModelRoute::new(source, &model) {
+                let context_window = provider.model_context(&model);
                 self.entries.push(ModelEntry {
                     route,
                     display_name: model,
-                    context_window: None,
+                    context_window,
                     reasoning: true,
                     tool_call: true,
                 });
@@ -146,7 +162,7 @@ struct Discovery {
 
 async fn discover_codex_models(refresh_remote: bool) -> Discovery {
     let mut discovery = Discovery::default();
-    if !codex::has_codex_login() {
+    if !codex::has_valid_codex_login() {
         return discovery;
     }
     let models = if refresh_remote {
@@ -168,6 +184,48 @@ async fn discover_codex_models(refresh_remote: bool) -> Discovery {
                 route,
                 display_name: model.slug,
                 context_window: model.context_window,
+                reasoning: true,
+                tool_call: true,
+            });
+        }
+    }
+    discovery
+}
+
+async fn discover_account_models(provider: AccountProvider, refresh_remote: bool) -> Discovery {
+    let mut discovery = Discovery::default();
+    if !provider.is_available() {
+        return discovery;
+    }
+    let models = if refresh_remote {
+        match provider.discover_models().await {
+            Ok(models) if !models.is_empty() => models,
+            Ok(_) => {
+                discovery.warnings.push(format!(
+                    "{} returned no account models; using its compatibility list",
+                    provider.label()
+                ));
+                provider.local_models()
+            }
+            Err(error) => {
+                discovery.warnings.push(format!(
+                    "{} model discovery failed; using its compatibility list: {error}",
+                    provider.label()
+                ));
+                provider.local_models()
+            }
+        }
+    } else {
+        provider.local_models()
+    };
+    let source = ModelSource::from_account_provider(provider);
+    for model in models {
+        let model = provider.canonical_model(&model);
+        if let Ok(route) = ModelRoute::new(source, &model) {
+            discovery.entries.push(ModelEntry {
+                route,
+                display_name: model.clone(),
+                context_window: provider.model_context(&model),
                 reasoning: true,
                 tool_call: true,
             });
@@ -232,91 +290,7 @@ fn source_rank(source: ModelSource) -> usize {
         ModelSource::Config => 0,
         ModelSource::Claude => 1,
         ModelSource::Codex => 2,
-        ModelSource::OsGateway => 3,
-    }
-}
-
-/// Claude models observed in local Claude Code project state and usage caches.
-pub(crate) fn claude_models() -> Vec<String> {
-    let mut models = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = Path::new(&home);
-        for path in [
-            home.join(".claude.json"),
-            home.join(".claude").join("stats-cache.json"),
-        ] {
-            if let Ok(raw) = std::fs::read_to_string(path) {
-                if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-                    collect_claude_models(&value, &mut models);
-                }
-            }
-        }
-    }
-    if models.is_empty() {
-        models.push("claude-sonnet-4".to_string());
-    }
-    models
-}
-
-fn collect_claude_models(value: &Value, models: &mut Vec<String>) {
-    fn push(models: &mut Vec<String>, candidate: &str) {
-        let model = claude::canonical_model_name(candidate);
-        if model.starts_with("claude") && !models.contains(&model) {
-            models.push(model);
-        }
-    }
-
-    fn walk(value: &Value, parent: Option<&str>, models: &mut Vec<String>) {
-        match value {
-            Value::Object(map) => {
-                if matches!(parent, Some("lastModelUsage" | "tokensByModel")) {
-                    for model in map.keys() {
-                        push(models, model);
-                    }
-                }
-                for (key, child) in map {
-                    if key == "model" {
-                        if let Some(model) = child.as_str() {
-                            push(models, model);
-                        }
-                    }
-                    walk(child, Some(key), models);
-                }
-            }
-            Value::Array(items) => {
-                for child in items {
-                    walk(child, parent, models);
-                }
-            }
-            Value::String(model) if parent == Some("model") => push(models, model),
-            _ => {}
-        }
-    }
-    walk(value, None, models);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn collects_claude_models_without_duplicates() {
-        let value = json!({
-            "projects": [{"model": "claude-opus-4-6"}],
-            "lastModelUsage": {"claude-sonnet-4": 10},
-            "tokensByModel": {"not-claude": 1, "claude-sonnet-4": 2}
-        });
-        let mut models = Vec::new();
-        collect_claude_models(&value, &mut models);
-        assert!(models.contains(&"claude-opus-4-6".to_string()));
-        assert_eq!(
-            models
-                .iter()
-                .filter(|model| model.as_str() == "claude-sonnet-4")
-                .count(),
-            1
-        );
-        assert!(!models.contains(&"not-claude".to_string()));
+        ModelSource::CodeBuddy => 3,
+        ModelSource::OsGateway => 4,
     }
 }

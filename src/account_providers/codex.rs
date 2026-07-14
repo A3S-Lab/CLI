@@ -434,7 +434,7 @@ pub(crate) fn codex_model_context(model: &str) -> Option<u32> {
 }
 
 pub(crate) fn has_codex_login() -> bool {
-    let Some(path) = codex_home().map(|home| home.join("auth.json")) else {
+    let Some(path) = codex_auth_path() else {
         return false;
     };
     std::fs::read_to_string(path)
@@ -450,6 +450,49 @@ pub(crate) fn has_codex_login() -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|token| !token.is_empty())
         })
+}
+
+/// Return whether the local Codex login has a usable access token and, when an
+/// ID token is present, has not expired (or entered the 60-second refresh
+/// window). Legacy auth files without an ID token remain supported because
+/// their expiry cannot be determined locally.
+pub(crate) fn has_valid_codex_login() -> bool {
+    if !has_codex_login() {
+        return false;
+    }
+    let Some(path) = codex_auth_path() else {
+        return false;
+    };
+    let Some(value) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+    else {
+        return false;
+    };
+    value
+        .pointer("/tokens/id_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .is_none_or(|token| !is_jwt_expired_at(token, chrono::Utc::now().timestamp()))
+}
+
+fn is_jwt_expired_at(jwt: &str, now: i64) -> bool {
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+
+    let Some(payload) = jwt.split('.').nth(1) else {
+        return true;
+    };
+    let Some(claims) = URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    else {
+        return true;
+    };
+    let Some(expires_at) = claims.get("exp").and_then(Value::as_i64) else {
+        return true;
+    };
+    expires_at <= now.saturating_add(60)
 }
 
 fn positive_u32(value: &Value) -> Option<u32> {
@@ -694,6 +737,11 @@ impl LlmClient for CodexClient {
         if !(200..300).contains(&response.status) {
             if let Some(error) = codex_usage_limit_error(response.status, &response.error_body) {
                 return Err(error.into());
+            }
+            if response.status == 401 {
+                return Err(anyhow!(
+                    "Codex access token expired or is invalid (HTTP 401); run `codex login` to refresh the local account"
+                ));
             }
             return Err(anyhow!(
                 "codex /responses HTTP {}: {}",
@@ -944,7 +992,7 @@ fn account_id_from_id_token(jwt: &str) -> Option<String> {
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let claims: Value = serde_json::from_slice(&bytes).ok()?;
     claims
-        .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+        .pointer("/https:~1~1api.openai.com~1auth~1chatgpt_account_id")
         .and_then(|value| value.as_str())
         .map(str::to_string)
 }
@@ -1022,6 +1070,7 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 mod tests {
     use super::*;
     use a3s_code_core::llm::{HttpResponse, StreamingHttpResponse};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct ErrorStreamingHttp {
@@ -1128,6 +1177,43 @@ mod tests {
             description: "Read a file".to_string(),
             parameters: json!({"type": "object"}),
         }
+    }
+
+    fn jwt_with_claims(claims: Value) -> String {
+        format!(
+            "header.{}.signature",
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
+        )
+    }
+
+    #[test]
+    fn codex_login_expiry_uses_a_refresh_safety_window() {
+        let now = 1_800_000_000;
+        assert!(!is_jwt_expired_at(
+            &jwt_with_claims(json!({"exp": now + 61})),
+            now
+        ));
+        assert!(is_jwt_expired_at(
+            &jwt_with_claims(json!({"exp": now + 60})),
+            now
+        ));
+        assert!(is_jwt_expired_at("malformed", now));
+        assert!(is_jwt_expired_at(
+            &jwt_with_claims(json!({"sub": "account"})),
+            now
+        ));
+    }
+
+    #[test]
+    fn chatgpt_account_id_uses_the_fully_escaped_json_pointer() {
+        let token = jwt_with_claims(json!({
+            "https://api.openai.com/auth/chatgpt_account_id": "acct_123"
+        }));
+
+        assert_eq!(
+            account_id_from_id_token(&token).as_deref(),
+            Some("acct_123")
+        );
     }
 
     #[test]
@@ -1442,6 +1528,26 @@ mod tests {
             error.to_string(),
             "Codex usage limit reached (Pro plan). It resets in about 2m. Wait for the reset, or use another provider or account."
         );
+        assert_eq!(http.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_response_points_to_codex_login_without_leaking_body() {
+        let http = Arc::new(ErrorStreamingHttp {
+            status: 401,
+            body: "private backend detail".to_string(),
+            calls: AtomicUsize::new(0),
+        });
+        let mut client = client(true, Some("low"));
+        client.http = http.clone();
+
+        let error = client
+            .complete_streaming(&[], None, &[], CancellationToken::new())
+            .await
+            .expect_err("HTTP 401 must fail before opening a stream");
+
+        assert!(error.to_string().contains("codex login"));
+        assert!(!error.to_string().contains("private backend detail"));
         assert_eq!(http.calls.load(Ordering::SeqCst), 1);
     }
 

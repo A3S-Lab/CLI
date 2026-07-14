@@ -138,6 +138,21 @@ impl AnthropicEventMapper {
                 usage: msg_usage,
             } => {
                 self.stop_reason = Some(delta.stop_reason);
+                if let Some(input_tokens) = msg_usage.input_tokens.filter(|tokens| *tokens > 0) {
+                    self.usage.prompt_tokens = input_tokens;
+                }
+                if let Some(cache_read_tokens) = msg_usage
+                    .cache_read_input_tokens
+                    .filter(|tokens| *tokens > 0)
+                {
+                    self.usage.cache_read_tokens = Some(cache_read_tokens);
+                }
+                if let Some(cache_write_tokens) = msg_usage
+                    .cache_creation_input_tokens
+                    .filter(|tokens| *tokens > 0)
+                {
+                    self.usage.cache_write_tokens = Some(cache_write_tokens);
+                }
                 self.usage.completion_tokens = msg_usage.output_tokens;
                 self.usage.total_tokens = self.usage.prompt_tokens + self.usage.completion_tokens;
             }
@@ -190,7 +205,7 @@ pub(crate) fn parse_sse_data(data: &str) -> Option<AnthropicStreamEvent> {
     serde_json::from_str(data).ok()
 }
 
-pub(crate) fn parse_claude_cli_stream_event(line: &str) -> Option<AnthropicStreamEvent> {
+pub(crate) fn parse_account_cli_stream_event(line: &str) -> Option<AnthropicStreamEvent> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("stream_event") {
         return None;
@@ -298,6 +313,12 @@ pub(crate) struct AnthropicMessageDeltaData {
 #[derive(Debug, Deserialize)]
 pub(crate) struct AnthropicOutputUsage {
     pub(crate) output_tokens: usize,
+    #[serde(default)]
+    pub(crate) input_tokens: Option<usize>,
+    #[serde(default)]
+    pub(crate) cache_read_input_tokens: Option<usize>,
+    #[serde(default)]
+    pub(crate) cache_creation_input_tokens: Option<usize>,
 }
 
 #[cfg(test)]
@@ -305,8 +326,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_claude_cli_stream_event_lines() {
-        let event = parse_claude_cli_stream_event(
+    fn parses_account_cli_stream_event_lines() {
+        let event = parse_account_cli_stream_event(
             r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}}"#,
         )
         .unwrap();
@@ -318,7 +339,7 @@ mod tests {
                 delta: AnthropicDelta::TextDelta { text }
             } if text == "hi"
         ));
-        assert!(parse_claude_cli_stream_event(r#"{"type":"system"}"#).is_none());
+        assert!(parse_account_cli_stream_event(r#"{"type":"system"}"#).is_none());
     }
 
     #[tokio::test]

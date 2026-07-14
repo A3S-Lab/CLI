@@ -2,10 +2,12 @@ use a3s_code_core::llm::{ContentBlock, ToolDefinition};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const TOOL_CALLS_OPEN: &str = "<A3S_TOOL_CALLS>";
 const TOOL_CALLS_CLOSE: &str = "</A3S_TOOL_CALLS>";
 const PROTOCOL_VERSION: &str = "a3s.host_tools.v1";
+static HOST_TOOL_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostToolCall {
@@ -31,7 +33,10 @@ pub(crate) enum HostToolParseResult {
     Invalid(String),
 }
 
-pub(crate) fn host_tool_instructions(tools: &[ToolDefinition]) -> Option<String> {
+pub(crate) fn host_tool_instructions(
+    transport_name: &str,
+    tools: &[ToolDefinition],
+) -> Option<String> {
     if tools.is_empty() {
         return None;
     }
@@ -58,12 +63,12 @@ pub(crate) fn host_tool_instructions(tools: &[ToolDefinition]) -> Option<String>
     Some(format!(
         "# A3S Host Tools\n\n\
          Protocol: {PROTOCOL_VERSION}\n\n\
-         a3s-code host tools are available in this session. Claude Code's own \
+         a3s-code host tools are available in this session. {transport_name}'s own \
          built-in tools are disabled for this transport, so when you need files, \
          commands, web access, skills, or subagents, request a3s host tools \
-         instead of trying to execute Claude Code tools directly. Do not describe \
+         instead of trying to execute {transport_name} tools directly. Do not describe \
          the tool call in prose.\n\n\
-         Preferred Claude Code-compatible form:\n\n\
+         Preferred account-CLI-compatible form:\n\n\
          <function_calls>\n\
          <invoke name=\"read\">\n\
          <parameter name=\"file_path\">README.md</parameter>\n\
@@ -154,7 +159,10 @@ fn build_host_tool_calls(
             id: call
                 .id
                 .filter(|id| !id.trim().is_empty())
-                .unwrap_or_else(|| format!("claude_cli_tool_{}", index + 1)),
+                .unwrap_or_else(|| {
+                    let sequence = HOST_TOOL_CALL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                    format!("account_cli_tool_{sequence}_{}", index + 1)
+                }),
             name,
             input,
         });
@@ -508,9 +516,10 @@ mod tests {
     }
 
     #[test]
-    fn instructions_include_tool_schema_and_claude_code_protocol() {
-        let instructions = host_tool_instructions(&tools()).unwrap();
+    fn instructions_include_tool_schema_and_account_cli_protocol() {
+        let instructions = host_tool_instructions("WorkBuddy", &tools()).unwrap();
 
+        assert!(instructions.contains("WorkBuddy's own built-in tools"));
         assert!(!instructions.contains("<A3S_TOOL_CALLS>"));
         assert!(instructions.contains("<function_calls>"));
         assert!(instructions.contains("<invoke name=\"read\">"));
@@ -533,10 +542,23 @@ mod tests {
         };
 
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].id, "claude_cli_tool_1");
+        assert!(calls[0].id.starts_with("account_cli_tool_"));
         assert_eq!(calls[0].name, "read");
         assert_eq!(calls[0].input, json!({"file_path":"README.md"}));
         assert_eq!(calls[1].id, "custom");
+    }
+
+    #[test]
+    fn generated_tool_ids_are_unique_across_account_cli_rounds() {
+        let text = r#"<function_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></function_calls>"#;
+        let HostToolParseResult::Calls(first) = parse_host_tool_calls(text, &tools()) else {
+            panic!("expected first call");
+        };
+        let HostToolParseResult::Calls(second) = parse_host_tool_calls(text, &tools()) else {
+            panic!("expected second call");
+        };
+
+        assert_ne!(first[0].id, second[0].id);
     }
 
     #[test]

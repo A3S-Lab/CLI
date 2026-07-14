@@ -5,12 +5,11 @@
 
 mod a3s_os;
 mod account;
+mod account_providers;
 mod api;
 mod bench_component;
 mod box_cmd;
 mod budget;
-mod claude;
-mod codex;
 mod compact;
 mod components;
 mod config;
@@ -47,7 +46,7 @@ fn usage_text() -> String {
         "  a3s logout                sign out from A3S OS".to_string(),
         "  a3s model <command>       list, select, or reset the A3S Code model route"
             .to_string(),
-        "  a3s account <command>     inspect or manage Claude, Codex, and A3S OS logins"
+        "  a3s account <command>     inspect local Claude, Codex, WorkBuddy, and A3S OS logins"
             .to_string(),
         "  a3s box <args...>         run Box, installing it automatically on first use".to_string(),
         "  a3s bench <args...>       run Bench, installing its private control component on first real use"

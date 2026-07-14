@@ -1,5 +1,5 @@
+use super::super::protocol::{parse_sse_data, AnthropicEventMapper, StreamMeta};
 use super::model::canonical_model_name;
-use super::protocol::{parse_sse_data, AnthropicEventMapper, StreamMeta};
 use a3s_code_core::llm::{HttpClient, Message, StreamEvent, ToolDefinition};
 use futures::StreamExt;
 use serde::Deserialize;
