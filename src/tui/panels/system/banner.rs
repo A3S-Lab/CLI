@@ -1,10 +1,10 @@
-//! First-run welcome banner: animated ASCII-art logo + tips.
+//! First-run welcome banner: animated A3S mascot, wordmark, and session details.
 
 use super::super::*;
 use a3s_tui::components::WelcomeBanner;
 
 impl App {
-    /// First-run welcome: ASCII-art logo, version, model, and tips.
+    /// First-run welcome: animated product identity, version, model, and tips.
     pub(crate) fn banner(&self) -> String {
         let model = self.model.as_deref().unwrap_or("no model configured");
         let skills = if self.skill_count > 0 {
@@ -47,8 +47,8 @@ fn banner_view(
         .art_offset(1)
         .margin(PAD)
         .gap(2)
-        .mascot_color(TN_GRAY)
-        .art_color(ACCENT)
+        .mascot_color(banner_mascot_color(anim))
+        .art_color(banner_wordmark_color(anim))
         .metadata_color(TN_GRAY)
         .tip_color(TN_GRAY)
         .notice_color(ACCENT)
@@ -65,23 +65,25 @@ fn banner_view(
 }
 
 fn banner_mascot(anim: u8) -> Vec<String> {
-    // A Song-dynasty soldier in a wide-brimmed helmet, holding a sword
-    // (blade + `-+-` crossguard) in his right hand and a heater shield
-    // (`|#|` tapering to `\#/`) in his left. Animated by `anim`: he
-    // blinks, the crossguard glints, and he shifts his feet.
-    let eyes = if anim % 14 == 7 { "- -" } else { "o o" };
-    let g = if anim % 6 == 3 { "*" } else { "+" };
-    let feet = if anim.is_multiple_of(2) {
+    // Preserve the original Song-dynasty guard silhouette. Animation is
+    // deliberately sparse: a blink, sword glint, shield glint, and slow weight
+    // shift make it feel alive without creating terminal flicker.
+    let phase = anim % 24;
+    let eyes = if phase == 18 { "- -" } else { "o o" };
+    let sword_glint = if phase == 5 { "*" } else { "+" };
+    let shield = if phase == 11 { "|✦|" } else { "|#|" };
+    let feet = if (phase / 4).is_multiple_of(2) {
         r"/   \"
     } else {
         r"\   /"
     };
+
     vec![
         r"     .-^-.      ".to_string(),
         r"    /_____\     ".to_string(),
         format!("    ( {eyes} )     "),
         r"  |  /|_|\  _   ".to_string(),
-        format!(" -{g}- |   | |#|  "),
+        format!(" -{sword_glint}- |   | {shield}  "),
         r"  |  |___| \#/  ".to_string(),
         format!("     {feet}      "),
     ]
@@ -98,6 +100,22 @@ fn banner_wordmark() -> Vec<&'static str> {
     ]
 }
 
+fn banner_mascot_color(anim: u8) -> Color {
+    if anim % 24 == 5 || anim % 24 == 11 {
+        BRAND_GRADIENT[3]
+    } else {
+        TN_GRAY
+    }
+}
+
+fn banner_wordmark_color(anim: u8) -> Color {
+    if anim % 24 == 11 {
+        BRAND_GRADIENT[1]
+    } else {
+        ACCENT
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,7 +123,7 @@ mod tests {
     #[test]
     fn welcome_banner_uses_shared_component_and_fits_width() {
         let terminal_width = 52;
-        let viewport_width = terminal_width - 1;
+        let viewport_width = terminal_width;
         let rendered = banner_view(
             3,
             "gpt-5",
@@ -118,6 +136,7 @@ mod tests {
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("a3s-code v"), "{plain}");
+        assert!(plain.contains(".-^-.") || plain.contains("████"), "{plain}");
         assert!(plain.contains("Type a message"), "{plain}");
         assert!(plain.contains("0.9.0"), "{plain}");
         assert!(rendered.contains("\x1b["), "banner should carry styling");
@@ -131,9 +150,21 @@ mod tests {
     }
 
     #[test]
+    fn welcome_identity_keeps_mascot_wordmark_and_animation() {
+        let first = banner_view(0, "gpt-5", "", "", "/workspace", None, 120);
+        let later = banner_view(5, "gpt-5", "", "", "/workspace", None, 120);
+        let plain = a3s_tui::style::strip_ansi(&first);
+
+        assert!(plain.contains(".-^-."), "{plain}");
+        assert!(plain.contains("████"), "{plain}");
+        assert_eq!(first.lines().count(), later.lines().count());
+        assert_ne!(first, later);
+    }
+
+    #[test]
     fn welcome_banner_does_not_wrap_inside_scrollbar_viewport() {
         let terminal_width = 52;
-        let viewport_width = terminal_width - 1;
+        let viewport_width = terminal_width;
         let rendered = banner_view(
             3,
             "gpt-5",

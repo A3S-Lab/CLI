@@ -1,0 +1,275 @@
+use super::*;
+
+#[test]
+fn markdown_report_html_renders_safe_clickable_sources() {
+    let html = deep_research_completed_report_html(
+        "Clickable sources",
+        "# Clickable sources\n\n- [Official <source>](https://example.com/docs?a=1&b=2)\n- Bare: https://example.org/evidence.\n- [unsafe](javascript:alert(1))",
+    );
+
+    assert!(
+        html.contains(
+            "<a href=\"https://example.com/docs?a=1&amp;b=2\">Official &lt;source&gt;</a>"
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("<a href=\"https://example.org/evidence\">https://example.org/evidence</a>."),
+        "{html}"
+    );
+    assert!(html.contains("<a href=\"\">unsafe</a>"), "{html}");
+}
+
+#[test]
+fn markdown_table_keeps_escaped_pipes_inside_cells() {
+    let fragment = deep_research_markdown_to_html_fragment(
+        "| Finding | Source |\n| --- | --- |\n| Alpha \\| Beta | [`a\\|b`](https://example.com/a%7Cb) |",
+    );
+
+    assert!(fragment.contains("<table>"), "{fragment}");
+    assert_eq!(fragment.matches("<td>").count(), 2, "{fragment}");
+    assert!(fragment.contains("<td>Alpha | Beta</td>"), "{fragment}");
+    assert!(
+        fragment.contains("<td><a href=\"https://example.com/a%7Cb\"><code>a|b</code></a></td>"),
+        "{fragment}"
+    );
+}
+
+#[test]
+fn markdown_report_html_escapes_raw_html_and_blocks_dangerous_links() {
+    let fragment = deep_research_markdown_to_html_fragment(
+        "<script>alert('xss')</script>\n\n<img src=x onerror=alert(1)>\n\n[unsafe](javascript:alert(1)) [encoded](jav&#x61;script:alert(2)) [safe](https://example.com)",
+    );
+
+    assert!(!fragment.contains("<script"), "{fragment}");
+    assert!(!fragment.contains("<img"), "{fragment}");
+    assert!(fragment.contains("&lt;script&gt;"), "{fragment}");
+    assert!(
+        fragment.contains("&lt;img src=x onerror=alert(1)&gt;"),
+        "{fragment}"
+    );
+    assert_eq!(fragment.matches("href=\"\"").count(), 2, "{fragment}");
+    assert!(
+        fragment.contains("<a href=\"https://example.com\">safe</a>"),
+        "{fragment}"
+    );
+}
+
+#[test]
+fn markdown_report_html_keeps_fetched_relative_links_as_plain_text() {
+    let fragment = deep_research_markdown_to_html_fragment(
+        "[Joint Typhoon Warning Center](/wiki/JTWC) and [local](../private/report.md)",
+    );
+
+    assert!(
+        fragment.contains("Joint Typhoon Warning Center"),
+        "{fragment}"
+    );
+    assert!(fragment.contains("and local"), "{fragment}");
+    assert!(!fragment.contains("href=\"/wiki/"), "{fragment}");
+    assert!(!fragment.contains("href=\"../"), "{fragment}");
+}
+
+#[test]
+fn markdown_report_html_sanitizes_query_fallback_title() {
+    let html = deep_research_completed_report_html(
+        "Analyze https://user:password@example.com/private?token=secret#fragment",
+        "Findings without a level-one heading.",
+    );
+
+    assert!(
+        html.contains("<title>Analyze https://example.com/private</title>"),
+        "{html}"
+    );
+    for secret in ["user", "password", "token=secret", "#fragment"] {
+        assert!(!html.contains(secret), "{html}");
+    }
+}
+
+#[test]
+fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
+    let html = deep_research_completed_report_html(
+        "一份非常长的中文研究请求，需要生成专业、清晰、可验证且适合移动设备阅读的报告，并且不要把完整用户提示直接当作页面标题反复展示",
+        "# 简洁研究标题\n\n## 核心发现\n\n结论正文。\n\n## Sources\n\n- [来源](https://example.com)",
+    );
+
+    assert!(html.contains("<html lang=\"zh-CN\">"), "{html}");
+    assert!(html.contains("class=\"hero\""), "{html}");
+    assert!(html.contains("class=\"report-shell\""), "{html}");
+    assert!(html.contains("@media(max-width:820px)"), "{html}");
+    assert!(html.contains("横向滑动查看全部列"), "{html}");
+    assert!(html.contains("@media print"), "{html}");
+    assert!(html.contains("prefers-reduced-motion"), "{html}");
+    assert!(html.contains(":focus-visible"), "{html}");
+    assert!(
+        html.contains("<strong>01</strong><span>引用来源</span>"),
+        "{html}"
+    );
+    assert!(html.contains("class=\"toc\""), "{html}");
+    assert!(html.contains("section--findings"), "{html}");
+    assert!(html.contains("section--sources"), "{html}");
+    assert!(html.contains("aria-label=\"报告元数据\""), "{html}");
+    assert_eq!(html.matches("<h1>").count(), 1, "{html}");
+    assert!(!html.contains("<script"), "{html}");
+}
+
+#[test]
+fn editorial_report_uses_distinct_information_shapes_instead_of_one_markdown_shell() {
+    let html = deep_research_completed_report_html(
+        "Compare Tokio and async-std",
+        "# Tokio and async-std\n\n## Executive Summary\n\n- Tokio is active.\n- async-std is deprecated.\n\n## Key Findings\n\n### Maintenance\n\nLifecycle evidence.\n\n### Adoption\n\nAdoption evidence.\n\n## Evidence Matrix\n\n| Finding | Source |\n| --- | --- |\n| Maintenance | [Docs](https://example.com/docs) |\n\n## Gaps And Caveats\n\n- No workload benchmark.\n\n## Source Quality And Confidence\n\nConfidence is medium-high.\n\n## Sources\n\n- [Docs](https://example.com/docs)",
+    );
+
+    for class in [
+        "section--summary",
+        "section--findings",
+        "class=\"finding\"",
+        "section--matrix",
+        "class=\"table-wrap\"",
+        "section--caveats",
+        "section--confidence",
+        "section--sources",
+    ] {
+        assert!(html.contains(class), "missing {class}: {html}");
+    }
+    assert!(html.contains("<strong>02</strong><span>Key findings</span>"));
+    assert!(html.contains("href=\"#section-6\""));
+}
+
+#[test]
+fn recovery_report_is_visually_and_semantically_degraded() {
+    let html = deep_research_completed_report_html(
+        "Current market state",
+        "# DeepResearch Recovery Report\n\n## Findings\n\nEvidence collection did not complete.\n\n## Sources And Evidence\n\n- https://example.com/partial\n\n## Confidence And Limits\n\nConfidence is low.",
+    );
+
+    assert!(
+        html.contains("class=\"theme-editorial report-degraded\""),
+        "{html}"
+    );
+    assert!(html.contains("Insufficient evidence · Degraded"), "{html}");
+    assert!(html.contains("Not a final domain conclusion"), "{html}");
+    assert!(html.contains("<title>DeepResearch Recovery Report</title>"));
+}
+
+#[test]
+fn editorial_report_wraps_unparsed_relative_markdown_without_page_overflow() {
+    let html = deep_research_completed_report_html(
+        "台风巴威",
+        "# 台风巴威研究\n\n## 证据\n\n- [菲律宾大气地球物理和天文管理局](/wiki/%E8%8F%B2%E5%BE%8B%E8%B3%93%E5%A4%A7%E6%B0%A3%E5%9C%B0%E7%90%83%E7%89%A9%E7%90%86%E5%92%8C%E5%A4%A9%E6%96%87%E7%AE%A1%E7%90%86%E5%B1%80",
+    );
+
+    assert!(
+        html.contains("article{min-width:0;max-width:100%"),
+        "{html}"
+    );
+    assert!(html.contains("overflow-wrap:anywhere"), "{html}");
+    assert!(
+        html.contains(".table-wrap { width: 100%; overflow-x: auto;"),
+        "{html}"
+    );
+    assert!(
+        html.contains("table { width: 100%; min-width: 720px;"),
+        "{html}"
+    );
+}
+
+#[test]
+fn editorial_report_derives_a_semantic_title_without_double_ellipsis() {
+    let title = concise_report_title(
+        "请研究2020年第8号台风“巴威”（Bavi）的生命史、路径、强度、登陆时间、灾害影响和预警…研究报告",
+    );
+
+    assert_eq!(title, "2020年第8号台风“巴威”（Bavi）研究");
+    assert!(!title.contains('…'));
+}
+
+#[test]
+fn print_layout_does_not_expand_every_inline_link_or_pin_large_tables() {
+    let html = deep_research_completed_report_html(
+        "Printable report",
+        "# Printable report\n\nA [source](https://example.com/very/long/path).",
+    );
+
+    assert!(!html.contains("attr(href)"), "{html}");
+    assert!(
+        html.contains(".finding, tr { break-inside: avoid; }"),
+        "{html}"
+    );
+    assert!(html.contains(".table-wrap { overflow: visible;"), "{html}");
+}
+
+#[test]
+fn editorial_report_counts_unique_external_source_urls() {
+    let html = deep_research_completed_report_html(
+        "Source count",
+        "# Source count\n\n## Summary\n\nLead with [supporting context](https://context.example.net).\n\n## Sources\n\n- [Primary](https://example.com/evidence) — evidence: see [nested detail](https://nested.example.net)\n- [Primary again](https://example.com/evidence)\n- [Secondary](http://example.org/report)\n- [Internal](/local/report)",
+    );
+
+    assert!(
+        html.contains("<strong>02</strong><span>Cited sources</span>"),
+        "{html}"
+    );
+    assert!(html.contains("Cited sources: 2"), "{html}");
+}
+
+#[test]
+fn editorial_hero_background_tracks_intrinsic_content_height() {
+    let html = deep_research_completed_report_html(
+        "Responsive hero",
+        "# Responsive hero\n\n## Summary\n\nLead.",
+    );
+
+    assert!(
+        html.contains("body{margin:0;background:var(--paper)"),
+        "{html}"
+    );
+    assert!(
+        html.contains(".hero{background:var(--navy);color:#fff;overflow:hidden"),
+        "{html}"
+    );
+    assert!(html.contains("class=\"hero-inner\""), "{html}");
+    assert!(
+        !html.contains("linear-gradient(180deg,var(--navy)"),
+        "{html}"
+    );
+    assert!(!html.contains("440px"), "{html}");
+    assert!(!html.contains("360px"), "{html}");
+}
+
+#[test]
+fn editorial_lead_style_targets_paragraph_after_first_section_heading() {
+    let html = deep_research_completed_report_html(
+        "Lead paragraph",
+        "# Lead paragraph\n\n## Executive summary\n\nThis paragraph is the report lead.\n\nMore detail.",
+    );
+
+    assert!(
+        html.contains(".section--summary .section-body > p:first-child"),
+        "{html}"
+    );
+    assert!(
+        html.contains("class=\"report-section section--summary\"")
+            && html.contains("<h2>Executive summary</h2>")
+            && html.contains("<p>This paragraph is the report lead.</p>"),
+        "{html}"
+    );
+}
+
+#[test]
+fn mobile_rail_keeps_source_label_and_value_semantically_visible() {
+    let html = deep_research_completed_report_html(
+        "Mobile metadata",
+        "# Mobile metadata\n\n## Summary\n\nLead.\n\n## Sources\n\n- [Source](https://example.com)",
+    );
+
+    assert!(
+        html.contains("<dl class=\"rail-stat\"><dt>Story sections</dt><dd>02</dd></dl>"),
+        "{html}"
+    );
+    assert!(
+        html.contains(".rail-stat{flex-direction:row;align-items:baseline"),
+        "{html}"
+    );
+    assert!(!html.contains(".rail-stat dt{display:none}"), "{html}");
+}

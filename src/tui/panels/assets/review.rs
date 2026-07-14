@@ -183,7 +183,7 @@ fn review_menu_lines(review: &ReviewState, width: usize, height: usize) -> Vec<S
     .text_color(TN_FG)
     .muted_color(TN_GRAY)
     .checked_color(TN_GREEN)
-    .selected_colors(Color::BrightWhite, TN_PURPLE)
+    .selected_colors(TN_FG, SURFACE_SELECTED)
     .view(width.min(u16::MAX as usize) as u16, max_items + 3)
     .lines()
     .map(str::to_string)
@@ -307,8 +307,10 @@ impl App {
                 self.review_open = false;
                 let prompt = review_fix_prompt(&asset_dir, &picked);
                 let label = format!("🛠 fixing {}/{total} review issues", picked.len());
-                self.messages
-                    .push(gutter(TN_PURPLE, &Style::new().bold().render(&label)));
+                self.messages.push(TranscriptEntry::preformatted(gutter(
+                    TN_PURPLE,
+                    &Style::new().bold().render(&label),
+                )));
                 if self.state == State::Idle {
                     // No attachments: pending pasted images belong to the
                     // user's next chat message, not this synthetic fix prompt.

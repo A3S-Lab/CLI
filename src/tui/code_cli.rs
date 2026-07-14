@@ -336,44 +336,11 @@ async fn run_okf(args: &[String]) -> anyhow::Result<()> {
 }
 
 async fn run_login(args: &[String]) -> anyhow::Result<()> {
-    if matches!(
-        args.first().map(String::as_str),
-        Some("-h" | "--help" | "help")
-    ) {
-        println!("a3s code login [token]");
-        println!("  no token: open the configured OS OAuth login in your browser");
-        println!("  token:    store an existing OS bearer token");
-        return Ok(());
-    }
-    let (_, os_config) = load_os_config()?;
-    let token = optional_single_arg("login", args)?;
-    let session = match token {
-        Some(token) => crate::a3s_os::login_with_token(&os_config, &token)?,
-        None => crate::a3s_os::login_via_browser(os_config.clone()).await?,
-    };
-    crate::a3s_os::export_os_env(&session);
-    let skill_ready = crate::a3s_os::ensure_capability_skill_dir(&os_config).is_some();
-    println!("signed in to OS as {}", session.display_label());
-    if skill_ready {
-        println!("capabilities skill: active");
-    } else {
-        println!("capabilities skill: not installed (check ~/.a3s permissions)");
-    }
-    print_ssh_key_outcome(crate::a3s_os::sync_ssh_key(session).await);
-    Ok(())
+    crate::os_cmd::login(args).await
 }
 
 async fn run_logout() -> anyhow::Result<()> {
-    let (_, os_config) = load_os_config()?;
-    let removed = crate::a3s_os::logout(&os_config)?;
-    crate::a3s_os::clear_os_env();
-    crate::a3s_os::remove_capability_skill_dir();
-    if removed {
-        println!("signed out from OS");
-    } else {
-        println!("no stored OS login for {}", os_config.address);
-    }
-    Ok(())
+    crate::os_cmd::logout(&[])
 }
 
 async fn run_auth(args: &[String]) -> anyhow::Result<()> {
@@ -508,76 +475,7 @@ async fn run_config(args: &[String]) -> anyhow::Result<()> {
 }
 
 async fn run_models(args: &[String]) -> anyhow::Result<()> {
-    match args.first().map(String::as_str) {
-        None | Some("list") => {}
-        Some("-h" | "--help" | "help") => {
-            println!("a3s code models");
-            println!(
-                "  lists config.acl models, local Claude/Codex account models, and OS gateway models when signed in"
-            );
-            return Ok(());
-        }
-        Some(other) => anyhow::bail!("unknown models command `{other}`; expected list"),
-    }
-    let (_, cfg) = load_code_config()?;
-    println!(
-        "default: {}",
-        cfg.default_model.as_deref().unwrap_or("(not set)")
-    );
-    println!("config.acl models:");
-    if cfg.list_models().is_empty() {
-        println!("  (none)");
-    } else {
-        for (provider, model) in cfg.list_models() {
-            let id = format!("{}/{}", provider.name, model.id);
-            let marker = if Some(id.as_str()) == cfg.default_model.as_deref() {
-                "*"
-            } else {
-                " "
-            };
-            let display = if model.name.is_empty() {
-                model.id.as_str()
-            } else {
-                model.name.as_str()
-            };
-            println!(
-                "  {marker} {:<42} {}{}{}",
-                id,
-                display,
-                if model.reasoning { " · reasoning" } else { "" },
-                if model.tool_call { " · tools" } else { "" }
-            );
-        }
-    }
-
-    if panels::login::has_local_login(panels::login::AuthProvider::Claude) {
-        println!("Claude Code account models:");
-        for model in panels::login::claude_models() {
-            println!("  {model}");
-        }
-    }
-    if panels::login::has_local_login(panels::login::AuthProvider::Codex) {
-        println!("Codex account models:");
-        for model in crate::codex::codex_models() {
-            println!("  {model}");
-        }
-    }
-    if let Some(session) = current_os_session_if_configured().await {
-        println!("OS gateway models:");
-        match crate::a3s_os::fetch_gateway_models(&session.address, &session.access_token).await {
-            Ok(models) if models.is_empty() => println!("  (none configured)"),
-            Ok(models) => {
-                for model in models {
-                    match model.context {
-                        Some(context) => println!("  {} · context {}", model.id, context),
-                        None => println!("  {}", model.id),
-                    }
-                }
-            }
-            Err(error) => println!("  unavailable: {error}"),
-        }
-    }
-    Ok(())
+    crate::model::command::run(args).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,17 +489,33 @@ enum DeepResearchRuntimeMode {
 struct DeepResearchCliOptions {
     query: String,
     runtime_mode: DeepResearchRuntimeMode,
+    evidence_scope: super::DeepResearchEvidenceScope,
 }
 
 fn parse_deepresearch_args(args: &[String]) -> anyhow::Result<DeepResearchCliOptions> {
     let mut runtime_mode = DeepResearchRuntimeMode::Auto;
+    let mut evidence_scope = None;
     let mut query_parts = Vec::new();
     for arg in args {
         match arg.as_str() {
             "--local" => runtime_mode = DeepResearchRuntimeMode::Local,
             "--os" => runtime_mode = DeepResearchRuntimeMode::Os,
+            "--local-only" | "--offline" => {
+                if evidence_scope == Some(super::DeepResearchEvidenceScope::WebAndWorkspace) {
+                    anyhow::bail!("--local-only conflicts with --web");
+                }
+                evidence_scope = Some(super::DeepResearchEvidenceScope::LocalOnly);
+            }
+            "--web" => {
+                if evidence_scope == Some(super::DeepResearchEvidenceScope::LocalOnly) {
+                    anyhow::bail!("--web conflicts with --local-only");
+                }
+                evidence_scope = Some(super::DeepResearchEvidenceScope::WebAndWorkspace);
+            }
             "-h" | "--help" | "help" => {
-                anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+                anyhow::bail!(
+                    "usage: a3s code deepresearch [--local|--os] [--local-only|--web] <query>"
+                );
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown a3s code deepresearch option `{value}`")
@@ -611,11 +525,19 @@ fn parse_deepresearch_args(args: &[String]) -> anyhow::Result<DeepResearchCliOpt
     }
     let query = query_parts.join(" ").trim().to_string();
     if query.is_empty() {
-        anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+        anyhow::bail!("usage: a3s code deepresearch [--local|--os] [--local-only|--web] <query>");
     }
+    let evidence_scope = evidence_scope.unwrap_or_else(|| {
+        if super::deep_research_query_is_local_only(&query) {
+            super::DeepResearchEvidenceScope::LocalOnly
+        } else {
+            super::DeepResearchEvidenceScope::WebAndWorkspace
+        }
+    });
     Ok(DeepResearchCliOptions {
         query,
         runtime_mode,
+        evidence_scope,
     })
 }
 
@@ -627,6 +549,8 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
         print_deepresearch_help();
         return Ok(());
     }
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS);
     let opts = parse_deepresearch_args(args)?;
     if opts.runtime_mode == DeepResearchRuntimeMode::Os {
         anyhow::bail!(
@@ -634,25 +558,82 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
         );
     }
     let workspace = std::env::current_dir()?;
+    let recovery_query = opts.query.clone();
+    let recovery_workspace = workspace.clone();
+    complete_deepresearch_before_deadline(
+        &recovery_workspace,
+        &recovery_query,
+        deadline,
+        run_deepresearch_inner(opts, workspace, deadline),
+    )
+    .await
+}
+
+async fn run_deepresearch_inner(
+    opts: DeepResearchCliOptions,
+    workspace: PathBuf,
+    deadline: tokio::time::Instant,
+) -> anyhow::Result<()> {
+    ensure_deepresearch_cli_deadline(deadline)?;
     let workspace_text = workspace.to_string_lossy().to_string();
-    let (session, report_tool_gate) = build_deepresearch_session(&workspace_text).await?;
+    let session_setup = tokio::time::timeout(
+        std::time::Duration::from_millis(DEEP_RESEARCH_CLI_SESSION_SETUP_TIMEOUT_MS),
+        build_deepresearch_session(&workspace_text),
+    )
+    .await;
+    let (session, report_tool_gate) = match session_setup {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            return Err(deepresearch_cli_recovery_error(
+                &workspace,
+                &opts.query,
+                &format!("DeepResearch session setup failed: {error}"),
+            ));
+        }
+        Err(_) => {
+            return Err(deepresearch_cli_recovery_error(
+                &workspace,
+                &opts.query,
+                &format!(
+                    "DeepResearch session setup timed out after {DEEP_RESEARCH_CLI_SESSION_SETUP_TIMEOUT_MS} ms"
+                ),
+            ));
+        }
+    };
+    report_tool_gate.set_report_target(&workspace, &opts.query);
+    report_tool_gate.set_evidence_scope(opts.evidence_scope);
     let os_runtime = match opts.runtime_mode {
         DeepResearchRuntimeMode::Local => false,
         DeepResearchRuntimeMode::Os => false,
         DeepResearchRuntimeMode::Auto => false,
     };
 
+    // A prior report cannot prove that its evidence is still current. Let the
+    // semantic planner decide freshness for every run instead of maintaining a
+    // second keyword classifier or a topic-specific cache allowlist here.
     eprintln!(
-        "deepresearch: gathering evidence via {} workflow…",
-        if os_runtime { "OS Runtime" } else { "local" }
+        "deepresearch: gathering evidence via {} workflow ({})…",
+        if os_runtime { "OS Runtime" } else { "local" },
+        opts.evidence_scope.label(),
     );
-    let workflow_args = super::deep_research_workflow_args(&opts.query, os_runtime);
-    let workflow = run_deepresearch_workflow(&session, workflow_args.clone()).await;
-    let (workflow_output, exit_code, metadata) = match workflow {
+    let mut workflow_args =
+        super::deep_research_workflow_args_with_scope(&opts.query, os_runtime, opts.evidence_scope);
+    super::ensure_deep_research_workflow_run_id(&mut workflow_args);
+    let workflow_deadline = deepresearch_cli_workflow_deadline(deadline);
+    ensure_deepresearch_cli_deadline(workflow_deadline)?;
+    let (workflow_output, exit_code, metadata) = match run_deepresearch_workflow_until(
+        &session,
+        &workspace,
+        workflow_args,
+        Some(workflow_deadline),
+    )
+    .await
+    {
         Ok(result) => (result.output, result.exit_code, result.metadata),
         Err(error) => (error, 1, None),
     };
 
+    ensure_deepresearch_cli_deadline(deadline)?;
     let synthesis = synthesize_deepresearch_report(
         &session,
         &workspace,
@@ -664,6 +645,10 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
         &report_tool_gate,
     )
     .await?;
+    // Report rendering is synchronous today. Checking immediately after it
+    // prevents a long render/write from being reported as a successful run
+    // merely because it completed inside one poll of the outer timeout.
+    ensure_deepresearch_cli_deadline(deadline)?;
 
     print!("{}", synthesis.text);
     if !synthesis.text.ends_with('\n') {
@@ -671,233 +656,209 @@ async fn run_deepresearch(args: &[String]) -> anyhow::Result<()> {
     }
     println!("report.md: {}", synthesis.artifacts.markdown.display());
     println!("index.html: {}", synthesis.artifacts.html.display());
-    if synthesis.status == DeepResearchReportStatus::FallbackDraft {
-        anyhow::bail!(
-            "DeepResearch did not complete; fallback draft written at {}",
-            synthesis.artifacts.html.display()
-        );
+    match synthesis.outcome {
+        DeepResearchCliOutcome::Completed => {}
+        DeepResearchCliOutcome::RecoveryReport => anyhow::bail!(
+            "DeepResearch did not complete with source-backed evidence; an explicit low-confidence recovery report was written"
+        ),
     }
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeepResearchReportStatus {
+#[derive(Debug)]
+struct DeepResearchCliDeadlineExceeded;
+
+impl std::fmt::Display for DeepResearchCliDeadlineExceeded {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "DeepResearch command exceeded its {DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS} ms wall-clock deadline"
+        )
+    }
+}
+
+impl std::error::Error for DeepResearchCliDeadlineExceeded {}
+
+fn ensure_deepresearch_cli_deadline(deadline: tokio::time::Instant) -> anyhow::Result<()> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(DeepResearchCliDeadlineExceeded.into());
+    }
+    Ok(())
+}
+
+fn deepresearch_cli_workflow_deadline(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    deadline
+        .checked_sub(std::time::Duration::from_millis(
+            DEEP_RESEARCH_CLI_FINALIZATION_RESERVE_MS,
+        ))
+        .unwrap_or(deadline)
+}
+
+async fn complete_deepresearch_before_deadline(
+    workspace: &Path,
+    query: &str,
+    deadline: tokio::time::Instant,
+    command: impl std::future::Future<Output = anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    match tokio::time::timeout_at(deadline, command).await {
+        Ok(_) if tokio::time::Instant::now() >= deadline => {
+            Err(deepresearch_cli_deadline_recovery_error(workspace, query))
+        }
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) if error.is::<DeepResearchCliDeadlineExceeded>() => {
+            Err(deepresearch_cli_deadline_recovery_error(workspace, query))
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(deepresearch_cli_deadline_recovery_error(workspace, query)),
+    }
+}
+
+fn deepresearch_cli_deadline_recovery_error(workspace: &Path, query: &str) -> anyhow::Error {
+    let message = format!(
+        "DeepResearch command exceeded its {DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS} ms wall-clock deadline"
+    );
+    let workflow_output = serde_json::json!({
+        "mode": "cli_deadline_exceeded",
+        "research": {
+            "status": "degraded",
+            "results": [],
+            "warnings": [message.clone()],
+            "metadata": {
+                "deadline_ms": DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS
+            }
+        }
+    })
+    .to_string();
+    deepresearch_cli_recovery_error_from_output(workspace, query, &message, &workflow_output)
+}
+
+fn deepresearch_cli_recovery_error(workspace: &Path, query: &str, message: &str) -> anyhow::Error {
+    let workflow_output = serde_json::json!({
+        "mode": "cli_preflight_failed",
+        "error": message,
+        "research": {
+            "status": "failed",
+            "results": []
+        }
+    })
+    .to_string();
+    deepresearch_cli_recovery_error_from_output(workspace, query, message, &workflow_output)
+}
+
+fn deepresearch_cli_recovery_error_from_output(
+    workspace: &Path,
+    query: &str,
+    message: &str,
+    workflow_output: &str,
+) -> anyhow::Error {
+    match super::materialize_deep_research_recovery_report(
+        workspace,
+        query,
+        "",
+        workflow_output,
+        None,
+    ) {
+        Ok(artifacts) => {
+            if let Some(text) =
+                super::clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+            {
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+            }
+            println!("report.md: {}", artifacts.markdown.display());
+            println!("index.html: {}", artifacts.html.display());
+        }
+        Err(error) => {
+            eprintln!("deepresearch: could not write bounded recovery artifacts: {error}");
+        }
+    }
+    anyhow::anyhow!(message.to_string())
+}
+
+const DEEP_RESEARCH_CLI_SESSION_SETUP_TIMEOUT_MS: u64 = 8_000;
+const DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS: u64 = super::DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS;
+const DEEP_RESEARCH_CLI_FINALIZATION_RESERVE_MS: u64 =
+    super::DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeepResearchCliOutcome {
     Completed,
-    FallbackDraft,
+    RecoveryReport,
 }
 
 #[derive(Debug)]
 struct DeepResearchReportSynthesis {
     text: String,
     artifacts: super::ResearchReportArtifacts,
-    status: DeepResearchReportStatus,
+    outcome: DeepResearchCliOutcome,
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn synthesize_deepresearch_report(
-    session: &AgentSession,
+    _session: &AgentSession,
     workspace: &Path,
     query: &str,
-    os_runtime: bool,
+    _os_runtime: bool,
     workflow_output: &str,
-    exit_code: i32,
+    _exit_code: i32,
     metadata: Option<&serde_json::Value>,
     report_tool_gate: &super::DeepResearchReportToolGate,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
-    eprintln!("deepresearch: synthesizing report artifacts…");
-    if exit_code != 0 && !super::deep_research_has_source_evidence(workflow_output, metadata) {
-        report_tool_gate.set_report_only(false);
-        let artifacts = super::materialize_deep_research_fallback_draft(
+    eprintln!("deepresearch: materializing deterministic report artifacts…");
+    report_tool_gate.set_report_target(workspace, query);
+    report_tool_gate.set_report_only(false);
+
+    if let Some(artifacts) =
+        super::materialize_deep_research_completed_report_from_workflow_evidence(
             workspace,
             query,
-            "DeepResearch evidence collection failed before source-backed evidence was available.",
             workflow_output,
+            metadata,
         )
-        .map_err(anyhow::Error::msg)?;
+    {
+        let text = super::clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+            .unwrap_or_default();
         return Ok(DeepResearchReportSynthesis {
-            text: format!(
-                "DeepResearch fallback draft written at {}\n",
-                artifacts.html.display()
-            ),
+            text,
             artifacts,
-            status: DeepResearchReportStatus::FallbackDraft,
+            outcome: DeepResearchCliOutcome::Completed,
         });
     }
-    let prompt = if exit_code == 0 {
-        super::deep_research_synthesis_prompt(query, os_runtime, workflow_output, metadata)
-    } else {
-        super::deep_research_recovery_prompt(query, os_runtime, workflow_output, metadata)
-    };
-    report_tool_gate.set_report_only(true);
-    let (mut final_text, synthesis_completed) = send_deepresearch_text(
-        session,
-        &prompt,
-        super::DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
-        "synthesis",
-    )
-    .await;
-    let mut artifacts = super::deep_research_report_artifacts_from_output_for_query(
-        &final_text,
+
+    eprintln!("deepresearch: evidence gate did not pass; writing bounded recovery artifacts…");
+    let artifacts = super::materialize_deep_research_recovery_report(
         workspace,
         query,
+        "",
         workflow_output,
         metadata,
-    );
-    let mut status = DeepResearchReportStatus::Completed;
-
-    if super::deep_research_output_has_internal_leak(&final_text) {
-        if let Some(artifacts) = artifacts.as_ref() {
-            if let Some(clean_text) =
-                super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-            {
-                final_text = clean_text;
-            }
-        }
-    }
-    if artifacts.is_none() {
-        artifacts = super::materialize_deep_research_completed_report_from_markdown(
-            workspace,
-            query,
-            workflow_output,
-            metadata,
-        );
-        if let Some(artifacts) = artifacts.as_ref() {
-            if let Some(clean_text) =
-                super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-            {
-                final_text = clean_text;
-            }
-        }
-    }
-
-    if (artifacts.is_none() || super::deep_research_output_has_internal_leak(&final_text))
-        && synthesis_completed
-    {
-        eprintln!("deepresearch: report marker/artifacts missing, running focused repair pass…");
-        let repair = super::deep_research_repair_prompt(
-            query,
-            os_runtime,
-            workflow_output,
-            metadata,
-            &final_text,
-        );
-        let (repair_text, repair_completed) = send_deepresearch_text(
-            session,
-            &repair,
-            super::DEEP_RESEARCH_REPAIR_TIMEOUT_MS,
-            "repair",
-        )
-        .await;
-        final_text = repair_text;
-        artifacts = super::deep_research_report_artifacts_from_output_for_query(
-            &final_text,
-            workspace,
-            query,
-            workflow_output,
-            metadata,
-        );
-        if super::deep_research_output_has_internal_leak(&final_text) {
-            if let Some(artifacts) = artifacts.as_ref() {
-                if let Some(clean_text) =
-                    super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-                {
-                    final_text = clean_text;
-                }
-            }
-        }
-        if artifacts.is_none() {
-            artifacts = super::materialize_deep_research_completed_report_from_markdown(
-                workspace,
-                query,
-                workflow_output,
-                metadata,
-            );
-            if let Some(artifacts) = artifacts.as_ref() {
-                if let Some(clean_text) =
-                    super::clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-                {
-                    final_text = clean_text;
-                }
-            }
-        }
-        if !repair_completed {
-            eprintln!("deepresearch: repair pass did not complete, using host fallback…");
-        }
-    }
-
-    if artifacts.is_none() || super::deep_research_output_has_internal_leak(&final_text) {
-        eprintln!(
-            "deepresearch: report artifacts still missing, materializing host fallback draft…"
-        );
-        report_tool_gate.set_report_only(false);
-        let fallback_artifacts = super::materialize_deep_research_fallback_draft(
-            workspace,
-            query,
-            &final_text,
-            workflow_output,
-        )
-        .map_err(anyhow::Error::msg)?;
-        if super::deep_research_output_has_internal_leak(&final_text) {
-            final_text.clear();
-        } else if !final_text.ends_with('\n') {
-            final_text.push('\n');
-        }
-        final_text.push_str(&format!(
-            "DeepResearch fallback draft written at {}\n",
-            fallback_artifacts.html.display()
-        ));
-        artifacts = Some(fallback_artifacts);
-        status = DeepResearchReportStatus::FallbackDraft;
-    }
-
-    let artifacts = artifacts.ok_or_else(|| {
-        anyhow::anyhow!(
-            "DeepResearch did not produce the required report artifacts: expected `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`, plus sibling report.md"
-        )
-    })?;
-    report_tool_gate.set_report_only(false);
+    )
+    .map_err(anyhow::Error::msg)?;
+    let text = super::clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+        .unwrap_or_default();
     Ok(DeepResearchReportSynthesis {
-        text: final_text,
+        text,
         artifacts,
-        status,
+        outcome: DeepResearchCliOutcome::RecoveryReport,
     })
 }
 
-async fn send_deepresearch_text(
-    session: &AgentSession,
-    prompt: &str,
-    timeout_ms: u64,
-    phase: &str,
-) -> (String, bool) {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        session.send(prompt, Some(&[])),
-    )
-    .await
-    {
-        Ok(Ok(result)) => (result.text, true),
-        Ok(Err(error)) => (
-            format!("DeepResearch {phase} model call failed: {error}"),
-            false,
-        ),
-        Err(_) => (
-            format!("DeepResearch {phase} model call timed out after {timeout_ms} ms."),
-            false,
-        ),
-    }
-}
-
 fn print_deepresearch_help() {
-    println!("a3s code deepresearch [--local|--os] <query>");
+    println!("a3s code deepresearch [--local|--os] [--local-only|--web] <query>");
     println!("  run DeepResearch from the CLI and write:");
     println!("    .a3s/research/<slug>/report.md");
     println!("    .a3s/research/<slug>/index.html");
-    println!("  --local  force local parallel_task research");
+    println!("  --local  use local orchestration (web evidence remains enabled)");
+    println!("  --local-only, --offline  use workspace evidence and enforce no network access");
+    println!("  --web    enable web evidence; use workspace only when the query requires it");
+    println!("           query wording is retained only as a compatibility fallback");
     println!("  --os     temporarily disabled; future OS Runtime support should use FaaS");
 }
 
 fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
-    let mut policy = a3s_code_core::permissions::PermissionPolicy::new()
+    a3s_code_core::permissions::PermissionPolicy::new()
         .deny_all(&[
             "Write(/**)",
             "Edit(/**)",
@@ -915,26 +876,37 @@ fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::Permissio
             "ls(*)",
             "web_search(*)",
             "web_fetch(*)",
-            "Write(.a3s/research/**)",
-            "Edit(.a3s/research/**)",
-            "write(.a3s/research/**)",
-            "edit(.a3s/research/**)",
-        ]);
-    policy.default_decision = a3s_code_core::permissions::PermissionDecision::Deny;
-    policy
+        ])
+        .ask_all(&[
+            "Write(*)",
+            "Edit(*)",
+            "Patch(*)",
+            "Bash(*)",
+            "Git(*)",
+            "batch(*)",
+            "program(*)",
+            "task(*)",
+            "parallel_task(*)",
+            "dynamic_workflow(*)",
+            "Skill(*)",
+        ])
 }
 
 async fn build_deepresearch_session(
     workspace: &str,
 ) -> anyhow::Result<(AgentSession, super::DeepResearchReportToolGate)> {
     let (config_path, _) = load_code_config()?;
+    let code_config = CodeConfig::from_file(Path::new(&config_path))
+        .map_err(|error| anyhow::anyhow!("failed to load config from {config_path}: {error}"))?;
     let agent = Agent::new(config_path.clone())
         .await
         .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?;
     let budget = super::deep_research_default_budget();
     let permission_policy = deepresearch_cli_permission_policy();
     let report_tool_gate = super::DeepResearchReportToolGate::default();
-    let opts = SessionOptions::new()
+    let session_id = format!("deepresearch-{}", super::new_session_id());
+    let mut opts = SessionOptions::new()
+        .with_session_id(session_id.as_str())
         .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
         .with_permission_policy(permission_policy.clone())
         .with_permission_checker(std::sync::Arc::new(super::TuiHitlPermissionChecker::new(
@@ -950,32 +922,111 @@ async fn build_deepresearch_session(
         .with_auto_delegation_enabled(true)
         .with_auto_parallel_delegation(true)
         .with_manual_delegation_enabled(true);
-    let session = agent.session(workspace.to_string(), Some(opts))?;
-    session.register_dynamic_workflow_runtime();
+    if let Some(dir) = super::skills::ensure_builtin_skills_dir() {
+        opts = opts.with_skill_dirs([dir]);
+    }
+    let configured_models = code_config
+        .list_models()
+        .into_iter()
+        .map(|(provider, model)| format!("{}/{}", provider.name, model.id))
+        .collect::<Vec<_>>();
+    let os_session = code_config
+        .os
+        .as_ref()
+        .and_then(crate::a3s_os::current_session);
+    let restored_model =
+        super::restore_model_selection(&configured_models, os_session.as_ref(), &session_id);
+    let launch_model = restored_model
+        .as_ref()
+        .map(|(model, _)| model.clone())
+        .or_else(|| code_config.default_model.clone());
+    let launch_override = restored_model
+        .as_ref()
+        .and_then(|(_, client)| client.clone());
+    let effort = config::load_tui_effort_preference().unwrap_or(super::DEFAULT_TUI_EFFORT_INDEX);
+    opts = super::apply_launch_model_options(
+        opts,
+        launch_model.as_deref(),
+        launch_override.as_ref(),
+        super::EFFORT_LEVELS[effort].id,
+        &code_config,
+        session_id.as_str(),
+    );
+    if let Some(model) = launch_model.as_deref() {
+        eprintln!("deepresearch: using active model {model}");
+    }
+    let session = agent
+        .session_async(workspace.to_string(), Some(opts))
+        .await?;
+    let _ = session.register_dynamic_workflow_runtime();
     Ok((session, report_tool_gate))
 }
 
+#[cfg(test)]
 async fn run_deepresearch_workflow(
     session: &AgentSession,
+    workspace: &Path,
     args: serde_json::Value,
 ) -> Result<ToolCallResult, String> {
-    let timeout_ms = super::deep_research_workflow_host_timeout_ms(&args);
-    let (mut progress_rx, workflow_join) = session.tool_with_events("dynamic_workflow", args);
+    run_deepresearch_workflow_until(session, workspace, args, None).await
+}
+
+async fn run_deepresearch_workflow_until(
+    session: &AgentSession,
+    workspace: &Path,
+    args: serde_json::Value,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<ToolCallResult, String> {
+    let configured_timeout_ms = super::deep_research_workflow_host_timeout_ms(&args);
+    let started = tokio::time::Instant::now();
+    let configured_deadline = started
+        .checked_add(std::time::Duration::from_millis(configured_timeout_ms))
+        .unwrap_or(started);
+    let effective_deadline = deadline
+        .map(|deadline| deadline.min(configured_deadline))
+        .unwrap_or(configured_deadline);
+    let effective_timeout_ms = effective_deadline
+        .saturating_duration_since(started)
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    let args_for_timeout = args.clone();
+    let (mut progress_rx, mut workflow_join) = session.tool_with_events("dynamic_workflow", args);
     let workflow_abort = workflow_join.abort_handle();
-    let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
-    let result = match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        workflow_join,
-    )
-    .await
-    {
+    let progress_drain = tokio::spawn(async move {
+        let started = tokio::time::Instant::now();
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        loop {
+            tokio::select! {
+                progress = progress_rx.recv() => {
+                    if progress.is_none() {
+                        break;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    eprintln!(
+                        "deepresearch: evidence workflow active for {}s…",
+                        started.elapsed().as_secs()
+                    );
+                }
+            }
+        }
+    });
+    let result = match tokio::time::timeout_at(effective_deadline, &mut workflow_join).await {
         Ok(Ok(result)) => result.map_err(|err| err.to_string()),
         Ok(Err(err)) => Err(err.to_string()),
         Err(_) => {
             workflow_abort.abort();
-            Err(format!(
-                "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
-            ))
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(super::DEEP_RESEARCH_ABORT_GRACE_MS),
+                &mut workflow_join,
+            )
+            .await;
+            let message = format!(
+                "dynamic_workflow timed out after {effective_timeout_ms} ms while gathering DeepResearch evidence"
+            );
+            super::deep_research_workflow_timeout_tool_result(workspace, &args_for_timeout, message)
         }
     };
     progress_drain.abort();
@@ -1094,14 +1145,6 @@ fn run_memory(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-fn optional_single_arg(command: &str, args: &[String]) -> anyhow::Result<Option<String>> {
-    match args {
-        [] => Ok(None),
-        [value] => Ok(Some(value.clone())),
-        _ => anyhow::bail!("usage: a3s code {command} [value]"),
-    }
-}
-
 fn ensure_no_args(command: &str, args: &[String]) -> anyhow::Result<()> {
     if args.is_empty() {
         Ok(())
@@ -1151,33 +1194,6 @@ fn preferred_config_init_path() -> anyhow::Result<PathBuf> {
         }
     }
     config::default_config_path().ok_or_else(|| anyhow::anyhow!("HOME is not set"))
-}
-
-async fn current_os_session_if_configured() -> Option<crate::a3s_os::StoredOsSession> {
-    let (_, os_config) = load_os_config().ok()?;
-    let mut session = crate::a3s_os::current_session(&os_config)?;
-    if crate::a3s_os::needs_refresh(&session) {
-        session = crate::a3s_os::refresh_session(&session).await.ok()?;
-    }
-    crate::a3s_os::export_os_env(&session);
-    Some(session)
-}
-
-fn print_ssh_key_outcome(outcome: crate::a3s_os::SshKeyOutcome) {
-    match outcome {
-        crate::a3s_os::SshKeyOutcome::Registered(fp) => {
-            println!("ssh key: registered with OS ({fp})")
-        }
-        crate::a3s_os::SshKeyOutcome::AlreadyRegistered => {
-            println!("ssh key: already registered")
-        }
-        crate::a3s_os::SshKeyOutcome::NoLocalKey => {
-            println!("ssh key: none found (create one with `ssh-keygen -t ed25519`)")
-        }
-        crate::a3s_os::SshKeyOutcome::Failed(error) => {
-            println!("ssh key: sync skipped: {error}")
-        }
-    }
 }
 
 fn format_unix_ms(ms: u64) -> String {
@@ -1539,9 +1555,8 @@ async fn run_agent_os(
         .await
         .map_err(anyhow::Error::msg)?;
     println!(
-        "agent {} {}: {} ({})",
+        "agent {} Agent as a Service: {} ({})",
         result.action.label(),
-        result.kind.label(),
         result.asset_name,
         result.asset_id
     );
@@ -2189,11 +2204,13 @@ fn unknown_family_command(family: &str, command: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use a3s_code_core::llm::{
-        ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
+        structured::NativeStructuredSupport, ContentBlock, LlmClient, LlmResponse, Message,
+        StreamEvent, TokenUsage, ToolDefinition,
     };
     use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -2202,6 +2219,7 @@ mod tests {
 
     struct ScriptedLlmClient {
         responses: Mutex<VecDeque<LlmResponse>>,
+        calls: AtomicUsize,
     }
 
     #[async_trait]
@@ -2212,6 +2230,7 @@ mod tests {
             system: Option<&str>,
             tools: &[ToolDefinition],
         ) -> anyhow::Result<LlmResponse> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.response_for_messages(messages, system, tools))
         }
 
@@ -2222,6 +2241,7 @@ mod tests {
             tools: &[ToolDefinition],
             _cancel_token: CancellationToken,
         ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
             let response = self.response_for_messages(messages, system, tools);
             let (tx, rx) = mpsc::channel(1);
             tokio::spawn(async move {
@@ -2229,13 +2249,22 @@ mod tests {
             });
             Ok(rx)
         }
+
+        fn native_structured_support(&self) -> NativeStructuredSupport {
+            NativeStructuredSupport::ForcedTool
+        }
     }
 
     impl ScriptedLlmClient {
         fn new(responses: Vec<LlmResponse>) -> Self {
             Self {
                 responses: Mutex::new(responses.into()),
+                calls: AtomicUsize::new(0),
             }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::Relaxed)
         }
 
         fn response_for_messages(
@@ -2251,11 +2280,11 @@ mod tests {
                     serde_json::json!({
                         "summary": "Structured DeepResearch track evidence confirms local fan-out completed before synthesis.",
                         "sources": [{
-                            "title": "Example research source",
-                            "url_or_path": "https://example.com/research",
+                            "title": "Workspace research source",
+                            "url_or_path": "research-source.md",
                             "date": "2026-07-08",
                             "quote_or_fact": "Local DeepResearch fan-out completed before synthesis.",
-                            "reliability": "deterministic test evidence"
+                            "reliability": "deterministic workspace evidence"
                         }],
                         "key_evidence": [
                             "Local parallel_task fan-out produced deterministic evidence."
@@ -2282,9 +2311,22 @@ mod tests {
                 && !lower.contains("complete only the missing report work")
                 && !last.contains("DeepResearch verification layer")
             {
+                let observed_read_result = messages.iter().any(|message| {
+                    message
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, ContentBlock::ToolResult { .. }))
+                });
+                if !observed_read_result {
+                    return tool_call_response(
+                        "toolu_read_research_source",
+                        "read",
+                        serde_json::json!({"file_path": "research-source.md"}),
+                    );
+                }
                 return text_response(
-                    "Track evidence: https://example.com/research confirms the local \
-                     DeepResearch fan-out completed before synthesis.",
+                    "Track evidence from research-source.md confirms the local DeepResearch \
+                     fan-out completed before synthesis.",
                 );
             }
             self.next_response()
@@ -2456,6 +2498,337 @@ mod tests {
         }
     }
 
+    struct FakeDirectWebSearchTool {
+        seen_args: std::sync::Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl Tool for FakeDirectWebSearchTool {
+        fn name(&self) -> &str {
+            "fake_web_search"
+        }
+
+        fn description(&self) -> &str {
+            "Deterministic web search fixture for DeepResearch direct web tests."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            self.seen_args.lock().unwrap().push(args.clone());
+            Ok(ToolOutput::success(
+                serde_json::json!([
+                    {
+                        "title": "Direct Web Official Source",
+                        "url": "https://user:password@example.com/direct-web-official?token=secret#fragment",
+                        "content": "The official source confirms the direct web evidence path.",
+                        "published_date": "2026-07-10",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Direct Web Independent Source",
+                        "url": "https://independent.example.org/direct-web-independent",
+                        "content": "Independent evidence corroborates the direct web result.",
+                        "published_date": "2026-07-09",
+                        "engines": ["fixture"]
+                    }
+                ])
+                .to_string(),
+            ))
+        }
+    }
+
+    struct FakeDirectWebFetchTool {
+        seen_args: std::sync::Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    struct MultilingualDirectWebSearchTool;
+
+    struct MultilingualDirectWebFetchTool;
+
+    #[async_trait]
+    impl Tool for MultilingualDirectWebSearchTool {
+        fn name(&self) -> &str {
+            "multilingual_web_search"
+        }
+
+        fn description(&self) -> &str {
+            "Returns multilingual compound-name search fixtures."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                serde_json::json!([
+                    {
+                        "title": "A3S Code 人工智能进展",
+                        "url": "https://example.com/a3s-code-ai",
+                        "content": "A3S Code 的人工智能进展已有可追踪的一手证据。",
+                        "published_date": "unknown",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "A3S_Code 人工智能进展独立分析",
+                        "url": "https://independent.example.org/a3s_code_ai",
+                        "content": "独立来源验证 A3S Code 人工智能进展。",
+                        "published_date": "N/A",
+                        "engines": ["fixture"]
+                    }
+                ])
+                .to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for MultilingualDirectWebFetchTool {
+        fn name(&self) -> &str {
+            "multilingual_web_fetch"
+        }
+
+        fn description(&self) -> &str {
+            "Returns multilingual fetched page evidence."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                "# A3S Code 人工智能进展\n\nA3S Code 的人工智能进展已有完整页面证据。",
+            ))
+        }
+    }
+
+    struct IrrelevantDirectWebSearchTool;
+
+    #[async_trait]
+    impl Tool for IrrelevantDirectWebSearchTool {
+        fn name(&self) -> &str {
+            "irrelevant_web_search"
+        }
+
+        fn description(&self) -> &str {
+            "Returns authoritative-looking but off-topic search fixtures."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                serde_json::json!([
+                    {
+                        "title": "Python release documentation",
+                        "url": "https://docs.python.org/3/whatsnew/",
+                        "content": "The current stable version and release schedule for Python.",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Java ongoing release notes",
+                        "url": "https://docs.oracle.com/java/ongoing-release/",
+                        "content": "Official ongoing release notes for the Java platform.",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Trusted rustic release archive",
+                        "url": "https://trust.example.com/rustic-release",
+                        "content": "A trustworthy archive for rustic design releases.",
+                        "engines": ["fixture"]
+                    }
+                ])
+                .to_string(),
+            ))
+        }
+    }
+
+    #[async_trait]
+    impl Tool for FakeDirectWebFetchTool {
+        fn name(&self) -> &str {
+            "fake_web_fetch"
+        }
+
+        fn description(&self) -> &str {
+            "Deterministic web fetch fixture for DeepResearch direct web tests."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            self.seen_args.lock().unwrap().push(args.clone());
+            let url = args
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("https://example.com/direct-web-official");
+            Ok(ToolOutput::success(format!(
+                "# Fixture Source\n\nFetched page text from {url}. It contains source-backed evidence for the direct web research path. Related evidence: https://reader:nested-password@linked.example.org/reference?nested_token=secret#private-fragment."
+            )))
+        }
+    }
+
+    struct OffTopicDirectWebFetchTool;
+
+    #[async_trait]
+    impl Tool for OffTopicDirectWebFetchTool {
+        fn name(&self) -> &str {
+            "off_topic_web_fetch"
+        }
+
+        fn description(&self) -> &str {
+            "Returns non-empty but off-topic page text for fetch validation tests."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                "# Redirected page\n\nPython packaging guidance unrelated to the requested topic.",
+            ))
+        }
+    }
+
+    struct DuplicateCanonicalDirectWebSearchTool;
+
+    #[async_trait]
+    impl Tool for DuplicateCanonicalDirectWebSearchTool {
+        fn name(&self) -> &str {
+            "duplicate_canonical_web_search"
+        }
+
+        fn description(&self) -> &str {
+            "Returns URL variants for one canonical direct-web resource."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                serde_json::json!([
+                    {
+                        "title": "Canonical direct web source",
+                        "url": "https://user:password@example.com/canonical?campaign=one#first",
+                        "content": "Canonical direct web evidence for duplicate URL testing.",
+                        "engines": ["fixture-primary"]
+                    },
+                    {
+                        "title": "Canonical direct web source",
+                        "url": "https://example.com/canonical?campaign=two#second",
+                        "content": "Canonical direct web evidence for duplicate URL testing.",
+                        "published_date": "2026-07-08",
+                        "engines": ["fixture-date"]
+                    },
+                    {
+                        "title": "Canonical direct web source trailing slash duplicate",
+                        "url": "https://example.com/canonical/?campaign=three#third",
+                        "content": "Duplicate canonical direct web evidence with a trailing slash.",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Case-distinct canonical direct web source",
+                        "url": "HTTPS://EXAMPLE.COM/Canonical?campaign=fourth#fourth",
+                        "content": "Case-distinct canonical direct web evidence is a separate resource.",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Canonical direct web default-port duplicate",
+                        "url": "https://example.com:443/canonical?campaign=fifth#fifth",
+                        "content": "Duplicate canonical direct web evidence with an explicit default port.",
+                        "engines": ["fixture"]
+                    },
+                    {
+                        "title": "Non-default port direct web source",
+                        "url": "https://example.com:8443/port-distinct?campaign=sixth#sixth",
+                        "content": "A distinct canonical direct web resource on the same hostname and another port.",
+                        "engines": ["fixture"]
+                    }
+                ])
+                .to_string(),
+            ))
+        }
+    }
+
+    struct NonJsonBalancedUrlSearchTool;
+
+    #[async_trait]
+    impl Tool for NonJsonBalancedUrlSearchTool {
+        fn name(&self) -> &str {
+            "non_json_balanced_url_search"
+        }
+
+        fn description(&self) -> &str {
+            "Returns a balanced-parenthesis URL in plain search output."
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({ "type": "object" })
+        }
+
+        async fn execute(
+            &self,
+            _args: &serde_json::Value,
+            _ctx: &ToolContext,
+        ) -> anyhow::Result<ToolOutput> {
+            Ok(ToolOutput::success(
+                "Strong result: https://example.com/spec_(v2)).",
+            ))
+        }
+    }
+
+    fn use_direct_web_fixture_tools(source: &str, search_tool: &str, fetch_tool: &str) -> String {
+        source
+            .replace(
+                "ctx.tool(\"web_search\"",
+                &format!("ctx.tool(\"{search_tool}\""),
+            )
+            .replace(
+                "ctx.tool(\"web_fetch\"",
+                &format!("ctx.tool(\"{fetch_tool}\""),
+            )
+            .replace("tool: \"web_search\"", &format!("tool: \"{search_tool}\""))
+            .replace("tool: \"web_fetch\"", &format!("tool: \"{fetch_tool}\""))
+    }
+
     fn test_config(path: &std::path::Path) {
         std::fs::write(
             path,
@@ -2463,6 +2836,11 @@ mod tests {
              providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
              models \"x\" { name = \"x\" }\n}\n\
              memory {\n  llmExtraction = false\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            path.parent().unwrap().join("research-source.md"),
+            "Deterministic workspace evidence for DeepResearch tests.\n",
         )
         .unwrap();
     }
@@ -2506,6 +2884,10 @@ mod tests {
             .expect("local deepresearch args");
         assert_eq!(opts.query, "rust async");
         assert_eq!(opts.runtime_mode, DeepResearchRuntimeMode::Local);
+        assert_eq!(
+            opts.evidence_scope,
+            super::super::DeepResearchEvidenceScope::WebAndWorkspace
+        );
 
         let opts = parse_deepresearch_args(&["--os".into(), "market".into()])
             .expect("os deepresearch args");
@@ -2516,6 +2898,159 @@ mod tests {
             .expect("auto deepresearch args");
         assert_eq!(opts.query, "compare runtimes");
         assert_eq!(opts.runtime_mode, DeepResearchRuntimeMode::Auto);
+
+        let opts = parse_deepresearch_args(&[
+            "--local-only".into(),
+            "use".into(),
+            "current web sources".into(),
+        ])
+        .expect("explicit offline scope");
+        assert_eq!(
+            opts.evidence_scope,
+            super::super::DeepResearchEvidenceScope::LocalOnly
+        );
+
+        let opts = parse_deepresearch_args(&[
+            "--web".into(),
+            "do not use web".into(),
+            "as quoted text".into(),
+        ])
+        .expect("explicit web scope");
+        assert_eq!(
+            opts.evidence_scope,
+            super::super::DeepResearchEvidenceScope::WebAndWorkspace
+        );
+
+        assert!(
+            parse_deepresearch_args(&["--web".into(), "--offline".into(), "query".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn deepresearch_cli_preserves_semantic_workflow_budget() {
+        let args = super::super::deep_research_workflow_args_with_scope(
+            "broad current research with many sources",
+            false,
+            super::super::DeepResearchEvidenceScope::WebAndWorkspace,
+        );
+
+        assert_eq!(args["input"]["local_research_rounds"], 4);
+        assert_eq!(args["input"]["local_parallel_task_timeout_ms"], 120_000);
+        assert_eq!(
+            args["limits"]["timeoutMs"],
+            super::super::DEEP_RESEARCH_SCRIPT_TIMEOUT_MS
+        );
+        assert!(
+            args["limits"]["maxToolCalls"].as_u64().unwrap() > 64,
+            "{args}"
+        );
+    }
+
+    #[test]
+    fn deepresearch_cli_uses_shared_hard_fuse_with_phase_reserve() {
+        assert_eq!(
+            DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS,
+            super::super::DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS
+        );
+        const {
+            assert!(
+                DEEP_RESEARCH_CLI_SESSION_SETUP_TIMEOUT_MS < DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS,
+                "session setup must retain time inside the outer safety fuse"
+            );
+        }
+
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_millis(DEEP_RESEARCH_CLI_TOTAL_TIMEOUT_MS);
+        let workflow_deadline = deepresearch_cli_workflow_deadline(deadline);
+        assert_eq!(
+            deadline.saturating_duration_since(workflow_deadline),
+            std::time::Duration::from_millis(DEEP_RESEARCH_CLI_FINALIZATION_RESERVE_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_expired_deadline_writes_degraded_recovery() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-deadline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let query = "deterministic deadline recovery";
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            complete_deepresearch_before_deadline(
+                &workspace,
+                query,
+                tokio::time::Instant::now(),
+                std::future::pending::<anyhow::Result<()>>(),
+            ),
+        )
+        .await
+        .expect("an expired absolute deadline must converge immediately");
+        let error = result.expect_err("deadline recovery must return a non-zero outcome");
+        assert!(
+            error.to_string().contains("360000 ms wall-clock deadline"),
+            "{error}"
+        );
+
+        let report = workspace.join(".a3s/research/deterministic-deadline-recovery/report.md");
+        let html = workspace.join(".a3s/research/deterministic-deadline-recovery/index.html");
+        let markdown = std::fs::read_to_string(&report)
+            .unwrap_or_else(|error| panic!("{}: {error}", report.display()));
+        assert!(
+            markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("`degraded` collection status"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("`cli_deadline_exceeded` mode"),
+            "{markdown}"
+        );
+        assert!(html.exists(), "{}", html.display());
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_counts_synchronous_materialization_against_deadline() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-sync-deadline-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let query = "synchronous deadline recovery";
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(5);
+
+        let result = complete_deepresearch_before_deadline(&workspace, query, deadline, async {
+            // Deterministically model the current synchronous report render/write
+            // path: it cannot yield to Tokio's timer while this poll is running.
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err(), "late synchronous completion must not win");
+
+        let report = workspace.join(".a3s/research/synchronous-deadline-recovery/report.md");
+        let markdown = std::fs::read_to_string(&report)
+            .unwrap_or_else(|error| panic!("{}: {error}", report.display()));
+        assert!(
+            markdown.contains("`degraded` collection status"),
+            "{markdown}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
@@ -2529,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn deepresearch_cli_policy_only_allows_report_artifact_writes() {
+    fn deepresearch_cli_policy_keeps_sensitive_tools_gated() {
         use a3s_code_core::permissions::PermissionDecision;
 
         let policy = deepresearch_cli_permission_policy();
@@ -2542,7 +3077,7 @@ mod tests {
                     "content": "# Report"
                 })
             ),
-            PermissionDecision::Allow
+            PermissionDecision::Ask
         );
         assert_eq!(
             policy.check(
@@ -2552,7 +3087,7 @@ mod tests {
                     "content": "<!doctype html><html><body></body></html>"
                 })
             ),
-            PermissionDecision::Allow
+            PermissionDecision::Ask
         );
         assert_eq!(
             policy.check("web_search", &serde_json::json!({"query": "a3s"})),
@@ -2560,14 +3095,18 @@ mod tests {
         );
         assert_eq!(
             policy.check("bash", &serde_json::json!({"command": "ls -la"})),
-            PermissionDecision::Deny
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            policy.check("Skill", &serde_json::json!({"name": "openai-docs"})),
+            PermissionDecision::Ask
         );
         assert_eq!(
             policy.check(
                 "write",
                 &serde_json::json!({"file_path": "README.md", "content": "oops"})
             ),
-            PermissionDecision::Deny
+            PermissionDecision::Ask
         );
         assert_eq!(
             policy.check(
@@ -2602,12 +3141,12 @@ mod tests {
         );
         assert_eq!(
             policy.check("bash", &serde_json::json!({"command": "rm -rf target"})),
-            PermissionDecision::Deny
+            PermissionDecision::Ask
         );
     }
 
     #[tokio::test]
-    async fn deepresearch_cli_synthesis_denies_non_report_writes_before_fallback() {
+    async fn deepresearch_cli_deterministic_recovery_never_attempts_non_report_writes() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-denied-write-{}-{}",
             std::process::id(),
@@ -2629,13 +3168,15 @@ mod tests {
                     "content": "DeepResearch should not write ordinary workspace files.",
                 }),
             ),
-            text_response("Synthesis recovered after a denied workspace write but did not write report files."),
+            text_response(
+                "Synthesis recovered after a denied workspace write but did not write report files.",
+            ),
             text_response("Repair also did not write report files."),
         ]));
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
         let permission_policy = deepresearch_cli_permission_policy();
         let opts = SessionOptions::new()
-            .with_llm_client(llm)
+            .with_llm_client(llm.clone())
             .with_permission_policy(permission_policy.clone())
             .with_permission_checker(Arc::new(super::super::TuiHitlPermissionChecker::new(
                 permission_policy,
@@ -2644,7 +3185,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let synthesis = synthesize_deepresearch_report(
             &session,
@@ -2657,23 +3199,24 @@ mod tests {
             &report_tool_gate,
         )
         .await
-        .expect("host fallback should materialize after denied non-report write");
+        .expect("host recovery report should materialize after denied non-report write");
         let DeepResearchReportSynthesis {
             text: final_text,
             artifacts,
-            status,
+            outcome,
         } = synthesis;
+        assert_eq!(outcome, DeepResearchCliOutcome::RecoveryReport);
+        assert_eq!(llm.call_count(), 0, "recovery invoked model synthesis");
 
-        assert_eq!(status, DeepResearchReportStatus::FallbackDraft);
         assert!(
             !workspace.join("README.md").exists(),
             "DeepResearch CLI policy must block non-report writes"
         );
         assert!(
-            final_text.contains("DeepResearch fallback draft written at"),
+            final_text
+                .contains("A3S_RESEARCH_VIEW: .a3s/research/denied-write-fallback/index.html"),
             "{final_text}"
         );
-        assert!(!final_text.contains("A3S_RESEARCH_VIEW"), "{final_text}");
         assert_eq!(
             artifacts.markdown,
             workspace
@@ -2688,12 +3231,102 @@ mod tests {
                 .canonicalize()
                 .unwrap()
         );
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(markdown.contains("The evidence collection phase ended with degraded status"));
+        assert!(markdown.contains("DeepResearch Recovery Report"));
+        assert!(!markdown.contains("DeepResearch Fallback Draft"));
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
-    async fn deepresearch_cli_repair_pass_writes_required_markdown_and_html_artifacts() {
+    async fn deepresearch_cli_current_evidence_replaces_stale_report_without_model() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-current-answer-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let report_dir = workspace.join(".a3s/research/current-answer");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(
+            report_dir.join("report.md"),
+            "# Stale Report\n\n## Findings\n\nThis is an older answer that must not replace the current synthesis merely because the deterministic slug already exists.\n\n## Sources\n\n- https://example.com/current-source\n\n## Confidence\n\nConfidence was medium in the older run.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            report_dir.join("index.html"),
+            "<!doctype html><html><body><h1>Stale Report</h1><h2>Findings</h2><p>This older answer must not replace current synthesis.</p><h2>Sources</h2><p>https://example.com/current-source</p><h2>Confidence</h2><p>Medium confidence.</p></body></html>",
+        )
+        .unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let current_answer = "# Current Answer\n\n## Findings\n\nThis current source-backed synthesis supersedes the older deterministic-slug report and contains enough substantive analysis, caveats, and conclusions to be materialized directly.\n\n## Sources\n\n- https://example.com/current-source\n\n## Confidence\n\nConfidence is high because the cited source came from this run's structured evidence.\n\nA3S_RESEARCH_VIEW: .a3s/research/current-answer/index.html\n";
+        let llm = Arc::new(ScriptedLlmClient::new(vec![text_response(current_answer)]));
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+        let permission_policy = deepresearch_cli_permission_policy();
+        let opts = SessionOptions::new()
+            .with_llm_client(llm.clone())
+            .with_permission_policy(permission_policy.clone())
+            .with_permission_checker(Arc::new(super::super::TuiHitlPermissionChecker::new(
+                permission_policy,
+                report_tool_gate.clone(),
+            )))
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(2);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let workflow_output = serde_json::json!({
+            "mode": "local_parallel_task",
+            "research": {
+                "status": "success",
+                "results": [{
+                    "structured": {
+                        "summary": "Current evidence",
+                        "sources": [{
+                            "url_or_path": "https://example.com/current-source",
+                            "quote_or_fact": "current source trace"
+                        }],
+                        "confidence": "high"
+                    }
+                }]
+            }
+        })
+        .to_string();
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "current answer",
+            false,
+            &workflow_output,
+            0,
+            None,
+            &report_tool_gate,
+        )
+        .await
+        .expect("current answer should materialize over the stale report");
+
+        assert_eq!(synthesis.outcome, DeepResearchCliOutcome::Completed);
+        assert_eq!(
+            llm.call_count(),
+            0,
+            "valid evidence invoked model synthesis"
+        );
+        let markdown = std::fs::read_to_string(&synthesis.artifacts.markdown).unwrap();
+        assert!(markdown.contains("Current evidence"), "{markdown}");
+        assert!(!markdown.contains("# Stale Report"), "{markdown}");
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_skips_model_repair_and_materializes_validated_evidence() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-artifacts-{}-{}",
             std::process::id(),
@@ -2740,7 +3373,8 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(6);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
 
         let synthesis = synthesize_deepresearch_report(
@@ -2748,7 +3382,7 @@ mod tests {
             &workspace,
             "local test",
             false,
-            r#"{"mode":"local_parallel_task","research":"evidence"}"#,
+            r#"{"mode":"local_parallel_task","research":{"status":"success","results":[{"structured":{"summary":"source-backed evidence","sources":[{"url_or_path":"https://example.com/research","quote_or_fact":"traceable source"}],"confidence":"medium"}}]}}"#,
             0,
             None,
             &report_tool_gate,
@@ -2766,17 +3400,17 @@ mod tests {
         let DeepResearchReportSynthesis {
             text: final_text,
             artifacts,
-            status,
+            outcome,
         } = synthesis;
+        assert_eq!(outcome, DeepResearchCliOutcome::Completed);
 
-        assert_eq!(status, DeepResearchReportStatus::Completed);
         assert!(
             final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/local-test/index.html"),
             "{final_text}"
         );
         assert!(
-            final_text.contains("# Local Test"),
-            "dirty repair text should be rebuilt from validated report.md: {final_text}"
+            final_text.contains("# local test — Research Report"),
+            "host evidence should replace dirty model output without a repair call: {final_text}"
         );
         assert!(
             !final_text.contains("Step 2 complete")
@@ -2803,7 +3437,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deepresearch_cli_materializes_fallback_artifacts_when_model_never_writes_report() {
+    async fn deepresearch_cli_materializes_recovery_without_model_synthesis() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-fallback-{}-{}",
             std::process::id(),
@@ -2821,10 +3455,11 @@ mod tests {
             text_response("Repair also forgot to write the report files."),
         ]));
         let opts = SessionOptions::new()
-            .with_llm_client(llm)
+            .with_llm_client(llm.clone())
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
@@ -2839,19 +3474,19 @@ mod tests {
             &report_tool_gate,
         )
         .await
-        .expect("host fallback should materialize draft artifacts");
+        .expect("host recovery report should materialize artifacts");
         let DeepResearchReportSynthesis {
             text: final_text,
             artifacts,
-            status,
+            outcome,
         } = synthesis;
+        assert_eq!(outcome, DeepResearchCliOutcome::RecoveryReport);
+        assert_eq!(llm.call_count(), 0, "recovery invoked model synthesis");
 
-        assert_eq!(status, DeepResearchReportStatus::FallbackDraft);
         assert!(
-            final_text.contains("DeepResearch fallback draft written at"),
+            final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/fallback-only/index.html"),
             "{final_text}"
         );
-        assert!(!final_text.contains("A3S_RESEARCH_VIEW"), "{final_text}");
         assert_eq!(
             artifacts.markdown,
             workspace
@@ -2867,23 +3502,20 @@ mod tests {
                 .unwrap()
         );
         let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-        assert!(markdown.contains("Repair also forgot"));
-        assert!(markdown.contains("fallback evidence"));
-        assert!(markdown.contains("DeepResearch Fallback Draft"));
-        assert!(!markdown.contains("A3S_RESEARCH_VIEW"));
+        assert!(markdown.contains("The evidence collection phase ended with degraded status"));
+        assert!(markdown.contains("DeepResearch Recovery Report"));
+        assert!(!markdown.contains("DeepResearch Fallback Draft"));
         let html = std::fs::read_to_string(&artifacts.html).unwrap();
-        assert!(html.contains("DeepResearch Fallback Draft"));
-        assert!(html.contains("fallback evidence"));
+        assert!(html.contains("DeepResearch Recovery Report"));
         assert!(!html.contains("A3S_RESEARCH_VIEW"));
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
-    async fn deepresearch_cli_failed_collection_without_sources_falls_back_without_model_recovery()
-    {
+    async fn deepresearch_cli_materializes_structured_evidence_report_when_synthesis_is_empty() {
         let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-cli-no-evidence-{}-{}",
+            "a3s-deepresearch-cli-evidence-report-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -2894,49 +3526,145 @@ mod tests {
         let cfg = workspace.join("config.acl");
         test_config(&cfg);
         let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
-        let llm = Arc::new(ScriptedLlmClient::new(vec![text_response(
-            "Incorrect recovery should not be used.\nA3S_RESEARCH_VIEW: .a3s/research/no-evidence/index.html",
-        )]));
+        let llm = Arc::new(ScriptedLlmClient::new(vec![text_response("##")]));
         let opts = SessionOptions::new()
             .with_llm_client(llm)
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+        let workflow_output = serde_json::json!({
+            "query": "evidence materialization",
+            "mode": "local_parallel_task",
+            "research": {
+                "status": "success",
+                "metadata": { "success_count": 1, "task_count": 1, "failed_count": 0 },
+                "results": [{
+                    "structured": {
+                        "summary": "Structured evidence can produce a final report when model synthesis returns no useful artifact.",
+                        "sources": [{
+                            "title": "Evidence Report Source",
+                            "url_or_path": "https://example.com/evidence-report",
+                            "date": "2026-07-09",
+                            "quote_or_fact": "Source-backed evidence was available before synthesis.",
+                            "reliability": "deterministic test fixture"
+                        }],
+                        "key_evidence": ["The workflow returned a schema-shaped evidence object."],
+                        "contradictions": [],
+                        "confidence": "high for deterministic test evidence",
+                        "gaps": []
+                    }
+                }]
+            }
+        })
+        .to_string();
 
         let synthesis = synthesize_deepresearch_report(
             &session,
             &workspace,
-            "no evidence",
+            "evidence materialization",
             false,
-            "dynamic_workflow timed out before evidence was available",
-            1,
+            &workflow_output,
+            0,
             None,
             &report_tool_gate,
         )
         .await
-        .expect("host fallback should materialize draft artifacts");
+        .expect("structured evidence should materialize a completed report");
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            ..
+        } = synthesis;
 
-        assert_eq!(synthesis.status, DeepResearchReportStatus::FallbackDraft);
         assert!(
-            synthesis
-                .text
-                .contains("DeepResearch fallback draft written at"),
-            "{}",
-            synthesis.text
+            final_text
+                .contains("A3S_RESEARCH_VIEW: .a3s/research/evidence-materialization/index.html"),
+            "{final_text}"
         );
-        assert!(!synthesis.text.contains("A3S_RESEARCH_VIEW"));
-        let markdown = std::fs::read_to_string(&synthesis.artifacts.markdown).unwrap();
-        assert!(markdown.contains("DeepResearch Fallback Draft"));
-        assert!(markdown.contains("evidence collection failed"));
-        assert!(!markdown.contains("Incorrect recovery should not be used"));
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(
+            markdown.contains("https://example.com/evidence-report"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Fallback Draft"),
+            "{markdown}"
+        );
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
-    async fn deepresearch_cli_dirty_synthesis_is_repaired_or_falls_back_cleanly() {
+    async fn deepresearch_cli_workflow_timeout_materializes_recovery_report() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-cli-workflow-timeout-recovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![text_response("##")]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let report_tool_gate = super::super::DeepResearchReportToolGate::default();
+        let workflow_output =
+            "dynamic_workflow timed out after 360000 ms while gathering DeepResearch evidence";
+
+        let synthesis = synthesize_deepresearch_report(
+            &session,
+            &workspace,
+            "arbitrary research subject",
+            false,
+            workflow_output,
+            1,
+            None,
+            &report_tool_gate,
+        )
+        .await
+        .expect("workflow timeout should produce a recovery report");
+        let DeepResearchReportSynthesis {
+            text: final_text,
+            artifacts,
+            ..
+        } = synthesis;
+
+        assert!(
+            final_text
+                .contains("A3S_RESEARCH_VIEW: .a3s/research/arbitrary-research-subject/index.html"),
+            "{final_text}"
+        );
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(
+            markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Fallback Draft"),
+            "{markdown}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_cli_dirty_synthesis_recovers_cleanly() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-cli-dirty-fallback-{}-{}",
             std::process::id(),
@@ -2959,10 +3687,11 @@ mod tests {
         ]));
         let opts = SessionOptions::new().with_planning_mode(a3s_code_core::PlanningMode::Disabled);
         let session = agent
-            .session(
+            .session_async(
                 workspace.to_string_lossy().to_string(),
                 Some(opts.with_llm_client(llm)),
             )
+            .await
             .unwrap();
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
 
@@ -2977,19 +3706,17 @@ mod tests {
             &report_tool_gate,
         )
         .await
-        .expect("host fallback should materialize when synthesis remains dirty");
+        .expect("host recovery report should materialize when synthesis remains dirty");
         let DeepResearchReportSynthesis {
             text: final_text,
             artifacts,
-            status,
+            ..
         } = synthesis;
 
-        assert_eq!(status, DeepResearchReportStatus::FallbackDraft);
         assert!(
-            final_text.contains("DeepResearch fallback draft written at"),
+            final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/dirty-fallback/index.html"),
             "{final_text}"
         );
-        assert!(!final_text.contains("A3S_RESEARCH_VIEW"), "{final_text}");
         assert!(
             !super::super::deep_research_output_has_internal_leak(&final_text),
             "{final_text}"
@@ -3003,6 +3730,14 @@ mod tests {
         assert!(
             !super::super::deep_research_output_has_internal_leak(&html),
             "{html}"
+        );
+        assert!(
+            markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Fallback Draft"),
+            "{markdown}"
         );
 
         let _ = std::fs::remove_dir_all(&workspace);
@@ -3029,7 +3764,7 @@ mod tests {
                 "write",
                 serde_json::json!({
                     "file_path": ".a3s/research/local-workflow-e2e/report.md",
-                    "content": "# Local Workflow E2E\n\n## Findings\n\nThe workflow produced deterministic evidence and completed fan-out before synthesis, giving the report enough source-backed material to explain the result.\n\n## Sources\n\n- https://example.com/research\n\n## Confidence\n\nConfidence is high for this test because the evidence path is deterministic and verified by workflow metadata.\n",
+                    "content": "# Local Workflow E2E\n\n## Findings\n\nThe workflow produced deterministic evidence and completed fan-out before synthesis, giving the report enough source-backed material to explain the result.\n\n## Sources\n\n- research-source.md\n\n## Confidence\n\nConfidence is high for this test because the cited workspace source was read during this workflow run.\n",
                 }),
             ),
             tool_call_response(
@@ -3037,7 +3772,7 @@ mod tests {
                 "write",
                 serde_json::json!({
                     "file_path": ".a3s/research/local-workflow-e2e/index.html",
-                    "content": "<!doctype html><html><body><h1>Local Workflow E2E</h1><section><h2>Findings</h2><p>The workflow produced deterministic evidence and completed fan-out before synthesis.</p></section><section><h2>Sources</h2><p>Evidence source: https://example.com/research. Confidence is high for this deterministic test.</p></section></body></html>",
+                    "content": "<!doctype html><html><body><h1>Local Workflow E2E</h1><section><h2>Findings</h2><p>The workflow produced deterministic evidence and completed fan-out before synthesis.</p></section><section><h2>Sources</h2><p>Evidence source: research-source.md. Confidence is high because the source was read during this workflow run.</p></section></body></html>",
                 }),
             ),
             text_response(
@@ -3050,12 +3785,14 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(6);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_workflow_runtime();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("local workflow e2e", false);
+        workflow_args["input"]["evidence_scope"] = serde_json::json!("local_only");
         workflow_args["input"]["tracks"] = serde_json::json!([
             {
                 "title": "Local evidence",
@@ -3071,7 +3808,7 @@ mod tests {
                 "parallelizable": false
             }
         ]);
-        let workflow = run_deepresearch_workflow(&session, workflow_args)
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
             .await
             .expect("local DeepResearch workflow should complete");
         assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
@@ -3082,7 +3819,10 @@ mod tests {
         );
         let workflow_json: serde_json::Value =
             serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
-        assert_eq!(workflow_json["research"]["status"], "success");
+        assert_eq!(
+            workflow_json["research"]["status"], "success",
+            "{workflow_json:#}"
+        );
         assert!(
             workflow_json["research"].get("output").is_none(),
             "DeepResearch workflow output should not expose raw parallel_task text"
@@ -3114,8 +3854,8 @@ mod tests {
             serde_json::json!(2)
         );
         assert_eq!(
-            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
-                ["metadata"]["results"][0]["structured"]["summary"],
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]["metadata"]
+                ["results"][0]["structured"]["summary"],
             "Structured DeepResearch track evidence confirms local fan-out completed before synthesis."
         );
         let report_tool_gate = super::super::DeepResearchReportToolGate::default();
@@ -3135,10 +3875,9 @@ mod tests {
         let DeepResearchReportSynthesis {
             text: final_text,
             artifacts,
-            status,
+            ..
         } = synthesis;
 
-        assert_eq!(status, DeepResearchReportStatus::Completed);
         assert!(
             final_text.contains("A3S_RESEARCH_VIEW: .a3s/research/local-workflow-e2e/index.html"),
             "{final_text}"
@@ -3157,17 +3896,795 @@ mod tests {
                 .canonicalize()
                 .unwrap()
         );
-        assert!(std::fs::read_to_string(&artifacts.markdown)
-            .unwrap()
-            .contains("workflow produced deterministic evidence"));
-        assert!(std::fs::read_to_string(&artifacts.html)
-            .unwrap()
-            .contains("Local Workflow E2E"));
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(
+            markdown.contains("Structured DeepResearch track evidence confirms local fan-out"),
+            "{markdown}"
+        );
+        assert!(markdown.contains("research-source.md"), "{markdown}");
+        let html = std::fs::read_to_string(&artifacts.html).unwrap();
+        assert!(html.contains("research-source.md"), "{html}");
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
     #[tokio::test]
-    async fn deepresearch_workflow_runs_bounded_recursive_rounds() {
+    async fn deepresearch_workflow_collects_direct_web_evidence_before_parallel_fanout() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-direct-web-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let seen_search_args = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let seen_fetch_args = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebSearchTool {
+            seen_args: std::sync::Arc::clone(&seen_search_args),
+        }));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebFetchTool {
+            seen_args: std::sync::Arc::clone(&seen_fetch_args),
+        }));
+
+        let mut workflow_args = super::super::deep_research_workflow_args(
+            "comprehensive comparison direct web e2e research",
+            false,
+        );
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "fake_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("direct web DeepResearch workflow should complete");
+        assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
+        assert_eq!(output["mode"], "hybrid_direct_web_parallel");
+        assert_eq!(
+            output["seed_research"]["algorithm"],
+            "direct_web_search_fetch"
+        );
+        assert_eq!(
+            output["research"]["algorithm"],
+            "bounded_recursive_parallel_retrieval_summary"
+        );
+        assert_eq!(output["research"]["status"], "success");
+        assert_eq!(
+            output["seed_research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+            "https://example.com/direct-web-official"
+        );
+        assert!(!workflow.output.contains("password"));
+        assert!(!workflow.output.contains("token=secret"));
+        assert!(
+            output["seed_research"]["results"][0]["structured"]["quote_or_fact"]
+                .as_str()
+                .is_none(),
+            "quote_or_fact belongs to sources, not the top-level evidence object"
+        );
+
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        let steps = &metadata["dynamic_workflow"]["snapshot"]["steps"];
+        assert_eq!(steps["direct_web_research"]["status"], "completed");
+        assert!(
+            steps.get("local_research").is_some(),
+            "complex DeepResearch must use direct web as seed evidence before delegated fan-out"
+        );
+        assert!(!seen_search_args.lock().unwrap().is_empty());
+        let fetch_args = seen_fetch_args.lock().unwrap();
+        assert_eq!(fetch_args.len(), 1);
+        assert_eq!(
+            fetch_args[0]["url"],
+            "https://example.com/direct-web-official"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn deepresearch_direct_web_uses_bounded_generic_queries_and_configured_engines() {
+        let args = super::super::deep_research_workflow_args(
+            "请研究一个任意主题，并生成有来源的完整报告。",
+            false,
+        );
+        let source = args["source"].as_str().expect("workflow source");
+        assert!(
+            source.contains("split(/[。！？\\n]/)[0]")
+                && source.contains("slice(0, 140)")
+                && source.contains("const crossLanguage ="),
+            "direct search queries must discard long report instructions: {source}"
+        );
+        assert!(
+            source.contains("if (directWebEngines.length > 0)")
+                && source.contains("args.engines = directWebEngines")
+                && source.contains("tool: \"web_search\"")
+                && !source.contains(r#"["ddg", "brave", "bing_cn"]"#),
+            "search must omit engines by default and defer health selection to a3s-search"
+        );
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_fast_path_requires_and_accepts_two_hosts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-two-host-fast-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let seen_search_args = Arc::new(Mutex::new(Vec::new()));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebSearchTool {
+            seen_args: Arc::clone(&seen_search_args),
+        }));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebFetchTool {
+            seen_args: Arc::new(Mutex::new(Vec::new())),
+        }));
+
+        let mut workflow_args =
+            super::super::deep_research_workflow_args(
+                "latest direct web evidence from https://query-user:query-password@private.example.com/release?api_key=query-secret#query-fragment",
+                false,
+            );
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "fake_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(2);
+        workflow_args["input"]["research_plan"]["freshness_required"] = serde_json::json!(true);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("two-host verified direct web evidence should use the fast path");
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).unwrap_or_else(|error| {
+                panic!(
+                    "workflow output was not JSON: {error}; output={:?}; metadata={:?}",
+                    workflow.output, workflow.metadata
+                )
+            });
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        let steps = &metadata["dynamic_workflow"]["snapshot"]["steps"];
+
+        assert_eq!(output["mode"], "direct_web", "{output}");
+        assert_eq!(output["research"]["metadata"]["source_count"], 2);
+        assert_eq!(output["research"]["metadata"]["host_count"], 2);
+        assert_eq!(output["research"]["metadata"]["fetched_count"], 2);
+        assert_eq!(output["research"]["metadata"]["fetched_host_count"], 2);
+        assert_eq!(output["research"]["metadata"]["query_term_count"], 2);
+        assert_eq!(output["research"]["metadata"]["freshness_required"], true);
+        assert_eq!(output["research"]["metadata"]["dated_source_count"], 2);
+        assert_eq!(
+            output["research"]["metadata"]["matched_query_term_count"],
+            2
+        );
+        assert_eq!(
+            output["research"]["metadata"]["fetched_query_term_count"],
+            2
+        );
+        let sources = output["research"]["results"][0]["structured"]["sources"]
+            .as_array()
+            .expect("direct-web sources");
+        let official = sources
+            .iter()
+            .find(|source| source["url_or_path"] == "https://example.com/direct-web-official")
+            .expect("official source");
+        assert_eq!(official["date"], "2026-07-10", "{official}");
+        let serialized = serde_json::to_string(&output).unwrap();
+        assert!(serialized.contains("https://linked.example.org/reference"));
+        for secret in [
+            "reader:nested-password",
+            "nested_token=secret",
+            "private-fragment",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "leaked {secret}: {serialized}"
+            );
+        }
+        let synthesis_digest = super::super::deep_research_prompt_workflow_output(&workflow.output);
+        assert!(synthesis_digest.contains("https://linked.example.org/reference"));
+        for secret in [
+            "reader:nested-password",
+            "nested_token=secret",
+            "private-fragment",
+        ] {
+            assert!(
+                !synthesis_digest.contains(secret),
+                "leaked {secret}: {synthesis_digest}"
+            );
+        }
+        assert!(steps.get("local_research").is_none(), "{steps}");
+        let serialized_search_args = {
+            let search_args = seen_search_args.lock().unwrap();
+            assert!(!search_args.is_empty());
+            serde_json::to_string(&*search_args).unwrap()
+        };
+        assert!(
+            serialized_search_args.contains("https://private.example.com/release"),
+            "{serialized_search_args}"
+        );
+        for secret in [
+            "query-user",
+            "query-password",
+            "api_key",
+            "query-secret",
+            "query-fragment",
+        ] {
+            assert!(
+                !serialized_search_args.contains(secret),
+                "leaked {secret}: {serialized_search_args}"
+            );
+        }
+        let mut partial_fetch_args =
+            super::super::deep_research_workflow_args("direct web independent", false);
+        let partial_fetch_source = use_direct_web_fixture_tools(
+            partial_fetch_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "fake_web_fetch",
+        );
+        partial_fetch_args["source"] = serde_json::json!(partial_fetch_source);
+        partial_fetch_args["input"]["complexity_score"] = serde_json::json!(1);
+        partial_fetch_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        partial_fetch_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        partial_fetch_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let partial_fetch = run_deepresearch_workflow(&session, &workspace, partial_fetch_args)
+            .await
+            .expect("snippet-only entity coverage should delegate");
+        let partial_metadata = partial_fetch.metadata.as_ref().expect("workflow metadata");
+        let partial_direct = &partial_metadata["dynamic_workflow"]["snapshot"]["steps"]
+            ["direct_web_research"]["output"];
+
+        assert_eq!(
+            partial_direct["metadata"]["matched_query_term_count"], 3,
+            "{partial_direct}"
+        );
+        assert_eq!(
+            partial_direct["metadata"]["fetched_query_term_count"], 2,
+            "{partial_direct}"
+        );
+        assert!(
+            partial_metadata["dynamic_workflow"]["snapshot"]["steps"]
+                .get("local_research")
+                .is_some(),
+            "{partial_metadata}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_matches_cjk_terms_and_compound_name_variants() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-multilingual-terms-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(MultilingualDirectWebSearchTool));
+        let _ = session.register_dynamic_tool(Arc::new(MultilingualDirectWebFetchTool));
+
+        let mut workflow_args =
+            super::super::deep_research_workflow_args("请全面调研 A3S-Code 人工智能进展", false);
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "multilingual_web_search",
+            "multilingual_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["complexity_score"] = serde_json::json!(1);
+        workflow_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(2);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("multilingual direct web evidence should remain eligible");
+        let output: serde_json::Value = serde_json::from_str(&workflow.output).unwrap();
+        let counts = &output["research"]["metadata"];
+
+        assert_eq!(output["mode"], "direct_web", "{output}");
+        assert_eq!(counts["query_term_count"], 6, "{counts}");
+        assert_eq!(counts["matched_query_term_count"], 6, "{counts}");
+        assert_eq!(counts["query_term_coverage"], 1.0, "{counts}");
+        assert_eq!(counts["fetched_query_term_count"], 6, "{counts}");
+        assert_eq!(counts["fetched_query_term_coverage"], 1.0, "{counts}");
+        assert_eq!(counts["fetched_host_count"], 2, "{counts}");
+        assert_eq!(counts["freshness_required"], false, "{counts}");
+        assert!(
+            output["research"]["results"][0]["structured"]["sources"]
+                .as_array()
+                .is_some_and(|sources| sources.iter().all(|source| source.get("date").is_none())),
+            "{output}"
+        );
+
+        let mut freshness_args = super::super::deep_research_workflow_args(
+            "请全面调研 A3S-Code 人工智能最新进展",
+            false,
+        );
+        let freshness_source = use_direct_web_fixture_tools(
+            freshness_args["source"].as_str().unwrap(),
+            "multilingual_web_search",
+            "multilingual_web_fetch",
+        );
+        freshness_args["source"] = serde_json::json!(freshness_source);
+        freshness_args["input"]["complexity_score"] = serde_json::json!(1);
+        freshness_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        freshness_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        freshness_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+        freshness_args["input"]["research_plan"]["freshness_required"] = serde_json::json!(true);
+
+        let freshness = run_deepresearch_workflow(&session, &workspace, freshness_args)
+            .await
+            .expect("undated freshness evidence should delegate");
+        let freshness_metadata = freshness.metadata.as_ref().expect("workflow metadata");
+        let freshness_direct = &freshness_metadata["dynamic_workflow"]["snapshot"]["steps"]
+            ["direct_web_research"]["output"];
+
+        assert_eq!(
+            freshness_direct["metadata"]["freshness_required"], true,
+            "{freshness_direct}"
+        );
+        assert_eq!(
+            freshness_direct["metadata"]["dated_source_count"], 0,
+            "{freshness_direct}"
+        );
+        assert!(
+            freshness_metadata["dynamic_workflow"]["snapshot"]["steps"]
+                .get("local_research")
+                .is_some(),
+            "{freshness_metadata}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_fast_path_requires_all_query_entities() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-query-coverage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebSearchTool {
+            seen_args: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebFetchTool {
+            seen_args: Arc::new(Mutex::new(Vec::new())),
+        }));
+
+        let mut workflow_args = super::super::deep_research_workflow_args(
+            "compare direct web evidence with missingtopic",
+            false,
+        );
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "fake_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("incomplete entity coverage should fall through to delegated research");
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).unwrap_or_else(|error| {
+                panic!(
+                    "workflow output was not JSON: {error}; output={:?}; metadata={:?}",
+                    workflow.output, workflow.metadata
+                )
+            });
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        let direct =
+            &metadata["dynamic_workflow"]["snapshot"]["steps"]["direct_web_research"]["output"];
+        let steps = &metadata["dynamic_workflow"]["snapshot"]["steps"];
+
+        assert_ne!(output["mode"], "direct_web", "{output}");
+        assert_eq!(direct["metadata"]["query_term_count"], 3, "{direct}");
+        assert_eq!(
+            direct["metadata"]["matched_query_term_count"], 2,
+            "{direct}"
+        );
+        assert!(steps.get("local_research").is_some(), "{steps}");
+
+        let extra_terms = (0..60)
+            .map(|index| format!("term{index:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut bounded_args =
+            super::super::deep_research_workflow_args(&format!("direct web {extra_terms}"), false);
+        let bounded_source = use_direct_web_fixture_tools(
+            bounded_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "fake_web_fetch",
+        );
+        bounded_args["source"] = serde_json::json!(bounded_source);
+        bounded_args["input"]["complexity_score"] = serde_json::json!(1);
+        bounded_args["input"]["local_research_rounds"] = serde_json::json!(1);
+        bounded_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        bounded_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let bounded = run_deepresearch_workflow(&session, &workspace, bounded_args)
+            .await
+            .expect("high-cardinality queries should remain bounded and delegate");
+        let bounded_metadata = bounded.metadata.as_ref().expect("workflow metadata");
+        let bounded_direct = &bounded_metadata["dynamic_workflow"]["snapshot"]["steps"]
+            ["direct_web_research"]["output"];
+
+        assert!(
+            bounded_direct["metadata"]["query_term_count"]
+                .as_u64()
+                .is_some_and(|count| count < 48),
+            "{bounded_direct}"
+        );
+        assert_eq!(
+            bounded_direct["metadata"]["query_terms_truncated"], true,
+            "{bounded_direct}"
+        );
+        assert!(
+            bounded_metadata["dynamic_workflow"]["snapshot"]["steps"]
+                .get("local_research")
+                .is_some(),
+            "{bounded_metadata}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_does_not_verify_off_topic_fetch_text() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-off-topic-fetch-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebSearchTool {
+            seen_args: Arc::new(Mutex::new(Vec::new())),
+        }));
+        let _ = session.register_dynamic_tool(Arc::new(OffTopicDirectWebFetchTool));
+
+        let mut workflow_args = super::super::deep_research_workflow_args(
+            "comprehensive comparison direct web e2e research",
+            false,
+        );
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "fake_web_search",
+            "off_topic_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(2);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("off-topic fetch text should degrade without discarding search snippets");
+        let output: serde_json::Value = serde_json::from_str(&workflow.output).unwrap();
+        let seed = &output["seed_research"];
+
+        assert_eq!(seed["metadata"]["fetched_count"], 0, "{seed}");
+        assert_eq!(seed["metadata"]["partial_failure"], true, "{seed}");
+        assert_eq!(seed["status"], "partial_success", "{seed}");
+        assert!(
+            seed["warnings"]["collection_errors"]
+                .as_array()
+                .is_some_and(|warnings| warnings.iter().any(|warning| warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("off-topic page text")))),
+            "{seed}"
+        );
+        let reliability = seed["results"][0]["structured"]["sources"][0]["reliability"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(reliability.contains("fixture"), "{reliability}");
+        assert!(!reliability.contains("verified"), "{reliability}");
+        assert!(!workflow.output.contains("Python packaging"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_dedupes_canonical_url_variants() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-canonical-dedupe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(DuplicateCanonicalDirectWebSearchTool));
+        let seen_fetch_args = Arc::new(Mutex::new(Vec::new()));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebFetchTool {
+            seen_args: Arc::clone(&seen_fetch_args),
+        }));
+
+        let mut workflow_args = super::super::deep_research_workflow_args(
+            "canonical direct web duplicate URL test",
+            false,
+        );
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "duplicate_canonical_web_search",
+            "fake_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(6);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(6);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("canonical URL variants should produce one direct-web source");
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        let direct_output =
+            &metadata["dynamic_workflow"]["snapshot"]["steps"]["direct_web_research"]["output"];
+
+        assert_eq!(
+            direct_output["metadata"]["result_count"], 3,
+            "{direct_output}"
+        );
+        assert_eq!(
+            direct_output["metadata"]["source_count"], 3,
+            "{direct_output}"
+        );
+        assert_eq!(
+            direct_output["metadata"]["host_count"], 1,
+            "{direct_output}"
+        );
+        let canonical_source = direct_output["results"][0]["structured"]["sources"]
+            .as_array()
+            .and_then(|sources| {
+                sources.iter().find(|source| {
+                    source["url_or_path"].as_str().is_some_and(|url| {
+                        url.trim_end_matches('/') == "https://example.com/canonical"
+                    })
+                })
+            })
+            .unwrap_or_else(|| panic!("canonical source missing: {direct_output}"));
+        assert_eq!(canonical_source["date"], "2026-07-08");
+        let reliability = canonical_source["reliability"].as_str().unwrap_or_default();
+        assert!(reliability.contains("fixture-primary"), "{reliability}");
+        assert!(reliability.contains("fixture-date"), "{reliability}");
+        assert_eq!(seen_fetch_args.lock().unwrap().len(), 3);
+        assert!(workflow.output.contains("https://example.com/canonical"));
+        assert!(workflow.output.contains("https://example.com/Canonical"));
+        assert!(workflow
+            .output
+            .contains("https://example.com:8443/port-distinct"));
+        assert!(
+            !workflow.output.contains("campaign="),
+            "{}",
+            workflow.output
+        );
+        assert!(!workflow.output.contains(":443"), "{}", workflow.output);
+        assert!(!workflow.output.contains("password"), "{}", workflow.output);
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_non_json_fallback_preserves_balanced_url_parentheses() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-balanced-fallback-url-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(NonJsonBalancedUrlSearchTool));
+        let _ = session.register_dynamic_tool(Arc::new(FakeDirectWebFetchTool {
+            seen_args: Arc::new(Mutex::new(Vec::new())),
+        }));
+
+        let mut workflow_args = super::super::deep_research_workflow_args("spec v2", false);
+        let source = use_direct_web_fixture_tools(
+            workflow_args["source"].as_str().unwrap(),
+            "non_json_balanced_url_search",
+            "fake_web_fetch",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+        workflow_args["input"]["direct_web_max_results"] = serde_json::json!(1);
+        workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(1);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("balanced fallback URL should remain usable direct-web evidence");
+        let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+        let direct_output =
+            &metadata["dynamic_workflow"]["snapshot"]["steps"]["direct_web_research"]["output"];
+
+        assert_eq!(
+            direct_output["results"][0]["structured"]["sources"][0]["url_or_path"],
+            "https://example.com/spec_(v2)"
+        );
+        assert!(
+            !workflow.output.contains("spec_(v2))"),
+            "{}",
+            workflow.output
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_direct_web_rejects_authoritative_looking_off_topic_results() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-off-topic-web-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let opts = SessionOptions::new()
+            .with_llm_client(Arc::new(ScriptedLlmClient::new(vec![])))
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_tool(Arc::new(IrrelevantDirectWebSearchTool));
+
+        for query in [
+            "Rust stable version from official Rust source",
+            "Go stable version from official Go source",
+        ] {
+            let mut workflow_args = super::super::deep_research_workflow_args(query, false);
+            let source = use_direct_web_fixture_tools(
+                workflow_args["source"].as_str().unwrap(),
+                "irrelevant_web_search",
+                "web_fetch",
+            );
+            workflow_args["source"] = serde_json::json!(source);
+            workflow_args["input"]["direct_web_fetch_limit"] = serde_json::json!(0);
+
+            let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+                .await
+                .expect("off-topic direct web results should degrade into delegated recovery");
+            let metadata = workflow.metadata.as_ref().expect("workflow metadata");
+            let direct_output =
+                &metadata["dynamic_workflow"]["snapshot"]["steps"]["direct_web_research"]["output"];
+
+            assert_eq!(direct_output["status"], "failed", "{direct_output}");
+            assert_eq!(direct_output["metadata"]["source_count"], 0);
+            for off_topic in ["docs.python.org", "docs.oracle.com", "trust.example.com"] {
+                assert!(!workflow.output.contains(off_topic), "{}", workflow.output);
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_workflow_stops_after_a_clean_first_round() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-recursive-rounds-{}-{}",
             std::process::id(),
@@ -3187,12 +4704,14 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(8);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_workflow_runtime();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("recursive rounds e2e", false);
+        workflow_args["input"]["evidence_scope"] = serde_json::json!("local_only");
         workflow_args["input"]["local_research_rounds"] = serde_json::json!(3);
         workflow_args["input"]["local_max_parallel_tasks"] = serde_json::json!(3);
         workflow_args["input"]["tracks"] = serde_json::json!([
@@ -3206,7 +4725,7 @@ mod tests {
             }
         ]);
 
-        let workflow = run_deepresearch_workflow(&session, workflow_args)
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
             .await
             .expect("recursive DeepResearch workflow should complete");
         assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
@@ -3218,19 +4737,19 @@ mod tests {
             "bounded_recursive_parallel_retrieval_summary"
         );
         assert_eq!(output["research"]["max_rounds"], serde_json::json!(3));
-        assert_eq!(output["research"]["completed_rounds"], serde_json::json!(2));
+        assert_eq!(output["research"]["completed_rounds"], serde_json::json!(1));
         assert_eq!(output["research"]["stop_reason"], "bounded_rounds_complete");
         assert_eq!(
             output["research"]["rounds"].as_array().map(Vec::len),
-            Some(2)
+            Some(1)
         );
         assert_eq!(
             output["research"]["metadata"]["task_count"],
-            serde_json::json!(4)
+            serde_json::json!(2)
         );
         assert_eq!(
             output["research"]["metadata"]["success_count"],
-            serde_json::json!(4)
+            serde_json::json!(2)
         );
 
         let metadata = workflow.metadata.as_ref().expect("workflow metadata");
@@ -3238,15 +4757,82 @@ mod tests {
             metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["status"],
             "completed"
         );
-        assert_eq!(
-            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research_round_2"]["status"],
-            "completed"
-        );
         assert!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]
-                .get("local_research_round_3")
+                .get("local_research_round_2")
                 .is_none(),
-            "workflow should early-stop instead of exhausting every allowed round"
+            "workflow should not schedule an unneeded corroboration round"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn deepresearch_workflow_marks_later_round_failure_as_partial_success() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-later-round-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let cfg = workspace.join("config.acl");
+        test_config(&cfg);
+        let agent = Agent::new(cfg.to_string_lossy().to_string()).await.unwrap();
+        let llm = Arc::new(ScriptedLlmClient::new(vec![]));
+        let opts = SessionOptions::new()
+            .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
+            .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
+            .with_max_tool_rounds(6);
+        let session = agent
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
+            .unwrap();
+        let _ = session.register_dynamic_workflow_runtime();
+
+        let mut workflow_args =
+            super::super::deep_research_workflow_args("later round failure e2e", false);
+        workflow_args["input"]["evidence_scope"] = serde_json::json!("local_only");
+        workflow_args["input"]["local_research_rounds"] = serde_json::json!(2);
+        workflow_args["input"]["tracks"] = serde_json::json!([{
+            "title": "Initial evidence",
+            "focus": "Return structured evidence in round one."
+        }]);
+        let source = workflow_args["source"].as_str().unwrap().replacen(
+            "agent: \"deep-research\",",
+            "agent: roundNumber === 1 ? \"deep-research\" : \"missing-agent\",",
+            1,
+        );
+        let source = source.replace(
+            "return followUpTracks(rounds).length > 0;",
+            "return rounds.length < maxResearchRounds;",
+        );
+        workflow_args["source"] = serde_json::json!(source);
+
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
+            .await
+            .expect("evidence from round one should survive a later failed round");
+        assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
+        let output: serde_json::Value =
+            serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
+        assert_eq!(output["research"]["status"], "partial_success");
+        assert_eq!(
+            output["research"]["metadata"]["partial_failure"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            output["research"]["metadata"]["all_success"],
+            serde_json::json!(false)
+        );
+        assert!(
+            output["research"]["warnings"]["failed_rounds"]
+                .as_array()
+                .is_some_and(|rounds| !rounds.is_empty()),
+            "{}",
+            workflow.output
         );
 
         let _ = std::fs::remove_dir_all(&workspace);
@@ -3273,15 +4859,17 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_workflow_runtime();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("partial failure e2e", false);
+        workflow_args["input"]["evidence_scope"] = serde_json::json!("local_only");
         let source = workflow_args["source"].as_str().unwrap().replacen(
-            "agent: \"explore\",",
-            "agent: index === 0 ? \"explore\" : \"missing-agent\",",
+            "agent: \"deep-research\",",
+            "agent: index === 0 ? \"deep-research\" : \"missing-agent\",",
             1,
         );
         workflow_args["source"] = serde_json::json!(source);
@@ -3296,7 +4884,7 @@ mod tests {
             }
         ]);
 
-        let workflow = run_deepresearch_workflow(&session, workflow_args)
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
             .await
             .expect("partial DeepResearch workflow should complete with usable evidence");
         assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
@@ -3325,8 +4913,7 @@ mod tests {
         assert!(
             output["research"]["warnings"]["failed_tasks"][0]["error_summary"]
                 .as_str()
-                .is_some_and(|summary| summary
-                    .contains("Delegated task failed before returning usable evidence")),
+                .is_some_and(|summary| summary.contains("no usable evidence")),
             "{}",
             workflow.output
         );
@@ -3378,12 +4965,14 @@ mod tests {
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_workflow_runtime();
 
         let mut workflow_args =
             super::super::deep_research_workflow_args("latest Rust stable official version", false);
+        workflow_args["input"]["evidence_scope"] = serde_json::json!("local_only");
         workflow_args["input"]["local_research_rounds"] = serde_json::json!(1);
         workflow_args["input"]["local_max_parallel_tasks"] = serde_json::json!(1);
         workflow_args["input"]["tracks"] = serde_json::json!([
@@ -3393,13 +4982,17 @@ mod tests {
             }
         ]);
 
-        let workflow = run_deepresearch_workflow(&session, workflow_args)
+        let workflow = run_deepresearch_workflow(&session, &workspace, workflow_args)
             .await
             .expect("workflow should retain useful source-backed evidence");
         assert_eq!(workflow.exit_code, 0, "{}", workflow.output);
         let output: serde_json::Value =
             serde_json::from_str(&workflow.output).expect("workflow output should be JSON");
-        assert_eq!(output["mode"], "local_parallel_task_partial_success");
+        assert_eq!(
+            output["mode"], "local_parallel_task_partial_success",
+            "{}",
+            workflow.output
+        );
         assert_eq!(output["research"]["status"], "partial_success");
         assert_eq!(output["research"]["stop_reason"], "source_notes_retained");
         assert_eq!(
@@ -3480,32 +5073,44 @@ mod tests {
         let llm = Arc::new(ScriptedLlmClient::new(vec![]));
         let opts = SessionOptions::new()
             .with_llm_client(llm)
+            .with_permission_policy(deepresearch_cli_permission_policy())
             .with_planning_mode(a3s_code_core::PlanningMode::Disabled)
             .with_max_tool_rounds(4);
         let session = agent
-            .session(workspace.to_string_lossy().to_string(), Some(opts))
+            .session_async(workspace.to_string_lossy().to_string(), Some(opts))
+            .await
             .unwrap();
-        session.register_dynamic_workflow_runtime();
+        let _ = session.register_dynamic_workflow_runtime();
         let seen_args = std::sync::Arc::new(Mutex::new(Vec::new()));
-        session.register_dynamic_tool(Arc::new(StructuredRuntimeTool {
+        let _ = session.register_dynamic_tool(Arc::new(StructuredRuntimeTool {
             seen_args: std::sync::Arc::clone(&seen_args),
         }));
 
-        let args = super::super::deep_research_workflow_args("runtime disabled", true);
+        let mut args = super::super::deep_research_workflow_args("runtime disabled", true);
+        args["input"]["evidence_scope"] = serde_json::json!("local_only");
         let budget = super::super::deep_research_default_budget();
-        let workflow_budget = super::super::deep_research_workflow_budget_for_query(
-            "runtime disabled",
-            false,
+        let safety = super::super::deep_research_safety_envelope(
+            super::super::DeepResearchEvidenceScope::WebAndWorkspace,
             budget,
         );
         assert_eq!(args["input"]["os_runtime"], false);
-        assert_eq!(args["allowed_tools"], serde_json::json!([]));
+        assert!(
+            args.get("allowed_tools").is_none(),
+            "DeepResearch should use dynamic_workflow's default tool set instead of an empty allow-list: {args}"
+        );
         assert_eq!(
             args["input"]["local_max_parallel_tasks"],
-            serde_json::json!(workflow_budget.local_max_parallel_tasks)
+            serde_json::json!(safety.max_parallel_tasks)
         );
-        assert_eq!(args["input"]["local_research_rounds"], serde_json::json!(1));
-        let workflow = run_deepresearch_workflow(&session, args)
+        assert_eq!(
+            args["input"]["local_research_rounds"],
+            serde_json::json!(safety.max_iterations)
+        );
+        let expected_track_count = args["input"]["research_plan"]["tracks"]
+            .as_array()
+            .expect("fixture tracks")
+            .len();
+        let workflow = run_deepresearch_workflow(&session, &workspace, args)
             .await
             .expect("DeepResearch workflow should stay local even if runtime was requested");
 
@@ -3530,12 +5135,19 @@ mod tests {
         assert_eq!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
                 ["metadata"]["task_count"],
-            serde_json::json!(1)
+            serde_json::json!(expected_track_count)
         );
         assert_eq!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
                 ["metadata"]["result_count"],
-            serde_json::json!(1)
+            serde_json::json!(expected_track_count)
+        );
+        assert_eq!(
+            metadata["dynamic_workflow"]["snapshot"]["steps"]["local_research"]["output"]
+                ["metadata"]["results"]
+                .as_array()
+                .map(Vec::len),
+            Some(expected_track_count)
         );
         assert!(
             metadata["dynamic_workflow"]["snapshot"]["steps"]

@@ -132,6 +132,7 @@ mod tests {
 
                   models "default-model" {}
                   models "selected-model" {}
+                  models "text-only" { toolCall = false }
                 }
             "#,
         )
@@ -158,6 +159,7 @@ mod tests {
         assert_eq!(resolved.api_timeout_ms, Some(2400));
         assert_eq!(resolved.logprobs, Some(true));
         assert_eq!(resolved.top_logprobs, Some(3));
+        assert_eq!(resolved.native_structured_support, None);
     }
 
     #[test]
@@ -181,6 +183,15 @@ mod tests {
 
         assert!(error.contains("openai"));
         assert!(error.contains("missing"));
+    }
+
+    #[test]
+    fn custom_openai_text_only_model_keeps_prompt_structured_fallback() {
+        let options = SessionOptions::new().with_model("openai/text-only");
+        let resolved = prepare_config_llm_config(&test_config(), &options, "session-text")
+            .expect("resolve text-only model");
+
+        assert_eq!(resolved.native_structured_support, None);
     }
 
     #[test]

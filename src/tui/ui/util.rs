@@ -15,28 +15,73 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
 /// A user-input message rendered with a subtle background "bubble" so it stands
 /// out from agent output in the transcript.
 pub(crate) fn user_bubble(content: &str, width: usize) -> String {
-    let lines = content.lines().collect::<Vec<_>>();
-    if lines.is_empty() {
+    if content.is_empty() || width == 0 {
         return String::new();
     }
 
-    // Keep the historical shape: 2 columns outside the bubble and at least an
-    // 8-column colored body for very narrow terminals.
-    let bubble_width = width.saturating_sub(PAD).max(PAD + 8);
+    let margin = PAD;
+    // Keep at least one display column for message content after the marker and
+    // its gap. On smaller viewports the surface remains, but the rail yields.
+    let marker = if width.saturating_sub(margin) >= 3 {
+        "›"
+    } else {
+        ""
+    };
+    let gap = usize::from(!marker.is_empty());
+    let body_width = width
+        .saturating_sub(margin)
+        .saturating_sub(a3s_tui::style::visible_len(marker) + gap)
+        .max(1);
+    let lines = content
+        .split('\n')
+        .flat_map(|line| wrap_user_line(line, body_width))
+        .collect::<Vec<_>>();
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
-    chrome
+    let body = chrome
         .gutter(lines.join("\n"))
-        .margin(PAD)
-        .marker(" ●")
-        .gap(" ")
-        .width(bubble_width)
-        .background_color(SURFACE_SOFT)
-        .view()
+        .margin(margin)
+        .marker(marker)
+        .marker_color(TN_GRAY)
+        .gap(" ".repeat(gap))
+        .width(width)
+        .content_color(TN_FG)
+        .background_color(SURFACE_USER)
+        .view();
+    let padding = format!(
+        "{}{}",
+        " ".repeat(margin),
+        Style::new()
+            .bg(SURFACE_USER)
+            .render(&" ".repeat(width.saturating_sub(margin)))
+    );
+    format!("{padding}\n{body}\n{padding}")
 }
 
-/// Prefix a message block with a colored ● gutter on its first line and align
-/// the rest under the text.
+fn wrap_user_line(line: &str, width: usize) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let total = a3s_tui::style::visible_len(line);
+    let mut rows = Vec::new();
+    let mut from = 0usize;
+    while from < total {
+        let to = from.saturating_add(width).min(total);
+        let row = a3s_tui::style::slice_visible_cols(line, from, to);
+        if row.is_empty() {
+            break;
+        }
+        from = from.saturating_add(a3s_tui::style::visible_len(&row));
+        rows.push(row);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+/// Prefix a message block with a Codex-style colored • gutter on its first line
+/// and align the rest under the text.
 pub(crate) fn gutter(color: Color, content: &str) -> String {
     let lines = content.lines().collect::<Vec<_>>();
     if lines.is_empty() {
@@ -45,12 +90,13 @@ pub(crate) fn gutter(color: Color, content: &str) -> String {
 
     a3s_tui::components::GutterBlock::lines(lines)
         .margin(PAD)
+        .marker("•")
         .marker_color(color)
         .view()
 }
 
 fn input_chrome_width(width: usize) -> u16 {
-    width.saturating_sub(PAD).min(u16::MAX as usize) as u16
+    width.min(u16::MAX as usize) as u16
 }
 
 pub(crate) fn input_rule(width: usize, color: Color) -> String {
@@ -59,8 +105,7 @@ pub(crate) fn input_rule(width: usize, color: Color) -> String {
     }
 
     let theme = agent_chrome_theme();
-    let chrome = agent_chrome(&theme);
-    chrome
+    agent_chrome(&theme)
         .input_border()
         .margin(PAD)
         .rule_color(color)
@@ -68,13 +113,12 @@ pub(crate) fn input_rule(width: usize, color: Color) -> String {
 }
 
 pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize) -> String {
-    if width == 0 {
+    if width == 0 || palette.is_empty() {
         return String::new();
     }
 
     let theme = agent_chrome_theme();
-    let chrome = agent_chrome(&theme);
-    chrome
+    agent_chrome(&theme)
         .input_border()
         .margin(PAD)
         .rule('━')
@@ -82,23 +126,16 @@ pub(crate) fn input_gradient_rule(width: usize, palette: &[Color], offset: usize
         .view(input_chrome_width(width))
 }
 
-pub(crate) fn input_status_rule(
-    width: usize,
-    border_color: Color,
-    context: &str,
-    label: &str,
-) -> String {
+pub(crate) fn input_status_rule(width: usize, border_color: Color, label: &str) -> String {
     if width == 0 {
         return String::new();
     }
 
     let theme = agent_chrome_theme();
-    let chrome = agent_chrome(&theme);
-    chrome
+    agent_chrome(&theme)
         .input_border()
         .margin(PAD)
         .rule_color(border_color)
-        .context(context)
         .label(label)
         .view(input_chrome_width(width))
 }
@@ -137,7 +174,7 @@ pub(crate) fn thinking_block(text: &str, width: usize) -> String {
     a3s_tui::components::WrappedPrefixBlock::new(text)
         .margin(PAD)
         .width(width)
-        .prefixes("💭 ", "   ")
+        .prefixes("• ", "  ")
         .style(Style::new().fg(TN_GRAY).italic())
         .view()
 }
@@ -219,7 +256,7 @@ pub(crate) fn humanize(n: usize) -> String {
 pub(crate) fn shimmer(text: &str, phase: usize) -> String {
     a3s_tui::components::ShimmerText::new(text)
         .phase(phase)
-        .colors(ACCENT, Color::Rgb(211, 229, 255))
+        .colors(TN_GRAY, TN_FG)
         .spread(5.0)
         .speed_divisor(3)
         .cycle_gap(12)
@@ -238,7 +275,8 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::{
         compact_progress_line, gutter, input_gradient_rule, input_prompt_line, input_rule,
-        input_status_rule, shimmer, thinking_block, truncate, user_bubble, wrap_words,
+        input_status_rule, shimmer, thinking_block, truncate, user_bubble, wrap_words, ACCENT,
+        SURFACE_USER, TN_FG, TN_GRAY,
     };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
     use std::time::Duration;
@@ -315,8 +353,8 @@ mod tests {
         let rendered = gutter(Color::Green, "hello\nworld");
         let plain = strip_ansi(&rendered);
 
-        assert_eq!(plain, "  ● hello\n    world");
-        assert!(rendered.contains("\x1b[1;32m●\x1b[0m"));
+        assert_eq!(plain, "• hello\n  world");
+        assert!(rendered.contains("\x1b[1;32m•\x1b[0m"));
     }
 
     #[test]
@@ -325,7 +363,7 @@ mod tests {
         let rendered = gutter(Color::Green, &styled);
 
         assert!(rendered.contains("\x1b[33mstyled\x1b[0m"));
-        assert_eq!(strip_ansi(&rendered), "  ● styled");
+        assert_eq!(strip_ansi(&rendered), "• styled");
     }
 
     #[test]
@@ -334,27 +372,82 @@ mod tests {
     }
 
     #[test]
-    fn user_bubble_uses_shared_gutter_block_shape() {
+    fn user_bubble_uses_codex_surface_and_message_rail() {
         let rendered = user_bubble("hello\nworld", 20);
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert_eq!(rows, vec!["   ● hello        ", "     world        "]);
-        assert!(rendered.contains("\x1b[38;2;237;237;237;48;2;31;31;31m"));
-        assert!(rendered.lines().all(|row| visible_len(row) == 18));
+        assert_eq!(
+            rows,
+            vec![
+                "                    ",
+                "› hello             ",
+                "  world             ",
+                "                    ",
+            ]
+        );
+        assert!(rendered.lines().all(|row| visible_len(row) == 20));
+        assert!(rendered.contains(&Style::new().fg(TN_GRAY).bg(SURFACE_USER).bold().render("›")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(TN_FG)
+                .bg(SURFACE_USER)
+                .render("hello             ")
+        ));
+        assert_eq!(rows.first().unwrap().trim(), "");
+        assert_eq!(rows.last().unwrap().trim(), "");
     }
 
     #[test]
     fn user_bubble_keeps_empty_input_empty() {
         assert_eq!(user_bubble("", 20), "");
+        assert_eq!(user_bubble("hello", 0), "");
     }
 
     #[test]
-    fn user_bubble_keeps_narrow_body_min_width() {
+    fn user_bubble_stays_within_narrow_viewport() {
         let rendered = user_bubble("hi", 6);
+        let rows = strip_ansi(&rendered)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
 
-        assert_eq!(strip_ansi(&rendered), "   ● hi   ");
-        assert_eq!(visible_len(&rendered), 10);
+        assert_eq!(rows, vec!["      ", "› hi  ", "      "]);
+        assert!(rendered.lines().all(|line| visible_len(line) == 6));
+
+        for width in 1..=5 {
+            let rendered = user_bubble("hi", width);
+            let plain = strip_ansi(&rendered);
+            assert!(
+                rendered.lines().all(|line| visible_len(line) == width),
+                "width {width}: {plain:?}"
+            );
+            assert!(plain.contains('h'), "width {width}: {plain:?}");
+            assert!(plain.contains('i'), "width {width}: {plain:?}");
+            assert!(!plain.contains('…'), "width {width}: {plain:?}");
+        }
+    }
+
+    #[test]
+    fn user_bubble_wraps_long_and_wide_text_without_losing_content() {
+        let rendered = user_bubble("abcdefghij\n中文测试", 8);
+        let rows = strip_ansi(&rendered)
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rows,
+            vec![
+                "        ",
+                "› abcdef",
+                "  ghij  ",
+                "  中文测",
+                "  试    ",
+                "        ",
+            ]
+        );
+        assert!(rendered.lines().all(|line| visible_len(line) == 8));
     }
 
     #[test]
@@ -363,51 +456,53 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("  ❯ cargo test"));
-        assert!(rows[1].starts_with("    --all"));
+        assert!(rows[0].starts_with("❯ cargo test"));
+        assert!(rows[1].starts_with("  --all"));
         assert!(rendered.lines().all(|line| visible_len(line) == 24));
-        assert!(rendered.contains("\x1b[1;36m❯ \x1b[0m"));
+        assert!(rendered.contains(&Style::new().fg(Color::Cyan).bold().render("❯ ")));
+        assert!(!rendered.contains(&format!("\x1b[{}m", SURFACE_USER.bg_ansi())));
     }
 
     #[test]
     fn input_prompt_line_can_tint_modal_input_text() {
         let rendered = input_prompt_line("?", Color::Cyan, "research mode", true, 28);
 
-        assert_eq!(strip_ansi(&rendered).trim_end(), "  ? research mode");
-        assert!(rendered.contains("\x1b[1;36m? \x1b[0m"));
-        assert!(rendered.contains("\x1b[36mresearch mode\x1b[0m"));
+        assert_eq!(strip_ansi(&rendered).trim_end(), "? research mode");
+        assert!(rendered.contains(&Style::new().fg(Color::Cyan).bold().render("? ")));
+        assert!(rendered.contains(&Style::new().fg(Color::Cyan).render("research mode")));
     }
 
     #[test]
-    fn input_rules_use_shared_border_component_widths() {
+    fn input_rules_restore_outlined_composer_and_status_chip() {
         let plain = strip_ansi(&input_rule(20, Color::BrightBlack));
-        assert_eq!(visible_len(&plain), 18);
-        assert!(plain.starts_with("  ─"));
+        assert_eq!(visible_len(&plain), 20);
+        assert!(plain.starts_with('─'));
 
-        let status = input_status_rule(48, Color::BrightBlack, "70% context used  ", "◇ high");
+        let status = input_status_rule(48, Color::BrightBlack, "◇ high");
         let status_plain = strip_ansi(&status);
-        assert_eq!(visible_len(&status), 46);
-        assert!(status_plain.contains("70% context used"));
-        assert!(status_plain.contains("◇ high"));
-        assert!(status.contains("\x1b[1;38;2;0;112;243m◇ high\x1b[0m"));
+        assert_eq!(visible_len(&status), 48);
+        assert!(status_plain.starts_with('─'), "{status_plain}");
+        assert!(!status_plain.contains("context"), "{status_plain}");
+        assert!(status_plain.contains("◇ high"), "{status_plain}");
+        assert!(status.contains(&ACCENT.fg_ansi()));
     }
 
     #[test]
-    fn input_gradient_rule_preserves_brand_ribbon_width() {
-        let rendered = input_gradient_rule(
-            20,
-            &[
-                Color::Rgb(0, 124, 240),
-                Color::Rgb(0, 223, 216),
-                Color::Rgb(255, 0, 128),
-            ],
-            1,
-        );
-        let plain = strip_ansi(&rendered);
+    fn input_gradient_rule_animates_brand_ribbon_without_a_surface_fill() {
+        let palette = [
+            Color::Rgb(86, 156, 255),
+            Color::Rgb(70, 214, 255),
+            Color::Rgb(255, 101, 155),
+            Color::Rgb(190, 124, 255),
+        ];
+        let first = input_gradient_rule(24, &palette, 0);
+        let next = input_gradient_rule(24, &palette, 1);
 
-        assert_eq!(visible_len(&rendered), 18);
-        assert!(plain.starts_with("  ━"));
-        assert!(rendered.contains("\x1b[1;38;2;"));
+        assert_eq!(visible_len(&first), 24);
+        assert_eq!(strip_ansi(&first), "━━━━━━━━━━━━━━━━━━━━━━━━");
+        assert_ne!(first, next);
+        assert!(palette.iter().all(|color| first.contains(&color.fg_ansi())));
+        assert!(!first.contains(&SURFACE_USER.bg_ansi()));
     }
 
     #[test]
@@ -416,10 +511,10 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("  💭 alpha"));
-        assert!(rows.iter().skip(1).all(|row| row.starts_with("     ")));
+        assert!(rows[0].starts_with("• alpha"));
+        assert!(rows.iter().skip(1).all(|row| row.starts_with("  ")));
         assert!(rendered.lines().all(|line| visible_len(line) == 16));
-        assert!(rendered.contains("\x1b[3;38;2;143;143;143m💭 alpha"));
+        assert!(rendered.contains(&format!("\x1b[3;{}m• alpha", TN_GRAY.fg_ansi())));
     }
 
     #[test]
@@ -434,8 +529,8 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("  💭 中文测试"));
-        assert!(rows[1].starts_with("     内容"));
+        assert!(rows[0].starts_with("• 中文测试内"));
+        assert!(rows[1].starts_with("  容"));
         assert!(rendered.lines().all(|line| visible_len(line) == 13));
     }
 
@@ -449,7 +544,7 @@ mod tests {
         assert!(!plain.contains('%'), "{plain}");
         assert!(plain.contains('▰'), "{plain}");
         assert!(plain.contains('▱'), "{plain}");
-        assert!(rendered.contains("\x1b[38;2;0;112;243m"));
+        assert!(rendered.contains(&format!("\x1b[{}m", ACCENT.fg_ansi())));
         assert!(visible_len(&rendered) <= 80);
     }
 
@@ -475,7 +570,7 @@ mod tests {
         let rendered = shimmer("Working…", 0);
         let expected = a3s_tui::components::ShimmerText::new("Working…")
             .phase(0)
-            .colors(Color::Rgb(0, 112, 243), Color::Rgb(211, 229, 255))
+            .colors(TN_GRAY, TN_FG)
             .spread(5.0)
             .speed_divisor(3)
             .cycle_gap(12)
@@ -483,7 +578,8 @@ mod tests {
 
         assert_eq!(rendered, expected);
         assert_eq!(strip_ansi(&rendered), "Working…");
-        assert!(rendered.contains("\x1b[1;38;2;211;229;255mW\x1b[0m"));
+        assert!(rendered.contains(&Style::new().fg(TN_FG).bold().render("W")));
+        assert!(!rendered.contains("38;2;125;182;255"));
     }
 
     #[test]

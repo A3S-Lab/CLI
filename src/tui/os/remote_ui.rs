@@ -3,24 +3,30 @@
 //!
 //! A `view` is a partial, chrome-less OS surface meant for a *sized popup*
 //! rather than a full browser tab. We can't embed a WebView in the terminal, so
-//! we spawn the sibling `a3s-webview` helper — a native window that seeds the OS
-//! token into localStorage (from `A3S_OS_TOKEN`, which the TUI exports) and loads
-//! the page authenticated. Plain links still go to the user's browser.
+//! we spawn the sibling `a3s-webview` helper. OS views seed the exported OS token
+//! into localStorage; validated local report views use `--no-auth` and never
+//! receive that credential. Plain links still go to the user's browser.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
 static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
 static LOCAL_FILE_SERVER: OnceLock<std::io::Result<LocalFileServer>> = OnceLock::new();
-static LOCAL_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
+const MAX_REGISTERED_LOCAL_FILES: usize = 128;
+const MAX_LOCAL_VIEW_BYTES: u64 = 8 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct LocalFileRegistry {
+    files: HashMap<String, PathBuf>,
+    order: VecDeque<String>,
+}
 
 /// A `viewUrl` (+ optional size / embeddable hint) extracted from a tool result.
 #[derive(Clone, Debug, PartialEq)]
@@ -55,7 +61,7 @@ pub(crate) fn local_file_view(path: &Path) -> std::io::Result<ViewSpec> {
 #[derive(Debug)]
 struct LocalFileServer {
     origin: String,
-    files: std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
+    files: std::sync::Arc<Mutex<LocalFileRegistry>>,
 }
 
 impl Clone for LocalFileServer {
@@ -71,7 +77,7 @@ impl LocalFileServer {
     fn start() -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         let port = listener.local_addr()?.port();
-        let files = std::sync::Arc::new(Mutex::new(HashMap::new()));
+        let files = std::sync::Arc::new(Mutex::new(LocalFileRegistry::default()));
         let thread_files = files.clone();
         thread::Builder::new()
             .name("a3s-local-remoteui".to_string())
@@ -84,15 +90,24 @@ impl LocalFileServer {
     }
 
     fn register(&self, path: PathBuf) -> std::io::Result<String> {
-        let id = format!(
-            "{:x}-{}",
-            current_unix_nanos(),
-            LOCAL_FILE_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        self.files
+        let mut registry = self
+            .files
             .lock()
-            .map_err(|_| std::io::Error::other("local RemoteUI file registry poisoned"))?
-            .insert(id.clone(), path.clone());
+            .map_err(|_| std::io::Error::other("local RemoteUI file registry poisoned"))?;
+        let id = loop {
+            let candidate = format!("{:032x}", rand::random::<u128>());
+            if !registry.files.contains_key(&candidate) {
+                break candidate;
+            }
+        };
+        registry.files.insert(id.clone(), path.clone());
+        registry.order.push_back(id.clone());
+        while registry.order.len() > MAX_REGISTERED_LOCAL_FILES {
+            if let Some(expired) = registry.order.pop_front() {
+                registry.files.remove(&expired);
+            }
+        }
+        drop(registry);
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -113,10 +128,7 @@ fn local_file_server() -> std::io::Result<LocalFileServer> {
     }
 }
 
-fn serve_local_files(
-    listener: TcpListener,
-    files: std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
-) {
+fn serve_local_files(listener: TcpListener, files: std::sync::Arc<Mutex<LocalFileRegistry>>) {
     for stream in listener.incoming().flatten() {
         let _ = handle_local_file_request(stream, &files);
     }
@@ -124,7 +136,7 @@ fn serve_local_files(
 
 fn handle_local_file_request(
     mut stream: TcpStream,
-    files: &std::sync::Arc<Mutex<HashMap<String, PathBuf>>>,
+    files: &std::sync::Arc<Mutex<LocalFileRegistry>>,
 ) -> std::io::Result<()> {
     let request = read_http_request_head(&mut stream)?;
     let path = request
@@ -150,7 +162,10 @@ fn handle_local_file_request(
             b"not found",
         );
     };
-    let file = files.lock().ok().and_then(|map| map.get(id).cloned());
+    let file = files
+        .lock()
+        .ok()
+        .and_then(|registry| registry.files.get(id).cloned());
     let Some(file) = file else {
         return write_local_file_response(
             &mut stream,
@@ -159,6 +174,22 @@ fn handle_local_file_request(
             b"not found",
         );
     };
+    let Ok(metadata) = std::fs::metadata(&file) else {
+        return write_local_file_response(
+            &mut stream,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found",
+        );
+    };
+    if !metadata.is_file() || metadata.len() > MAX_LOCAL_VIEW_BYTES {
+        return write_local_file_response(
+            &mut stream,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found",
+        );
+    }
     let Ok(bytes) = std::fs::read(&file) else {
         return write_local_file_response(
             &mut stream,
@@ -210,7 +241,7 @@ fn write_local_file_response(
     };
     write!(
         stream,
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n",
         body.len()
     )?;
     stream.write_all(body)?;
@@ -236,13 +267,6 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("webp") => "image/webp",
         _ => "application/octet-stream",
     }
-}
-
-fn current_unix_nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default()
 }
 
 /// Find a renderable view in a tool's JSON output. Prefers the current `view`
@@ -460,12 +484,24 @@ pub(crate) fn prime_webview_lookup() {
 /// Build the `a3s-webview` argv for a view (url + optional size). Split out from
 /// spawning so the spec→argv mapping is unit-testable.
 fn webview_args(spec: &ViewSpec) -> Vec<String> {
+    let local_report = is_local_report_view(spec);
     let mut args = vec![
         "--url".to_string(),
         spec.url.clone(),
         "--title".to_string(),
-        "A3S RemoteUI".to_string(),
+        if local_report {
+            "A3S Research Report"
+        } else {
+            "A3S RemoteUI"
+        }
+        .to_string(),
     ];
+    if local_report {
+        // Local report HTML is model-generated content. Never seed OS access or
+        // refresh tokens into its localStorage, even though it is served over a
+        // loopback HTTP origin for the native webview.
+        args.push("--no-auth".to_string());
+    }
     if let Some(w) = spec.width {
         args.push("--width".to_string());
         args.push(w.to_string());
@@ -477,9 +513,24 @@ fn webview_args(spec: &ViewSpec) -> Vec<String> {
     args
 }
 
+pub(crate) fn is_local_report_view(spec: &ViewSpec) -> bool {
+    local_view_requires_no_auth(&spec.url)
+}
+
+fn local_view_requires_no_auth(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let loopback = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"]
+        .into_iter()
+        .find_map(|prefix| lower.strip_prefix(prefix));
+    loopback
+        .and_then(|rest| rest.find('/').map(|path_at| &rest[path_at..]))
+        .is_some_and(|path| path.starts_with("/a3s-local-view/"))
+}
+
 /// Open a view's url in the native `a3s-webview` window (detached), falling back
 /// to the system browser when the helper is not installed or cannot launch.
-/// The webview inherits the process env so it can read `A3S_OS_TOKEN` for auth.
+/// The webview inherits the process env so OS views can read `A3S_OS_TOKEN` for
+/// auth; registered local reports receive `--no-auth` and ignore it.
 pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<OpenedWith> {
     Command::new(webview_bin())
         .args(webview_args(spec))
@@ -640,6 +691,15 @@ mod tests {
         assert!(spec.embeddable);
         let response = fetch_local_test_url(&spec.url);
         assert!(response.contains("<!doctype html"), "{response}");
+        assert!(
+            response.contains("Content-Security-Policy: default-src 'none'"),
+            "{response}"
+        );
+        assert!(response.contains("script-src 'none'"), "{response}");
+        assert!(response.contains("connect-src 'none'"), "{response}");
+
+        let args = webview_args(&spec);
+        assert!(args.iter().any(|arg| arg == "--no-auth"), "{args:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -688,6 +748,40 @@ mod tests {
         assert_eq!(
             webview_args(&no_size),
             vec!["--url", "https://os.x/p", "--title", "A3S RemoteUI"]
+        );
+
+        let local = ViewSpec {
+            url: "http://127.0.0.1:4321/a3s-local-view/id/index.html".into(),
+            width: None,
+            height: None,
+            embeddable: true,
+        };
+        assert_eq!(
+            webview_args(&local),
+            vec![
+                "--url",
+                "http://127.0.0.1:4321/a3s-local-view/id/index.html",
+                "--title",
+                "A3S Research Report",
+                "--no-auth"
+            ]
+        );
+
+        let authenticated_loopback = ViewSpec {
+            url: "http://127.0.0.1:4321/runtime/view".into(),
+            width: None,
+            height: None,
+            embeddable: true,
+        };
+        assert_eq!(
+            webview_args(&authenticated_loopback),
+            vec![
+                "--url",
+                "http://127.0.0.1:4321/runtime/view",
+                "--title",
+                "A3S RemoteUI"
+            ],
+            "ordinary loopback OS/development views may still require auth"
         );
     }
 

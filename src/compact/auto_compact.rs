@@ -22,12 +22,9 @@ impl AutoCompactController {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn state(&self) -> AutoCompactState {
         self.state
-    }
-
-    pub(crate) fn threshold(&self) -> f64 {
-        self.threshold
     }
 
     pub(crate) fn observe_prompt_tokens(&mut self, prompt_tokens: usize) -> bool {

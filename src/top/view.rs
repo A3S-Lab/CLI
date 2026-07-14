@@ -1,7 +1,6 @@
-//! Shared process-table renderer used by `a3s top`'s Processes tab and the
-//! lightweight `/top` panel in `a3s code`, so both show identical columns,
-//! colours, and agent highlighting. The rich sparkline columns degrade to
-//! blank cells when the caller has no per-pid history.
+//! Shared process-table renderer used by the `a3s top` process surfaces. The
+//! rich sparkline columns degrade to blank cells when a caller has no per-pid
+//! history.
 
 use std::collections::HashSet;
 
@@ -22,7 +21,7 @@ pub(crate) struct ProcessTableView<'a> {
     /// Column ids to hide (empty = show all).
     pub(crate) hidden: &'a HashSet<String>,
     /// Per-pid history feeding the sparkline columns. `None` renders those cells
-    /// blank — graceful degradation for the lightweight `/top` panel.
+    /// blank when a caller has no retained history.
     pub(crate) history: Option<&'a HistoryFn<'a>>,
 }
 
@@ -44,7 +43,7 @@ fn sparkline(values: &[f32], color: Color) -> String {
 
 /// Build the host process table. Agent rows wear their brand colour; other
 /// rows are coloured by risk. The selected row is highlighted by the table.
-pub(crate) fn process_data_table(rows: &[ProcessRow], view: &ProcessTableView) -> DataTable {
+fn process_data_table(rows: &[ProcessRow], view: &ProcessTableView) -> DataTable {
     let h = view.hidden;
     let columns = vec![
         configured(

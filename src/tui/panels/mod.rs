@@ -32,10 +32,10 @@ mod files;
 mod ide;
 #[path = "workspace/loop_engineering.rs"]
 pub(crate) mod loop_engineering;
+#[path = "workspace/transcript.rs"]
+pub(crate) mod transcript;
 
 // Context and memory.
-#[path = "context/btw.rs"]
-mod btw;
 #[path = "context/ctx.rs"]
 pub(crate) mod ctx;
 #[path = "context/memory.rs"]
@@ -50,6 +50,8 @@ pub(crate) mod login;
 // System UI.
 #[path = "system/banner.rs"]
 mod banner;
+#[path = "system/bottom.rs"]
+pub(crate) mod bottom;
 #[path = "system/effort.rs"]
 mod effort;
 #[path = "system/help.rs"]
@@ -57,7 +59,7 @@ mod help;
 #[path = "system/menu.rs"]
 mod menu;
 #[path = "system/model.rs"]
-mod model;
+pub(crate) mod model;
 #[path = "system/plan.rs"]
 mod plan;
 #[path = "system/plugins.rs"]
@@ -66,5 +68,3 @@ mod plugins;
 pub(crate) mod spf;
 #[path = "system/theme.rs"]
 mod theme;
-#[path = "system/top.rs"]
-mod top;

@@ -9,8 +9,6 @@ use super::super::*;
 use a3s_tui::components::{MenuItem, MenuPanel, MenuPanelMsg};
 use a3s_tui::event::MouseEvent;
 
-const OKF_OVERLAY_ROWS_BELOW: usize = 5;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OkfCommand {
     Select,
@@ -1409,8 +1407,7 @@ impl App {
                     self.open_okf_package_panel();
                     return None;
                 };
-                self.messages
-                    .push(user_bubble("/okf review", self.viewport_content_width()));
+                self.messages.push(TranscriptEntry::user("/okf review"));
                 self.engage_autonomy(4);
                 self.review_pending = true;
                 let prompt = okf_lifecycle_prompt("review", &okf_dev, self.os_session.is_some());
@@ -1438,10 +1435,8 @@ impl App {
                         );
                         return None;
                     }
-                    self.messages.push(user_bubble(
-                        &format!("/okf {action}"),
-                        self.viewport_content_width(),
-                    ));
+                    self.messages
+                        .push(TranscriptEntry::user(format!("/okf {action}")));
                     self.engage_autonomy(6);
                     let prompt = okf_lifecycle_prompt(action, &okf_dev, false);
                     let display = format!("⌁ {} {action}", okf_dev.name);
@@ -1453,18 +1448,20 @@ impl App {
                     OkfCommand::Status => OkfOsAction::Status,
                     _ => unreachable!(),
                 };
-                self.messages.push(user_bubble(
-                    &format!("/okf {action}"),
-                    self.viewport_content_width(),
-                ));
-                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                    "  ⌁ {} → OS Knowledge service {}…",
-                    okf_dev.name,
-                    os_action.label()
-                )));
+                self.messages
+                    .push(TranscriptEntry::user(format!("/okf {action}")));
+                let status_entry =
+                    self.push_tracked_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  ⌁ {} → OS Knowledge service {}…",
+                        okf_dev.name,
+                        os_action.label()
+                    )));
                 Some(cmd::cmd(move || async move {
                     let result = publish_okf_to_os(session, okf_dev, os_action).await;
-                    Msg::OkfOsCompleted(result)
+                    Msg::OkfOsCompleted {
+                        status_entry,
+                        result,
+                    }
                 }))
             }
             _ => unreachable!("non-asset OKF command routed to execute_okf_asset_command"),
@@ -1548,7 +1545,8 @@ impl App {
         if row_count == 0 {
             return None;
         }
-        let y_offset = okf_overlay_y_offset(self.height as usize, row_count);
+        let y_offset =
+            okf_overlay_y_offset(self.height as usize, row_count, self.overlay_rows_below());
         let row = mouse.row as usize;
         let start = y_offset as usize;
         if row < start || row >= start.saturating_add(row_count) {
@@ -1693,31 +1691,38 @@ fn okf_picker_panel(
         .subtitle_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT);
+        .selected_colors(TN_FG, SURFACE_SELECTED);
     Some((panel, max_items + 3))
 }
 
-fn okf_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn okf_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(OKF_OVERLAY_ROWS_BELOW)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
 
 impl App {
-    pub(crate) fn on_okf_os_completed(&mut self, res: Result<OkfOsResult, String>) {
+    pub(crate) fn on_okf_os_completed(
+        &mut self,
+        status_entry: TranscriptEntryId,
+        res: Result<OkfOsResult, String>,
+    ) {
         match res {
             Ok(result) => {
                 self.last_view = Some(result.view.clone());
-                self.push_line(&gutter(
-                    TN_CYAN,
-                    &format!(
-                        "⌁ /okf {} · `{}` ({})",
-                        result.action.label(),
-                        result.asset_name,
-                        result.asset_id
+                self.replace_tracked_line(
+                    status_entry,
+                    &gutter(
+                        TN_CYAN,
+                        &format!(
+                            "⌁ /okf {} · `{}` ({})",
+                            result.action.label(),
+                            result.asset_name,
+                            result.asset_id
+                        ),
                     ),
-                ));
+                );
                 self.push_line(
                     &Style::new()
                         .fg(TN_GRAY)
@@ -1738,7 +1743,8 @@ impl App {
                 }
             }
             Err(e) => {
-                self.push_line(
+                self.replace_tracked_line(
+                    status_entry,
                     &Style::new()
                         .fg(TN_RED)
                         .render(&format!("  /okf OS operation failed: {e}")),
@@ -2047,7 +2053,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = okf_picker_lines(&packages, 0, &root, width, height).len();
-        let y_offset = okf_overlay_y_offset(height, row_count);
+        let y_offset = okf_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = okf_picker_panel(&packages, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2078,7 +2084,7 @@ mod tests {
         let width = 48;
         let height = 18;
         let row_count = okf_picker_lines(&packages, 0, &root, width, height).len();
-        let y_offset = okf_overlay_y_offset(height, row_count);
+        let y_offset = okf_overlay_y_offset(height, row_count, 5);
         let (mut panel, _) = okf_picker_panel(&packages, 0, &root, width, height).expect("panel");
         panel.set_y_offset(y_offset);
 
@@ -2090,6 +2096,11 @@ mod tests {
         });
 
         assert_eq!(msg, Some(MenuPanelMsg::Selected(1)));
+    }
+
+    #[test]
+    fn okf_overlay_offset_moves_up_with_more_rows_below() {
+        assert!(okf_overlay_y_offset(24, 8, 7) < okf_overlay_y_offset(24, 8, 5));
     }
 
     #[test]

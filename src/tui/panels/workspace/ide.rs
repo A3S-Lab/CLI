@@ -247,7 +247,7 @@ impl App {
 
     /// Full-screen `/ide`, superfile-style: rounded tree + editor/preview
     /// panels (border colour marks focus), breadcrumb in the right panel's
-    /// title, and a metadata + keys footer row.
+    /// title, and details + controls footer panels.
     pub(crate) fn render_ide(&self, ide: &Ide) -> String {
         let width = self.width as usize;
         let h = self.height as usize;
@@ -261,25 +261,15 @@ impl App {
         let mut tree_rows = Vec::with_capacity(body);
         for i in 0..body {
             let row = if let Some(e) = ide.entries.get(ide.tree_scroll + i) {
-                let icon = spf::file_icon(&e.name, e.is_dir, e.expanded);
-                // fit(): emoji in user file NAMES must not widen the row.
-                let plain = spf::fit(
-                    &format!("{}{icon} {}", " ".repeat(e.depth * 2), e.name),
+                spf::file_tree_row(
+                    &e.name,
+                    e.depth,
+                    e.is_dir,
+                    e.expanded,
+                    ide.tree_scroll + i == ide.sel,
+                    !ide.focus_editor,
                     tree_iw,
-                );
-                if ide.tree_scroll + i == ide.sel && !ide.focus_editor {
-                    Style::new()
-                        .fg(Color::BrightWhite)
-                        .bg(ACCENT)
-                        .render(&plain)
-                } else if ide.tree_scroll + i == ide.sel {
-                    // Selection stays visible (dim) while the editor has focus.
-                    Style::new().fg(TN_FG).bg(SURFACE_SELECTED).render(&plain)
-                } else if e.is_dir {
-                    Style::new().fg(ACCENT).render(&plain)
-                } else {
-                    Style::new().fg(TN_FG).render(&plain)
-                }
+                )
             } else {
                 String::new()
             };
@@ -298,18 +288,20 @@ impl App {
             Option<std::path::PathBuf>,
             Option<usize>,
         ) = if let Some((path, plines)) = hover {
+            let icon = spf::path_icon(path, false, false);
             let rows = plines
                 .iter()
                 .take(body)
                 .map(|l| highlight_code(&spf::fit(l, right_iw), lang_of(path)))
                 .collect();
             (
-                format!("preview · {}", self.ide_crumb(path)),
+                format!("{} preview · {}", icon.glyph, self.ide_crumb(path)),
                 rows,
                 Some(path.clone()),
                 Some(plines.len()),
             )
         } else if let Some(f) = &ide.file {
+            let icon = spf::path_icon(&f.path, false, false);
             let mut rows = Vec::with_capacity(body);
             for i in 0..body {
                 let row = if f.image {
@@ -324,9 +316,7 @@ impl App {
                         (lo..=hi).contains(&lineno)
                     });
                     let num = if spf::ide_gutter_on(width) {
-                        Style::new()
-                            .fg(if cur_row { TN_YELLOW } else { TN_GRAY })
-                            .render(&format!("{:>4} ", lineno + 1))
+                        spf::ide_gutter(lineno + 1, cur_row)
                     } else {
                         String::new() // tiny panel: every column goes to text
                     };
@@ -358,7 +348,7 @@ impl App {
                 };
                 rows.push(row);
             }
-            let mut title = self.ide_crumb(&f.path);
+            let mut title = format!("{} {}", icon.glyph, self.ide_crumb(&f.path));
             if f.dirty {
                 title.push_str(" ●");
             }
@@ -373,16 +363,19 @@ impl App {
                 .filter(|e| e.is_dir)
                 .map(|e| e.path.clone());
             (
-                "preview".to_string(),
-                vec![Style::new()
-                    .fg(TN_GRAY)
-                    .render(&spf::fit("  ← pick a file to preview", right_iw))],
+                "· preview".to_string(),
+                vec![Style::new().fg(TN_GRAY).render(&spf::fit(
+                    "  Select a file · Enter open · Tab focus",
+                    right_iw,
+                ))],
                 sel_dir,
                 None,
             )
         };
 
-        let left = spf::frame(&ide.title, tw, main_h, !ide.focus_editor, tree_rows);
+        let tree_icon = spf::file_icon(&ide.title, true, true);
+        let tree_title = format!("{} {}", tree_icon.glyph, ide.title);
+        let left = spf::frame(&tree_title, tw, main_h, !ide.focus_editor, tree_rows);
         let right = spf::frame(&right_title, rw, main_h, ide.focus_editor, right_rows);
         let mut out = spf::hjoin(&left, &right);
 
@@ -424,7 +417,7 @@ impl App {
             .as_deref()
             .map(|p| spf::file_meta_breadcrumb_line(p, meta_lines, meta_inner))
             .unwrap_or_else(|| Style::new().fg(TN_GRAY).render(&spf::fit(" —", meta_inner)));
-        let meta = spf::frame("metadata", meta_w, 3, false, vec![meta_line]);
+        let meta = spf::frame("details", meta_w, 3, false, vec![meta_line]);
         let keys_inner = keys_w.saturating_sub(2);
         let keys_line = if let Some(line) = kb_delete_confirm_line(ide, keys_inner) {
             line
@@ -435,7 +428,7 @@ impl App {
                 .fg(TN_GRAY)
                 .render(&spf::fit(&format!(" {hint}"), keys_inner))
         };
-        let keys = spf::frame("keys", keys_w, 3, false, vec![keys_line]);
+        let keys = spf::frame("controls", keys_w, 3, false, vec![keys_line]);
         out.extend(spf::hjoin(&meta, &keys));
 
         out.truncate(h);

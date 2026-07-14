@@ -31,6 +31,7 @@ impl OsService {
             return Err(BootError::BadRequest("token is required".to_string()));
         }
         let session = crate::a3s_os::login_with_token(&config, token)
+            .await
             .map_err(|error| BootError::BadRequest(error.to_string()))?;
         self.finish_login(&config, session, "token").await
     }

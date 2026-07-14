@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Write};
+#[cfg(test)]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use a3s_code_core::llm::{ContentBlock, Message};
@@ -120,6 +122,7 @@ impl TimelineJsonlStore {
         Ok(events)
     }
 
+    #[cfg(test)]
     pub(crate) fn load_tail_page(&self, limit: usize) -> anyhow::Result<TimelinePage> {
         if limit == 0 || !self.path.exists() {
             return Ok(TimelinePage {
@@ -259,6 +262,7 @@ impl TimelineJsonlStore {
     }
 }
 
+#[cfg(test)]
 fn retain_visible_event(
     line: &[u8],
     visible_reversed: &mut Vec<TranscriptEvent>,

@@ -321,13 +321,19 @@ impl ClaudeCliHostToolMapper {
                 stop_reason = Some("tool_use".into());
                 for call in calls {
                     let input_delta = call.input.to_string();
+                    let call_id = call.id.clone();
                     let _ = tx
                         .send(StreamEvent::ToolUseStart {
-                            id: call.id.clone(),
+                            id: call_id.clone(),
                             name: call.name.clone(),
                         })
                         .await;
-                    let _ = tx.send(StreamEvent::ToolUseInputDelta(input_delta)).await;
+                    let _ = tx
+                        .send(StreamEvent::ToolUseInputDelta {
+                            id: Some(call_id),
+                            delta: input_delta,
+                        })
+                        .await;
                     content.push(call.into_content_block());
                 }
             }
@@ -512,13 +518,14 @@ mod tests {
             }
         }
 
+        let Some(StreamEvent::ToolUseStart { id: call_id, name }) = rx.recv().await else {
+            panic!("expected tool start");
+        };
+        assert_eq!(name, "read");
         assert!(matches!(
             rx.recv().await,
-            Some(StreamEvent::ToolUseStart { name, .. }) if name == "read"
-        ));
-        assert!(matches!(
-            rx.recv().await,
-            Some(StreamEvent::ToolUseInputDelta(delta)) if delta.contains("README.md")
+            Some(StreamEvent::ToolUseInputDelta { id: Some(id), delta })
+                if id == call_id && delta.contains("README.md")
         ));
         let Some(StreamEvent::Done(response)) = rx.recv().await else {
             panic!("expected done");
@@ -564,13 +571,14 @@ mod tests {
             }
         }
 
+        let Some(StreamEvent::ToolUseStart { id: call_id, name }) = rx.recv().await else {
+            panic!("expected tool start");
+        };
+        assert_eq!(name, "read");
         assert!(matches!(
             rx.recv().await,
-            Some(StreamEvent::ToolUseStart { name, .. }) if name == "read"
-        ));
-        assert!(matches!(
-            rx.recv().await,
-            Some(StreamEvent::ToolUseInputDelta(delta)) if delta.contains("README.md")
+            Some(StreamEvent::ToolUseInputDelta { id: Some(id), delta })
+                if id == call_id && delta.contains("README.md")
         ));
         let Some(StreamEvent::Done(response)) = rx.recv().await else {
             panic!("expected done");

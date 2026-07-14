@@ -262,13 +262,44 @@ fn verify_binary_version(
     version_ge(&version, latest).then_some(version)
 }
 
-fn verify_brew_binary(runner: &impl CommandRunner, formula: &str, latest: &str) -> Option<PathBuf> {
+fn verify_brew_binary(
+    runner: &impl CommandRunner,
+    formula: &str,
+    current_exe: &Path,
+    latest: &str,
+) -> Option<PathBuf> {
     let path_bin = PathBuf::from("a3s");
     if verify_binary_version(runner, path_bin.as_os_str(), latest).is_some() {
         return Some(path_bin);
     }
     let prefix_bin = brew_prefix_bin(runner, formula)?;
-    verify_binary_version(runner, prefix_bin.as_os_str(), latest).map(|_| prefix_bin)
+    verify_binary_version(runner, prefix_bin.as_os_str(), latest)?;
+
+    eprintln!("\n⚠  Homebrew has a3s {latest}, but `a3s` on PATH is still older — relinking…");
+    let _ = runner.status(OsStr::new("brew"), &args(&["link", "--overwrite", formula]));
+    if verify_binary_version(runner, path_bin.as_os_str(), latest).is_some() {
+        return Some(path_bin);
+    }
+
+    if current_exe != prefix_bin {
+        eprintln!(
+            "⚠  Homebrew link is still shadowed — repairing {} from {}…",
+            current_exe.display(),
+            prefix_bin.display()
+        );
+        if swap_binary_and_verify(runner, &prefix_bin, current_exe, latest).is_ok() {
+            if verify_binary_version(runner, path_bin.as_os_str(), latest).is_some() {
+                return Some(path_bin);
+            }
+            return Some(current_exe.to_path_buf());
+        }
+    }
+
+    eprintln!(
+        "⚠  Homebrew binary is current at {}, but the active `a3s` command is still shadowed",
+        prefix_bin.display()
+    );
+    None
 }
 
 fn sibling_webview_helper(current_exe: &Path) -> Option<PathBuf> {
@@ -324,10 +355,17 @@ pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
     let runner = RealCommandRunner;
     let exe =
         std::env::current_exe().map_err(|e| format!("could not locate current binary: {e}"))?;
-    match ensure_remoteui_helper_with(&runner, &exe, cfg!(target_os = "macos"))? {
-        Some(path) => Ok(vec![format!("RemoteUI helper ready: {}", path.display())]),
-        None => Ok(Vec::new()),
+    let mut repaired = Vec::new();
+    if let Some(formula) = managed_brew_formula(&runner) {
+        let current = current_version();
+        if let Some(bin) = verify_brew_binary(&runner, formula, &exe, &current) {
+            repaired.push(format!("Homebrew command ready: {}", bin.display()));
+        }
     }
+    if let Some(path) = ensure_remoteui_helper_with(&runner, &exe, cfg!(target_os = "macos"))? {
+        repaired.push(format!("RemoteUI helper ready: {}", path.display()));
+    }
+    Ok(repaired)
 }
 
 /// Upgrade to `latest` in place. Returns the binary to exec on success —
@@ -383,7 +421,7 @@ fn perform_upgrade_with(
         }
         println!("\n⬇  upgrading a3s {latest} via Homebrew…\n");
         let upgrade_ok = runner.status(OsStr::new("brew"), &args(&["upgrade", formula]));
-        if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+        if let Some(bin) = verify_brew_binary(runner, formula, &current_exe, latest) {
             ensure_remoteui_helper_best_effort(runner, &current_exe);
             return Ok(bin);
         }
@@ -401,7 +439,7 @@ fn perform_upgrade_with(
         };
         eprintln!("\n⚠  {reason} — reinstalling…");
         let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", formula]));
-        if let Some(bin) = verify_brew_binary(runner, formula, latest) {
+        if let Some(bin) = verify_brew_binary(runner, formula, &current_exe, latest) {
             ensure_remoteui_helper_best_effort(runner, &current_exe);
             return Ok(bin);
         }
@@ -736,6 +774,93 @@ mod tests {
         assert_eq!(runner.version_checks.load(Ordering::SeqCst), 2);
     }
 
+    struct ShadowedBrewRunner {
+        commands: Mutex<Vec<String>>,
+        linked: AtomicBool,
+        prefix: PathBuf,
+    }
+
+    impl ShadowedBrewRunner {
+        fn new(prefix: PathBuf) -> Self {
+            Self {
+                commands: Mutex::new(Vec::new()),
+                linked: AtomicBool::new(false),
+                prefix,
+            }
+        }
+
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        fn record(&self, program: &OsStr, args: &[OsString]) -> String {
+            let mut line = program.to_string_lossy().to_string();
+            for arg in args {
+                line.push(' ');
+                line.push_str(&arg.to_string_lossy());
+            }
+            self.commands.lock().unwrap().push(line.clone());
+            line
+        }
+
+        fn prefix_bin(&self) -> PathBuf {
+            self.prefix.join("bin").join("a3s")
+        }
+    }
+
+    impl CommandRunner for ShadowedBrewRunner {
+        fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
+            let line = self.record(program, args);
+            let prefix_line = format!("brew --prefix {BREW_FORMULA}");
+            let prefix_bin = self.prefix_bin();
+            let stdout = if line == "brew list --versions a3s" {
+                b"a3s 9.9.9\n".to_vec()
+            } else if line == "brew --repo a3s-lab/tap" {
+                b"/tmp/a3s-tap\n".to_vec()
+            } else if line == prefix_line {
+                format!("{}\n", self.prefix.display()).into_bytes()
+            } else if line == "a3s --version" {
+                if self.linked.load(Ordering::SeqCst) {
+                    b"a3s 9.9.9\n".to_vec()
+                } else {
+                    b"a3s 0.1.0\n".to_vec()
+                }
+            } else if program == prefix_bin.as_os_str() && args == [OsString::from("--version")] {
+                b"a3s 9.9.9\n".to_vec()
+            } else {
+                return None;
+            };
+            Some(CommandOutput {
+                success: true,
+                stdout,
+                stderr: Vec::new(),
+            })
+        }
+
+        fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
+            let line = self.record(program, args);
+            if line == format!("brew link --overwrite {BREW_FORMULA}") {
+                self.linked.store(true, Ordering::SeqCst);
+                return true;
+            }
+            line == format!("brew tap {BREW_TAP} {BREW_TAP_URL}")
+                || line == "git -C /tmp/a3s-tap pull --quiet --ff-only"
+                || line == format!("brew upgrade {BREW_FORMULA}")
+        }
+    }
+
+    #[test]
+    fn brew_upgrade_relinks_when_keg_is_latest_but_path_is_old() {
+        let runner = ShadowedBrewRunner::new(PathBuf::from("/tmp/a3s-shadowed-prefix"));
+        let result = perform_upgrade_with("9.9.9", &runner, PathBuf::from("/unused/a3s"));
+
+        assert_eq!(result.as_deref(), Ok(Path::new("a3s")));
+        assert!(runner
+            .commands()
+            .iter()
+            .any(|c| c == &format!("brew link --overwrite {BREW_FORMULA}")));
+    }
+
     #[cfg(unix)]
     struct TempDir {
         root: PathBuf,
@@ -776,6 +901,113 @@ mod tests {
         }
         std::fs::write(path, format!("#!/bin/sh\nprintf 'a3s {version}\\n'\n")).unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    struct LinkFailingBrewRunner {
+        commands: Mutex<Vec<String>>,
+        prefix: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl LinkFailingBrewRunner {
+        fn new(prefix: PathBuf) -> Self {
+            Self {
+                commands: Mutex::new(Vec::new()),
+                prefix,
+            }
+        }
+
+        fn commands(&self) -> Vec<String> {
+            self.commands.lock().unwrap().clone()
+        }
+
+        fn record(&self, program: &OsStr, args: &[OsString]) -> String {
+            let mut line = program.to_string_lossy().to_string();
+            for arg in args {
+                line.push(' ');
+                line.push_str(&arg.to_string_lossy());
+            }
+            self.commands.lock().unwrap().push(line.clone());
+            line
+        }
+    }
+
+    #[cfg(unix)]
+    impl CommandRunner for LinkFailingBrewRunner {
+        fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
+            let line = self.record(program, args);
+            if line == "brew list --versions a3s" {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: b"a3s 9.9.9\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if line == "brew --repo a3s-lab/tap" {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: b"/tmp/a3s-tap\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            if line == format!("brew --prefix {BREW_FORMULA}") {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: format!("{}\n", self.prefix.display()).into_bytes(),
+                    stderr: Vec::new(),
+                });
+            }
+            if line == "a3s --version" {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: b"a3s 0.1.0\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
+            let path = Path::new(program);
+            if path.is_absolute() && args == [OsString::from("--version")] {
+                let out = Command::new(path).arg("--version").output().ok()?;
+                return Some(CommandOutput {
+                    success: out.status.success(),
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                });
+            }
+            None
+        }
+
+        fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
+            let line = self.record(program, args);
+            line == format!("brew tap {BREW_TAP} {BREW_TAP_URL}")
+                || line == "git -C /tmp/a3s-tap pull --quiet --ff-only"
+                || line == format!("brew upgrade {BREW_FORMULA}")
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn brew_upgrade_repairs_current_exe_when_link_stays_shadowed() {
+        let tmp = TempDir::new("brew-shadowed-current");
+        let current_exe = tmp.path("shadowed-a3s");
+        let prefix = tmp.path("prefix");
+        let prefix_bin = prefix.join("bin").join("a3s");
+        write_executable(&current_exe, "0.1.0");
+        write_executable(&prefix_bin, "9.9.9");
+        let runner = LinkFailingBrewRunner::new(prefix);
+
+        let result = perform_upgrade_with("9.9.9", &runner, current_exe.clone());
+
+        assert_eq!(result.as_deref(), Ok(current_exe.as_path()));
+        let out = Command::new(&current_exe)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+        assert!(runner
+            .commands()
+            .iter()
+            .any(|c| c == &format!("brew link --overwrite {BREW_FORMULA}")));
     }
 
     #[derive(Default)]

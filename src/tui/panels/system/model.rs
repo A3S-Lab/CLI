@@ -1,7 +1,7 @@
 //! `/model` picker (with account tabs) + `/effort` rebuild logic + overlays.
 
 use super::super::*;
-use super::login::{claude_models, has_local_login, AuthProvider};
+use super::login::{has_local_login, AuthProvider};
 use crate::config::{
     save_model_selection_preference, ModelSelectionPreference, ModelSelectionSource,
 };
@@ -13,8 +13,7 @@ struct ModelTab {
     label: &'static str,
     color: Color,
     models: Vec<String>,
-    provider: Option<AuthProvider>, // None = config.acl
-    os_gateway: bool,               // the OS unified AI gateway tab
+    source: ModelSelectionSource,
 }
 
 fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, usize) {
@@ -36,6 +35,19 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
 const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = TN_CYAN;
+const CODEX_MODEL_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn prompt_guideline_for_effort(
+    effort: usize,
+    has_native_reasoning_effort: bool,
+) -> Option<&'static str> {
+    let effort = effort.min(EFFORT_LEVELS.len().saturating_sub(1));
+    if effort == ULTRACODE || !has_native_reasoning_effort {
+        EFFORT_LEVELS[effort].guideline
+    } else {
+        None
+    }
+}
 
 fn model_menu_max_rows(height: usize) -> usize {
     height.saturating_sub(8).clamp(3, 12)
@@ -94,7 +106,7 @@ fn model_menu_panel(
         .hint_color(TN_GRAY)
         .text_color(TN_GRAY)
         .muted_color(TN_GRAY)
-        .selected_colors(Color::BrightWhite, ACCENT)
+        .selected_colors(TN_FG, SURFACE_SELECTED)
 }
 
 fn model_menu_lines(
@@ -116,9 +128,9 @@ fn model_menu_lines(
         .collect()
 }
 
-fn model_menu_overlay_y_offset(screen_height: usize, row_count: usize) -> u16 {
+fn model_menu_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
     screen_height
-        .saturating_sub(5)
+        .saturating_sub(rows_below)
         .saturating_sub(row_count)
         .min(u16::MAX as usize) as u16
 }
@@ -129,10 +141,115 @@ fn should_fetch_os_gateway_models(
     loading: bool,
     signed_in: bool,
 ) -> bool {
-    active_tab.is_some_and(|tab| tab.os_gateway)
+    active_tab.is_some_and(|tab| tab.source == ModelSelectionSource::OsGateway)
         && signed_in
         && !loading
         && gateway_models.is_none_or(|models| models.is_empty())
+}
+
+pub(crate) async fn rebuild_agent_session(
+    agent: Arc<Agent>,
+    workspace: String,
+    session_id: String,
+    with_thinking: SessionOptions,
+    without_thinking: SessionOptions,
+    mode: SessionRebuildMode,
+) -> Result<(AgentSession, bool), String> {
+    let mut failures = Vec::new();
+    for (thinking, options) in [(true, with_thinking), (false, without_thinking)] {
+        let result = match mode {
+            SessionRebuildMode::ResumeExisting => agent
+                .resume_session_async(&session_id, options)
+                .await
+                .map_err(|error| format!("resume failed ({error})")),
+            SessionRebuildMode::CreateFresh => agent
+                .session_async(workspace.clone(), Some(options))
+                .await
+                .map_err(|error| format!("fresh session failed ({error})")),
+        };
+        match result {
+            Ok(session) => return Ok((session, !thinking)),
+            Err(error) => failures.push(format!(
+                "{}: {error}",
+                if thinking {
+                    "with extended thinking"
+                } else {
+                    "without extended thinking"
+                }
+            )),
+        }
+    }
+
+    Err(format!(
+        "could not rebuild the session: {}",
+        failures.join("; ")
+    ))
+}
+
+pub(crate) enum SessionRebuildResult {
+    Success(AgentSession, bool),
+    Failed {
+        error: String,
+        recovered: Option<AgentSession>,
+    },
+}
+
+struct SessionRebuildOptions {
+    with_thinking: SessionOptions,
+    without_thinking: SessionOptions,
+}
+
+struct LiveSessionRebuildRequest {
+    agent: Arc<Agent>,
+    current_session: Arc<AgentSession>,
+    workspace: String,
+    session_id: String,
+    requested: SessionRebuildOptions,
+    recovery: SessionRebuildOptions,
+}
+
+async fn rebuild_live_agent_session(request: LiveSessionRebuildRequest) -> SessionRebuildResult {
+    let LiveSessionRebuildRequest {
+        agent,
+        current_session,
+        workspace,
+        session_id,
+        requested,
+        recovery,
+    } = request;
+    if let Err(error) = current_session.save().await {
+        return SessionRebuildResult::Failed {
+            error: format!("could not save the current session before rebuilding: {error}"),
+            recovered: None,
+        };
+    }
+    current_session.close().await;
+    match rebuild_agent_session(
+        Arc::clone(&agent),
+        workspace.clone(),
+        session_id.clone(),
+        requested.with_thinking,
+        requested.without_thinking,
+        SessionRebuildMode::ResumeExisting,
+    )
+    .await
+    {
+        Ok((session, thinking_dropped)) => SessionRebuildResult::Success(session, thinking_dropped),
+        Err(error) => {
+            let recovered = rebuild_agent_session(
+                agent,
+                workspace,
+                session_id,
+                recovery.with_thinking,
+                recovery.without_thinking,
+                SessionRebuildMode::ResumeExisting,
+            )
+            .await
+            .ok()
+            .map(|(session, _)| session);
+            SessionRebuildResult::Failed { error, recovered }
+        }
+    }
 }
 
 impl App {
@@ -143,25 +260,26 @@ impl App {
             label: "a3s-code",
             color: A3S_COLOR,
             models: self.models.clone(),
-            provider: None,
-            os_gateway: false,
+            source: ModelSelectionSource::Config,
         }];
         if has_local_login(AuthProvider::Claude) {
             tabs.push(ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
-                models: claude_models(), // from ~/.claude.json
-                provider: Some(AuthProvider::Claude),
-                os_gateway: false,
+                models: crate::model::catalog::claude_models(),
+                source: ModelSelectionSource::Claude,
             });
         }
         if has_local_login(AuthProvider::Codex) {
             tabs.push(ModelTab {
                 label: "Codex",
                 color: CODEX_COLOR,
-                models: crate::codex::codex_models(), // from ~/.codex/models_cache.json
-                provider: Some(AuthProvider::Codex),
-                os_gateway: false,
+                models: self
+                    .codex_account_models
+                    .iter()
+                    .map(|model| model.slug.clone())
+                    .collect(),
+                source: ModelSelectionSource::Codex,
             });
         }
         // Signed in to OS → offer its unified AI gateway (gateway-managed:
@@ -181,8 +299,7 @@ impl App {
                 label: "OS Gateway",
                 color: TN_CYAN,
                 models,
-                provider: None,
-                os_gateway: true,
+                source: ModelSelectionSource::OsGateway,
             });
         }
         tabs
@@ -202,6 +319,29 @@ impl App {
         let (tab, idx) = selected_model_location(&tabs, self.model.as_deref());
         self.model_tab = tab;
         self.model_menu = Some(idx);
+    }
+
+    /// Refresh Codex account models without blocking the terminal event loop.
+    /// The installed Codex CLI owns login refresh, entitlement filtering, and
+    /// client-version negotiation; this TUI only consumes its picker catalog.
+    pub(crate) fn maybe_refresh_codex_models(&mut self) -> Option<Cmd<Msg>> {
+        if !has_local_login(AuthProvider::Codex)
+            || self.codex_models_loading
+            || self
+                .codex_models_refreshed_at
+                .is_some_and(|at| at.elapsed() < CODEX_MODEL_REFRESH_TTL)
+        {
+            return None;
+        }
+
+        self.codex_models_loading = true;
+        Some(cmd::cmd(|| async {
+            Msg::CodexModels(
+                crate::codex::refresh_codex_models()
+                    .await
+                    .map_err(|error| error.to_string()),
+            )
+        }))
     }
 
     pub(crate) fn maybe_fetch_active_os_gateway_models(&mut self) -> Option<Cmd<Msg>> {
@@ -272,10 +412,7 @@ impl App {
                 self.model_menu = Some(0);
                 Some(self.maybe_fetch_active_os_gateway_models())
             }
-            KeyCode::Enter => {
-                self.activate_model_menu_item(&tabs[t], sel.min(last));
-                Some(None)
-            }
+            KeyCode::Enter => Some(self.activate_model_menu_item(&tabs[t], sel.min(last))),
             KeyCode::Esc => {
                 self.model_menu = None;
                 Some(None)
@@ -301,7 +438,11 @@ impl App {
         if row_count == 0 {
             return None;
         }
-        panel.set_y_offset(model_menu_overlay_y_offset(self.height as usize, row_count));
+        panel.set_y_offset(model_menu_overlay_y_offset(
+            self.height as usize,
+            row_count,
+            self.overlay_rows_below(),
+        ));
 
         match panel.handle_mouse(mouse) {
             Some(TabbedMenuPanelMsg::TabChanged(tab)) => {
@@ -309,41 +450,21 @@ impl App {
                 self.model_menu = Some(0);
                 self.maybe_fetch_active_os_gateway_models()
             }
-            Some(TabbedMenuPanelMsg::Selected { tab, item }) => {
-                if let Some(tab) = tabs.get(tab) {
-                    self.activate_model_menu_item(tab, item);
-                }
-                None
-            }
+            Some(TabbedMenuPanelMsg::Selected { tab, item }) => tabs
+                .get(tab)
+                .and_then(|tab| self.activate_model_menu_item(tab, item)),
             Some(TabbedMenuPanelMsg::Cancelled) | None => None,
         }
     }
 
-    fn activate_model_menu_item(&mut self, tab: &ModelTab, item: usize) {
+    fn activate_model_menu_item(&mut self, tab: &ModelTab, item: usize) -> Option<Cmd<Msg>> {
         let model = tab.models.get(item).cloned();
         self.model_menu = None;
-        if tab.os_gateway {
-            if let Some(model) = model {
-                self.use_os_gateway(&model);
-            }
-            return;
-        }
-        match tab.provider {
-            None => {
-                if let Some(model) = model {
-                    self.switch_model(&model);
-                }
-            }
-            Some(AuthProvider::Claude) => {
-                if let Some(model) = model {
-                    self.sign_in_claude(&model);
-                }
-            }
-            Some(AuthProvider::Codex) => {
-                if let Some(model) = model {
-                    self.sign_in_codex(&model);
-                }
-            }
+        match tab.source {
+            ModelSelectionSource::Config => model.and_then(|model| self.switch_model(&model)),
+            ModelSelectionSource::Claude => model.and_then(|model| self.sign_in_claude(&model)),
+            ModelSelectionSource::Codex => model.and_then(|model| self.sign_in_codex(&model)),
+            ModelSelectionSource::OsGateway => model.and_then(|model| self.use_os_gateway(&model)),
         }
     }
 
@@ -354,11 +475,10 @@ impl App {
     fn commit_model_switch(
         &mut self,
         session: AgentSession,
-        llm_client: Arc<dyn a3s_code_core::llm::LlmClient>,
         model: String,
         source: ModelSelectionSource,
     ) {
-        self.replace_session(session, llm_client);
+        self.replace_session(session);
         let preference = ModelSelectionPreference {
             source,
             model: model.clone(),
@@ -368,11 +488,6 @@ impl App {
         // Until then, do not show the previous model's prompt/token counters as
         // if they belonged to this context window.
         self.last_prompt_tokens = 0;
-        self.auto_compact = crate::compact::auto_compact::AutoCompactController::new(
-            crate::config::auto_compact_threshold(),
-            self.context_limit,
-        );
-        self.rebuild_model_context();
         self.ctx_warned_tier = 0;
         self.output_tokens = 0;
         if let Err(error) = save_model_selection_preference(&preference) {
@@ -384,7 +499,7 @@ impl App {
 
     /// Sign in with the local Claude Code login and switch to one of its models
     /// by injecting the Claude account client (OAuth Bearer auth).
-    fn sign_in_claude(&mut self, model: &str) {
+    fn sign_in_claude(&mut self, model: &str) -> Option<Cmd<Msg>> {
         let model = crate::claude::canonical_model_name(model);
         if self.state != State::Idle {
             self.push_line(
@@ -392,95 +507,78 @@ impl App {
                     .fg(TN_YELLOW)
                     .render("  finish the current turn before switching models"),
             );
-            return;
+            return None;
         }
         match crate::claude::ClaudeClient::from_claude_login(&model) {
             Ok(client) => {
-                let prev_override = self.llm_override.clone();
-                let prev_ctx = self.context_limit;
-                self.llm_override = Some(Arc::new(client));
-                // Build the replacement session with the new model's context policy.
-                self.context_limit = self.active_context_limit_for(&model);
-                match self.rebuild_session(Some(&model)) {
-                    Ok((session, llm_client, _)) => {
-                        self.commit_model_switch(
-                            session,
-                            llm_client,
-                            model.clone(),
-                            ModelSelectionSource::Claude,
-                        );
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_GREEN)
-                                .render(&format!("  ⇄ Claude Code · {model}")),
-                        );
-                    }
-                    Err(error) => {
-                        self.llm_override = prev_override;
-                        self.context_limit = prev_ctx;
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_RED)
-                                .render(&format!("  failed to switch: {error}")),
-                        );
-                    }
-                }
+                let llm_override = Some(LlmOverride::Static(Arc::new(client)));
+                let context_limit = self.active_context_limit_for(&model);
+                let mut profile = self.session_rebuild_profile();
+                profile.model = Some(model.clone());
+                profile.context_limit = context_limit;
+                profile.llm_override = llm_override.clone();
+                self.start_session_rebuild(
+                    profile,
+                    SessionRebuildAction::Model {
+                        model,
+                        source: ModelSelectionSource::Claude,
+                        llm_override,
+                        context_limit,
+                    },
+                )
             }
-            Err(error) => self.push_line(
-                &Style::new()
-                    .fg(TN_RED)
-                    .render(&format!("  Claude Code sign-in failed: {error}")),
-            ),
+            Err(error) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  Claude Code sign-in failed: {error}")),
+                );
+                None
+            }
         }
     }
 
     /// Sign in with the local Codex login and switch to one of its models by
     /// injecting the custom Codex client (talks to the ChatGPT backend).
-    fn sign_in_codex(&mut self, model: &str) {
+    fn sign_in_codex(&mut self, model: &str) -> Option<Cmd<Msg>> {
         if self.state != State::Idle {
             self.push_line(
                 &Style::new()
                     .fg(TN_YELLOW)
                     .render("  finish the current turn before switching models"),
             );
-            return;
+            return None;
         }
-        match crate::codex::CodexClient::from_codex_login(model, &self.session_id) {
+        match crate::codex::CodexClient::from_codex_login_with_effort(
+            model,
+            &self.session_id,
+            EFFORT_LEVELS[self.effort].id,
+        ) {
             Ok(client) => {
-                let prev_override = self.llm_override.clone();
-                let prev_ctx = self.context_limit;
-                self.llm_override = Some(Arc::new(client));
-                self.context_limit = self.active_context_limit_for(model);
-                match self.rebuild_session(Some(model)) {
-                    Ok((s, llm_client, _)) => {
-                        self.commit_model_switch(
-                            s,
-                            llm_client,
-                            model.to_string(),
-                            ModelSelectionSource::Codex,
-                        );
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_GREEN)
-                                .render(&format!("  ⇄ Codex · {model}")),
-                        );
-                    }
-                    Err(e) => {
-                        self.llm_override = prev_override;
-                        self.context_limit = prev_ctx;
-                        self.push_line(
-                            &Style::new()
-                                .fg(TN_RED)
-                                .render(&format!("  failed to switch: {e}")),
-                        );
-                    }
-                }
+                let llm_override = Some(LlmOverride::Codex(client));
+                let context_limit = self.active_context_limit_for(model);
+                let mut profile = self.session_rebuild_profile();
+                profile.model = Some(model.to_string());
+                profile.context_limit = context_limit;
+                profile.llm_override = llm_override.clone();
+                self.start_session_rebuild(
+                    profile,
+                    SessionRebuildAction::Model {
+                        model: model.to_string(),
+                        source: ModelSelectionSource::Codex,
+                        llm_override,
+                        context_limit,
+                    },
+                )
             }
-            Err(e) => self.push_line(
-                &Style::new()
-                    .fg(TN_RED)
-                    .render(&format!("  Codex sign-in failed: {e}")),
-            ),
+            Err(error) => {
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  Codex sign-in failed: {error}")),
+                );
+                None
+            }
         }
     }
 
@@ -488,7 +586,7 @@ impl App {
     /// OpenAI-compatible client at the OS authenticated LLM proxy, authed with
     /// the OS Bearer token (the gateway is "gateway-managed" — it holds the real
     /// provider keys). `model` is a gateway model id.
-    fn use_os_gateway(&mut self, model: &str) {
+    fn use_os_gateway(&mut self, model: &str) -> Option<Cmd<Msg>> {
         if model.starts_with('(') {
             // A placeholder row. Surface loading, the precise failure reason, or
             // the genuinely-unconfigured gateway state.
@@ -505,7 +603,7 @@ impl App {
                     .fg(TN_YELLOW)
                     .render(&format!("  OS gateway unavailable: {reason}")),
             );
-            return;
+            return None;
         }
         if self.state != State::Idle {
             self.push_line(
@@ -513,39 +611,24 @@ impl App {
                     .fg(TN_YELLOW)
                     .render("  finish the current turn before switching models"),
             );
-            return;
+            return None;
         }
-        let Some(session) = self.os_session.clone() else {
-            return;
-        };
-        let prev_override = self.llm_override.clone();
-        let prev_ctx = self.context_limit;
-        self.llm_override = Some(os_gateway_llm_override(&session, model));
-        self.context_limit = self.active_context_limit_for(model);
-        match self.rebuild_session(Some(model)) {
-            Ok((s, llm_client, _)) => {
-                self.commit_model_switch(
-                    s,
-                    llm_client,
-                    model.to_string(),
-                    ModelSelectionSource::OsGateway,
-                );
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GREEN)
-                        .render(&format!("  ⇄ OS Gateway · {model}")),
-                );
-            }
-            Err(e) => {
-                self.llm_override = prev_override;
-                self.context_limit = prev_ctx;
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  failed to switch: {e}")),
-                );
-            }
-        }
+        let session = self.os_session.clone()?;
+        let llm_override = Some(os_gateway_llm_override(&session, model));
+        let context_limit = self.active_context_limit_for(model);
+        let mut profile = self.session_rebuild_profile();
+        profile.model = Some(model.to_string());
+        profile.context_limit = context_limit;
+        profile.llm_override = llm_override.clone();
+        self.start_session_rebuild(
+            profile,
+            SessionRebuildAction::Model {
+                model: model.to_string(),
+                source: ModelSelectionSource::OsGateway,
+                llm_override,
+                context_limit,
+            },
+        )
     }
 
     /// Switch the active model by resuming the session under it (history kept).
@@ -553,53 +636,89 @@ impl App {
     /// planning + goal tracking + a wider tool-round budget so a turn plans,
     /// then fans independent work out to visible parallel subagents.
     pub(crate) fn effort_session_opts(&self, thinking: bool) -> SessionOptions {
+        let profile = SessionRebuildProfile {
+            session_id: self.session_id.clone(),
+            model: self.model.clone(),
+            effort: self.effort,
+            context_limit: self.context_limit,
+            llm_override: self.llm_override.clone(),
+            compact_summary: self.compact_summary.clone(),
+        };
+        self.session_options_for_profile(thinking, &profile)
+    }
+
+    fn session_options_for_profile(
+        &self,
+        thinking: bool,
+        profile: &SessionRebuildProfile,
+    ) -> SessionOptions {
         let budget = budget_plan_for_effort_index(
-            self.effort,
-            Some(self.context_limit),
+            profile.effort,
+            Some(profile.context_limit),
             BudgetWorkload::Interactive,
         );
+        let automatic_delegation = effort_uses_automatic_delegation(profile.effort);
         let mut opts = with_recent_workspace_context(
-            tui_session_options(self.confirmation.clone())
-                .with_session_store(self.store.clone())
-                .with_session_id(self.session_id.as_str())
-                .with_workspace_backend(self.workspace_services.clone())
-                // Includes the login-gated OS `a3s-os-capabilities` skill.
-                .with_skill_dirs(self.skill_dirs())
-                .with_auto_save(true)
-                .with_file_memory(memory_dir())
-                // Parallel fan-out available in every mode (not just ultracode).
-                .with_max_parallel_tasks(budget.max_parallel_tasks)
-                .with_auto_delegation_enabled(true)
-                .with_auto_parallel_delegation(true)
-                // Pin manual delegation on so `parallel_task`/`task` stay registered
-                // even if config.acl disables them — else ultracode's fan-out calls
-                // an unregistered tool ("Unknown tool: parallel_task").
-                .with_manual_delegation_enabled(true)
-                // Tool-round budget scales with effort (low 120 … max 500,
-                // ultracode 600) — the old flat ~50 default cut real multi-step
-                // work (and parallel subagents) short.
-                .with_max_tool_rounds(budget.max_tool_rounds)
-                // Auto-continuation also scales: higher effort re-prompts more
-                // times to finish before giving up (low 2 … max/ultra 8).
-                .with_max_continuation_turns(budget.max_continuation_turns),
+            tui_session_options_with_gate(
+                self.confirmation.clone(),
+                self.deep_research_report_tool_gate.clone(),
+            )
+            .with_session_store(self.store.clone())
+            .with_session_id(profile.session_id.as_str())
+            .with_workspace_backend(self.workspace_services.clone())
+            // Includes the login-gated OS `a3s-os-capabilities` skill.
+            .with_skill_dirs(self.skill_dirs())
+            .with_auto_save(true)
+            // Auto-compact against this model's real context window.
+            .with_auto_compact(true)
+            .with_auto_compact_threshold(AUTO_COMPACT_THRESHOLD as f32)
+            .with_file_memory(memory_dir())
+            // The numeric cap remains available to explicit `parallel_task`
+            // calls at every effort. Runtime-driven fan-out is a separate
+            // ultracode orchestration capability, not a Codex reasoning level.
+            .with_max_parallel_tasks(budget.max_parallel_tasks)
+            .with_auto_delegation_enabled(automatic_delegation)
+            .with_auto_parallel_delegation(automatic_delegation)
+            // Pin manual delegation on so `parallel_task`/`task` stay registered
+            // even if config.acl disables them — else ultracode's fan-out calls
+            // an unregistered tool ("Unknown tool: parallel_task").
+            .with_manual_delegation_enabled(true)
+            // Tool-round budget scales with effort (low 240 … max 2,400,
+            // ultracode 3,200), so long multi-step work and subagents are
+            // not cut off by the core's much smaller default.
+            .with_max_tool_rounds(budget.max_tool_rounds)
+            // Auto-continuation also scales from 4 through 32 turns.
+            .with_max_continuation_turns(budget.max_continuation_turns),
             &self.workspace_manifest,
         );
-        // Keep project instructions (CLAUDE.md) across model/effort rebuilds,
-        // injected into the system prompt. When signed in, also steer the model
-        // to the progressive-API skill for OS questions (else "OS" reads as the
-        // local operating system → `whoami`).
+        // Keep project instructions (CLAUDE.md) + any /compact summary across
+        // model/effort/compact rebuilds, injected into the system prompt. When
+        // signed in, also steer the model to the progressive-API skill for OS
+        // questions (else "OS" reads as the local operating system → `whoami`).
         let mut extra_parts: Vec<String> = Vec::new();
         if let Some(i) = &self.instructions {
             extra_parts.push(i.clone());
+        }
+        if let Some(s) = &profile.compact_summary {
+            extra_parts.push(format!("# Earlier conversation (compacted)\n\n{s}"));
         }
         if let Some(s) = &self.os_session {
             extra_parts.push(os_platform_guide(&s.address));
         }
         let extra = (!extra_parts.is_empty()).then(|| extra_parts.join("\n\n"));
-        let ultra = self.effort == ULTRACODE;
+        let ultra = profile.effort == ULTRACODE;
+        let effort_profile = &EFFORT_LEVELS[profile.effort];
+        let codex_effort = profile
+            .llm_override
+            .as_ref()
+            .and_then(|client| client.codex_effort_status(effort_profile.id));
         // The per-level depth steer (low → max, and ultracode's own) — the lever
-        // that scales effort on models with no thinking budget (GPT/GLM/OS).
-        let guideline = EFFORT_LEVELS[self.effort].guideline;
+        // that scales effort on models with no native thinking control. A Codex
+        // model with the exact resolved `reasoning.effort` does not need duplicate
+        // depth prompting; capped profiles retain guidance, and ultracode keeps
+        // its distinct orchestration instructions.
+        let has_exact_codex_effort = codex_effort.as_ref().is_some_and(|status| !status.capped);
+        let guideline = prompt_guideline_for_effort(profile.effort, has_exact_codex_effort);
         if extra.is_some() || guideline.is_some() {
             let mut slots = SystemPromptSlots::default();
             if let Some(e) = extra {
@@ -624,143 +743,363 @@ impl App {
                 .with_planning_mode(a3s_code_core::PlanningMode::Auto)
                 .with_goal_tracking(true);
         }
-        // Signed in via a /model account tab → route through that account client.
-        if let Some(client) = &self.llm_override {
-            opts = opts.with_llm_client(client.clone());
+        if let Some(model) = &profile.model {
+            opts = opts.with_model(model);
+        }
+        // Signed in via a /model account tab → route through that account
+        // client. Config-backed models are also host-created so a3s-code v5.2.2
+        // retains the provider's verified structured-output capability during
+        // launch, model switches, and effort rebuilds. Unknown custom endpoints
+        // deliberately keep the safe prompt fallback.
+        if let Some(client) = &profile.llm_override {
+            opts = opts.with_llm_client(client.client_for_effort(effort_profile.id));
+        } else if let Ok(client) = crate::session_llm::resolve_config_llm_client(
+            &self.code_config,
+            &opts,
+            profile.session_id.as_str(),
+        ) {
+            opts = opts.with_llm_client(client);
         }
         opts
     }
 
-    /// Rebuild the session under the current effort. Tries with the thinking
-    /// budget, then falls back without it (so models that don't support extended
-    /// thinking don't error). Returns (session, thinking_dropped).
-    pub(crate) fn rebuild_session(
-        &self,
-        model: Option<&str>,
-    ) -> Result<(AgentSession, Arc<dyn a3s_code_core::llm::LlmClient>, bool), String> {
-        let build = |thinking: bool| {
-            let o = self.effort_session_opts(thinking);
-            let options = match model {
-                Some(m) => o.with_model(m),
-                None => o,
-            };
-            let llm_client = crate::session_llm::resolve_session_llm_client(
-                &self.code_config,
-                &options,
-                &self.session_id,
-            )?;
-            Ok::<_, String>((options.with_llm_client(Arc::clone(&llm_client)), llm_client))
-        };
-        // Resume keeps history if the session was saved. Before the first turn
-        // it isn't in the store ("Session not found"), so fall back to a fresh
-        // session with the same id (no turns yet = no history to lose). Each is
-        // also retried without the thinking budget for non-Anthropic models.
-        for thinking in [true, false] {
-            let (options, llm_client) = build(thinking)?;
-            if let Ok(s) = self
-                .agent
-                .resume_session(self.session_id.as_str(), options.clone())
-            {
-                s.register_dynamic_workflow_runtime();
-                return Ok((s, llm_client, !thinking));
-            }
-            if let Ok(s) = self.agent.session(self.cwd.clone(), Some(options)) {
-                s.register_dynamic_workflow_runtime();
-                return Ok((s, llm_client, !thinking));
-            }
-        }
-        Err("could not rebuild the session".into())
+    pub(crate) fn codex_effort_status_for_index(&self, effort: usize) -> Option<CodexEffortStatus> {
+        let profile = &EFFORT_LEVELS[effort.min(EFFORT_LEVELS.len().saturating_sub(1))];
+        self.llm_override
+            .as_ref()
+            .and_then(|client| client.codex_effort_status(profile.id))
     }
 
-    pub(crate) fn switch_model(&mut self, model: &str) {
-        if self.state != State::Idle {
+    /// Start an async session rebuild. Session stores, file-backed memory, MCP,
+    /// and queue resources are async-only; never route a TUI rebuild through the
+    /// synchronous compatibility API.
+    pub(crate) fn start_session_rebuild(
+        &mut self,
+        profile: SessionRebuildProfile,
+        action: SessionRebuildAction,
+    ) -> Option<Cmd<Msg>> {
+        if self.session_rebuild_pending.is_some() {
             self.push_line(
                 &Style::new()
                     .fg(TN_YELLOW)
-                    .render("  finish the current turn before switching models"),
+                    .render("  wait for the current session change to finish"),
             );
+            return None;
+        }
+
+        let with_thinking = self.session_options_for_profile(true, &profile);
+        let without_thinking = self.session_options_for_profile(false, &profile);
+        let recovery_profile = self.session_rebuild_profile();
+        let recovery_with_thinking = self.session_options_for_profile(true, &recovery_profile);
+        let recovery_without_thinking = self.session_options_for_profile(false, &recovery_profile);
+        let mode = match &action {
+            SessionRebuildAction::Compact { .. } | SessionRebuildAction::Clear { .. } => {
+                SessionRebuildMode::CreateFresh
+            }
+            _ => SessionRebuildMode::ResumeExisting,
+        };
+        self.session_rebuild_seq = self.session_rebuild_seq.wrapping_add(1);
+        let request_id = self.session_rebuild_seq;
+        self.session_rebuild_pending = Some(request_id);
+
+        let agent = Arc::clone(&self.agent);
+        let current_session = Arc::clone(&self.session);
+        let workspace = self.cwd.clone();
+        let session_id = profile.session_id;
+        Some(cmd::cmd(move || async move {
+            let result = if mode == SessionRebuildMode::ResumeExisting {
+                rebuild_live_agent_session(LiveSessionRebuildRequest {
+                    agent,
+                    current_session,
+                    workspace,
+                    session_id,
+                    requested: SessionRebuildOptions {
+                        with_thinking,
+                        without_thinking,
+                    },
+                    recovery: SessionRebuildOptions {
+                        with_thinking: recovery_with_thinking,
+                        without_thinking: recovery_without_thinking,
+                    },
+                })
+                .await
+            } else {
+                match rebuild_agent_session(
+                    agent,
+                    workspace,
+                    session_id,
+                    with_thinking,
+                    without_thinking,
+                    mode,
+                )
+                .await
+                {
+                    Ok((session, thinking_dropped)) => {
+                        SessionRebuildResult::Success(session, thinking_dropped)
+                    }
+                    Err(error) => SessionRebuildResult::Failed {
+                        error,
+                        recovered: None,
+                    },
+                }
+            };
+            Msg::SessionRebuilt {
+                request_id,
+                action,
+                result: Box::new(result),
+            }
+        }))
+    }
+
+    pub(crate) fn session_rebuild_profile(&self) -> SessionRebuildProfile {
+        SessionRebuildProfile {
+            session_id: self.session_id.clone(),
+            model: self.model.clone(),
+            effort: self.effort,
+            context_limit: self.context_limit,
+            llm_override: self.llm_override.clone(),
+            compact_summary: self.compact_summary.clone(),
+        }
+    }
+
+    pub(crate) fn finish_session_rebuild(
+        &mut self,
+        request_id: u64,
+        action: SessionRebuildAction,
+        result: SessionRebuildResult,
+    ) {
+        if self.session_rebuild_pending != Some(request_id) {
             return;
         }
-        // Build the replacement session with the new model's context policy.
-        let prev_override = self.llm_override.clone();
-        let prev_ctx = self.context_limit;
-        self.llm_override = None;
-        self.context_limit = self.active_context_limit_for(model);
-        match self.rebuild_session(Some(model)) {
-            Ok((s, llm_client, _)) => {
-                self.commit_model_switch(
-                    s,
-                    llm_client,
-                    model.to_string(),
-                    ModelSelectionSource::Config,
-                );
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_GREEN)
-                        .render(&format!("  ⇄ switched to {model}")),
-                );
-            }
-            Err(e) => {
-                self.llm_override = prev_override;
-                self.context_limit = prev_ctx;
+        self.session_rebuild_pending = None;
+
+        let (session, thinking_dropped) = match result {
+            SessionRebuildResult::Success(session, thinking_dropped) => (session, thinking_dropped),
+            SessionRebuildResult::Failed { error, recovered } => {
+                if let Some(session) = recovered {
+                    self.replace_session(session);
+                }
+                if matches!(action, SessionRebuildAction::Compact { .. }) {
+                    self.compacting = None;
+                }
+                let context = match action {
+                    SessionRebuildAction::Model { .. } => "switch model",
+                    SessionRebuildAction::Effort { .. } => "set effort",
+                    SessionRebuildAction::Compact { .. } => "compact context",
+                    SessionRebuildAction::Fork { .. } => "fork session",
+                    SessionRebuildAction::Clear { .. } => "clear session",
+                    SessionRebuildAction::Reload { .. } => "reload session",
+                    SessionRebuildAction::Refresh { failure_context } => {
+                        let Some(context) = failure_context else {
+                            return;
+                        };
+                        context
+                    }
+                };
                 self.push_line(
                     &Style::new()
                         .fg(TN_RED)
-                        .render(&format!("  failed to switch model: {e}")),
+                        .render(&format!("  failed to {context}: {error}")),
                 );
+                return;
             }
-        }
-    }
+        };
 
-    /// Apply the selected effort by rebuilding the session (keeps model + history).
-    pub(crate) fn apply_effort(&mut self) {
-        if self.state != State::Idle {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render("  finish the current turn before changing effort"),
-            );
-            return;
-        }
-        let model = self.model.clone();
-        match self.rebuild_session(model.as_deref()) {
-            Ok((s, llm_client, dropped)) => {
-                self.replace_session(s, llm_client);
-                if self.effort == ULTRACODE {
-                    // Unattended fan-out: auto-approve so subagents run freely.
+        match action {
+            SessionRebuildAction::Model {
+                model,
+                source,
+                llm_override,
+                context_limit,
+            } => {
+                self.llm_override = llm_override;
+                self.context_limit = context_limit;
+                self.commit_model_switch(session, model.clone(), source);
+                let label = match source {
+                    ModelSelectionSource::Config => format!("switched to {model}"),
+                    ModelSelectionSource::Claude => format!("Claude Code · {model}"),
+                    ModelSelectionSource::Codex => format!("Codex · {model}"),
+                    ModelSelectionSource::OsGateway => format!("OS Gateway · {model}"),
+                };
+                self.push_line(&Style::new().fg(TN_GREEN).render(&format!("  ⇄ {label}")));
+            }
+            SessionRebuildAction::Effort {
+                selected,
+                codex_effort,
+            } => {
+                self.effort = selected;
+                self.replace_session(session);
+                if let Err(error) = save_tui_effort_preference(selected) {
+                    self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                        "  effort changed, but preference was not saved: {error}"
+                    )));
+                }
+                if selected == ULTRACODE {
                     self.mode = Mode::Auto;
-                    self.gradient_until = Some(Instant::now()); // brand-gradient flourish
+                    self.gradient_until = Some(Instant::now());
                     self.gradient_frame = 0;
-                    self.push_line(&Style::new().fg(ACCENT).bold().render(
-                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on)",
-                    ));
-                } else if dropped {
-                    // No extended-thinking budget on this model. Above/below the
-                    // medium baseline a depth guideline still applies (effort is
-                    // not a no-op); at medium only the tool-round budget differs.
-                    let note = if EFFORT_LEVELS[self.effort].guideline.is_some() {
+                    let native = codex_effort
+                        .as_ref()
+                        .map(|status| {
+                            let cap = if status.capped { " (model limit)" } else { "" };
+                            format!(" · Codex reasoning: {}{cap}", status.effective)
+                        })
+                        .unwrap_or_default();
+                    self.push_line(&Style::new().fg(ACCENT).bold().render(&format!(
+                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on){native}",
+                    )));
+                } else if let Some(status) = codex_effort {
+                    let cap = if status.capped { " (model limit)" } else { "" };
+                    self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                        "  ◇ effort: {} · Codex reasoning: {}{cap}",
+                        EFFORT_LEVELS[selected].label, status.effective
+                    )));
+                } else if thinking_dropped {
+                    let note = if EFFORT_LEVELS[selected].guideline.is_some() {
                         "depth via reasoning guidance; no extended-thinking on this model"
                     } else {
                         "balanced baseline; no extended-thinking on this model"
                     };
                     self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                         "  ◇ effort: {} ({note})",
-                        EFFORT_LEVELS[self.effort].label
+                        EFFORT_LEVELS[selected].label
                     )));
                 } else {
                     self.push_line(
                         &Style::new()
                             .fg(TN_GREEN)
-                            .render(&format!("  ◇ effort: {}", EFFORT_LEVELS[self.effort].label)),
+                            .render(&format!("  ◇ effort: {}", EFFORT_LEVELS[selected].label)),
                     );
                 }
             }
-            Err(e) => self.push_line(
-                &Style::new()
-                    .fg(TN_RED)
-                    .render(&format!("  failed to set effort: {e}")),
-            ),
+            SessionRebuildAction::Compact {
+                summary,
+                session_id,
+            } => {
+                self.compacting = None;
+                self.compact_summary = Some(summary);
+                self.session_id = session_id;
+                self.replace_session(session);
+                self.messages.clear();
+                self.output_tokens = 0;
+                self.last_prompt_tokens = 0;
+                self.ctx_warned_tier = 0;
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GREEN)
+                        .bold()
+                        .render("  ✦ context compacted — continuing from this summary:"),
+                );
+                self.push_line(&gutter(
+                    TN_CYAN,
+                    self.compact_summary.as_deref().unwrap_or(""),
+                ));
+                self.rebuild_viewport();
+            }
+            SessionRebuildAction::Fork { session_id } => {
+                self.session_id = session_id;
+                self.replace_session(session);
+                let short: String = self.session_id.chars().take(8).collect();
+                self.push_line(&gutter(
+                    TN_CYAN,
+                    &format!("⑂ forked into a new session ({short}) — the original is kept"),
+                ));
+            }
+            SessionRebuildAction::Clear { session_id } => {
+                // Commit the UI reset only after the fresh session exists. A
+                // failed `/clear` must leave the old conversation untouched.
+                self.restore_autonomy();
+                self.session_id = session_id;
+                self.replace_session(session);
+                self.compact_summary = None;
+                self.messages.clear();
+                self.plan.clear();
+                self.runtime.clear_turn_entities();
+                self.runtime.clear_subagent_entities();
+                self.queue.clear();
+                self.completed = 0;
+                self.review_pending = false;
+                self.sleep_pending = false;
+                self.pending_ctx = None;
+                self.ctx_hits.clear();
+                self.agent_dev = None;
+                self.pending_flow_subcommand = None;
+                self.pending_agent_subcommand = None;
+                self.mcp_dev = None;
+                self.pending_mcp_subcommand = None;
+                self.skill_dev = None;
+                self.pending_skill_subcommand = None;
+                self.okf_picker = None;
+                self.pending_okf_subcommand = None;
+                self.okf_dev = None;
+                self.asset_list = None;
+                self.runtime_activity = None;
+                self.kb = None;
+                self.output_tokens = 0;
+                self.last_prompt_tokens = 0;
+                self.ctx_warned_tier = 0;
+                self.relayout();
+                self.rebuild_viewport();
+            }
+            SessionRebuildAction::Reload { skill_count } => {
+                self.replace_session(session);
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GREEN)
+                        .render(&format!("  ↻ reloaded — {skill_count} skills available")),
+                );
+            }
+            SessionRebuildAction::Refresh { .. } => self.replace_session(session),
         }
+    }
+
+    pub(crate) fn switch_model(&mut self, model: &str) -> Option<Cmd<Msg>> {
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  finish the current turn before switching models"),
+            );
+            return None;
+        }
+        let context_limit = self.active_context_limit_for(model);
+        let mut profile = self.session_rebuild_profile();
+        profile.model = Some(model.to_string());
+        profile.context_limit = context_limit;
+        profile.llm_override = None;
+        self.start_session_rebuild(
+            profile,
+            SessionRebuildAction::Model {
+                model: model.to_string(),
+                source: ModelSelectionSource::Config,
+                llm_override: None,
+                context_limit,
+            },
+        )
+    }
+
+    /// Apply a selected effort by rebuilding the session (keeps model + history).
+    /// The old profile remains active if the rebuild fails.
+    pub(crate) fn apply_effort(&mut self, selected: usize) -> Option<Cmd<Msg>> {
+        if self.state != State::Idle {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  finish the current turn before changing effort"),
+            );
+            return None;
+        }
+        let selected = selected.min(EFFORT_LEVELS.len().saturating_sub(1));
+        let codex_effort = self.codex_effort_status_for_index(selected);
+        let mut profile = self.session_rebuild_profile();
+        profile.effort = selected;
+        self.start_session_rebuild(
+            profile,
+            SessionRebuildAction::Effort {
+                selected,
+                codex_effort,
+            },
+        )
     }
 
     pub(crate) fn overlay_model_menu(&self, composed: String) -> String {
@@ -786,6 +1125,140 @@ impl App {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn async_rebuild_initializes_default_file_memory() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-async-rebuild-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = root.join("config.acl");
+        std::fs::write(
+            &config,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n",
+        )
+        .unwrap();
+        let agent = Arc::new(
+            Agent::new(config.to_string_lossy().to_string())
+                .await
+                .unwrap(),
+        );
+        let options = SessionOptions::new().with_session_id("async-rebuild-memory");
+
+        let (session, thinking_dropped) = rebuild_agent_session(
+            agent,
+            workspace.to_string_lossy().to_string(),
+            "async-rebuild-memory".to_string(),
+            options.clone(),
+            options,
+            SessionRebuildMode::CreateFresh,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(session.session_id(), "async-rebuild-memory");
+        assert!(!thinking_dropped);
+        assert!(workspace.join(".a3s/memory").is_dir());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn live_session_rebuild_closes_before_resuming_same_id() {
+        let root = std::env::temp_dir().join(format!(
+            "a3s-live-session-rebuild-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let config = root.join("config.acl");
+        std::fs::write(
+            &config,
+            "default_model = \"openai/x\"\n\
+             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
+             models \"x\" { name = \"x\" }\n}\n",
+        )
+        .unwrap();
+        let agent = Arc::new(
+            Agent::new(config.to_string_lossy().to_string())
+                .await
+                .unwrap(),
+        );
+        let session_id = "live-session-rebuild";
+        let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
+            a3s_code_core::store::FileSessionStore::new(root.join("sessions"))
+                .await
+                .unwrap(),
+        );
+        let options = SessionOptions::new()
+            .with_session_id(session_id)
+            .with_session_store(store);
+        let current = Arc::new(
+            agent
+                .session_async(
+                    workspace.to_string_lossy().to_string(),
+                    Some(options.clone()),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let result = rebuild_live_agent_session(LiveSessionRebuildRequest {
+            agent: Arc::clone(&agent),
+            current_session: current,
+            workspace: workspace.to_string_lossy().to_string(),
+            session_id: session_id.to_string(),
+            requested: SessionRebuildOptions {
+                with_thinking: options.clone(),
+                without_thinking: options.clone(),
+            },
+            recovery: SessionRebuildOptions {
+                with_thinking: options.clone(),
+                without_thinking: options,
+            },
+        })
+        .await;
+
+        let session = match result {
+            SessionRebuildResult::Success(session, _) => session,
+            SessionRebuildResult::Failed { error, recovered } => panic!(
+                "same-id live session rebuild should succeed after closing the old session: {error}; recovered={}",
+                recovered.is_some()
+            ),
+        };
+        assert_eq!(session.session_id(), session_id);
+        assert_eq!(agent.list_sessions().await, vec![session_id.to_string()]);
+        session.close().await;
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn native_codex_effort_replaces_only_simulated_depth_guidance() {
+        assert!(prompt_guideline_for_effort(2, true).is_none());
+        assert_eq!(
+            prompt_guideline_for_effort(2, false),
+            EFFORT_LEVELS[2].guideline
+        );
+        assert_eq!(
+            prompt_guideline_for_effort(ULTRACODE, true),
+            EFFORT_LEVELS[ULTRACODE].guideline
+        );
+        assert_eq!(
+            prompt_guideline_for_effort(4, false),
+            EFFORT_LEVELS[4].guideline
+        );
+    }
+
     #[test]
     fn selected_model_location_finds_account_tab_model() {
         let tabs = vec![
@@ -793,15 +1266,13 @@ mod tests {
                 label: "a3s-code",
                 color: A3S_COLOR,
                 models: vec!["openai/gpt-5".into()],
-                provider: None,
-                os_gateway: false,
+                source: ModelSelectionSource::Config,
             },
             ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
                 models: vec!["claude-sonnet-4".into()],
-                provider: Some(AuthProvider::Claude),
-                os_gateway: false,
+                source: ModelSelectionSource::Claude,
             },
         ];
 
@@ -822,15 +1293,13 @@ mod tests {
             label: "a3s-code",
             color: A3S_COLOR,
             models: vec!["openai/gpt-5".into()],
-            provider: None,
-            os_gateway: false,
+            source: ModelSelectionSource::Config,
         };
         let gateway_tab = ModelTab {
             label: "OS Gateway",
             color: TN_CYAN,
             models: vec!["(loading…)".into()],
-            provider: None,
-            os_gateway: true,
+            source: ModelSelectionSource::OsGateway,
         };
         let cached = vec!["gpt-5.1".to_string()];
 
@@ -882,8 +1351,7 @@ mod tests {
                     "openai-compatible/provider/model-name-with-a-very-long-context-window".into(),
                     "gpt-5-codex".into(),
                 ],
-                provider: Some(AuthProvider::Codex),
-                os_gateway: false,
+                source: ModelSelectionSource::Codex,
             }],
             0,
             0,
@@ -910,20 +1378,18 @@ mod tests {
                 label: "a3s-code",
                 color: A3S_COLOR,
                 models: vec!["openai/gpt-5".into()],
-                provider: None,
-                os_gateway: false,
+                source: ModelSelectionSource::Config,
             },
             ModelTab {
                 label: "Claude Code",
                 color: CLAUDE_COLOR,
                 models: vec!["claude-sonnet-4".into()],
-                provider: Some(AuthProvider::Claude),
-                os_gateway: false,
+                source: ModelSelectionSource::Claude,
             },
         ];
         let max_rows = model_menu_max_rows(24);
         let row_count = model_menu_lines(&tabs, 0, 0, None, 48, max_rows).len();
-        let y_offset = model_menu_overlay_y_offset(24, row_count);
+        let y_offset = model_menu_overlay_y_offset(24, row_count, 5);
         let mut panel = model_menu_panel(&tabs, 0, 0, None, max_rows);
         panel.set_y_offset(y_offset);
 
@@ -935,5 +1401,11 @@ mod tests {
         });
 
         assert_eq!(msg, Some(TabbedMenuPanelMsg::TabChanged(1)));
+    }
+
+    #[test]
+    fn model_menu_mouse_offset_follows_dynamic_rows_below() {
+        assert_eq!(model_menu_overlay_y_offset(24, 6, 5), 13);
+        assert_eq!(model_menu_overlay_y_offset(24, 6, 9), 9);
     }
 }

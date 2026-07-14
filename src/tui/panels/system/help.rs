@@ -242,10 +242,6 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "/skill status",
         "check OS skill asset and runtime binding without mutating it",
     ),
-    (
-        "/btw <question>",
-        "ask a background side-question outside the main chat",
-    ),
 ];
 
 fn help_panel() -> HelpPanel {
@@ -270,7 +266,7 @@ fn help_panel() -> HelpPanel {
                 .row("! <cmd>", "run a shell command directly")
                 .row(
                     "? <query>",
-                    "deep research through DynamicWorkflowRuntime; uses runtime when signed in",
+                    "web seed + local DynamicWorkflowRuntime workflow fan-out; say `no web` for offline evidence",
                 )
                 .row("@<path>", "attach a workspace file from the file picker")
                 .row("Ctrl+V", "attach a clipboard image to the next message"),
@@ -286,6 +282,10 @@ fn help_panel() -> HelpPanel {
                 )
                 .row("PgUp / PgDn", "scroll the transcript or this help panel")
                 .row("Shift+End", "jump to the latest transcript output")
+                .row(
+                    "Ctrl+T",
+                    "open the complete live semantic transcript with full tool output",
+                )
                 .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",
@@ -374,12 +374,13 @@ impl App {
         let max_scroll = body.len().saturating_sub(body_h);
         let scroll = self.help_scroll.min(max_scroll);
         let mut lines: Vec<String> = Vec::with_capacity(h);
-        lines.push(
+        lines.push(format!(
+            "{}{}",
+            Style::new().fg(ACCENT).bold().render("  A3S Code"),
             Style::new()
-                .fg(ACCENT)
-                .bold()
-                .render("  A3S CODE help   Esc/Enter close · Up/Down/PgUp/PgDn scroll"),
-        );
+                .fg(TN_GRAY)
+                .render(" help · Esc/Enter close · Up/Down/PgUp/PgDn scroll")
+        ));
         lines.extend(body.iter().skip(scroll).take(body_h).cloned());
         if h > 1 {
             let showing_to = (scroll + body_h).min(body.len());
@@ -670,7 +671,10 @@ mod tests {
         assert!(body.contains("/skill clone"));
         assert!(body.contains("typed OS services"));
         assert!(body.contains("DynamicWorkflowRuntime"));
-        assert!(body.contains("uses runtime when signed in"));
+        assert!(body.contains("local DynamicWorkflowRuntime workflow"));
+        assert!(body.contains("Ctrl+T"));
+        assert!(body.contains("complete live semantic transcript"));
+        assert!(!body.contains("uses runtime when signed in"));
         assert!(!body.contains(&format!("OS-backed {}", "runs")));
         assert!(!body.contains("/kb open"));
         assert!(!body.contains("/kb dashboard"));

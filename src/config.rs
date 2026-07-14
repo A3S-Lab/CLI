@@ -1,7 +1,5 @@
 //! Config-file discovery and the first-launch starter template.
 
-use serde::{Deserialize, Serialize};
-
 pub(crate) const DEFAULT_AUTO_COMPACT_THRESHOLD: f64 = 0.85;
 
 /// A starter `config.acl` (HCL-like ACL) with placeholders, generated on first
@@ -42,6 +40,21 @@ default_model = "openai/my-model"
 #   llmExtractionMaxInputChars = 8000
 # }
 
+# Optional: a3s-search configuration. HTTP engines need no browser. Enable the
+# headless block only for google, baidu, or bing_cn; manage browser runtimes
+# with `a3s search browser ...` and verify them with `a3s search doctor`.
+# search {
+#   timeout = 20
+#   engine {
+#     ddg   { enabled = true  weight = 1.0 }
+#     brave { enabled = true  weight = 1.0 }
+#     wiki  { enabled = true  weight = 0.8 }
+#     # baidu  { enabled = true weight = 1.0 }
+#     # bing_cn { enabled = true weight = 1.0 }
+#   }
+#   # headless { backend = "chrome" maxTabs = 4 }
+# }
+
 providers "openai" {
   apiKey  = "sk-REPLACE-ME"
   baseUrl = "https://api.openai.com/v1/"   # or any OpenAI-compatible endpoint
@@ -70,46 +83,66 @@ pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
 }
 
 /// Where the interactive `/model` picker stores the last successful choice.
-pub(crate) fn model_selection_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/model-selection.json"))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum ModelSelectionSource {
-    Config,
-    Claude,
-    Codex,
-    OsGateway,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ModelSelectionPreference {
-    pub source: ModelSelectionSource,
-    pub model: String,
-}
+pub(crate) use crate::model::route::ModelSource as ModelSelectionSource;
+pub(crate) use crate::model::selection::ModelSelection as ModelSelectionPreference;
 
 /// Load the last successful `/model` choice. Invalid or empty preferences are
 /// ignored so a broken cache never prevents the TUI from launching.
 pub(crate) fn load_model_selection_preference() -> Option<ModelSelectionPreference> {
-    let path = model_selection_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    let preference = serde_json::from_str::<ModelSelectionPreference>(&raw).ok()?;
-    (!preference.model.trim().is_empty()).then_some(preference)
+    crate::model::selection::load()
 }
 
 /// Persist the last successful `/model` choice without mutating config.acl.
 pub(crate) fn save_model_selection_preference(
     preference: &ModelSelectionPreference,
 ) -> std::io::Result<()> {
-    let path = model_selection_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME unset"))?;
+    crate::model::selection::save(preference)
+}
+
+/// Load the last successfully applied TUI effort profile.
+/// Unknown values are ignored so older or manually edited state is harmless.
+pub(crate) fn load_tui_effort_preference() -> Option<usize> {
+    let path = tui_effort_preference_path()?;
+    let id = if path.exists() {
+        std::fs::read_to_string(&path).ok()?
+    } else {
+        let legacy = path.parent()?.parent()?.join("tui-effort");
+        let id = std::fs::read_to_string(legacy).ok()?;
+        if effort_index(&id).is_some() {
+            let _ = save_tui_effort_id(&path, id.trim());
+        }
+        id
+    };
+    effort_index(&id)
+}
+
+fn effort_index(id: &str) -> Option<usize> {
+    crate::budget::EFFORT_LEVELS
+        .iter()
+        .position(|profile| profile.id == id.trim())
+}
+
+/// Persist a successfully applied TUI effort profile by stable profile ID.
+pub(crate) fn save_tui_effort_preference(index: usize) -> std::io::Result<()> {
+    let profile = crate::budget::EFFORT_LEVELS.get(index).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TUI effort index")
+    })?;
+    let path = tui_effort_preference_path()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    save_tui_effort_id(&path, profile.id)
+}
+
+fn save_tui_effort_id(path: &std::path::Path, id: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(preference)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
-    std::fs::write(path, format!("{json}\n"))
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    std::fs::write(&temporary, id)?;
+    std::fs::rename(temporary, path)
+}
+
+fn tui_effort_preference_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".a3s/tui/effort"))
 }
 
 /// Where long-term memory is stored: `$A3S_MEMORY_DIR`, else a top-level
@@ -218,13 +251,6 @@ pub(crate) fn skill_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(|h| std::path::Path::new(&h).join(".a3s/skills"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"))
-}
-
-pub(crate) fn auto_compact_threshold() -> f64 {
-    let Some(path) = find_config() else {
-        return DEFAULT_AUTO_COMPACT_THRESHOLD;
-    };
-    auto_compact_threshold_for_path(std::path::Path::new(&path))
 }
 
 pub(crate) fn auto_compact_threshold_for_path(path: &std::path::Path) -> f64 {
@@ -417,7 +443,7 @@ memoryDir = "~/camel-memories"
         save_model_selection_preference(&preference).expect("preference should save");
 
         assert_eq!(load_model_selection_preference(), Some(preference));
-        assert!(home.join(".a3s/model-selection.json").is_file());
+        assert!(home.join(".a3s/tui/model-selection.json").is_file());
 
         restore_var("HOME", old_home);
         let _ = std::fs::remove_dir_all(home);
@@ -430,12 +456,36 @@ memoryDir = "~/camel-memories"
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let old_home = std::env::var_os("HOME");
         let home = temp_home("model-selection-invalid");
-        let path = home.join(".a3s/model-selection.json");
+        let path = home.join(".a3s/tui/model-selection.json");
         std::fs::create_dir_all(path.parent().expect("path has parent")).unwrap();
         std::fs::write(&path, "{not-json").unwrap();
         std::env::set_var("HOME", &home);
 
         assert_eq!(load_model_selection_preference(), None);
+
+        restore_var("HOME", old_home);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn tui_effort_preference_round_trips_and_rejects_invalid_values() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let old_home = std::env::var_os("HOME");
+        let home = temp_home("tui-effort-round-trip");
+        std::env::set_var("HOME", &home);
+
+        assert_eq!(load_tui_effort_preference(), None);
+        save_tui_effort_preference(4).expect("preference should save");
+        assert_eq!(load_tui_effort_preference(), Some(4));
+        assert_eq!(
+            std::fs::read_to_string(home.join(".a3s/tui/effort")).unwrap(),
+            crate::budget::EFFORT_LEVELS[4].id
+        );
+        std::fs::write(home.join(".a3s/tui/effort"), "unknown").unwrap();
+        assert_eq!(load_tui_effort_preference(), None);
+        assert!(save_tui_effort_preference(usize::MAX).is_err());
 
         restore_var("HOME", old_home);
         let _ = std::fs::remove_dir_all(home);

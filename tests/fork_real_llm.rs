@@ -83,7 +83,8 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
 
     // 1. Original session A: plant a secret the model must recall later.
     let a = agent
-        .session(cwd.clone(), Some(opts("fork-A")))
+        .session_async(cwd.clone(), Some(opts("fork-A")))
+        .await
         .expect("session A");
     let a1 = turn(
         &a,
@@ -110,7 +111,8 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
 
     // 3. Resume the FORK and ask for the secret -> proves context carried over.
     let b = agent
-        .resume_session("fork-B", opts("fork-B"))
+        .resume_session_async("fork-B", opts("fork-B"))
+        .await
         .expect("resume fork B");
     let b1 = turn(
         &b,
@@ -139,7 +141,8 @@ async fn fork_carries_context_diverges_and_leaves_original_intact() {
 
     // 5. Resume the ORIGINAL A -> proves it's untouched and diverged from B.
     let a_again = agent
-        .resume_session("fork-A", opts("fork-A"))
+        .resume_session_async("fork-A", opts("fork-A"))
+        .await
         .expect("resume original A");
     let a2 = turn(
         &a_again,

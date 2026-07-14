@@ -108,23 +108,30 @@ pub(crate) fn count_skill_files(dirs: &[std::path::PathBuf]) -> usize {
 
 /// Bundled built-in skills the cli always ships (not gated, not project-local).
 const OKF_SKILL: &str = include_str!("../../../skills/okf.md");
+const REPORT_MASTER_SKILL: &str = include_str!("../../../skills/report-master/SKILL.md");
+const REPORT_MASTER_SYSTEM: &str =
+    include_str!("../../../skills/report-master/references/report-system.md");
 
-/// Materialize the always-available built-in cli skills (currently `okf`, the
-/// LLM-wiki knowledge compiler that emits an Open Knowledge Format bundle) under
-/// `~/.a3s/cli-skills/<name>/SKILL.md` and return that root so the session can add
-/// it to its skill dirs. Best-effort — returns `None` on any I/O error.
+/// Materialize the always-available built-in cli skills (`okf` and
+/// `report-master`) under `~/.a3s/cli/skills/<name>/` and return that root so the
+/// session can add it to its skill dirs. Best-effort — returns `None` on any I/O
+/// error.
 pub(crate) fn ensure_builtin_skills_dir() -> Option<std::path::PathBuf> {
-    let root = std::path::PathBuf::from(std::env::var_os("HOME")?)
-        .join(".a3s")
-        .join("cli-skills");
+    let a3s_root = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".a3s");
+    let root = a3s_root.join("cli").join("skills");
     ensure_builtin_skills_dir_at(&root).ok()?;
+    // `~/.a3s/cli-skills` was an early flat layout and was always CLI-owned.
+    // Built-ins are regenerated above, so remove the obsolete duplicate instead
+    // of keeping two sources that can drift or surface twice in skill discovery.
+    let _ = remove_legacy_builtin_skills_dir(&a3s_root.join("cli-skills"));
     Some(root)
 }
 
-/// The built-in cli skills materialized under `~/.a3s/cli-skills/`. Any other
+/// The built-in cli skills materialized under `~/.a3s/cli/skills/`. Any other
 /// directory there is a stale leftover from an earlier version (e.g. the old
 /// `kb-compile`, which was renamed to `okf`) and is pruned below.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[("okf", OKF_SKILL)];
+const BUILTIN_SKILLS: &[(&str, &str)] =
+    &[("okf", OKF_SKILL), ("report-master", REPORT_MASTER_SKILL)];
 
 fn ensure_builtin_skills_dir_at(root: &std::path::Path) -> std::io::Result<()> {
     for (name, body) in BUILTIN_SKILLS {
@@ -132,6 +139,12 @@ fn ensure_builtin_skills_dir_at(root: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("SKILL.md"), body)?;
     }
+    let report_references = root.join("report-master").join("references");
+    std::fs::create_dir_all(&report_references)?;
+    std::fs::write(
+        report_references.join("report-system.md"),
+        REPORT_MASTER_SYSTEM,
+    )?;
     // The cli-skills root is cli-owned (only built-ins materialize here), so prune
     // any directory that isn't a current built-in — otherwise a renamed skill like
     // the old `kb-compile` lingers and resurfaces as a duplicate `/` command.
@@ -148,6 +161,19 @@ fn ensure_builtin_skills_dir_at(root: &std::path::Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn remove_legacy_builtin_skills_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
@@ -255,6 +281,10 @@ mod tests {
             "okf skill not discovered: {skills:?}"
         );
         assert!(
+            skills.iter().any(|(n, _)| n == "report-master"),
+            "report-master skill not discovered: {skills:?}"
+        );
+        assert!(
             !skills.iter().any(|(n, _)| n == "kb-compile"),
             "stale kb-compile must not be discovered: {skills:?}"
         );
@@ -269,6 +299,16 @@ mod tests {
             skill.allowed_tools.is_some(),
             "allowed-tools must parse (fail-secure) so the skill is usable"
         );
+        let report_md = std::fs::read_to_string(dir.join("report-master/SKILL.md")).unwrap();
+        let report_skill = a3s_code_core::skills::Skill::parse(&report_md)
+            .expect("core skill loader must accept report-master");
+        assert_eq!(report_skill.name, "report-master");
+        assert!(report_skill.allowed_tools.is_some());
+        let report_system =
+            std::fs::read_to_string(dir.join("report-master/references/report-system.md")).unwrap();
+        assert!(report_system.contains("Strategist pass"));
+        assert!(report_system.contains("Section rhythm"));
+        assert!(report_system.contains("Visual review and repair"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -333,5 +373,20 @@ mod tests {
         restore_env_var("A3S_CONFIG_FILE", old_config);
         restore_env_var("A3S_SKILL_DIR", old_skill_dir);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_flat_builtin_skill_directory_is_removed() {
+        let base =
+            std::env::temp_dir().join(format!("a3s-legacy-builtin-skills-{}", std::process::id()));
+        let legacy = base.join("cli-skills");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(legacy.join("report-master")).unwrap();
+        std::fs::write(legacy.join("report-master/SKILL.md"), "stale").unwrap();
+
+        remove_legacy_builtin_skills_dir(&legacy).unwrap();
+
+        assert!(!legacy.exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

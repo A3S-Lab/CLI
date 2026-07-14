@@ -50,7 +50,7 @@ provides the skill and a trigger.
 | Piece | What | Where |
 |---|---|---|
 | **`okf` skill** | The compilation pipeline (survey → plan → generate → index → verify; incremental; anti-hallucination rules). A `kind: instruction` skill — this *is* the capability. | `crates/cli/skills/okf.md` |
-| **Skill loader** | Always-materialized to `~/.a3s/cli-skills/okf/SKILL.md` and added to the session skill dirs — so the capability is available in every project (not login-gated, not project-local). | `src/tui/skills.rs` `ensure_builtin_skills_dir` → `skill_dirs()` (`mod.rs`) |
+| **Skill loader** | Always materialized to `~/.a3s/cli/skills/okf/SKILL.md` and added to the session skill dirs, so the capability is available in every project (not login-gated or project-local). The obsolete `~/.a3s/cli-skills/` layout is removed after the canonical directory is written. | `src/tui/system/skills.rs` `ensure_builtin_skills_dir` → `skill_dirs()` (`mod.rs`) |
 | **`/okf` trigger** | The skill itself surfaces in the `/` menu as **`/okf`** (selecting it asks the agent to apply the skill); it also auto-applies when the user asks for the wiki/docs in prose. *No separate slash command* — that would just duplicate the skill's menu entry. | the slash menu's skill listing (`panels/menu.rs`) |
 | **Fan-out** | Pages generate concurrently via `parallel_task` when available, else sequentially. | the agent's existing `parallel_task`/`task` tools |
 | **Output** | `.a3s/kb/wiki/*.md` — the KB vault's compiled subtree. | the agent's `write` tool, routed through `ctx.resolve_workspace_path` |

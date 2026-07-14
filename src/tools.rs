@@ -1,4 +1,4 @@
-//! Local A3S tool discovery for `a3s list`.
+//! Read-only component status and local A3S tool discovery for `a3s list`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -12,15 +12,44 @@ struct ToolEntry {
 }
 
 pub(crate) fn print_tool_list() {
-    let tools = discover_a3s_tools(std::env::var_os("PATH"));
+    println!("managed components");
+    for status in crate::components::statuses() {
+        println!("  {}", status.id.as_str());
+        println!(
+            "    installed: {}",
+            if status.installed { "yes" } else { "no" }
+        );
+        println!(
+            "    version:   {}",
+            status.version.as_deref().unwrap_or("-")
+        );
+        println!("    source:    {}", status.source);
+        println!(
+            "    path:      {}",
+            status
+                .path
+                .as_deref()
+                .map(Path::display)
+                .map(|path| path.to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!("    health:    {}", status.health);
+    }
 
-    println!("a3s built-ins");
-    println!("  code    launch the interactive coding agent");
-    println!("  top     live monitor for agents, boxes, and processes");
-    println!("  box     run a3s-box, installing it automatically if needed");
-    println!("  update  update the a3s CLI");
+    println!("\nmanaged search runtimes");
+    for status in a3s_search::browser_management::browser_statuses() {
+        crate::search_cmd::print_browser_status(&status);
+    }
 
-    println!("\ninstalled a3s-* tools on PATH");
+    let tools = discover_a3s_tools(std::env::var_os("PATH"))
+        .into_iter()
+        // The Box adapter already reports the selected a3s-box above. A
+        // standalone a3s-code or a3s-bench on PATH is still an external tool
+        // and must remain visible rather than being mistaken for a managed
+        // component.
+        .filter(|tool| tool.command != crate::components::ComponentId::Box.as_str())
+        .collect::<Vec<_>>();
+    println!("\nother a3s-* tools on PATH");
     if tools.is_empty() {
         println!("  none found");
         return;
@@ -119,6 +148,38 @@ mod tests {
     #[test]
     fn discover_handles_missing_path() {
         assert!(discover_a3s_tools(None).is_empty());
+    }
+
+    #[test]
+    fn only_the_selected_box_adapter_is_removed_from_legacy_discovery() {
+        let tools = vec![
+            ToolEntry {
+                command: "box".to_string(),
+                binary: "a3s-box".to_string(),
+                path: PathBuf::from("/tmp/a3s-box"),
+            },
+            ToolEntry {
+                command: "code".to_string(),
+                binary: "a3s-code".to_string(),
+                path: PathBuf::from("/tmp/a3s-code"),
+            },
+            ToolEntry {
+                command: "bench".to_string(),
+                binary: "a3s-bench".to_string(),
+                path: PathBuf::from("/tmp/a3s-bench"),
+            },
+            ToolEntry {
+                command: "search".to_string(),
+                binary: "a3s-search".to_string(),
+                path: PathBuf::from("/tmp/a3s-search"),
+            },
+        ];
+        let external = tools
+            .into_iter()
+            .filter(|tool| tool.command != crate::components::ComponentId::Box.as_str())
+            .map(|tool| tool.command)
+            .collect::<Vec<_>>();
+        assert_eq!(external, vec!["code", "bench", "search"]);
     }
 
     fn make_executable(path: &Path) {
