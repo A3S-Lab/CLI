@@ -1,0 +1,984 @@
+//! Prompt submission, slash-command dispatch, and attachment handling.
+
+use super::*;
+
+impl App {
+    pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // No input while compacting or upgrading.
+        if self.compacting.is_some() || self.updating.is_some() {
+            self.textarea.clear();
+            return None;
+        }
+        if self.session_rebuild_pending.is_some() {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  wait for the current session change to finish"),
+            );
+            return None;
+        }
+        // Shell mode (`!`) runs a shell command directly (not through the agent).
+        if self.shell_mode {
+            self.shell_mode = false;
+            let cmd = trimmed.trim_start_matches('!').trim().to_string();
+            if cmd.is_empty() {
+                return None;
+            }
+            self.messages.push(TranscriptEntry::preformatted(gutter(
+                TN_GRAY,
+                &Style::new().bold().render(&format!("! {cmd}")),
+            )));
+            self.textarea.clear();
+            self.rebuild_viewport();
+            return Some(cmd::cmd(move || async move {
+                let out = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .output()
+                    .await;
+                let text = match out {
+                    Ok(o) => {
+                        let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+                        s.push_str(&String::from_utf8_lossy(&o.stderr));
+                        if s.trim().is_empty() {
+                            format!("(exit {})", o.status.code().unwrap_or(-1))
+                        } else {
+                            s
+                        }
+                    }
+                    Err(e) => format!("failed to run: {e}"),
+                };
+                Msg::ShellOutput(text)
+            }));
+        }
+        // Deep-research mode (`?`) is host-orchestrated for stability. An LLM
+        // planner selects the stages, depth, parallelism, and phase clocks
+        // inside a query-agnostic safety envelope; Rust never re-plans by
+        // matching keywords or query length.
+        if self.research_mode || trimmed.starts_with('?') {
+            self.research_mode = false;
+            let raw_query = trimmed.trim_start_matches('?').trim();
+            let (query, evidence_scope) = parse_deep_research_tui_query(raw_query);
+            if query.is_empty() {
+                self.textarea.clear();
+                return None;
+            }
+            self.history.push(format!("? {query}"));
+            self.history_pos = None;
+            self.history_draft = None;
+            self.textarea.clear();
+            self.messages.push(TranscriptEntry::preformatted(gutter(
+                TN_CYAN,
+                &Style::new()
+                    .bold()
+                    .render(&format!("✦\u{200A}deep research: {query}")),
+            )));
+            let os_runtime =
+                should_use_os_runtime_for_deep_research(&query, self.os_session.is_some());
+            let evidence_scope_label = evidence_scope.label();
+            let runtime_hint = if os_runtime {
+                format!(
+                    "  ◎\u{200A}goal set · LLM-planned deep research · local workflow selected · {evidence_scope_label} · OS Runtime FaaS pending · adaptive stages and budget · local HTML opens in RemoteUI (Esc stops)"
+                )
+            } else if self.os_session.is_some() {
+                format!(
+                    "  ◎\u{200A}goal set · LLM-planned deep research · local workflow selected · {evidence_scope_label} · adaptive stages and budget · local HTML opens in RemoteUI (Esc stops)"
+                )
+            } else {
+                format!(
+                    "  ◎\u{200A}goal set · LLM-planned local deep research · {evidence_scope_label} · adaptive stages and budget · report + HTML opens in RemoteUI (Esc stops)"
+                )
+            };
+            self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
+            let display = format!("✦\u{200A}{query}");
+            // The planner chooses the work; the host only supplies finite hard
+            // caps and one bounded report finalization phase.
+            let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
+            if self.state == State::Idle {
+                return self.start_deep_research_workflow(
+                    query,
+                    os_runtime,
+                    evidence_scope,
+                    runtime_expectation,
+                );
+            }
+            self.seq += 1;
+            self.queue.push(Queued {
+                prio: 1,
+                seq: self.seq,
+                text: format!("? {query}"),
+                display,
+                runtime_expectation,
+                deep_research: Some((query, os_runtime, evidence_scope)),
+            });
+            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
+            self.relayout();
+            return None;
+        }
+        // `/goal clear` is intentionally available during a running goal. It
+        // invalidates delayed retries immediately, then cancels and joins the
+        // active stream before restoring normal Ultracode planning.
+        if trimmed == "/goal clear" {
+            return self.clear_goal_command();
+        }
+        // Block session-mutating commands while a turn is streaming.
+        if self.state != State::Idle {
+            let cmd0 = trimmed.split_whitespace().next().unwrap_or("");
+            if IDLE_ONLY.contains(&cmd0) {
+                self.textarea.clear();
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  {cmd0} is unavailable while a turn is running — press Esc to stop first"
+                )));
+                return None;
+            }
+        }
+        if let Some(rest) = slash_tail(trimmed, "/login") {
+            self.textarea.clear();
+            let Some(os_config) = self.os_config.clone() else {
+                self.push_line(&format!(
+                    "{}\n{}\n{}\n{}",
+                    Style::new()
+                        .fg(TN_YELLOW)
+                        .render("  /login needs an OS endpoint, but none is configured."),
+                    Style::new().fg(TN_GRAY).render(
+                        "  Add it to ~/.a3s/config.acl (or your project's .a3s/config.acl):"
+                    ),
+                    Style::new()
+                        .fg(TN_CYAN)
+                        .render("      os = \"https://your-os-host.example.com\""),
+                    Style::new()
+                        .fg(TN_GRAY)
+                        .render("  then restart a3s code and run /login again."),
+                ));
+                return None;
+            };
+            let token = rest.trim();
+            if !token.is_empty() {
+                let token = token.to_string();
+                let status_entry =
+                    self.push_tracked_line(&Style::new().fg(TN_GRAY).render("  signing in to OS…"));
+                return Some(cmd::cmd(move || async move {
+                    let result = crate::a3s_os::login_with_token(&os_config, &token)
+                        .await
+                        .map(|session| session.display_label())
+                        .map_err(|error| error.to_string());
+                    Msg::OsLogin {
+                        status_entry,
+                        result,
+                    }
+                }));
+            }
+
+            // Already signed in (restored from a previous run) → no need to
+            // re-authenticate; tell the user how to switch instead.
+            if let Some(s) = &self.os_session {
+                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                    "  already signed in to OS as {} · /logout to switch accounts",
+                    s.display_label()
+                )));
+                return None;
+            }
+
+            let status_entry = self.push_tracked_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  opening OS login in your browser…"),
+            );
+            return Some(cmd::cmd(move || async move {
+                let result = crate::a3s_os::login_via_browser(os_config)
+                    .await
+                    .map(|session| session.display_label())
+                    .map_err(|error| error.to_string());
+                Msg::OsLogin {
+                    status_entry,
+                    result,
+                }
+            }));
+        }
+        if trimmed == "/logout" {
+            self.textarea.clear();
+            let Some(os_config) = self.os_config.clone() else {
+                self.push_line(&Style::new().fg(TN_YELLOW).render(
+                    "  configure `os = \"https://...\"` in .a3s/config.acl to enable /logout",
+                ));
+                return None;
+            };
+            match crate::a3s_os::logout(&os_config) {
+                Ok(true) => {
+                    self.os_session = None;
+                    self.asset_list = None;
+                    self.runtime_activity = None;
+                    crate::a3s_os::remove_capability_skill_dir();
+                    crate::a3s_os::clear_os_env();
+                    let rebuild = self.refresh_after_auth();
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GREEN)
+                            .render("  ✓ signed out from OS · capabilities skill removed"),
+                    );
+                    return rebuild;
+                }
+                Ok(false) => {
+                    self.os_session = None;
+                    self.asset_list = None;
+                    self.runtime_activity = None;
+                    crate::a3s_os::remove_capability_skill_dir();
+                    crate::a3s_os::clear_os_env();
+                    let rebuild = self.refresh_after_auth();
+                    self.push_line(&Style::new().fg(TN_GRAY).render("  no OS login was stored"));
+                    return rebuild;
+                }
+                Err(error) => self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  logout failed: {error}")),
+                ),
+            }
+            return None;
+        }
+        // `/kb` opens the local personal knowledge-base panel. Notes/imports/search are
+        // explicit subcommands so a mistyped path no longer becomes a note.
+        // `/ctx <query>` searches past agent sessions; `/ctx <n>` stages hit n
+        // as context for the next message (ctx CLI, local SQLite index).
+        if let Some(rest) = slash_tail(trimmed, "/research") {
+            self.textarea.clear();
+            let mut parts = rest.split_whitespace();
+            let action = parts.next().unwrap_or("status");
+            if action == "diff" {
+                let left = parts.next().map(str::to_string);
+                let right = parts.next().map(str::to_string);
+                if left.is_none() || right.is_none() || parts.next().is_some() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  usage: /research diff <left-run-id> <right-run-id>"),
+                    );
+                    return None;
+                }
+                let (Some(left), Some(right)) = (left, right) else {
+                    return None;
+                };
+                let workspace = PathBuf::from(&self.cwd);
+                return Some(cmd::cmd(move || async move {
+                    Msg::ResearchDiagnostic(
+                        research_diff(&workspace, &left, &right)
+                            .await
+                            .map_err(|error| error.to_string()),
+                    )
+                }));
+            }
+            let explicit_run_id = parts.next().map(str::to_string);
+            if parts.next().is_some() {
+                self.push_line(&Style::new().fg(TN_GRAY).render(
+                    "  usage: /research [status|explain|replay] [run-id] · /research diff <left> <right>",
+                ));
+                return None;
+            }
+            let kind = match action {
+                "status" => ResearchDiagnosticKind::Status,
+                "explain" => ResearchDiagnosticKind::Explain,
+                "replay" => ResearchDiagnosticKind::Replay,
+                _ => {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(
+                        "  usage: /research [status|explain|replay] [run-id] · /research diff <left> <right>",
+                    ));
+                    return None;
+                }
+            };
+            let active_run_id = self
+                .deep_research_workflow
+                .args
+                .as_ref()
+                .and_then(|args| args.get("run_id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string);
+            let run_id = explicit_run_id.or(active_run_id);
+            let workspace = PathBuf::from(&self.cwd);
+            return Some(cmd::cmd(move || async move {
+                Msg::ResearchDiagnostic(
+                    research_diagnostic(&workspace, run_id.as_deref(), kind)
+                        .await
+                        .map_err(|error| error.to_string()),
+                )
+            }));
+        }
+        if let Some(rest) = slash_tail(trimmed, "/ctx") {
+            return self.handle_ctx_command(rest);
+        }
+        if let Some(rest) = slash_tail(trimmed, "/okf") {
+            return self.handle_okf_command(rest);
+        }
+        if let Some(rest) = slash_tail(trimmed, "/kb") {
+            return self.handle_kb_command(rest);
+        }
+        // `/goal [text|clear]` — a persistent goal prepended to every prompt.
+        if let Some(rest) = slash_tail(trimmed, "/goal") {
+            let g = rest.trim();
+            self.textarea.clear();
+            if g.is_empty() {
+                match &self.goal {
+                    Some(cur) => self.push_line(&gutter(
+                        TN_CYAN,
+                        &format!("◎\u{200A}goal: {cur}   (/goal clear to remove)"),
+                    )),
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  usage: /goal <what you're working toward>"),
+                    ),
+                }
+            } else if g == "clear" {
+                return self.clear_goal_command();
+            } else {
+                return self.start_goal_run(g);
+            }
+            return None;
+        }
+        // `/loop` — engineered loop dashboard + subcommands; unknown tails keep
+        // the quick-loop contract (`/loop <task>`).
+        if let Some(rest) = slash_tail(trimmed, "/loop") {
+            return self.handle_loop_command(rest);
+        }
+        // `/sleep [focus]` — end-of-day consolidation: the `/loop` mechanism
+        // drives the agent through reviewing today's work (cross-session via
+        // `ctx` when installed) until a turn ends with the machine-readable
+        // ```a3s-sleep report, which capture_sleep persists into long-term
+        // memory (experience · preferences · knowledge). Idle-only.
+        if let Some(rest) = slash_tail(trimmed, "/sleep") {
+            let focus = rest.trim().to_string();
+            self.textarea.clear();
+            self.sleep_pending = true;
+            self.engage_autonomy(8);
+            self.push_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  ☾ sleep — consolidating today's work into memory… (Esc stops)"),
+            );
+            let directive = panels::sleep::sleep_directive(
+                &focus,
+                self.ctx_ready,
+                &panels::sleep::sleep_today(),
+            );
+            // Like asset reviews: send the directive but show a short display
+            // line (echoing the boilerplate as a user message is just noise).
+            let display = if focus.is_empty() {
+                "☾ sleep".to_string()
+            } else {
+                format!("☾ sleep · {focus}")
+            };
+            return self.start_stream_inner(directive, display, true, true, false);
+        }
+        // `/flow` — select a local DAG JSON and open it in the OS workflow
+        // designer (login-gated); `/flow <description>` orchestrates a basic DAG into
+        // the flows folder (local, no login needed). Token-boundary filtered
+        // so "/flowx" stays a normal message and can't bypass the idle gate.
+        if let Some(rest) = slash_tail(trimmed, "/flow") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::flow::parse_flow_subcommand(&description) {
+                match parsed {
+                    Ok(panels::flow::FlowSubcommand::Clone(url)) => {
+                        return self.clone_asset_command("workflow", url, flow_dir());
+                    }
+                    Ok(panels::flow::FlowSubcommand::List(query)) => {
+                        return self
+                            .open_asset_list_panel(os_asset_category_query("workflow", &query));
+                    }
+                    Ok(panels::flow::FlowSubcommand::Activity(query)) => {
+                        if self.os_session.is_none() {
+                            self.push_line(&os_required_alert(
+                                "workflow runtime activity",
+                                self.os_config.is_some(),
+                            ));
+                        } else {
+                            self.pending_flow_subcommand =
+                                Some(panels::flow::FlowSubcommand::Activity(query));
+                            self.open_flow_panel();
+                        }
+                        return None;
+                    }
+                    Ok(panels::flow::FlowSubcommand::Review(target)) => {
+                        let root = flow_dir();
+                        let flows = panels::flow::list_flows(&root);
+                        let picked = match target {
+                            Some(target) => flows
+                                .into_iter()
+                                .find(|flow| flow == &target || flow.ends_with(&target)),
+                            None if flows.len() == 1 => flows.into_iter().next(),
+                            None => None,
+                        };
+                        let Some(file) = picked else {
+                            self.pending_flow_subcommand =
+                                Some(panels::flow::FlowSubcommand::Review(None));
+                            self.open_flow_panel();
+                            return None;
+                        };
+                        let path = root.join(&file);
+                        let design = match std::fs::read_to_string(&path) {
+                            Ok(value) => value,
+                            Err(error) => {
+                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                                    "  could not read {}: {error}",
+                                    path.display()
+                                )));
+                                return None;
+                            }
+                        };
+                        if serde_json::from_str::<serde_json::Value>(&design).is_err() {
+                            self.push_line(
+                                &Style::new()
+                                    .fg(TN_RED)
+                                    .render(&format!("  {} is not valid JSON", file)),
+                            );
+                            return None;
+                        }
+                        self.messages
+                            .push(TranscriptEntry::user(format!("/flow review {file}")));
+                        self.engage_autonomy(4);
+                        self.review_pending = true;
+                        let prompt = panels::flow::flow_review_prompt(&path, &design);
+                        let display = format!("⧉ flow review: {}", truncate(&file, 48));
+                        return self.start_stream_inner(prompt, display, true, true, false);
+                    }
+                    Ok(action @ panels::flow::FlowSubcommand::Publish)
+                    | Ok(action @ panels::flow::FlowSubcommand::Run)
+                    | Ok(action @ panels::flow::FlowSubcommand::Deploy)
+                    | Ok(action @ panels::flow::FlowSubcommand::Open)
+                    | Ok(action @ panels::flow::FlowSubcommand::Logs)
+                    | Ok(action @ panels::flow::FlowSubcommand::Status) => {
+                        if self.os_session.is_none() {
+                            self.push_line(
+                                &Style::new().fg(TN_YELLOW).render(
+                                    "  /flow publish/run/deploy/open/logs/status needs OS — sign in with /login first",
+                                ),
+                            );
+                        } else {
+                            self.pending_flow_subcommand = Some(action);
+                            self.open_flow_panel();
+                        }
+                        return None;
+                    }
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        return None;
+                    }
+                }
+            }
+            if description.is_empty() {
+                if self.os_session.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  /flow needs OS — sign in with /login first"),
+                    );
+                } else {
+                    self.open_flow_panel();
+                }
+                return None;
+            }
+            let dir = flow_dir();
+            match panels::flow::scaffold_flow_asset(&description, &dir) {
+                Ok(path) => {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  ⧉ scaffolded workflow asset → {}",
+                        path.parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .display()
+                    )));
+                    self.open_flow_panel_focused(&path);
+                    return None;
+                }
+                Err(e) => {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  /flow scaffold failed: {e}")),
+                    );
+                    return None;
+                }
+            }
+        }
+        // `/agent` — select a local a3s-code agent package and enter local
+        // multi-turn development mode; `/agent <description>` scaffolds a complete
+        // local A3S Code agent package; OS subcommands publish/run/deploy the
+        // active local definition through Agent as a Service or Function as a
+        // Service according to the kind.
+        if let Some(rest) = slash_tail(trimmed, "/agent") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::agent::parse_agent_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_agent_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
+            }
+            if description.is_empty() {
+                self.open_agent_panel();
+                return None;
+            }
+            let dir = agent_dir();
+            match panels::agent::scaffold_agent_package(&description, &dir) {
+                Ok(dev) => {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  ◇ scaffolded complete agent package → {}",
+                        dev.package_path.display()
+                    )));
+                    return self.activate_agent_package_path(&dev.package_path);
+                }
+                Err(e) => {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  /agent scaffold failed: {e}")),
+                    );
+                    return None;
+                }
+            }
+        }
+        // `/mcp` — select a local MCP server asset and enter local multi-turn
+        // development mode; `/mcp <description>` drafts a local MCP asset.
+        // OS publish/run/test will map MCP tool calls to Function as a Service.
+        if let Some(rest) = slash_tail(trimmed, "/mcp") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::mcp::parse_mcp_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_mcp_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
+            }
+            if description.is_empty() {
+                self.open_mcp_panel();
+                return None;
+            }
+            let dir = mcp_dir();
+            match panels::mcp::scaffold_mcp_project(&description, &dir) {
+                Ok(dev) => {
+                    self.agent_dev = None;
+                    self.skill_dev = None;
+                    self.okf_dev = None;
+                    self.mcp_dev = Some(dev.clone());
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  ◆ scaffolded MCP asset → {}",
+                        dev.path.display()
+                    )));
+                    self.push_line(&gutter(
+                        TN_CYAN,
+                        &format!(
+                            "◆ mcp dev: {} ({}) · Esc or /mcp off returns to normal mode",
+                            dev.name, dev.rel
+                        ),
+                    ));
+                    self.relayout();
+                    return None;
+                }
+                Err(e) => {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  /mcp scaffold failed: {e}")),
+                    );
+                    return None;
+                }
+            }
+        }
+        // `/skill` — select a local skill asset and enter local multi-turn
+        // development mode; `/skill <description>` drafts a local skill asset.
+        if let Some(rest) = slash_tail(trimmed, "/skill") {
+            let description = rest.trim().to_string();
+            self.textarea.clear();
+            if let Some(parsed) = panels::skill::parse_skill_subcommand(&description) {
+                return match parsed {
+                    Ok(subcommand) => self.execute_skill_subcommand(subcommand),
+                    Err(e) => {
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!("  {e}")));
+                        None
+                    }
+                };
+            }
+            if description.is_empty() {
+                self.open_skill_panel();
+                return None;
+            }
+            let dir = skill_dir();
+            match panels::skill::scaffold_skill_asset(&description, &dir) {
+                Ok(dev) => {
+                    self.agent_dev = None;
+                    self.mcp_dev = None;
+                    self.okf_dev = None;
+                    self.skill_dev = Some(dev.clone());
+                    self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                        "  ✦ scaffolded skill asset → {}",
+                        dev.path
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."))
+                            .display()
+                    )));
+                    self.push_line(&gutter(
+                        TN_CYAN,
+                        &format!(
+                            "✦ skill dev: {} ({}) · Esc or /skill off returns to normal mode",
+                            dev.name, dev.rel
+                        ),
+                    ));
+                    self.relayout();
+                    return None;
+                }
+                Err(e) => {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  /skill scaffold failed: {e}")),
+                    );
+                    return None;
+                }
+            }
+        }
+        // Slash commands run inline in any state.
+        match trimmed {
+            "/exit" => return self.begin_graceful_quit(),
+            "/fork" => {
+                // Branch a new session from the current one: copy the persisted
+                // SessionData under a fresh id, then swap the active session to it
+                // (Msg::Forked). The original id keeps its state, so it stays
+                // resumable — the two diverge from here. Idle-only (guarded above),
+                // so the last turn is already flushed to the store.
+                self.textarea.clear();
+                let store = self.store.clone();
+                let src = self.session_id.clone();
+                let dst = new_session_id();
+                self.session_rebuild_seq = self.session_rebuild_seq.wrapping_add(1);
+                let request_id = self.session_rebuild_seq;
+                self.session_rebuild_pending = Some(request_id);
+                return Some(cmd::cmd(move || async move {
+                    let result = match store.load_snapshot(&src).await {
+                        Ok(Some(mut snapshot)) => {
+                            snapshot.session.id = dst.clone();
+                            match store.save_snapshot(&snapshot).await {
+                                Ok(()) => Ok(dst),
+                                Err(e) => Err(format!("could not save the fork: {e}")),
+                            }
+                        }
+                        Ok(None) => Err("nothing to fork yet — start a conversation first".into()),
+                        Err(e) => Err(format!("could not read the session: {e}")),
+                    };
+                    Msg::Forked { request_id, result }
+                }));
+            }
+            "/clear" => {
+                self.textarea.clear();
+                self.cancel_goal_state("cleared by /clear");
+                self.goal = None;
+                self.goal_since = None;
+                // Actually reset the conversation, not just the screen: swap in a
+                // fresh session (new id, no history, no carried compact summary)
+                // and zero the token/ctx counters. All visible state is committed
+                // only by SessionRebuilt after construction succeeds, so a failed
+                // clear leaves the current transcript and active modes intact.
+                let session_id = new_session_id();
+                let mut profile = self.session_rebuild_profile();
+                profile.session_id = session_id.clone();
+                profile.compact_summary = None;
+                return self
+                    .start_session_rebuild(profile, SessionRebuildAction::Clear { session_id });
+            }
+            "/init" => {
+                // Agent-driven: analyze the workspace and write AGENTS.md (auto-loaded
+                // by the core, like CLAUDE.md). Guarded idle by IDLE_ONLY above.
+                self.textarea.clear();
+                self.messages
+                    .push(TranscriptEntry::user("/init — generate AGENTS.md"));
+                self.rebuild_viewport();
+                return self.start_stream(
+                    "Analyze this codebase and create (or update) an AGENTS.md file at the \
+                     project root. Include: a concise project overview, the exact build / test / \
+                     lint / run commands, the high-level architecture and key directories, and \
+                     the conventions an AI coding agent should follow. Base everything on what's \
+                     actually in the workspace, and write the file with your file-writing tool."
+                        .to_string(),
+                );
+            }
+            "/compact" => {
+                self.textarea.clear();
+                if self.state != State::Idle {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  finish the current turn before compacting"),
+                    );
+                    return None;
+                }
+                let history = self.session.history();
+                if history.is_empty() {
+                    self.push_line(&Style::new().fg(TN_GRAY).render("  nothing to compact yet"));
+                    return None;
+                }
+                let llm_client = match crate::session_llm::resolve_session_llm_client(
+                    &self.code_config,
+                    &self.effort_session_opts(false),
+                    &self.session_id,
+                ) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  could not prepare compaction: {error}")),
+                        );
+                        return None;
+                    }
+                };
+                self.compacting = Some(Instant::now()); // progress bar + input lock
+                let previous_summary = self.compact_summary.clone();
+                return Some(cmd::cmd(move || async move {
+                    Msg::Compacted(
+                        crate::compact::compact_history(
+                            llm_client,
+                            &history,
+                            previous_summary.as_deref(),
+                        )
+                        .await,
+                    )
+                }));
+            }
+            "/help" => {
+                self.textarea.clear();
+                self.help_open = true;
+                self.help_scroll = 0;
+                return None;
+            }
+            "/auto" => {
+                self.mode = Mode::Auto;
+                self.textarea.clear();
+                self.rebuild_viewport();
+                return None;
+            }
+            "/config" => {
+                self.textarea.clear();
+                // Resolve the config; if there's none, generate a starter so the
+                // user always lands in the editor with something to edit.
+                let path = find_config().map(std::path::PathBuf::from).or_else(|| {
+                    let p = default_config_path()?;
+                    let _ = write_template_config(&p);
+                    Some(p)
+                });
+                match path {
+                    Some(p) => self.open_config_in_ide(&p),
+                    None => self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render("  could not locate a home directory for ~/.a3s/config.acl"),
+                    ),
+                }
+                return None;
+            }
+            "/model" => {
+                self.textarea.clear();
+                self.open_model_menu();
+                let mut commands = Vec::new();
+                if let Some(command) = self.maybe_refresh_codex_models() {
+                    commands.push(command);
+                }
+                if let Some(command) = self.maybe_fetch_active_model_models() {
+                    commands.push(command);
+                }
+                return match commands.len() {
+                    0 => None,
+                    1 => commands.pop(),
+                    _ => Some(cmd::batch(commands)),
+                };
+            }
+            "/effort" => {
+                self.textarea.clear();
+                self.effort_panel = Some(self.effort);
+                return None;
+            }
+            "/ide" => {
+                self.textarea.clear();
+                let entries = ide_children(std::path::Path::new(&self.cwd), 0);
+                self.ide = Some(Ide::browse(entries, "workspace"));
+                return None;
+            }
+            "/plugin" => {
+                self.textarea.clear();
+                if self.skills.is_empty() {
+                    self.push_line(&Style::new().fg(TN_GRAY).render(
+                        "  no skills/plugins found (~/.claude/skills, ~/.codex/skills, ~/.claude/plugins)",
+                    ));
+                } else {
+                    self.plugins_panel = Some(0);
+                }
+                return None;
+            }
+            "/theme" => {
+                self.textarea.clear();
+                let cur = SYNTAX_THEME.load(std::sync::atomic::Ordering::Relaxed);
+                self.theme_panel = Some(cur.min(THEMES.len() - 1));
+                return None;
+            }
+            "/reload" => {
+                self.textarea.clear();
+                // Hot-reload: re-discover skill dirs, refresh the UI catalog,
+                // and rebuild the session so the core skill registry and
+                // next Claude/system prompt see the same skills.
+                let dirs = agent_skill_dirs(&self.cwd);
+                self.skills = load_skills(&dirs);
+                self.skill_count = count_skill_files(&dirs);
+                let profile = self.session_rebuild_profile();
+                return self.start_session_rebuild(
+                    profile,
+                    SessionRebuildAction::Reload {
+                        skill_count: self.skills.len(),
+                    },
+                );
+            }
+            "/update" => {
+                self.textarea.clear();
+                self.updating = Some(Instant::now()); // "checking…" + input lock
+                self.relayout();
+                return Some(cmd::cmd(|| async {
+                    // Quick version check only; the actual upgrade runs in the
+                    // shell after the TUI exits (run()), so brew's/curl's own
+                    // progress shows and the restart picks up the new binary.
+                    let latest = tokio::task::spawn_blocking(crate::update::fetch_latest)
+                        .await
+                        .ok()
+                        .flatten();
+                    Msg::UpdatePlan(latest)
+                }));
+            }
+            "/memory" => {
+                self.textarea.clear();
+                // Open immediately ("loading…"); load the file snapshot off the
+                // UI thread, with live session memory as a fallback.
+                let dir = memory_dir();
+                self.memory = Some(MemPanel {
+                    entries: Vec::new(),
+                    sel: 0,
+                    details: std::collections::BTreeMap::new(),
+                    graph: MemoryGraph::default(),
+                    loaded_from_session: false,
+                    detail: memutil::MemDetail::default(),
+                    detail_scroll: 0,
+                    dir: dir.clone(),
+                    note: "loading…".into(),
+                });
+                return Some(self.load_memory_panel(dir));
+            }
+            _ => {}
+        }
+
+        self.history.push(trimmed.to_string());
+        self.history_pos = None;
+        self.history_draft = None;
+        // Show the user message in a background bubble, then run now (if idle)
+        // or queue it (if the agent is busy).
+        self.messages.push(TranscriptEntry::user(trimmed));
+        self.textarea.clear();
+        // One-shot `/ctx <n>` context: attach the staged transcript to THIS
+        // genuine typed message only (never a `/loop` "Continue." re-entry),
+        // invisibly — the display bubble above stays clean. Travels with the
+        // message whether it runs now or is queued.
+        let loop_cont = std::mem::take(&mut self.loop_continuation);
+        if !loop_cont {
+            if let Some(run) = self.goal_run.as_mut() {
+                run.pause_achievement_for_user_turn();
+            }
+        }
+        let prompt = match (loop_cont, self.pending_ctx.take()) {
+            (false, Some(c)) => format!("{c}\n\n{trimmed}"),
+            _ => trimmed.to_string(),
+        };
+        let (prompt, display) = match &self.agent_dev {
+            Some(dev) => (
+                panels::agent::agent_dev_prompt(dev, &prompt),
+                format!("◇ {}: {}", dev.name, truncate(trimmed, 60)),
+            ),
+            None => match &self.mcp_dev {
+                Some(dev) => (
+                    panels::mcp::mcp_dev_prompt(dev, &prompt),
+                    format!("◆ {}: {}", dev.name, truncate(trimmed, 60)),
+                ),
+                None => match &self.skill_dev {
+                    Some(dev) => (
+                        panels::skill::skill_dev_prompt(dev, &prompt),
+                        format!("✦ {}: {}", dev.name, truncate(trimmed, 60)),
+                    ),
+                    None => match &self.okf_dev {
+                        Some(dev) => (
+                            panels::okf::okf_dev_prompt(dev, &prompt),
+                            format!("⌁ {}: {}", dev.name, truncate(trimmed, 60)),
+                        ),
+                        None => (prompt, trimmed.to_string()),
+                    },
+                },
+            },
+        };
+        if self.state == State::Idle {
+            self.start_stream_inner(prompt, display, true, true, false)
+        } else {
+            self.seq += 1;
+            self.queue.push(Queued {
+                prio: 1,
+                seq: self.seq,
+                text: prompt,
+                display,
+                runtime_expectation: None,
+                deep_research: None,
+            });
+            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
+            self.relayout();
+            None
+        }
+    }
+
+    /// Begin streaming a prompt (the user message must already be on screen).
+    /// Grab a clipboard image, preview it inline, and queue it for the next send.
+    pub(super) fn paste_clipboard_image(&mut self) {
+        let dest =
+            std::env::temp_dir().join(format!("a3s-paste-{}.png", self.pending_images.len()));
+        if !clipboard_image_to(&dest) {
+            self.push_line(
+                &Style::new()
+                    .fg(TN_YELLOW)
+                    .render("  no image in clipboard (Ctrl+V pastes a copied/screenshot image)"),
+            );
+            return;
+        }
+        let Ok(bytes) = std::fs::read(&dest) else {
+            return;
+        };
+        self.messages.push(TranscriptEntry::preformatted(gutter(
+            ACCENT,
+            "⊕\u{200A}pasted image (sends with your next message):",
+        )));
+        // Render narrower than the viewport so half-block rows never wrap (a
+        // wrapped row splits the picture and garbles it). Indent to align.
+        let cols = self.transcript_markdown_width().min(72);
+        if let Some(lines) = render_image_file(&dest, cols, 16) {
+            for l in lines {
+                self.messages.push(TranscriptEntry::preformatted(format!(
+                    "{}{l}",
+                    " ".repeat(PAD)
+                )));
+            }
+        }
+        self.rebuild_viewport();
+        self.pending_images
+            .push(a3s_code_core::llm::Attachment::png(bytes));
+    }
+
+    pub(super) fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {
+        self.start_stream_inner(prompt.clone(), prompt, true, true, false)
+    }
+}
