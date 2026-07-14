@@ -193,49 +193,6 @@ impl DeepResearchWorkflowSnapshot {
     }
 }
 
-#[cfg(test)]
-mod deep_research_workflow_snapshot_tests {
-    use super::*;
-
-    #[test]
-    pub(super) fn reset_for_run_discards_prior_transient_values_and_keeps_baseline() {
-        let mut snapshot = DeepResearchWorkflowSnapshot {
-            output: Some("stale output".to_string()),
-            metadata: Some(serde_json::json!({"stale": true})),
-            args: Some(serde_json::json!({"run_id": "old"})),
-            last_synthesis_text: Some("stale synthesis".to_string()),
-            report_baseline: None,
-        };
-
-        snapshot.reset_for_run(DeepResearchReportArtifactBaseline::default());
-
-        assert!(snapshot.output.is_none());
-        assert!(snapshot.metadata.is_none());
-        assert!(snapshot.args.is_none());
-        assert!(snapshot.last_synthesis_text.is_none());
-        assert!(snapshot.report_baseline.is_some());
-    }
-
-    #[test]
-    pub(super) fn clear_removes_all_transient_run_data() {
-        let mut snapshot = DeepResearchWorkflowSnapshot {
-            output: Some("output".to_string()),
-            metadata: Some(serde_json::json!({"source": "workflow"})),
-            args: Some(serde_json::json!({"run_id": "run"})),
-            last_synthesis_text: Some("synthesis".to_string()),
-            report_baseline: Some(DeepResearchReportArtifactBaseline::default()),
-        };
-
-        snapshot.clear();
-
-        assert!(snapshot.output.is_none());
-        assert!(snapshot.metadata.is_none());
-        assert!(snapshot.args.is_none());
-        assert!(snapshot.last_synthesis_text.is_none());
-        assert!(snapshot.report_baseline.is_none());
-    }
-}
-
 pub(super) fn deep_research_evidence_package_is_complete_for_query(
     query: &str,
     evidence_scope: DeepResearchEvidenceScope,
@@ -601,5 +558,48 @@ pub(super) fn nonempty_report_section(text: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod deep_research_workflow_snapshot_tests {
+    use super::*;
+
+    #[test]
+    pub(super) fn reset_for_run_discards_prior_transient_values_and_keeps_baseline() {
+        let mut snapshot = DeepResearchWorkflowSnapshot {
+            output: Some("stale output".to_string()),
+            metadata: Some(serde_json::json!({"stale": true})),
+            args: Some(serde_json::json!({"run_id": "old"})),
+            last_synthesis_text: Some("stale synthesis".to_string()),
+            report_baseline: None,
+        };
+
+        snapshot.reset_for_run(DeepResearchReportArtifactBaseline::default());
+
+        assert!(snapshot.output.is_none());
+        assert!(snapshot.metadata.is_none());
+        assert!(snapshot.args.is_none());
+        assert!(snapshot.last_synthesis_text.is_none());
+        assert!(snapshot.report_baseline.is_some());
+    }
+
+    #[test]
+    pub(super) fn clear_removes_all_transient_run_data() {
+        let mut snapshot = DeepResearchWorkflowSnapshot {
+            output: Some("output".to_string()),
+            metadata: Some(serde_json::json!({"source": "workflow"})),
+            args: Some(serde_json::json!({"run_id": "run"})),
+            last_synthesis_text: Some("synthesis".to_string()),
+            report_baseline: Some(DeepResearchReportArtifactBaseline::default()),
+        };
+
+        snapshot.clear();
+
+        assert!(snapshot.output.is_none());
+        assert!(snapshot.metadata.is_none());
+        assert!(snapshot.args.is_none());
+        assert!(snapshot.last_synthesis_text.is_none());
+        assert!(snapshot.report_baseline.is_none());
     }
 }

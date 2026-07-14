@@ -1001,12 +1001,7 @@ impl App {
                     SessionRebuildAction::Fork { .. } => "fork session",
                     SessionRebuildAction::Clear { .. } => "clear session",
                     SessionRebuildAction::Reload { .. } => "reload session",
-                    SessionRebuildAction::Refresh { failure_context } => {
-                        let Some(context) = failure_context else {
-                            return None;
-                        };
-                        context
-                    }
+                    SessionRebuildAction::Refresh { failure_context } => failure_context?,
                 };
                 self.push_line(
                     &Style::new()

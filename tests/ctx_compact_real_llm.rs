@@ -29,7 +29,8 @@ use a3s_code_core::{AgentEvent, AgentSession, Message, SessionOptions, TokenUsag
 const TURN_TIMEOUT: Duration = Duration::from_secs(300);
 /// Low on purpose: 0.01 × the configured 200k window = trigger at 2k tokens.
 const TEST_THRESHOLD: f32 = 0.01;
-const SESSION_ID: &str = "ctx-compact";
+const BASELINE_SESSION_ID: &str = "ctx-compact-baseline";
+const COMPACT_SESSION_ID: &str = "ctx-compact";
 
 /// One streamed turn; returns (last TurnEnd prompt_tokens, compactions seen
 /// as (before, after) message counts).
@@ -89,12 +90,17 @@ fn seeded_history() -> Vec<Message> {
         .collect()
 }
 
-fn seeded_session_data(workspace: &str, messages: Vec<Message>) -> SessionData {
+fn seeded_session_data(
+    session_id: &str,
+    workspace: &str,
+    messages: Vec<Message>,
+    auto_compact: bool,
+) -> SessionData {
     SessionData {
-        id: SESSION_ID.to_string(),
+        id: session_id.to_string(),
         config: SessionConfig {
             workspace: workspace.to_string(),
-            auto_compact: true,
+            auto_compact,
             auto_compact_threshold: TEST_THRESHOLD,
             max_context_length: 200_000,
             ..Default::default()
@@ -137,16 +143,58 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
     let store: Arc<dyn SessionStore> = Arc::new(MemorySessionStore::new());
     let cwd = tmp.to_string_lossy().to_string();
     store
-        .save(&seeded_session_data(&cwd, seeded_history()))
+        .save(&seeded_session_data(
+            BASELINE_SESSION_ID,
+            &cwd,
+            seeded_history(),
+            false,
+        ))
         .await
-        .expect("seed session");
+        .expect("seed baseline session");
+    store
+        .save(&seeded_session_data(
+            COMPACT_SESSION_ID,
+            &cwd,
+            seeded_history(),
+            true,
+        ))
+        .await
+        .expect("seed compacting session");
 
     let agent = a3s_code_core::Agent::new(config)
         .await
         .expect("build agent from config.acl");
+    let first_prompt = "Do not use any tools. Reply with only: OK";
+
+    // Measure the provider-reported prompt usage for the original history.
+    // Auto-compaction runs before a request, so the compacting session's first
+    // TurnEnd cannot serve as a pre-compaction baseline by itself.
+    let baseline_sess = agent
+        .resume_session_async(
+            BASELINE_SESSION_ID,
+            SessionOptions::new()
+                .with_session_store(store.clone())
+                .with_auto_save(false)
+                .with_auto_compact(false)
+                .with_llm_api_timeout(120_000)
+                .with_continuation(false)
+                .with_max_tool_rounds(1)
+                .with_temperature(0.0)
+                .with_confirmation_policy(
+                    ConfirmationPolicy::enabled().with_timeout(500, TimeoutAction::Reject),
+                ),
+        )
+        .await
+        .expect("resume baseline session");
+    let (baseline_prompt, baseline_compactions) = turn(&baseline_sess, first_prompt).await;
+    eprintln!("[baseline] prompt_tokens={baseline_prompt}");
+    assert!(baseline_compactions.is_empty());
+    assert!(baseline_prompt > 0, "baseline usage was not reported");
+    baseline_sess.close().await;
+
     let sess = agent
         .resume_session_async(
-            SESSION_ID,
+            COMPACT_SESSION_ID,
             SessionOptions::new()
                 .with_session_store(store.clone())
                 .with_auto_save(true)
@@ -163,12 +211,11 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .await
         .expect("resume seeded session");
 
-    let first_prompt = "Do not use any tools. Reply with only: OK";
-    let (peak_prompt, compactions) = turn(&sess, first_prompt).await;
-    eprintln!("[turn 1] prompt_tokens={peak_prompt}");
+    let (compacted_prompt, compactions) = turn(&sess, first_prompt).await;
+    eprintln!("[compacted turn 1] prompt_tokens={compacted_prompt}");
 
     assert!(
-        peak_prompt > 0,
+        compacted_prompt > 0,
         "TurnEnd did not report prompt_tokens > 0 — the provider/gateway is \
          not sending streaming usage, so ctx% and auto-compact are blind"
     );
@@ -178,9 +225,14 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .find(|(b, a)| a < b)
         .expect("auto-compaction did not shrink the seeded history on the first turn");
     assert!(after < before, "compaction must reduce messages");
+    assert!(
+        compacted_prompt < baseline_prompt,
+        "compacted prompt ({compacted_prompt}) should be smaller than the \
+         same request over the original history ({baseline_prompt})"
+    );
 
     let saved = store
-        .load(SESSION_ID)
+        .load(COMPACT_SESSION_ID)
         .await
         .expect("load compacted session")
         .expect("compacted session saved");
@@ -193,7 +245,7 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
 
     let post_compact_sess = agent
         .resume_session_async(
-            SESSION_ID,
+            COMPACT_SESSION_ID,
             SessionOptions::new()
                 .with_session_store(store.clone())
                 .with_auto_save(false)
@@ -210,18 +262,19 @@ async fn context_usage_reports_and_auto_compaction_triggers() {
         .expect("resume compacted session");
 
     let (post, _) = turn(&post_compact_sess, first_prompt).await;
-    eprintln!("[turn 2] prompt_tokens={post}");
+    eprintln!("[compacted turn 2] prompt_tokens={post}");
     assert!(
-        post < peak_prompt,
-        "post-compaction prompt ({post}) should be smaller than the pre-compaction \
-         peak ({peak_prompt})"
+        post < baseline_prompt,
+        "persisted post-compaction prompt ({post}) should remain smaller than the \
+         original-history baseline ({baseline_prompt})"
     );
 
     eprintln!(
         "\n✅ context tracking + auto-compaction verified against the real LLM:\n   \
-         - streaming usage reported (peak prompt {peak_prompt} tokens)\n   \
+         - original-history baseline reported ({baseline_prompt} prompt tokens)\n   \
          - auto-compact fired: {before} -> {after} messages\n   \
-         - next prompt shrank to {post} tokens\n"
+         - compacted request shrank to {compacted_prompt} prompt tokens\n   \
+         - persisted next request remained at {post} prompt tokens\n"
     );
     let _ = std::fs::remove_dir_all(&tmp);
 }

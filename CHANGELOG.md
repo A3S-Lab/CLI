@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-07-14
+
 ### Added
 
 - Added signed-in WorkBuddy account models to `/model`, `a3s model`, and
@@ -43,8 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enabled Core's model-aware rolling compaction for TUI and Code Web sessions.
   Each selected model supplies its actual context window, requests compact
   before overflow, and can compact repeatedly throughout a long-running task.
-  Core summaries are written back to each host's durable timeline so later
-  turns continue from the latest generation instead of compacting it again.
+  A3S Code Core 5.2.4 budgets the retained suffix by estimated message tokens,
+  bounds oversized summaries, and refuses replacements that would not reduce
+  context. Core summaries are written back to each host's durable timeline so
+  later turns continue from the latest generation instead of compacting it
+  again.
 - Moved model, effort, Ultracode, goal, auth, reload, fork, and clear session
   changes onto an async atomic replacement path. The UI no longer blocks the
   Tokio runtime, failed reconfiguration keeps the old session usable, and
@@ -72,6 +77,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corrected the real-LLM compaction integration test to compare matched
+  compressed and uncompressed histories. It now proves provider-reported
+  prompt reduction on the compacted request and again after session restore,
+  instead of comparing two already-compacted turns.
 - Preserved traceable structured evidence when the independent DeepResearch
   checker times out. The workflow now completes with an explicit degraded
   verification state and publishes a provisional evidence-derived report;
