@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `account_providers` boundary. Claude and WorkBuddy share one cancellable
   account-CLI stream/tool bridge, while all three share account detection,
   client construction, model switching, persistence, and session restore.
+- Unified TUI `/compact` with the direct, tool-free compactor used by Code Web.
+  Repeated manual compaction now includes the previous summary without creating
+  a temporary tool-capable agent session, while Core's rolling auto-compaction
+  remains re-armed for long-running conversations.
 - Rebuilt `/goal` as a durable Ultracode goal loop. Setting a goal now creates
   a complete `.a3s/loops/goal-*` Loop Engineering workspace, forces planning
   and goal tracking, runs separate maker/verifier guidance, and continues

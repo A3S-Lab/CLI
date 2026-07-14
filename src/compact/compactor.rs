@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use a3s_code_core::{LlmClient, Message};
 
-#[cfg(test)]
 use super::is_compact_message;
 use crate::timeline::{TimelineCompactionWindow, TimelineJsonlStore};
 
@@ -60,6 +59,26 @@ pub(crate) async fn compact_timeline(
     .await
 }
 
+/// Compact an in-memory session history through the same direct, tool-free LLM
+/// path used by the persisted Code Web timeline.
+///
+/// The TUI creates a fresh session after a manual compact, so a previous manual
+/// summary lives in its system prompt instead of the new session history. Feed
+/// that summary back as the oldest context when compacting again.
+pub(crate) async fn compact_history(
+    llm_client: Arc<dyn LlmClient>,
+    history: &[Message],
+    previous_summary: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut selected = Vec::new();
+    if let Some(summary) = previous_summary.filter(|summary| !summary.trim().is_empty()) {
+        let previous_context = format!("Earlier compacted context:\n\n{}", summary.trim());
+        selected.push(Message::user(&previous_context));
+    }
+    selected.extend(compaction_history_for_messages(history));
+    compact_history_with_timeout(llm_client, selected, MANUAL_COMPACT_TIMEOUT).await
+}
+
 #[cfg(test)]
 async fn compact_timeline_with_timeout(
     llm_client: Arc<dyn LlmClient>,
@@ -68,7 +87,7 @@ async fn compact_timeline_with_timeout(
 ) -> Result<Option<String>, String> {
     compact_history_with_timeout(
         llm_client,
-        compaction_history_for_timeline(&timeline),
+        compaction_history_for_messages(&timeline),
         timeout,
     )
     .await
@@ -104,8 +123,7 @@ fn compaction_history_for_window(window: TimelineCompactionWindow) -> Vec<Messag
     selected
 }
 
-#[cfg(test)]
-fn compaction_history_for_timeline(timeline: &[Message]) -> Vec<Message> {
+fn compaction_history_for_messages(timeline: &[Message]) -> Vec<Message> {
     let latest_summary_index = timeline.iter().rposition(is_compact_message);
     let mut selected = Vec::new();
 
@@ -150,7 +168,6 @@ fn compact_summary_as_user(message: &Message) -> Message {
     }
 }
 
-#[cfg(test)]
 fn tail_messages(messages: &[Message], limit: usize) -> Vec<Message> {
     let start = messages.len().saturating_sub(limit);
     messages[start..].to_vec()
@@ -271,7 +288,7 @@ mod tests {
             msg("assistant", "recent answer"),
         ];
 
-        let history = compaction_history_for_timeline(&timeline);
+        let history = compaction_history_for_messages(&timeline);
         let text = history
             .iter()
             .map(Message::text)
@@ -320,6 +337,33 @@ mod tests {
         assert!(messages
             .iter()
             .all(|message| message.role != A3S_COMPACT_ROLE));
+    }
+
+    #[tokio::test]
+    async fn repeated_manual_compact_includes_the_previous_summary() {
+        let client = Arc::new(RecordingLlmClient::new());
+
+        let summary = compact_history(
+            client.clone(),
+            &[msg("user", "new request"), msg("assistant", "new result")],
+            Some("earlier goal and completed work"),
+        )
+        .await
+        .expect("compact result")
+        .expect("summary");
+
+        assert_eq!(summary, "direct compact summary");
+        let text = client
+            .messages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(Message::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("earlier goal and completed work"));
+        assert!(text.contains("new request"));
+        assert!(text.contains("new result"));
     }
 
     #[tokio::test]

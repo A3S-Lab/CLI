@@ -3983,8 +3983,8 @@ enum Msg {
         ticket: AutoReviewTicket,
         text: String,
     },
-    /// `/compact` produced this conversation summary; reseed a fresh session.
-    Compacted(String),
+    /// `/compact` completed its direct, tool-free summary request.
+    Compacted(Result<Option<String>, String>),
     /// Startup update check completed with the latest published version (if any).
     UpdateCheck(Option<String>),
 }
@@ -6868,16 +6868,28 @@ impl Model for App {
                 }
             }
 
-            Msg::Compacted(summary) => {
-                if summary.trim().is_empty() {
-                    self.compacting = None;
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render("  compaction failed (empty summary)"),
-                    );
-                    return None;
-                }
+            Msg::Compacted(result) => {
+                let summary = match result {
+                    Ok(Some(summary)) if !summary.trim().is_empty() => summary,
+                    Ok(_) => {
+                        self.compacting = None;
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render("  compaction failed (empty summary)"),
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        self.compacting = None;
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  compaction failed: {error}")),
+                        );
+                        return None;
+                    }
+                };
                 // Reseed a FRESH session (new id, no history) carrying just the
                 // summary in its system prompt — that's the actual compaction.
                 let summary = summary.trim().to_string();
@@ -9391,50 +9403,32 @@ impl App {
                     self.push_line(&Style::new().fg(TN_GRAY).render("  nothing to compact yet"));
                     return None;
                 }
-                self.compacting = Some(Instant::now()); // progress bar + input lock
-                let agent = self.agent.clone();
-                let workspace = self.cwd.clone();
-                // Re-compacting must subsume the PRIOR summary — it lives in the
-                // system prompt, not in `history`, so without this everything
-                // before the last /compact would be dropped from the new summary.
-                let prompt = match &self.compact_summary {
-                    Some(prev) => format!(
-                        "An earlier part of this conversation was already condensed into this \
-                         summary:\n\n{prev}\n\nProduce a SINGLE updated summary that fully \
-                         incorporates the summary above AND the conversation history below, so a \
-                         fresh session can continue seamlessly: the goal, key decisions, \
-                         files/commands touched, current state, and the immediate next steps. Be \
-                         thorough but compact."
-                    ),
-                    None => "Summarize this conversation so a fresh session can continue \
-                         seamlessly: the goal, key decisions, files/commands touched, current \
-                         state, and the immediate next steps. Be thorough but compact."
-                        .to_string(),
-                };
-                return Some(cmd::cmd(move || async move {
-                    let conf = a3s_code_core::hitl::ConfirmationPolicy::enabled()
-                        .with_timeout(BACKGROUND_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
-                    let mut summary = String::new();
-                    if let Ok(sess) = agent
-                        .session_async(workspace, Some(tui_session_options(conf)))
-                        .await
-                    {
-                        if let Ok((mut rx, _j)) = sess.stream(&prompt, Some(&history)).await {
-                            while let Some(ev) = rx.recv().await {
-                                match ev {
-                                    AgentEvent::TextDelta { text } => summary.push_str(&text),
-                                    AgentEvent::End { text, .. } => {
-                                        if summary.trim().is_empty() {
-                                            summary = text;
-                                        }
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
+                let llm_client = match crate::session_llm::resolve_session_llm_client(
+                    &self.code_config,
+                    &self.effort_session_opts(false),
+                    &self.session_id,
+                ) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        self.push_line(
+                            &Style::new()
+                                .fg(TN_RED)
+                                .render(&format!("  could not prepare compaction: {error}")),
+                        );
+                        return None;
                     }
-                    Msg::Compacted(summary)
+                };
+                self.compacting = Some(Instant::now()); // progress bar + input lock
+                let previous_summary = self.compact_summary.clone();
+                return Some(cmd::cmd(move || async move {
+                    Msg::Compacted(
+                        crate::compact::compact_history(
+                            llm_client,
+                            &history,
+                            previous_summary.as_deref(),
+                        )
+                        .await,
+                    )
                 }));
             }
             "/help" => {
