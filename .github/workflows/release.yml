@@ -87,8 +87,8 @@ jobs:
           if ! crate_exists a3s-memory 0.1.2; then
             echo "::error::a3s-memory 0.1.2 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
-          if ! crate_exists a3s-tui 0.1.9; then
-            echo "::error::a3s-tui 0.1.9 is not on crates.io yet — cannot publish a3s"; exit 1
+          if ! crate_exists a3s-tui 0.1.10; then
+            echo "::error::a3s-tui 0.1.10 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           publish_dir="$(mktemp -d)"
           trap 'rm -rf "$publish_dir"' EXIT

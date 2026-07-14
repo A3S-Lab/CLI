@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -19,7 +19,7 @@ a3s-boot = "0.1.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.2"
-a3s-tui = "=0.1.9"
+a3s-tui = "=0.1.10"
 a3s-search = { version = "1.4.0", features = ["lightpanda"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "fs", "signal"] }
 anyhow = "1"

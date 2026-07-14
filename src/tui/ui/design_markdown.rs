@@ -2009,6 +2009,27 @@ mod tests {
     }
 
     #[test]
+    fn section_headings_keep_codex_vertical_spacing_after_cli_bounding() {
+        let rendered = Markdown::new()
+            .with_width(32)
+            .render("Previous section body.\n\n## Next section\n\nNext section body.");
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain.lines().collect::<Vec<_>>(),
+            vec![
+                "Previous section body.",
+                "",
+                "## Next section",
+                "",
+                "Next section body."
+            ]
+        );
+        assert_bounded(&rendered, 32);
+        assert_ansi_self_contained(&rendered);
+    }
+
+    #[test]
     fn narrow_bare_links_preserve_the_complete_url() {
         let url = "https://example.com/a/very/long/path?query=完整&mode=codex";
         let rendered = Markdown::new().with_width(14).render(url);

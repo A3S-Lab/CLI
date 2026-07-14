@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "a3s-boot",
  "a3s-code-core",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "comrak",
  "crossterm",

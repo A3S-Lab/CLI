@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-07-14
+
+### Fixed
+
+- Matched Codex Markdown section spacing by keeping exactly one blank terminal
+  row before and after headings. A new section no longer touches the final line
+  of the preceding paragraph, while existing code/table/heading separators are
+  not doubled.
+
 ## [0.8.0] - 2026-07-14
 
 ### Added
