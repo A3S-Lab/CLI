@@ -88,8 +88,8 @@ pub(crate) fn host_tool_instructions(
          when useful; a3s decides whether they can run in parallel.\n\
          - If you need a final answer and no tool is needed, answer normally with \
          no envelope.\n\
-         - After a3s returns `<A3S_TOOL_RESULT>` history blocks, continue from \
-         those observations.\n\n\
+         - After a3s returns an A3S host-tool result record in conversation \
+         history, continue from that observation; do not repeat a recorded call.\n\n\
          Available tools:\n\
          ```json\n{tools_json}\n```\n\n"
     ))
@@ -102,6 +102,19 @@ pub(crate) fn parse_host_tool_calls(text: &str, tools: &[ToolDefinition]) -> Hos
             Err(error) => return HostToolParseResult::Invalid(error),
         };
         return build_host_tool_calls(envelope.calls, tools, true);
+    }
+    if text.contains(TOOL_CALLS_OPEN) {
+        return HostToolParseResult::Invalid("unterminated a3s host tool envelope".into());
+    }
+
+    if text.contains("<tool_calls:") || text.contains("<tool_call:") {
+        return parse_workbuddy_tagged_calls(text, tools);
+    }
+
+    if text.contains("<A3S_ASSISTANT_TOOL_CALL>") || text.contains("<A3S_TOOL_RESULT>") {
+        return HostToolParseResult::Invalid(
+            "the account model echoed an internal host-tool history record".into(),
+        );
     }
 
     if text.contains("<function_calls>") || text.contains("<invoke ") {
@@ -268,6 +281,56 @@ fn parse_claude_function_calls(text: &str, tools: &[ToolDefinition]) -> HostTool
     }
 
     build_host_tool_calls(dedupe_items(items), tools, false)
+}
+
+/// Parse the tagged function-call dialect emitted by some WorkBuddy models.
+/// WorkBuddy replaces the opening `function_calls` / `invoke` tags with
+/// `<tool_calls:group-id>` and `<tool_call:call-id>name">`, while retaining
+/// the ordinary parameter and closing tags.
+fn parse_workbuddy_tagged_calls(text: &str, tools: &[ToolDefinition]) -> HostToolParseResult {
+    let mut items = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<tool_call:") {
+        rest = &rest[start + "<tool_call:".len()..];
+        let Some(id_end) = rest.find('>') else {
+            return HostToolParseResult::Invalid("unterminated WorkBuddy tool-call id".into());
+        };
+        let id = rest[..id_end].trim();
+        if id.is_empty()
+            || id.len() > 128
+            || !id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':'))
+        {
+            return HostToolParseResult::Invalid("invalid WorkBuddy tool-call id".into());
+        }
+
+        rest = &rest[id_end + 1..];
+        let Some(name_end) = rest.find("\">") else {
+            return HostToolParseResult::Invalid("unterminated WorkBuddy tool name".into());
+        };
+        let name = decode_xml_entities(rest[..name_end].trim());
+        if name.is_empty() {
+            return HostToolParseResult::Invalid("WorkBuddy tool call is missing a name".into());
+        }
+
+        let body_start = name_end + "\">".len();
+        let Some(body_end) = rest[body_start..].find("</invoke>") else {
+            return HostToolParseResult::Invalid("unterminated WorkBuddy function invoke".into());
+        };
+        let body = &rest[body_start..body_start + body_end];
+        items.push(ToolCallEnvelopeItem {
+            id: Some(id.to_string()),
+            name: Some(name),
+            input: Some(Value::Object(parse_claude_parameters(body))),
+        });
+        rest = &rest[body_start + body_end + "</invoke>".len()..];
+    }
+
+    if items.is_empty() {
+        return HostToolParseResult::Invalid("WorkBuddy tool envelope contains no calls".into());
+    }
+    build_host_tool_calls(dedupe_items(items), tools, true)
 }
 
 fn parse_claude_parameters(body: &str) -> serde_json::Map<String, Value> {
@@ -635,6 +698,35 @@ mod tests {
         assert_eq!(calls[0].input, json!({"file_path":"README.md"}));
         assert_eq!(calls[1].name, "bash");
         assert_eq!(calls[1].input, json!({"command":"pwd"}));
+    }
+
+    #[test]
+    fn parses_workbuddy_tagged_function_call_xml() {
+        let ls = ToolDefinition {
+            name: "ls".into(),
+            description: "List a directory".into(),
+            parameters: json!({
+                "type":"object",
+                "properties":{"path":{"type":"string"}},
+                "required":["path"]
+            }),
+        };
+        let result = parse_host_tool_calls(
+            r#"I'll list the workspace.<tool_calls:group_1>
+<tool_call:call_1>ls">
+<parameter name="path">/work/a3s</parameter>
+</invoke>
+</function_calls>"#,
+            &[ls],
+        );
+        let HostToolParseResult::Calls(calls) = result else {
+            panic!("expected calls, got {result:?}");
+        };
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "ls");
+        assert_eq!(calls[0].input, json!({"path":"/work/a3s"}));
     }
 
     #[test]

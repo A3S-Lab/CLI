@@ -146,7 +146,7 @@ fn codex_login_models_are_selectable_from_the_product_cache() {
     std::fs::create_dir_all(home.join(".codex")).unwrap();
     std::fs::write(
         home.join(".codex/auth.json"),
-        r#"{"tokens":{"access_token":"codex-secret"}}"#,
+        r#"{"tokens":{"id_token":"header.eyJleHAiOjF9.signature","access_token":"codex-secret","refresh_token":"codex-refresh-secret"}}"#,
     )
     .unwrap();
     std::fs::write(

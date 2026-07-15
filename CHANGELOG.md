@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-07-15
+
+### Fixed
+
+- Kept locally signed-in Codex accounts and their picker-visible models
+  available when the shorter-lived identity token has expired but reusable
+  Codex access state remains. Account refresh and entitlement validation stay
+  delegated to the installed Codex CLI instead of treating ID-token expiry as
+  a logout.
+- Parsed WorkBuddy `hy3` tagged tool-call envelopes and withheld protocol
+  markup across split streaming deltas. Tool calls now become native A3S tool
+  events instead of exposing `<tool_call:...>` or closing XML tags in TUI
+  messages.
+
 ## [0.8.1] - 2026-07-14
 
 ### Fixed

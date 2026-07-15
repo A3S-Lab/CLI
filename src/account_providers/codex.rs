@@ -433,6 +433,13 @@ pub(crate) fn codex_model_context(model: &str) -> Option<u32> {
     cached_codex_model(model).and_then(|model| model.context_window)
 }
 
+/// Return whether the Codex-owned auth cache contains reusable account state.
+///
+/// The ID token is identity metadata, not the bearer token used by the Codex
+/// Responses backend. It can expire before the access token and refresh token,
+/// so its expiry must not hide an otherwise usable account. The installed
+/// Codex CLI owns token refresh and validates the account when models are
+/// refreshed.
 pub(crate) fn has_codex_login() -> bool {
     let Some(path) = codex_auth_path() else {
         return false;
@@ -450,49 +457,6 @@ pub(crate) fn has_codex_login() -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(|token| !token.is_empty())
         })
-}
-
-/// Return whether the local Codex login has a usable access token and, when an
-/// ID token is present, has not expired (or entered the 60-second refresh
-/// window). Legacy auth files without an ID token remain supported because
-/// their expiry cannot be determined locally.
-pub(crate) fn has_valid_codex_login() -> bool {
-    if !has_codex_login() {
-        return false;
-    }
-    let Some(path) = codex_auth_path() else {
-        return false;
-    };
-    let Some(value) = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    else {
-        return false;
-    };
-    value
-        .pointer("/tokens/id_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.trim().is_empty())
-        .is_none_or(|token| !is_jwt_expired_at(token, chrono::Utc::now().timestamp()))
-}
-
-fn is_jwt_expired_at(jwt: &str, now: i64) -> bool {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-
-    let Some(payload) = jwt.split('.').nth(1) else {
-        return true;
-    };
-    let Some(claims) = URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-    else {
-        return true;
-    };
-    let Some(expires_at) = claims.get("exp").and_then(Value::as_i64) else {
-        return true;
-    };
-    expires_at <= now.saturating_add(60)
 }
 
 fn positive_u32(value: &Value) -> Option<u32> {
@@ -1184,24 +1148,6 @@ mod tests {
             "header.{}.signature",
             URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
         )
-    }
-
-    #[test]
-    fn codex_login_expiry_uses_a_refresh_safety_window() {
-        let now = 1_800_000_000;
-        assert!(!is_jwt_expired_at(
-            &jwt_with_claims(json!({"exp": now + 61})),
-            now
-        ));
-        assert!(is_jwt_expired_at(
-            &jwt_with_claims(json!({"exp": now + 60})),
-            now
-        ));
-        assert!(is_jwt_expired_at("malformed", now));
-        assert!(is_jwt_expired_at(
-            &jwt_with_claims(json!({"sub": "account"})),
-            now
-        ));
     }
 
     #[test]

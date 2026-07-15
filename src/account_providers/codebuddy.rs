@@ -498,14 +498,32 @@ printf '%s\n' '{"type":"stream_event","event":{"type":"message_stop"}}'
         let user = Message::user(
             "First call the A3S read tool for README.md. After its result, reply with exactly WORKBUDDY_TOOL_OK.",
         );
-        let first = client
-            .complete(
+        let mut first_stream = client
+            .complete_streaming(
                 std::slice::from_ref(&user),
                 Some("Follow the A3S host-tool protocol."),
                 &tools,
+                CancellationToken::new(),
             )
             .await
             .unwrap();
+        let mut streamed_protocol_text = String::new();
+        let mut first = None;
+        while let Some(event) = first_stream.recv().await {
+            match event {
+                StreamEvent::TextDelta(text) => streamed_protocol_text.push_str(&text),
+                StreamEvent::Done(response) => {
+                    first = Some(response);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            streamed_protocol_text.trim().is_empty(),
+            "host-tool protocol leaked into visible text: {streamed_protocol_text:?}"
+        );
+        let first = first.expect("WorkBuddy stream should complete");
         let calls = first.tool_calls();
         assert_eq!(calls.len(), 1, "first response: {}", first.text());
         assert!(first.usage.prompt_tokens > 0);

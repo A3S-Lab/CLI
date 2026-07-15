@@ -39,7 +39,7 @@ impl AccountProvider {
     pub(crate) fn is_available(self) -> bool {
         match self {
             Self::Claude => claude::has_claude_login(),
-            Self::Codex => codex::has_valid_codex_login(),
+            Self::Codex => codex::has_codex_login(),
             Self::CodeBuddy => codebuddy::has_workbuddy_login(),
         }
     }

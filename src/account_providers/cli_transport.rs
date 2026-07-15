@@ -102,9 +102,13 @@ pub(crate) fn account_cli_prompt(messages: &[Message]) -> String {
                 }
                 ContentBlock::ToolUse { id, name, input } => {
                     let block = json!({"id": id, "name": name, "input": input});
-                    prompt.push_str("<A3S_ASSISTANT_TOOL_CALL>\n");
+                    prompt.push_str(
+                        "### A3S host tool call record\n\n\
+                         This call has already been requested. Do not repeat it unless the user explicitly asks.\n\n\
+                         ```json\n",
+                    );
                     let _ = writeln!(prompt, "{block}");
-                    prompt.push_str("</A3S_ASSISTANT_TOOL_CALL>\n");
+                    prompt.push_str("```\n");
                 }
                 ContentBlock::ToolResult {
                     tool_use_id,
@@ -121,9 +125,9 @@ pub(crate) fn account_cli_prompt(messages: &[Message]) -> String {
                         "status": status,
                         "content": content.as_text(),
                     });
-                    prompt.push_str("<A3S_TOOL_RESULT>\n");
+                    prompt.push_str("### A3S host tool result record\n\n```json\n");
                     let _ = writeln!(prompt, "{block}");
-                    prompt.push_str("</A3S_TOOL_RESULT>\n");
+                    prompt.push_str("```\n");
                 }
             }
         }
@@ -314,7 +318,8 @@ struct AccountCliHostToolMapper {
     response_model: Option<String>,
     response_object: Option<String>,
     first_token_ms: Option<u64>,
-    streaming_plain_text: bool,
+    visible_pending: String,
+    protocol_started: bool,
 }
 
 impl AccountCliHostToolMapper {
@@ -329,7 +334,8 @@ impl AccountCliHostToolMapper {
             response_model: None,
             response_object: Some("message".into()),
             first_token_ms: None,
-            streaming_plain_text: false,
+            visible_pending: String::new(),
+            protocol_started: false,
         }
     }
 
@@ -353,12 +359,7 @@ impl AccountCliHostToolMapper {
             } => {
                 self.mark_first_token();
                 self.text.push_str(&text);
-                if self.streaming_plain_text {
-                    let _ = tx.send(StreamEvent::TextDelta(text)).await;
-                } else if should_stream_plain_text(&self.text) {
-                    self.streaming_plain_text = true;
-                    let _ = tx.send(StreamEvent::TextDelta(self.text.clone())).await;
-                }
+                self.stream_visible_text(&text, tx).await;
             }
             AnthropicStreamEvent::ContentBlockDelta { .. } => {}
             AnthropicStreamEvent::MessageDelta { delta, usage } => {
@@ -418,14 +419,15 @@ impl AccountCliHostToolMapper {
                 stop_reason = Some("host_tool_protocol_error".into());
                 content.push(ContentBlock::Text {
                     text: format!(
-                        "I need to retry the a3s host tool call because {reason}. I should output exactly one valid <function_calls> block next."
+                        "The account model returned an invalid host-tool request ({reason}). Retry the turn."
                     ),
                 });
             }
             HostToolParseResult::NoCall if !self.text.is_empty() => {
                 let text = std::mem::take(&mut self.text);
-                if !self.streaming_plain_text {
-                    let _ = tx.send(StreamEvent::TextDelta(text.clone())).await;
+                if !self.visible_pending.is_empty() {
+                    let pending = std::mem::take(&mut self.visible_pending);
+                    let _ = tx.send(StreamEvent::TextDelta(pending)).await;
                 }
                 content.push(ContentBlock::Text { text });
             }
@@ -460,17 +462,61 @@ impl AccountCliHostToolMapper {
             self.first_token_ms = Some(self.meta.started_at.elapsed().as_millis() as u64);
         }
     }
+
+    async fn stream_visible_text(&mut self, delta: &str, tx: &mpsc::Sender<StreamEvent>) {
+        if self.protocol_started {
+            return;
+        }
+        self.visible_pending.push_str(delta);
+
+        if let Some(start) = tool_protocol_start(&self.visible_pending) {
+            let visible = self.visible_pending[..start].to_string();
+            self.visible_pending.clear();
+            self.protocol_started = true;
+            if !visible.is_empty() {
+                let _ = tx.send(StreamEvent::TextDelta(visible)).await;
+            }
+            return;
+        }
+
+        let held = partial_tool_protocol_suffix_len(&self.visible_pending);
+        let visible_end = self.visible_pending.len().saturating_sub(held);
+        if visible_end > 0 {
+            let visible = self.visible_pending[..visible_end].to_string();
+            self.visible_pending.drain(..visible_end);
+            let _ = tx.send(StreamEvent::TextDelta(visible)).await;
+        }
+    }
 }
 
-fn should_stream_plain_text(text: &str) -> bool {
-    let candidate = text.trim_start();
-    if candidate.is_empty() {
-        return false;
-    }
-    const TOOL_PREFIXES: &[&str] = &["<function_calls>", "<invoke ", "<A3S_TOOL_CALLS>"];
-    !TOOL_PREFIXES
+const TOOL_PROTOCOL_PREFIXES: &[&str] = &[
+    "<function_calls>",
+    "<invoke ",
+    "<A3S_TOOL_CALLS>",
+    "<tool_calls:",
+    "<tool_call:",
+    "<A3S_ASSISTANT_TOOL_CALL>",
+    "<A3S_TOOL_RESULT>",
+];
+
+fn tool_protocol_start(text: &str) -> Option<usize> {
+    TOOL_PROTOCOL_PREFIXES
         .iter()
-        .any(|prefix| prefix.starts_with(candidate) || candidate.starts_with(prefix))
+        .filter_map(|prefix| text.find(prefix))
+        .min()
+}
+
+fn partial_tool_protocol_suffix_len(text: &str) -> usize {
+    TOOL_PROTOCOL_PREFIXES
+        .iter()
+        .map(|prefix| {
+            (1..prefix.len())
+                .rev()
+                .find(|length| text.ends_with(&prefix[..*length]))
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -495,8 +541,10 @@ mod tests {
         ]);
 
         assert!(prompt.contains("User:\nhello"));
-        assert!(prompt.contains("<A3S_ASSISTANT_TOOL_CALL>"));
-        assert!(prompt.contains("<A3S_TOOL_RESULT>"));
+        assert!(prompt.contains("### A3S host tool call record"));
+        assert!(prompt.contains("### A3S host tool result record"));
+        assert!(!prompt.contains("<A3S_ASSISTANT_TOOL_CALL>"));
+        assert!(!prompt.contains("<A3S_TOOL_RESULT>"));
         assert!(prompt.contains("\"status\":\"ok\""));
     }
 
@@ -595,5 +643,105 @@ mod tests {
             rx.recv().await,
             Some(StreamEvent::TextDelta(text)) if text == "Hello"
         ));
+    }
+
+    #[tokio::test]
+    async fn host_tool_mapper_hides_split_workbuddy_protocol_after_prose() {
+        let mut mapper = AccountCliHostToolMapper::new(
+            StreamMeta {
+                provider: "fake-account-cli",
+                request_model: "hy3".into(),
+                request_url: "fake account CLI".into(),
+                started_at: Instant::now(),
+            },
+            vec![ToolDefinition {
+                name: "ls".into(),
+                description: "List a directory".into(),
+                parameters: json!({
+                    "type":"object",
+                    "properties":{"path":{"type":"string"}},
+                    "required":["path"]
+                }),
+            }],
+        );
+        let (tx, mut rx) = mpsc::channel(10);
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I'll list the workspace.<tool_"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"calls:group_1>\n<tool_call:call_1>ls\">\n<parameter name=\"path\">/work/a3s</parameter>\n</invoke>\n</function_calls>"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        ] {
+            let event = parse_account_cli_stream_event(line).unwrap();
+            if mapper.handle(event, &tx).await {
+                break;
+            }
+        }
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+        assert!(events.iter().any(
+            |event| matches!(event, StreamEvent::TextDelta(text) if text == "I'll list the workspace.")
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::TextDelta(text) if text.contains('<'))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::ToolUseStart { name, .. } if name == "ls")));
+        let response = events.into_iter().find_map(|event| match event {
+            StreamEvent::Done(response) => Some(response),
+            _ => None,
+        });
+        assert_eq!(
+            response.unwrap().tool_calls()[0].args,
+            json!({"path":"/work/a3s"})
+        );
+    }
+
+    #[tokio::test]
+    async fn host_tool_mapper_never_exposes_echoed_legacy_history_tags() {
+        let mut mapper = AccountCliHostToolMapper::new(
+            StreamMeta {
+                provider: "fake-account-cli",
+                request_model: "hy3".into(),
+                request_url: "fake account CLI".into(),
+                started_at: Instant::now(),
+            },
+            vec![],
+        );
+        let (tx, mut rx) = mpsc::channel(10);
+        for line in [
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Continuing from the previous result.<A3S_ASSISTANT_"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"TOOL_CALL>\n{\"id\":\"call_1\"}\n</A3S_ASSISTANT_TOOL_CALL>\n<A3S_TOOL_RESULT>\n{\"status\":\"ok\"}\n</A3S_TOOL_RESULT>"}}}"#,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        ] {
+            let event = parse_account_cli_stream_event(line).unwrap();
+            if mapper.handle(event, &tx).await {
+                break;
+            }
+        }
+
+        let mut response = None;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                StreamEvent::TextDelta(text) => {
+                    assert!(!text.contains("<A3S"));
+                }
+                StreamEvent::Done(done) => response = Some(done),
+                _ => {}
+            }
+        }
+
+        let response = response.expect("expected final response");
+        for block in response.message.content {
+            if let ContentBlock::Text { text } = block {
+                assert!(!text.contains("<A3S"));
+            }
+        }
+        assert_eq!(
+            response.stop_reason.as_deref(),
+            Some("host_tool_protocol_error")
+        );
     }
 }

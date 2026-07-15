@@ -74,7 +74,7 @@ impl ModelCatalog {
                     .any(|model| provider.canonical_model(model) == route.model)
             }
             ModelSource::Codex => {
-                codex::has_valid_codex_login()
+                codex::has_codex_login()
                     && codex::cached_codex_models()
                         .iter()
                         .any(|model| model.slug == route.model)
@@ -162,7 +162,7 @@ struct Discovery {
 
 async fn discover_codex_models(refresh_remote: bool) -> Discovery {
     let mut discovery = Discovery::default();
-    if !codex::has_valid_codex_login() {
+    if !codex::has_codex_login() {
         return discovery;
     }
     let models = if refresh_remote {

@@ -84,3 +84,24 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
     assert!(logout.status.success());
     assert!(!home.join(".a3s/os-auth.json").exists());
 }
+
+#[test]
+fn codex_account_stays_signed_in_when_only_the_id_token_has_expired() {
+    let workspace = TempWorkspace::new("account-codex-expired-id-token");
+    let home = workspace.path("home");
+    let config = workspace.path("config.acl");
+    std::fs::create_dir_all(home.join(".codex")).unwrap();
+    std::fs::write(&config, "").unwrap();
+    std::fs::write(
+        home.join(".codex/auth.json"),
+        r#"{"tokens":{"id_token":"header.eyJleHAiOjF9.signature","access_token":"codex-secret","refresh_token":"codex-refresh-secret"}}"#,
+    )
+    .unwrap();
+
+    let output = run(&home, &config, &["account", "status"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("codex\tsigned-in\t-"), "{stdout}");
+    assert!(!stdout.contains("codex-secret"));
+    assert!(!stdout.contains("codex-refresh-secret"));
+}
