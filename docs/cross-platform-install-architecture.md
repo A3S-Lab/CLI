@@ -361,28 +361,36 @@ leaking sensitive URLs or environment values.
 - preserve current Homebrew and GitHub behavior behind backends;
 - expand receipt schema with migration tests.
 
-### Phase 2: Portable Three-OS Foundation
+### Phase 2: macOS and Linux Portable Foundation
 
 - support tar, zip, and single-file artifacts;
-- add Windows executable, path, process, lock, activation, and uninstall tests;
-- publish macOS, Linux, and Windows artifacts with publisher digests;
-- run install/upgrade/recovery/uninstall conformance tests on all targets.
+- publish macOS and Linux artifacts with publisher digests;
+- run install/upgrade/recovery/uninstall conformance tests on supported targets;
+- harden glibc/musl and architecture diagnostics before adding another runtime
+  platform.
 
-### Phase 3: Primary Native Managers
+### Phase 3: Windows Promotion
+
+- add Windows executable, path, process, lock, activation, and uninstall tests;
+- publish Windows artifacts with publisher digests;
+- pass real Browser cross-process persistent-session and cleanup tests;
+- promote Windows from compile/package preview only after those gates pass.
+
+### Phase 4: Primary Native Managers
 
 - stabilize Homebrew as a backend;
 - add Winget with user/system scope and outcome re-probing;
 - add source migration with explicit confirmation;
 - verify manager-owned uninstall never directly deletes files.
 
-### Phase 4: Linux Native Managers
+### Phase 5: Linux Native Managers
 
 - add APT and DNF based on actual A3S component packages;
 - add Pacman and Zypper only with release and CI fixtures;
 - test privilege denial, repository mismatch, scripts, partial outcomes, and
   dependency changes.
 
-### Phase 5: Signed Registry
+### Phase 6: Signed Registry
 
 - publish the official ACL component manifests;
 - deploy TUF root, targets, snapshot, and timestamp metadata;
@@ -390,7 +398,7 @@ leaking sensitive URLs or environment values.
 - enable remote external component discovery without executable installer
   plugins.
 
-### Phase 6: Demand-Driven Ecosystem Adapters
+### Phase 7: Demand-Driven Ecosystem Adapters
 
 - add Snap, Flatpak, Scoop, Chocolatey, or language-manager adapters only when
   a registered component and CI environment demonstrate the need;
@@ -399,11 +407,11 @@ leaking sensitive URLs or environment values.
 
 ## 13. Acceptance Criteria
 
-The cross-platform foundation is stable only when:
+The current macOS/Linux foundation is stable only when:
 
 - one official component installs, upgrades, repairs, and uninstalls through a
-  managed artifact on each of macOS, Linux, and Windows;
-- Homebrew and Winget installations remain manager-owned throughout lifecycle;
+  managed artifact on each supported macOS and Linux target;
+- Homebrew installations remain manager-owned throughout lifecycle;
 - unsupported target and capability combinations fail before mutation;
 - dry-run output identifies source, scope, privileges, scripts, ownership, and
   rollback behavior;
@@ -415,8 +423,13 @@ The cross-platform foundation is stable only when:
   traversal tests fail safely;
 - unsigned local packages require explicit trust and never auto-update;
 - delegated Browser, Office, CLI, MCP, and Skill boundaries remain unchanged;
-- Windows, macOS, and Linux CI leave no package-manager locks, child processes,
-  staging paths, or test packages behind.
+- macOS and Linux CI leave no package-manager locks, child processes, staging
+  paths, or test packages behind.
+
+Windows promotion additionally requires a published managed artifact,
+ownership-preserving Winget behavior when enabled, clean interruption and file
+lock recovery, and the same Browser persistent-session lifecycle evidence as
+macOS and Linux.
 
 ## 14. Deferred Decisions
 

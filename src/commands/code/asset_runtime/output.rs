@@ -32,7 +32,7 @@ pub(crate) fn runtime_asset_query(category: &str, asset_hint: &str, query: &str)
 }
 
 pub(super) fn local_agents_output(query: &str, root: &Path) -> AssetCommandOutput {
-    let rows = panels::agent::list_agents(&root)
+    let rows = panels::agent::list_agents(root)
         .into_iter()
         .filter(|row| matches_query(&row.rel, query))
         .collect::<Vec<_>>();
@@ -64,7 +64,7 @@ pub(super) fn local_agents_output(query: &str, root: &Path) -> AssetCommandOutpu
 }
 
 pub(super) fn local_mcps_output(query: &str, root: &Path) -> AssetCommandOutput {
-    let rows = panels::mcp::list_mcp_projects(&root)
+    let rows = panels::mcp::list_mcp_projects(root)
         .into_iter()
         .filter(|row| matches_query(&format!("{} {}", row.rel, row.name), query))
         .collect::<Vec<_>>();
@@ -92,7 +92,7 @@ pub(super) fn local_mcps_output(query: &str, root: &Path) -> AssetCommandOutput 
 }
 
 pub(super) fn local_skills_output(query: &str, root: &Path) -> AssetCommandOutput {
-    let rows = panels::skill::list_skill_assets(&root)
+    let rows = panels::skill::list_skill_assets(root)
         .into_iter()
         .filter(|row| matches_query(&format!("{} {}", row.rel, row.name), query))
         .collect::<Vec<_>>();
@@ -124,7 +124,7 @@ pub(super) fn local_skills_output(query: &str, root: &Path) -> AssetCommandOutpu
 }
 
 pub(super) fn local_flows_output(query: &str, root: &Path) -> AssetCommandOutput {
-    let rows = panels::flow::list_flows(&root)
+    let rows = panels::flow::list_flows(root)
         .into_iter()
         .filter(|row| matches_query(row, query))
         .collect::<Vec<_>>();
@@ -144,7 +144,7 @@ pub(super) fn local_flows_output(query: &str, root: &Path) -> AssetCommandOutput
 }
 
 pub(super) fn local_okf_output(query: &str, root: &Path) -> AssetCommandOutput {
-    let rows = panels::okf::list_okf_packages(&root)
+    let rows = panels::okf::list_okf_packages(root)
         .into_iter()
         .filter(|row| matches_query(&format!("{} {}", row.rel, row.name), query))
         .collect::<Vec<_>>();

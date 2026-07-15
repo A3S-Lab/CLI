@@ -11,9 +11,10 @@ mod release_install;
 mod state;
 
 pub use command::{
-    resolve_or_install, resolve_or_install_with, run_doctor, run_doctor_with, run_info,
-    run_info_with, run_install, run_install_with, run_list, run_list_with, run_proxy,
-    run_uninstall, run_uninstall_with, run_update, run_update_with, ComponentBatchFailure,
+    find_ready_executable_with, resolve_or_install, resolve_or_install_with, run_doctor,
+    run_doctor_with, run_info, run_info_with, run_install, run_install_with, run_list,
+    run_list_with, run_proxy, run_uninstall, run_uninstall_with, run_update, run_update_with,
+    ComponentBatchFailure,
 };
 pub use id::ComponentId;
 pub use paths::ComponentPaths;

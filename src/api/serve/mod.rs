@@ -7,6 +7,7 @@ use anyhow::Context;
 use axum::routing::{get, post};
 use axum::Json;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 use crate::config;
 
@@ -87,6 +88,26 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
         code_config,
         session_repository,
     ));
+    match a3s::components::ComponentPaths::from_env_at(&options.workspace)
+        .and_then(|paths| a3s::components::find_ready_executable_with("use", &paths))
+    {
+        Ok(Some(executable)) => {
+            let (registry, warning) = crate::use_registry::start_detached(
+                executable,
+                options.workspace.clone(),
+                CancellationToken::new(),
+            )
+            .await;
+            if let Some(warning) = warning {
+                eprintln!("warning: A3S Use capabilities will continue loading: {warning}");
+            }
+            state.install_use_registry(registry);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            eprintln!("warning: A3S Use hot-plug is unavailable for Code Web: {error}");
+        }
+    }
     let restored_sessions = KernelService::new(Arc::clone(&state))
         .restore_persisted_sessions()
         .await

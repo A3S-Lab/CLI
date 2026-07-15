@@ -297,10 +297,12 @@ mod tests {
 
     #[test]
     fn validation_reports_cross_field_model_and_storage_errors() {
-        let mut config = CodeConfig::default();
-        config.default_model = Some("missing".to_string());
-        config.storage_backend = StorageBackend::Custom;
-        config.max_parallel_tasks = Some(0);
+        let config = CodeConfig {
+            default_model: Some("missing".to_string()),
+            storage_backend: StorageBackend::Custom,
+            max_parallel_tasks: Some(0),
+            ..CodeConfig::default()
+        };
 
         let issues = validate_config(&config).join("\n");
         assert!(issues.contains("provider/model"));

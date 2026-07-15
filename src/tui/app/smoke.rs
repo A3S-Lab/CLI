@@ -495,7 +495,7 @@ async fn run_smoke_deep_research(
             run_deep_research_smoke_artifact_step(
                 run_deadline,
                 "workflow timeout artifact fallback",
-                || deep_research_workflow_timeout_tool_result(&workspace, &workflow_args, message),
+                || deep_research_workflow_timeout_tool_result(workspace, &workflow_args, message),
             )?
         }
     };
@@ -518,7 +518,7 @@ async fn run_smoke_deep_research(
             "failed-collection recovery report",
             || {
                 materialize_deep_research_recovery_report(
-                    &workspace,
+                    workspace,
                     &query,
                     "Evidence collection ended without a validated evidence package. No second retrieval or synthesis pass was started.",
                     &workflow_output,
@@ -551,7 +551,7 @@ async fn run_smoke_deep_research(
         stream_smoke_prompt_until_report(
             session.as_ref(),
             prompt.as_str(),
-            &workspace,
+            workspace,
             &query,
             &report_baseline,
             synthesis_deadline,
@@ -568,7 +568,7 @@ async fn run_smoke_deep_research(
         || {
             deep_research_report_artifacts_from_output_for_current_run(
                 &final_text,
-                &workspace,
+                workspace,
                 &query,
                 &workflow_output,
                 metadata.as_ref(),
@@ -579,7 +579,7 @@ async fn run_smoke_deep_research(
 
     if deep_research_output_has_internal_leak(&final_text) {
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -590,7 +590,7 @@ async fn run_smoke_deep_research(
             "answer-text artifact fallback",
             || {
                 materialize_deep_research_completed_report_from_answer_text(
-                    &workspace,
+                    workspace,
                     &query,
                     &final_text,
                     &workflow_output,
@@ -599,7 +599,7 @@ async fn run_smoke_deep_research(
             },
         )?;
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -610,7 +610,7 @@ async fn run_smoke_deep_research(
             "markdown artifact fallback",
             || {
                 materialize_deep_research_completed_report_from_markdown(
-                    &workspace,
+                    workspace,
                     &query,
                     &workflow_output,
                     metadata.as_ref(),
@@ -618,7 +618,7 @@ async fn run_smoke_deep_research(
             },
         )?;
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -632,7 +632,7 @@ async fn run_smoke_deep_research(
             "synthesis-timeout artifact fallback",
             || {
                 materialize_deep_research_timeout_completed_report(
-                    &workspace,
+                    workspace,
                     &query,
                     &final_text,
                     None,
@@ -642,7 +642,7 @@ async fn run_smoke_deep_research(
             },
         )?;
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -672,7 +672,7 @@ async fn run_smoke_deep_research(
             final_text = stream_smoke_prompt_until_report(
                 session.as_ref(),
                 repair.as_str(),
-                &workspace,
+                workspace,
                 &query,
                 &report_baseline,
                 repair_deadline,
@@ -684,7 +684,7 @@ async fn run_smoke_deep_research(
                 || {
                     deep_research_report_artifacts_from_output_for_current_run(
                         &final_text,
-                        &workspace,
+                        workspace,
                         &query,
                         &workflow_output,
                         metadata.as_ref(),
@@ -694,7 +694,7 @@ async fn run_smoke_deep_research(
             )?;
             if deep_research_output_has_internal_leak(&final_text) {
                 if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-                    clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+                    clean_deep_research_final_text_from_artifacts(artifacts, workspace)
                 }) {
                     final_text = clean_text;
                 }
@@ -705,7 +705,7 @@ async fn run_smoke_deep_research(
                     "repair markdown artifact fallback",
                     || {
                         materialize_deep_research_completed_report_from_markdown(
-                            &workspace,
+                            workspace,
                             &query,
                             &workflow_output,
                             metadata.as_ref(),
@@ -713,7 +713,7 @@ async fn run_smoke_deep_research(
                     },
                 )?;
                 if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-                    clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+                    clean_deep_research_final_text_from_artifacts(artifacts, workspace)
                 }) {
                     final_text = clean_text;
                 }
@@ -731,7 +731,7 @@ async fn run_smoke_deep_research(
             "post-repair answer-text artifact fallback",
             || {
                 materialize_deep_research_completed_report_from_answer_text(
-                    &workspace,
+                    workspace,
                     &query,
                     &final_text,
                     &workflow_output,
@@ -740,7 +740,7 @@ async fn run_smoke_deep_research(
             },
         )?;
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -752,7 +752,7 @@ async fn run_smoke_deep_research(
             "workflow-evidence artifact fallback",
             || {
                 materialize_deep_research_completed_report_from_workflow_evidence(
-                    &workspace,
+                    workspace,
                     &query,
                     &workflow_output,
                     metadata.as_ref(),
@@ -760,7 +760,7 @@ async fn run_smoke_deep_research(
             },
         )?;
         if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, &workspace)
+            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
         }) {
             final_text = clean_text;
         }
@@ -775,7 +775,7 @@ async fn run_smoke_deep_research(
             "recovery artifact fallback",
             || {
                 materialize_deep_research_recovery_report(
-                    &workspace,
+                    workspace,
                     &query,
                     &final_text,
                     &workflow_output,

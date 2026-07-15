@@ -140,6 +140,10 @@ fn discover_dynamic_use_extensions(parent_binary: &Path) -> anyhow::Result<Vec<C
 }
 
 pub fn find_state(id: &ComponentId, paths: &ComponentPaths) -> anyhow::Result<ComponentState> {
+    if let Some(spec) = catalog::find(id) {
+        let receipt = paths.receipt_store().read(id.as_str())?;
+        return discover_registered(spec, receipt.as_ref(), paths);
+    }
     let report = discover(paths)?;
     report
         .components

@@ -261,6 +261,48 @@ fn use_proxy_preserves_arguments_and_child_status() {
 }
 
 #[test]
+fn use_box_receives_only_the_registered_box_executable() {
+    let temp = TempWorkspace::new("use-box-route");
+    let use_bin = temp.path("use-bin");
+    let box_bin = temp.path("box-bin");
+    let route_log = temp.path("use-box-route.log");
+    let box_executable = box_bin.join("a3s-box");
+    make_executable(
+        &box_executable,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-box 2.5.2\\n'; exit 0; fi\nexit 0\n",
+    );
+    make_executable(
+        &use_bin.join("a3s-use"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"${{A3S_USE_BOX_EXECUTABLE-unset}}\" \"$@\" > {}\nexit 0\n",
+            sh_quote(&route_log)
+        ),
+    );
+
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["use", "box", "ps", "--json"])
+        .env("A3S_USE_INSTALL_DIR", &use_bin)
+        .env("A3S_BOX_INSTALL_DIR", &box_bin)
+        .env("A3S_USE_BOX_EXECUTABLE", "/untrusted/parent/value")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let lines = std::fs::read_to_string(&route_log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines[0],
+        box_executable.canonicalize().unwrap().display().to_string()
+    );
+    assert_eq!(&lines[1..], ["box", "ps", "--json"]);
+}
+
+#[test]
 fn proxy_receives_the_versioned_invocation_context() {
     let temp = TempWorkspace::new("proxy-context");
     let workspace = temp.path("workspace");

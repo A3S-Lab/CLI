@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-#[allow(dead_code)]
 mod support;
 
 use std::error::Error;

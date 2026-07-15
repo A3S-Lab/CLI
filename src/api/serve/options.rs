@@ -79,6 +79,25 @@ impl ServeOptions {
     }
 }
 
+fn take_value(args: &[String], index: &mut usize, flag: &str) -> anyhow::Result<String> {
+    let value_index = *index + 1;
+    let value = args
+        .get(value_index)
+        .filter(|value| !value.starts_with('-'))
+        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
+    *index += 2;
+    Ok(value.clone())
+}
+
+fn resolve_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let mut addrs = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|e| anyhow::anyhow!("invalid host/port {host}:{port}: {e}"))?;
+    addrs
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,23 +123,4 @@ mod tests {
         let error = ServeOptions::parse(&["--unknown".into()]).expect_err("unknown option");
         assert!(error.to_string().contains("unknown a3s web option"));
     }
-}
-
-fn take_value(args: &[String], index: &mut usize, flag: &str) -> anyhow::Result<String> {
-    let value_index = *index + 1;
-    let value = args
-        .get(value_index)
-        .filter(|value| !value.starts_with('-'))
-        .ok_or_else(|| anyhow::anyhow!("{flag} requires a value"))?;
-    *index += 2;
-    Ok(value.clone())
-}
-
-fn resolve_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
-    let mut addrs = format!("{host}:{port}")
-        .to_socket_addrs()
-        .map_err(|e| anyhow::anyhow!("invalid host/port {host}:{port}: {e}"))?;
-    addrs
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("could not resolve {host}:{port}"))
 }

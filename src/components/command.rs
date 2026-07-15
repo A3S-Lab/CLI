@@ -420,6 +420,23 @@ pub async fn resolve_or_install(component: &str) -> anyhow::Result<PathBuf> {
     resolve_or_install_with(component, &paths, allow_auto_install, progress).await
 }
 
+/// Resolve an already-ready component without installing or mutating it.
+///
+/// This is used when one component can optionally expose another component as
+/// a route. The component catalog and receipt remain the single source of
+/// truth; the consumer receives only the resolved executable path.
+pub fn find_ready_executable_with(
+    component: &str,
+    paths: &ComponentPaths,
+) -> anyhow::Result<Option<PathBuf>> {
+    let id = ComponentId::parse(component)?;
+    let state = find_state(&id, paths)?;
+    if !state.is_ready() {
+        return Ok(None);
+    }
+    Ok(state.path)
+}
+
 pub async fn resolve_or_install_with(
     component: &str,
     paths: &ComponentPaths,

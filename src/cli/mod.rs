@@ -286,7 +286,7 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
         RootCommand::Box(args) => run_proxy("box", args.args, context).await,
         RootCommand::Bench(args) => run_proxy("bench", args.args, context).await,
         RootCommand::Search(args) => run_proxy("search", args.args, context).await,
-        RootCommand::Use(args) => run_proxy("use", args.args, context).await,
+        RootCommand::Use(args) => run_use_proxy(args.args, context).await,
         RootCommand::Auth(args) => {
             crate::commands::auth::run(args, context).await?;
             Ok(ExitCode::SUCCESS)
@@ -393,6 +393,81 @@ async fn run_proxy(
         .await
         .with_context(|| format!("failed to run {}", executable.display()))?;
     Ok(exit_code_from_status(status))
+}
+
+async fn run_use_proxy(
+    args: Vec<OsString>,
+    context: &InvocationContext,
+) -> anyhow::Result<ExitCode> {
+    if context.output_mode() != OutputMode::Human {
+        return Err(output::usage_error(
+            "root `--output` is not translated for the `use` proxy; pass the child CLI's native output option after `use`",
+        ));
+    }
+
+    let box_requested = args
+        .first()
+        .is_some_and(|argument| argument.as_os_str() == "box");
+    let box_executable = if box_requested {
+        Some(
+            a3s::components::resolve_or_install_with(
+                "box",
+                &context.component_paths,
+                context.network.allow_first_use_install,
+                context.output.progress,
+            )
+            .await?,
+        )
+    } else {
+        a3s::components::find_ready_executable_with("box", &context.component_paths)?
+    }
+    .map(|path| canonical_component_executable("box", &path))
+    .transpose()?;
+
+    let executable = a3s::components::resolve_or_install_with(
+        "use",
+        &context.component_paths,
+        context.network.allow_first_use_install,
+        context.output.progress,
+    )
+    .await?;
+    let mut command = tokio::process::Command::new(&executable);
+    command.args(args);
+    command.env_remove("A3S_USE_BOX_EXECUTABLE");
+    if let Some(box_executable) = box_executable {
+        command.env("A3S_USE_BOX_EXECUTABLE", box_executable);
+    }
+    context.configure_child(&mut command);
+    let status = command
+        .status()
+        .await
+        .with_context(|| format!("failed to run {}", executable.display()))?;
+    Ok(exit_code_from_status(status))
+}
+
+fn canonical_component_executable(
+    component: &str,
+    path: &Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path).with_context(|| {
+        format!(
+            "failed to resolve the '{component}' component executable at {}",
+            path.display()
+        )
+    })?;
+    let metadata = std::fs::metadata(&canonical).with_context(|| {
+        format!(
+            "failed to inspect the '{component}' component executable at {}",
+            canonical.display()
+        )
+    })?;
+    if !metadata.is_file() {
+        bail!(
+            "the '{component}' component executable is not a regular file: {}",
+            canonical.display()
+        );
+    }
+    Ok(canonical)
 }
 
 async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::Result<ExitCode> {

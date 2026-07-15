@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added typed `list`, `info`, `install`, `upgrade`, `uninstall`, and `doctor`
+  component lifecycle commands for Code, Box, Bench, Search, Use, and delegated
+  Use capabilities.
+- Added unified A3S Use capability hot-plug for Code TUI and Web sessions,
+  including one shared Web watcher, live MCP/Skill projection, session rebuild
+  replay, and a permission-isolated `use` worker.
+
+### Changed
+
+- Made macOS and Linux the current component/runtime support targets; Windows
+  remains a compile/package preview until its managed lifecycle and persistent
+  Browser conformance gates pass.
+
 ## [0.8.2] - 2026-07-15
 
 ### Fixed

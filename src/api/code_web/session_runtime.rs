@@ -178,6 +178,7 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(new_session.as_ref(), &runtime);
+        state.attach_use_session(Arc::clone(&new_session));
         state
             .sessions
             .lock()

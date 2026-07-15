@@ -16,17 +16,12 @@ use super::probe::probe_version;
 use super::release_install::install_release;
 use super::state::{ComponentState, Health, Presence};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InstallSource {
+    #[default]
     Auto,
     Homebrew,
     Release,
-}
-
-impl Default for InstallSource {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -440,11 +435,11 @@ fn delegated_failure(parent: &ComponentId, action: &str, output: &Output) -> Str
     let message = machine_message.unwrap_or_else(|| {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        stderr
-            .trim()
-            .is_empty()
-            .then(|| stdout.trim().to_string())
-            .unwrap_or_else(|| stderr.trim().to_string())
+        if stderr.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            stderr.trim().to_string()
+        }
     });
     format!("parent component '{parent}' rejected {action}: {message}")
 }

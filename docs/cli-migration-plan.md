@@ -35,9 +35,12 @@ platform or security coverage.
    dry-runs, journals, rollback/recovery, and explicit outcome-unknown states.
 4. **P1 — Registry trust:** consume signed TUF catalog metadata, validate open
    `SourceId` values, and prohibit registry-supplied installer commands.
-5. **P2 — Platform backends:** deliver declared managed artifacts and isolated
-   native-manager adapters for macOS, Linux targets, Windows, and WSL.
-6. **P3 — Cutover:** generate/check documentation from parser metadata,
+5. **P2 — Supported platform backends:** finish managed artifacts and
+   conformance for macOS and Linux targets; treat WSL as Linux.
+6. **P3 — Windows promotion:** add native artifacts, locking, process,
+   recovery, and Browser persistent-session conformance before advertising
+   Windows runtime support.
+7. **P4 — Cutover:** generate/check documentation from parser metadata,
    publish compatibility telemetry limited to deprecation IDs, then retire
    aliases only after their release window.
 

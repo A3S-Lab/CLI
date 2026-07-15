@@ -2,6 +2,14 @@ use super::maintenance::message_text;
 use super::text::truncate_chars;
 use super::*;
 
+struct RestoredSessionState {
+    messages: Vec<Value>,
+    metadata: CodeWebSessionMetadata,
+    controls: CodeWebSessionControls,
+    context: CodeWebSessionContext,
+    settings: CodeWebSessionSettings,
+}
+
 impl KernelService {
     pub(in crate::api) async fn restore_persisted_sessions(&self) -> BootResult<usize> {
         let session_ids = self
@@ -158,14 +166,16 @@ impl KernelService {
         metadata.workspace = session.workspace().display().to_string();
         self.install_restored_session(
             Arc::clone(&session),
-            messages.clone(),
-            metadata.clone(),
-            controls.clone(),
-            CodeWebSessionContext {
-                compact_summary: stored_context.compact_summary.clone(),
-                ..CodeWebSessionContext::default()
+            RestoredSessionState {
+                messages: messages.clone(),
+                metadata: metadata.clone(),
+                controls: controls.clone(),
+                context: CodeWebSessionContext {
+                    compact_summary: stored_context.compact_summary.clone(),
+                    ..CodeWebSessionContext::default()
+                },
+                settings: settings.clone(),
             },
-            settings.clone(),
             llm_client,
         )
         .await;
@@ -286,11 +296,13 @@ impl KernelService {
             activate_session_runtime(session.as_ref(), &runtime);
             self.install_restored_session(
                 Arc::clone(&session),
-                messages,
-                metadata,
-                controls,
-                CodeWebSessionContext::default(),
-                settings,
+                RestoredSessionState {
+                    messages,
+                    metadata,
+                    controls,
+                    context: CodeWebSessionContext::default(),
+                    settings,
+                },
                 llm_client,
             )
             .await;
@@ -314,15 +326,12 @@ impl KernelService {
     async fn install_restored_session(
         &self,
         session: Arc<AgentSession>,
-        messages: Vec<Value>,
-        metadata: CodeWebSessionMetadata,
-        controls: CodeWebSessionControls,
-        mut context: CodeWebSessionContext,
-        settings: CodeWebSessionSettings,
+        mut restored: RestoredSessionState,
         llm_client: Arc<dyn a3s_code_core::LlmClient>,
     ) {
         let session_id = session.session_id().to_string();
-        context.set_llm_client(llm_client);
+        restored.context.set_llm_client(llm_client);
+        self.state.attach_use_session(Arc::clone(&session));
         self.state
             .sessions
             .lock()
@@ -332,27 +341,27 @@ impl KernelService {
             .messages
             .lock()
             .await
-            .insert(session_id.clone(), messages);
+            .insert(session_id.clone(), restored.messages);
         self.state
             .session_metadata
             .lock()
             .await
-            .insert(session_id.clone(), metadata);
+            .insert(session_id.clone(), restored.metadata);
         self.state
             .session_controls
             .lock()
             .await
-            .insert(session_id.clone(), controls);
+            .insert(session_id.clone(), restored.controls);
         self.state
             .session_contexts
             .lock()
             .await
-            .insert(session_id.clone(), context);
+            .insert(session_id.clone(), restored.context);
         self.state
             .session_settings
             .lock()
             .await
-            .insert(session_id, settings);
+            .insert(session_id, restored.settings);
     }
 
     pub(super) async fn persist_session_state(&self, session_id: &str) -> BootResult<()> {

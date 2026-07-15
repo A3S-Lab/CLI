@@ -455,8 +455,10 @@ mod tests {
 
     #[test]
     fn nullable_patch_clears_optional_sections() {
-        let mut config = CodeConfig::default();
-        config.memory = Some(MemoryConfig::default());
+        let mut config = CodeConfig {
+            memory: Some(MemoryConfig::default()),
+            ..CodeConfig::default()
+        };
 
         let sections = apply_category_patch(
             SettingsCategory::Context,

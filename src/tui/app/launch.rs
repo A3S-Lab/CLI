@@ -440,6 +440,35 @@ pub(crate) async fn run_in(
         .await;
     }
 
+    // A3S Use is optional for Code, so TUI startup never installs it as a side
+    // effect. When a ready component exists, project its immutable registry
+    // generations into this session and keep watching for hot-plug changes.
+    let (use_registry, use_registry_warning) =
+        match a3s::components::find_ready_executable_with("use", &context.component_paths) {
+            Ok(Some(executable)) => {
+                let (handle, warning) = crate::use_registry::start(
+                    executable,
+                    context.directory.clone(),
+                    context.cancellation.child_token(),
+                    Arc::clone(&session),
+                )
+                .await;
+                (Some(handle), warning)
+            }
+            Ok(None) => (None, None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "A3S Use hot-plug is unavailable for this session: {error}"
+                )),
+            ),
+        };
+    if let Some(warning) = use_registry_warning {
+        initial_messages.push(TranscriptEntry::preformatted(
+            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+        ));
+    }
+
     let running_tracker_children = session
         .pending_subagent_tasks()
         .await
@@ -484,6 +513,7 @@ pub(crate) async fn run_in(
     let mut app = App {
         session,
         active_session: Arc::clone(&active_session),
+        use_registry,
         agent: agent.clone(),
         store: store.clone(),
         confirmation,

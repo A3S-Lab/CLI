@@ -47,14 +47,10 @@ use tokio::sync::{mpsc, Mutex};
 
 // Team digital assets.
 #[path = "assets/clone.rs"]
-mod asset_clone;
+pub(crate) mod asset_clone;
 #[path = "assets/lifecycle.rs"]
 mod asset_lifecycle;
-#[path = "assets/naming.rs"]
-mod asset_naming;
-#[path = "code_cli.rs"]
-mod code_cli;
-pub(crate) use code_cli::{is_code_cli_command, run_code_cli};
+use crate::commands::code::naming as asset_naming;
 
 // DeepResearch.
 #[path = "deep_research/artifacts.rs"]
@@ -153,13 +149,13 @@ pub(crate) mod kbutil;
 
 // Context and memory.
 #[path = "context/memutil.rs"]
-mod memutil;
+pub(crate) mod memutil;
 
 // OS Runtime bridge.
 #[path = "os/progressive.rs"]
 mod os_progressive;
 #[path = "os/remote_ui.rs"]
-mod remote_ui;
+pub(crate) mod remote_ui;
 #[path = "os/runtime_policy.rs"]
 mod runtime_policy;
 mod runtime_projection;
@@ -215,17 +211,19 @@ mod syntax;
 #[path = "ui/util.rs"]
 mod util;
 
-mod panels;
+pub(crate) mod panels;
+#[cfg(test)]
+use crate::budget::AUTO_COMPACT_THRESHOLD;
 use crate::budget::{
     budget_plan_for_effort_index, context_limit_for_model, effort_uses_automatic_delegation,
-    resolve_ctx_limit, BudgetPlan, BudgetWorkload, AUTO_COMPACT_THRESHOLD,
-    DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS, ULTRACODE_INDEX as ULTRACODE,
+    resolve_ctx_limit, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX, EFFORT_LEVELS,
+    ULTRACODE_INDEX as ULTRACODE,
 };
 use crate::config::*;
 use app_commands::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
-pub(crate) use app_launch::run;
+pub(crate) use app_launch::run_in;
 use app_permissions::*;
 use app_projections::*;
 use app_smoke::run_smoke;
@@ -246,6 +244,7 @@ use editor_state::*;
 use gitutil::*;
 use image::*;
 use memutil::*;
+pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
 use render::*;
@@ -283,6 +282,9 @@ const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 struct App {
     session: Arc<AgentSession>,
     active_session: SharedActiveSession,
+    /// Live projection of independently managed A3S Use MCP and Skill
+    /// extensions into the current Code session.
+    use_registry: Option<crate::use_registry::UseRegistryHandle>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,
@@ -328,6 +330,11 @@ struct App {
     /// Parsed config used to rebuild config-backed model clients with the same
     /// v5.2 provider capabilities after /model and /effort changes.
     code_config: Arc<CodeConfig>,
+    /// Paths resolved once from the immutable CLI invocation and effective ACL.
+    asset_directories: crate::commands::config::CodeAssetDirectories,
+    config_path: PathBuf,
+    memory_dir: PathBuf,
+    auto_compact_threshold: f64,
     /// Optional OS endpoint from config.acl; enables /login and /logout.
     os_config: Option<OsConfig>,
     /// Restored OS login (from `~/.a3s/os-auth.json`, persisted across runs);

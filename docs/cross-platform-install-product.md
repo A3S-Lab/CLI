@@ -9,8 +9,9 @@
 ## 1. Decision
 
 `a3s install` is the cross-platform lifecycle entry point for registered A3S
-components. It provides one product contract on macOS, Linux, and Windows while
-delegating platform-specific installation to typed, trusted backends.
+components. The current delivery contract covers macOS and Linux. Windows uses
+the same product model but remains a roadmap target until its artifacts and
+lifecycle conformance gates pass.
 
 It is not a universal frontend for arbitrary operating-system packages. A3S
 installs only a component that is present in the built-in catalog, a trusted
@@ -49,13 +50,25 @@ The target design adds:
 This document defines the target contract. Public documentation must continue
 to describe only behavior that has shipped.
 
+### 2.1 Platform delivery policy
+
+- macOS and Linux are the current runtime, release, and install-conformance
+  priorities.
+- Windows keeps compile-time CLI, MCP, Skill, manifest, and package-schema
+  compatibility, but managed artifacts and runtime lifecycle are not currently
+  advertised as supported.
+- Windows moves to supported status only after install, upgrade, recovery,
+  uninstall, file-lock, and real Browser persistent-session tests pass on
+  release artifacts.
+- WSL is evaluated as Linux, not as a native Windows backend.
+
 ## 3. Product Scope
 
 ### 3.1 Goals
 
 | ID | Outcome |
 | --- | --- |
-| XP-1 | The same component ID and lifecycle commands work across supported macOS, Linux, and Windows targets. |
+| XP-1 | The same component ID and lifecycle commands work across every explicitly supported target. |
 | XP-2 | `a3s install` selects a deterministic trusted source and explains why it was selected. |
 | XP-3 | `--dry-run` exposes downloads, commands, privileges, scripts, ownership, and rollback limits before mutation. |
 | XP-4 | Direct artifacts are digest-verified, staged, health-checked, and atomically activated. |
@@ -256,15 +269,16 @@ Linux component binaries.
 | Tier 2 | Built-in adapter with conformance tests; enabled only for components declaring a compatible package. |
 | Tier 3 | Architecture extension point; not advertised until an actual component and CI fixture require it. |
 
-Initial delivery targets are:
+Current delivery and roadmap are:
 
-| Platform ecosystem | Planned level | Ownership |
+| Platform ecosystem | Delivery status | Ownership |
 | --- | --- | --- |
-| macOS/Linux/Windows portable archive or binary | Tier 1 | A3S |
-| Homebrew on macOS/Linux | Tier 1 | Homebrew |
-| Winget on Windows | Tier 1 | Winget |
-| APT, DNF, Pacman, Zypper on Linux | Tier 2 | Native manager |
-| MSI/MSIX/PKG/DEB/RPM package formats | Tier 2 through a typed native adapter | Native installer or manager |
+| macOS/Linux portable archive or binary | Current Tier 1 priority | A3S |
+| Homebrew on macOS/Linux | Current ownership-preserving backend | Homebrew |
+| Windows portable archive or binary | Roadmap; not currently advertised | A3S |
+| Winget on Windows | Roadmap after portable Windows conformance | Winget |
+| APT, DNF, Pacman, Zypper on Linux | Demand-driven Tier 2 | Native manager |
+| MSI/MSIX/PKG/DEB/RPM package formats | Demand-driven Tier 2 through a typed native adapter | Native installer or manager |
 | Snap, Flatpak, Scoop, Chocolatey | Tier 3 until a registered component needs them | Native manager |
 | npm, pipx, Cargo, and other language managers | Tier 3 and opt-in only | Language manager |
 

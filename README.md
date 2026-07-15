@@ -3,9 +3,9 @@
 The umbrella CLI for the [A3S](https://github.com/A3S-Lab) platform.
 
 `a3s <tool> [args...]` runs the matching A3S product. Code is included in the
-main `a3s` installation. Box and Bench are optional components: the CLI installs
-either one on its first real use, or you can install it explicitly before it is
-needed.
+main `a3s` installation. Box, Bench, Search, and Use are separately released
+components. Box and Use may be installed visibly on first real use; every
+optional component can also be prepared explicitly.
 
 ```
 a3s code                       # launch the included A3S Code TUI
@@ -51,9 +51,8 @@ brew install A3S-Lab/tap/a3s
 ```
 
 The initial installation always contains the umbrella CLI and A3S Code. It does
-not download Box or the Bench control component. This keeps a Code-only
-installation small, while every product still has one public entry point under
-`a3s`.
+not download Box, Bench, Search, or Use. This keeps a Code-only installation
+small, while every product still has one public entry point under `a3s`.
 
 The Homebrew `a3s` formula also installs the native RemoteUI helper
 `a3s-webview` on macOS. If a source or Cargo installation does not have that
@@ -61,16 +60,20 @@ helper, `a3s code` falls back immediately to printing the browser URL.
 
 ### Components and delayed installation
 
-The component names accepted by the package commands are `code`, `box`, and
-`bench`:
+The built-in catalog registers `code`, `box`, `bench`, `search`, and `use`.
+Browser and Office are delegated child capabilities owned by Use:
 
 | Component | Installed with `a3s` | Public command | Installation behavior |
 | --- | --- | --- | --- |
 | Code | Yes | `a3s code ...` | Runs directly from the main `a3s` installation. |
 | Box | No | `a3s box ...` | Installs Box on first use, then forwards the arguments to it. |
-| Bench | No | `a3s bench ...` | Installs the private Bench control component on first real use, then forwards the arguments to it. |
+| Bench | No | `a3s bench ...` | Requires an explicit compatible Bench installation. |
+| Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
+| Use | No | `a3s use ...` | Installs Use on first real use, then forwards native Browser, Office, Box, or extension arguments. |
+| Use/Browser | With Use | `a3s use browser ...` | Reports Browser provider readiness through Use; it is not a second product archive. |
+| Use/Office | With Use | `a3s use office ...` | Delegates OfficeCLI readiness and explicit installation through Use. |
 
-Delayed installation is persistent and user-wide. After a component has been
+First-use installation for opted-in components is persistent and user-wide. After a component has been
 installed, subsequent commands reuse it; changing projects does not download it
 again. Bench validates a downloaded bundle before switching its active-version
 record, so a failed Bench download or validation is not reported as installed.
@@ -90,14 +93,14 @@ arrive only when needed:
 ```sh
 a3s code
 a3s box ps
+a3s install bench
 a3s bench run ./tasks/smoke --agent codex
 ```
 
-The first `a3s box ...` command resolves or installs Box. The first real
-`a3s bench ...` command installs the Bench control component, validates that it
-implements the CLI's Bench protocol, and then starts it. Users still type
-`a3s bench`; its private executable is not installed as another public command
-on `PATH`.
+The first `a3s box ...` command resolves or installs Box. Bench and Search
+require explicit installation so an evaluation or search command never starts
+an unplanned download. Users still type `a3s bench`; its private executable is
+not installed as another public command on `PATH`.
 
 The Bench control component compiles and locks tasks, plans trials, coordinates
 evaluation, and produces scores and reports. It does not execute an Agent.
@@ -115,6 +118,10 @@ CI runner or before going offline:
 a3s install code
 a3s install box
 a3s install bench
+a3s install search
+a3s install use
+a3s install use/browser
+a3s install use/office
 ```
 
 Installation is idempotent. If the requested component is already healthy,
@@ -133,9 +140,9 @@ preparation step for machines whose benchmark run will not have network access.
 
 The Bench repository currently publishes the canonical design and fixtures but
 not a compatible control-component release. Until that release exists,
-`a3s install bench` and first-real-use installation fail with an explicit
+`a3s install bench` and direct `a3s bench ...` use fail with an explicit
 diagnostic that the control component is not published and do not create an
-installed-component record.
+installed-component record. Bench does not opt into first-use installation.
 
 ### Listing installed components
 
@@ -143,14 +150,15 @@ installed-component record.
 a3s list
 ```
 
-The list distinguishes the built-in Code component from optional Box and Bench
-components, and reports whether each one is installed, missing, or broken. For
+The list distinguishes bundled Code, optional product components, delegated
+Use capabilities, and explicitly installed external Use domains. It reports
+whether each entry is installed, missing, disabled, or broken. For
 an installed component it includes version metadata when it can be read without
 executing the component, plus its source and executable location. A Box found
 on `PATH` can therefore show `-` for version: `a3s list` deliberately does not
 run third-party commands just to probe them. Other executable `a3s-*` tools
 found on `PATH` remain visible as additional tools; they are not treated as
-managed Code, Box, or Bench components.
+managed A3S product components.
 
 `a3s list` is a local inspection command. It does not contact a release server,
 install a missing component, or update an installed one.
@@ -202,6 +210,29 @@ Browser and Office are built-in Use domains. Independently implemented domains
 can be explicitly installed from A3S ACL packages that declare native CLI,
 standard MCP, and/or `SKILL.md` surfaces. A3S does not define an extension
 JSON-RPC protocol; `--json` remains a one-command CLI result.
+
+When an already-ready Use component is present, both `a3s code` and `a3s web`
+consume its unified capability snapshot and keep one watcher for the process.
+Browser, Office, and enabled external MCP/Skill surfaces are projected into
+every active Code session. Code registers a dedicated `use` worker that can
+invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
+delegation tools are denied. A session rebuild replays the current surfaces,
+and a Web process shares the watcher across all concurrent sessions. Starting
+Code never installs Use as a side effect.
+
+### Platform support
+
+macOS and Linux are the supported runtime and managed-artifact targets for the
+current component platform. Windows remains a roadmap target: the CLI and
+protocol types should continue to compile there, but managed component
+archives, Browser persistent-session lifecycle, and full file-lock conformance
+are not part of the current runtime support claim.
+
+`a3s install` manages registered A3S components; it is not a universal frontend
+for Homebrew, APT, DNF, Pacman, Winget, npm, pip, Cargo, or arbitrary package
+names. Native package-manager adapters remain ownership-preserving and will be
+added only for a registered component with release artifacts and conformance
+tests.
 
 ## A3S Code TUI
 

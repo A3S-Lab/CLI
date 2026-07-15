@@ -59,16 +59,17 @@ Detailed contracts live in:
 
 ## 2. Why This Architecture
 
-A3S currently has three overlapping distribution patterns:
+Before the component foundation, A3S had three overlapping distribution
+patterns:
 
 - `a3s list` discovers executable names by scanning `PATH`.
 - `a3s box` contains a Box-specific first-use installer.
 - `a3s update` and `a3s-updater` focus on replacing one current binary.
 
-The root README already mentions `a3s install code|box|bench`, but the current
-CLI dispatcher does not yet provide the complete component lifecycle. Adding a
-Use-specific installer would duplicate Box and leave ownership, rollback, and
-uninstall behavior undefined.
+The component foundation now consolidates those paths behind the typed catalog,
+receipts, and lifecycle commands. Use remains a registered component and
+delegated parent rather than gaining a second installer, so Box and Use keep one
+ownership record and one uninstall authority.
 
 Browser and Office also require different runtime semantics:
 
@@ -98,7 +99,7 @@ or modifying the `a3s-use` binary.
 | CP-3 | `a3s install`, `a3s upgrade`, and `a3s uninstall` provide idempotent, ownership-safe component lifecycle management. |
 | CP-4 | Homebrew installations stay Homebrew-managed; direct installations use verified releases and receipts. |
 | CP-5 | Product components may opt into visible first-use installation, which automation can disable. |
-| CP-6 | Registered components may declare typed sources for macOS, Linux, and Windows while native package managers retain ownership. |
+| CP-6 | Registered components may declare typed sources for supported targets while native package managers retain ownership; current delivery prioritizes macOS and Linux. |
 | USE-1 | Use exposes separate typed Browser and Office APIs, not a generic JSON action API. |
 | USE-2 | Browser supports an embedded renderer and optional persistent CLI/MCP sessions. |
 | USE-3 | Office uses a pinned OfficeCLI provider through native commands and launches OfficeCLI's standard MCP server directly; A3S does not implement its resident transport. |
@@ -139,6 +140,15 @@ The first version will not:
 - support multiple active versions of one product component;
 - remove user data during normal uninstall;
 - silently migrate between Homebrew and direct-release provenance.
+
+## 4.1 Platform scope
+
+macOS and Linux are the current supported runtime and managed-component
+targets. Windows remains on the roadmap. Its CLI/MCP/Skill and manifest types
+stay build-compatible, but native managed installation, file-lock lifecycle,
+and real Browser persistent sessions are not completion criteria for the
+current release. Windows support is promoted only after those release and
+runtime gates pass; WSL follows the Linux contract.
 
 ## 5. System Architecture
 

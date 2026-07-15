@@ -99,6 +99,7 @@ impl KernelService {
     ) -> BootResult<()> {
         let session = self.kernel_session(session_id).await?;
         let workspace = session.workspace().to_path_buf();
+        self.state.detach_use_session(session_id).await;
         session.cancel_confirmations().await;
         session.close().await;
         self.state
@@ -430,6 +431,7 @@ impl KernelService {
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(session.as_ref(), &runtime);
+        self.state.attach_use_session(Arc::clone(&session));
         Ok((session, llm_client))
     }
 
@@ -528,6 +530,7 @@ impl KernelService {
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(new_session.as_ref(), &runtime);
+        self.state.attach_use_session(Arc::clone(&new_session));
         self.state
             .sessions
             .lock()

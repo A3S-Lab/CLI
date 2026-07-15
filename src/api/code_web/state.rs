@@ -79,6 +79,7 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) session_controls: Mutex<HashMap<String, CodeWebSessionControls>>,
     pub(in crate::api::code_web) session_contexts: Mutex<HashMap<String, CodeWebSessionContext>>,
     pub(in crate::api::code_web) session_settings: Mutex<HashMap<String, CodeWebSessionSettings>>,
+    use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
 }
 
 impl CodeWebState {
@@ -104,6 +105,39 @@ impl CodeWebState {
             session_controls: Mutex::new(HashMap::new()),
             session_contexts: Mutex::new(HashMap::new()),
             session_settings: Mutex::new(HashMap::new()),
+            use_registry: RwLock::new(None),
+        }
+    }
+
+    pub(in crate::api) fn install_use_registry(
+        &self,
+        registry: crate::use_registry::UseRegistryHandle,
+    ) {
+        *self
+            .use_registry
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(registry);
+    }
+
+    pub(in crate::api::code_web) fn attach_use_session(&self, session: Arc<AgentSession>) {
+        let registry = self
+            .use_registry
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(registry) = registry {
+            registry.attach_session(session);
+        }
+    }
+
+    pub(in crate::api::code_web) async fn detach_use_session(&self, session_id: &str) {
+        let registry = self
+            .use_registry
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(registry) = registry {
+            registry.detach_session(session_id).await;
         }
     }
 
@@ -119,6 +153,14 @@ impl CodeWebState {
     }
 
     pub(in crate::api::code_web) async fn close(&self) {
+        let registry = self
+            .use_registry
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(registry) = registry {
+            registry.shutdown().await;
+        }
         let sessions = self
             .sessions
             .lock()
