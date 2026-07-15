@@ -1,10 +1,11 @@
 use std::sync::Arc;
 
-use a3s_boot::{controller, Result as BootResult};
+use a3s_boot::{controller, BootResponse, Result as BootResult};
 
 use super::service::KernelService;
 use crate::api::code_web::dto::{
-    CreateSessionRequest, KernelSessionResponse, SessionListResponse, SessionResponse,
+    ConfirmToolUseRequest, CreateSessionRequest, KernelSessionResponse, SessionListResponse,
+    SessionResponse,
 };
 
 pub(super) struct KernelSessionsController {
@@ -88,6 +89,29 @@ impl KernelSessionsController {
         #[body] request: serde_json::Value,
     ) -> BootResult<serde_json::Value> {
         self.service.run_session_message(&session_id, request).await
+    }
+
+    #[post("/v1/kernel/sessions/{session_id}/messages/stream", raw)]
+    async fn stream_kernel_session_message(
+        &self,
+        #[param("session_id")] session_id: String,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<BootResponse> {
+        self.service
+            .stream_session_message(&session_id, request)
+            .await
+    }
+
+    #[post("/v1/kernel/sessions/{session_id}/confirmations/{tool_id}/confirm")]
+    async fn confirm_kernel_tool_use(
+        &self,
+        #[param("session_id")] session_id: String,
+        #[param("tool_id")] tool_id: String,
+        #[body] request: ConfirmToolUseRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .confirm_tool_use(&session_id, &tool_id, request)
+            .await
     }
 
     #[get("/v1/kernel/sessions/{session_id}/status")]

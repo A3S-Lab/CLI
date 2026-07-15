@@ -168,7 +168,7 @@ impl App {
         // gets the items in short-term recall immediately (same reasoning as
         // `/ctx save`). Standalone store only when the session has none.
         let mem = self.session.memory().cloned();
-        let dir = memory_dir();
+        let dir = self.memory_dir.clone();
         Some(cmd::cmd(move || async move {
             let n = items.len();
             let res = async {
@@ -312,7 +312,7 @@ mod tests {
         let pref = sleep_memory_item(
             &SleepMemory {
                 kind: "preference".into(),
-                content: "HCL over TOML".into(),
+                content: "ACL over TOML".into(),
             },
             today,
         );

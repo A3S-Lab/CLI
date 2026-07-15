@@ -139,9 +139,7 @@ impl Model for App {
         let activity = if self.updating.is_some() {
             // The upgrade itself runs in the shell after exit (real brew
             // progress); in-TUI this is just the quick version check.
-            Style::new()
-                .fg(TN_GREEN)
-                .render("  ⬇ checking for updates…")
+            Style::new().fg(TN_GREEN).render("⬇ checking for updates…")
         } else if let Some(t0) = self.compacting {
             compact_progress_line(t0.elapsed(), width)
         } else {
@@ -166,7 +164,7 @@ impl Model for App {
                         tail.push(')');
                     }
                     let tail = Style::new().fg(TN_GRAY).render(&tail);
-                    format!("  {spark} {working}{tail}")
+                    format!("{spark} {working}{tail}")
                 }
                 // The approval options panel (overlay_approval) is the UI now.
                 State::Awaiting => String::new(),
@@ -174,7 +172,7 @@ impl Model for App {
                     let g = ['✶', '✸', '✹', '✺', '✹', '✷'][(self.blink_tick as usize / 2) % 6];
                     let spark = Style::new().fg(ACCENT).render(&g.to_string());
                     format!(
-                        "  {spark} {}",
+                        "{spark} {}",
                         shimmer("Updating session…", self.blink_tick as usize)
                     )
                 }

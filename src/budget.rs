@@ -8,6 +8,7 @@
 use serde_json::{json, Value};
 
 const DEFAULT_CONTEXT_LIMIT: u32 = 200_000;
+#[cfg(test)]
 pub(crate) const AUTO_COMPACT_THRESHOLD: f64 = crate::config::DEFAULT_AUTO_COMPACT_THRESHOLD;
 const DEEP_RESEARCH_MIN_TOOL_ROUNDS: usize = 1_200;
 const DEEP_RESEARCH_MIN_CONTINUATION_TURNS: u32 = 12;

@@ -1978,7 +1978,7 @@ impl App {
 
     /// Open the `/mcp` picker.
     pub(crate) fn open_mcp_panel(&mut self) {
-        let root = mcp_dir();
+        let root = self.asset_directories.mcp.clone();
         let projects = list_mcp_projects(&root);
         if projects.is_empty() {
             self.pending_mcp_subcommand = None;

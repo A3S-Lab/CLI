@@ -177,14 +177,21 @@ fn remove_legacy_builtin_skills_dir(path: &std::path::Path) -> std::io::Result<(
 }
 
 pub(crate) fn agent_skill_dirs(workspace: &str) -> Vec<std::path::PathBuf> {
+    let configured_a3s = crate::config::skill_dir();
+    agent_skill_dirs_with_configured(workspace, &configured_a3s)
+}
+
+pub(crate) fn agent_skill_dirs_with_configured(
+    workspace: &str,
+    configured_a3s: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     let project_a3s = std::path::Path::new(workspace).join(".a3s").join("skills");
     if project_a3s.is_dir() {
         dirs.push(project_a3s);
     }
-    let configured_a3s = crate::config::skill_dir();
     if configured_a3s.is_dir() {
-        dirs.push(configured_a3s);
+        dirs.push(configured_a3s.to_path_buf());
     }
     // Agents, Claude Code, and Codex all keep skills under `<root>/skills`
     // (same SKILL.md layout); load from any of them so a skill written for one

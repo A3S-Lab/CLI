@@ -41,6 +41,16 @@ pub(crate) struct ImportPreview {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ImportOutcome {
+    pub(crate) source: PathBuf,
+    pub(crate) destination: PathBuf,
+    pub(crate) kind: ImportKind,
+    pub(crate) added: usize,
+    pub(crate) skipped: usize,
+    pub(crate) capped: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SearchHit {
     pub(crate) path: String,
     pub(crate) line: usize,
@@ -76,46 +86,79 @@ pub(crate) fn recent_sources(cwd: &str, limit: usize) -> Vec<String> {
 }
 
 pub(crate) fn add_text_to_kb(cwd: &str, text: &str, now: &str) -> String {
-    let text = text.trim();
-    if text.is_empty() {
-        return "✗ /kb add needs text".to_string();
-    }
-    ingest_text(text, &kb_dir(cwd).join("sources"), now)
+    capture_text(cwd, text, now)
         .map(|dest| format!("✔ captured note to KB · {}", show(cwd, &dest)))
         .unwrap_or_else(|e| format!("✗ /kb add failed: {e}"))
 }
 
 pub(crate) fn import_to_kb(cwd: &str, arg: &str, now: &str) -> String {
+    import_source(cwd, arg, now)
+        .map(|outcome| match outcome.kind {
+            ImportKind::File => {
+                format!("✔ added file to KB · {}", show(cwd, &outcome.destination))
+            }
+            ImportKind::Folder => {
+                let mut note = String::new();
+                if outcome.skipped > 0 {
+                    note.push_str(&format!(" ({} skipped)", outcome.skipped));
+                }
+                if outcome.capped {
+                    note.push_str(&format!(" (capped at {MAX_DIR_FILES} — folder truncated)"));
+                }
+                format!(
+                    "✔ added {} file(s) from {arg} to KB{note} · {}/",
+                    outcome.added,
+                    show(cwd, &outcome.destination)
+                )
+            }
+        })
+        .unwrap_or_else(|e| format!("✗ /kb import failed: {e}"))
+}
+
+pub(crate) fn capture_text(cwd: &str, text: &str, now: &str) -> std::io::Result<PathBuf> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "text must not be empty",
+        ));
+    }
+    ingest_text(text, &kb_dir(cwd).join("sources"), now)
+}
+
+pub(crate) fn import_source(cwd: &str, arg: &str, now: &str) -> std::io::Result<ImportOutcome> {
     let arg = arg.trim();
     let sources = kb_dir(cwd).join("sources");
     let path = resolve_path(cwd, arg);
-    let result = if path.is_file() {
-        ingest_file(&path, &sources).map(|dest| {
-            log_source(&sources, now, "file", arg, &dest);
-            format!("✔ added file to KB · {}", show(cwd, &dest))
+    if path.is_file() {
+        let destination = ingest_file(&path, &sources)?;
+        log_source(&sources, now, "file", arg, &destination);
+        Ok(ImportOutcome {
+            source: path,
+            destination,
+            kind: ImportKind::File,
+            added: 1,
+            skipped: 0,
+            capped: false,
         })
     } else if path.is_dir() {
-        ingest_dir(&path, &sources).map(|(added, skipped, capped)| {
-            log_source(&sources, now, "folder", arg, &sources.join(dir_name(&path)));
-            let mut note = String::new();
-            if skipped > 0 {
-                note.push_str(&format!(" ({skipped} skipped)"));
-            }
-            if capped {
-                note.push_str(&format!(" (capped at {MAX_DIR_FILES} — folder truncated)"));
-            }
-            format!(
-                "✔ added {added} file(s) from {arg} to KB{note} · .a3s/kb/sources/{}/",
-                dir_name(&path)
-            )
+        let destination = sources.join(dir_name(&path));
+        let (added, skipped, capped) = ingest_dir(&path, &sources)?;
+        log_source(&sources, now, "folder", arg, &destination);
+        Ok(ImportOutcome {
+            source: path,
+            destination,
+            kind: ImportKind::Folder,
+            added,
+            skipped,
+            capped,
         })
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "path not found",
         ))
-    };
-    result.unwrap_or_else(|e| format!("✗ /kb import failed: {e}"))
+    }
 }
 
 pub(crate) fn preview_import(cwd: &str, arg: &str) -> Result<ImportPreview, String> {
@@ -503,7 +546,7 @@ mod tests {
         let cwds = cwd.to_str().unwrap();
         let out = add_to_kb(
             cwds,
-            "Decision: use HCL over TOML for config",
+            "Decision: use ACL over TOML for config",
             "2026-07-01T00:00:00Z",
         );
         assert!(out.contains("captured note"), "{out}");
@@ -517,7 +560,7 @@ mod tests {
             .unwrap();
         let body = std::fs::read_to_string(&note).unwrap();
         assert!(body.contains("type: note") && body.contains("source: user"));
-        assert!(body.contains("use HCL over TOML"));
+        assert!(body.contains("use ACL over TOML"));
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -650,7 +693,7 @@ mod tests {
     #[test]
     fn slug_keeps_unicode_and_dedupes() {
         assert_eq!(slug("Hello, World!"), "hello-world");
-        assert_eq!(slug("Café HCL Config"), "café-hcl-config");
+        assert_eq!(slug("Café ACL Config"), "café-acl-config");
         assert_eq!(slug("   "), "note");
     }
 }

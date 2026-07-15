@@ -6,6 +6,7 @@ use super::*;
 /// uses, auto-approving tool calls. Drives the integration without a TTY.
 pub(super) async fn run_smoke(
     session: Arc<AgentSession>,
+    workspace: &Path,
     os_available: bool,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> anyhow::Result<()> {
@@ -18,6 +19,7 @@ pub(super) async fn run_smoke(
         }
         return run_smoke_deep_research(
             session,
+            workspace,
             query,
             os_available,
             deep_research_report_tool_gate,
@@ -388,19 +390,19 @@ async fn stream_smoke_prompt_inner(
 
 async fn run_smoke_deep_research(
     session: Arc<AgentSession>,
+    workspace: &Path,
     query: String,
     os_available: bool,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> anyhow::Result<()> {
     let run_started_at = Instant::now();
     let run_deadline = deep_research_smoke_run_deadline(run_started_at);
-    let workspace = std::env::current_dir()?;
     let report_baseline =
         run_deep_research_smoke_artifact_step(run_deadline, "report baseline snapshot", || {
-            snapshot_deep_research_report_artifacts(&workspace, &query)
+            snapshot_deep_research_report_artifacts(workspace, &query)
         })?;
     let evidence_scope = deep_research_inferred_evidence_scope(&query);
-    deep_research_report_tool_gate.set_report_target(&workspace, &query);
+    deep_research_report_tool_gate.set_report_target(workspace, &query);
     deep_research_report_tool_gate.set_evidence_scope(evidence_scope);
     let os_runtime = should_use_os_runtime_for_deep_research(&query, os_available);
     eprintln!(

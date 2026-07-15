@@ -3,9 +3,12 @@ use std::sync::Arc;
 
 use a3s_boot::{BootError, Result as BootResult};
 use a3s_code_core::host_env::HostEnv;
-use a3s_code_core::{AgentSession, CodeConfig, LlmClient, SessionOptions, SystemPromptSlots};
+use a3s_code_core::{
+    AgentSession, CodeConfig, LlmClient, PlanningMode, SessionOptions, SystemPromptSlots,
+};
 use serde_json::{json, Value};
 
+use super::permissions::{confirmation_policy_for_mode, permission_policy_for_mode};
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState};
 use crate::budget::{self, BudgetWorkload};
 use crate::config;
@@ -63,13 +66,15 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     session_id: Option<&str>,
     model: Option<String>,
     effort: &str,
+    settings: &CodeWebSessionSettings,
 ) -> BootResult<(SessionOptions, CodeWebSessionRuntime, Arc<dyn LlmClient>)> {
     let runtime = code_web_session_runtime_for_workspace(state, workspace).await;
     let context_limit = code_web_context_limit_for_model(state, model.as_deref());
     let budget =
         budget::budget_plan_for_effort_id(effort, Some(context_limit), BudgetWorkload::Interactive);
     let mut options = SessionOptions::new()
-        .with_auto_save(false)
+        .with_session_store(state.session_repository.core_store())
+        .with_auto_save(true)
         .with_auto_compact(true)
         .with_max_context_tokens(context_limit as usize)
         .with_auto_compact_threshold(state.auto_compact_threshold as f32)
@@ -77,7 +82,11 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_skill_dirs(runtime.skill_dirs.clone())
         .with_max_tool_rounds(budget.max_tool_rounds)
         .with_max_parallel_tasks(budget.max_parallel_tasks)
-        .with_max_continuation_turns(budget.max_continuation_turns);
+        .with_max_continuation_turns(budget.max_continuation_turns)
+        .with_confirmation_policy(confirmation_policy_for_mode(&settings.permission_mode))
+        .with_permission_policy(permission_policy_for_mode(&settings.permission_mode))
+        .with_planning_mode(planning_mode(settings.planning_mode.as_deref()))
+        .with_goal_tracking(settings.goal_tracking.unwrap_or(false));
 
     let session_id = session_id
         .map(ToOwned::to_owned)
@@ -158,17 +167,17 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
             Some(&session_id),
             model,
             &controls.effort,
+            &settings,
         )
         .await?;
         let new_session = Arc::new(
             state
                 .agent
-                .session_async(workspace.display().to_string(), Some(options))
+                .replace_session_async(old_session.as_ref(), options)
                 .await
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(new_session.as_ref(), &runtime);
-        old_session.close().await;
         state
             .sessions
             .lock()
@@ -192,6 +201,14 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
     }
 
     Ok(rebuilt)
+}
+
+fn planning_mode(value: Option<&str>) -> PlanningMode {
+    match value {
+        Some("enabled") => PlanningMode::Enabled,
+        Some("disabled") => PlanningMode::Disabled,
+        _ => PlanningMode::Auto,
+    }
 }
 
 pub(in crate::api::code_web) fn effective_session_model(

@@ -144,7 +144,7 @@ pub(crate) fn scaffold_name(description: &str, fallback: &str) -> String {
             .unwrap_or("")
             .trim()
             .trim_matches(['"', '\'', '`']);
-        let slug = super::asset_naming::asset_slug(raw);
+        let slug = crate::commands::code::naming::asset_slug(raw);
         if slug != "asset" {
             return truncate_slug(slug);
         }
@@ -155,7 +155,7 @@ pub(crate) fn scaffold_name(description: &str, fallback: &str) -> String {
         .take(8)
         .collect::<Vec<_>>()
         .join(" ");
-    let slug = super::asset_naming::asset_slug(if words.trim().is_empty() {
+    let slug = crate::commands::code::naming::asset_slug(if words.trim().is_empty() {
         fallback
     } else {
         &words

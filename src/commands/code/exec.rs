@@ -1,0 +1,216 @@
+use std::io::IsTerminal;
+use std::sync::Arc;
+
+use a3s_code_core::{Agent, AgentEvent, PlanningMode, SessionOptions};
+use anyhow::{bail, Context};
+use serde_json::json;
+use tokio::io::AsyncReadExt;
+
+use crate::cli::args::{CodeExecArgs, CodeMode, OutputMode};
+use crate::cli::context::InvocationContext;
+use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
+
+const MAX_PROMPT_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyhow::Result<()> {
+    let output = context.output_mode();
+    let prompt_file = args.prompt_file.map(|path| context.resolve_path(path));
+    let prompt = read_prompt(args.prompt, prompt_file.as_deref()).await?;
+    let (_, code_config) = crate::commands::config::load_active_config(context)?;
+    let agent = Agent::from_config(code_config.clone())
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
+    let session_id = execution_id();
+    let mut options = SessionOptions::new()
+        .with_session_id(&session_id)
+        .with_planning_mode(match args.mode {
+            CodeMode::Plan => PlanningMode::Enabled,
+            CodeMode::Default => PlanningMode::Disabled,
+            CodeMode::Auto => PlanningMode::Auto,
+        });
+    if let Some(model) = args.model {
+        options = options.with_model(model);
+    }
+    let client =
+        crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
+            .map_err(anyhow::Error::msg)?;
+    options = options.with_llm_client(Arc::clone(&client));
+    let workspace = &context.directory;
+    let session = agent
+        .session_async(workspace.to_string_lossy().to_string(), Some(options))
+        .await?;
+
+    let (mut receiver, worker) = session.stream(&prompt, None).await?;
+    let mut sequence = 1u64;
+    let mut streamed = String::new();
+    let mut final_text = String::new();
+    let mut usage = serde_json::Value::Null;
+    let mut approval_required = None;
+    let mut cancelled = false;
+    loop {
+        let event = tokio::select! {
+            event = receiver.recv() => event,
+            _ = context.cancellation.cancelled() => {
+                let _ = session.cancel().await;
+                cancelled = true;
+                None
+            }
+        };
+        let Some(event) = event else {
+            break;
+        };
+        match &event {
+            AgentEvent::TextDelta { text } => {
+                streamed.push_str(text);
+                if output == OutputMode::Human {
+                    print!("{text}");
+                }
+            }
+            AgentEvent::ToolStart { name, .. } if output == OutputMode::Human => {
+                eprintln!("tool: {name}");
+            }
+            AgentEvent::ConfirmationRequired {
+                tool_id, tool_name, ..
+            } => {
+                approval_required = Some(tool_name.clone());
+                let _ = session
+                    .confirm_tool_use(
+                        tool_id,
+                        false,
+                        Some(
+                            "non-interactive execution cannot request hidden approval".to_string(),
+                        ),
+                    )
+                    .await;
+                if output == OutputMode::Human {
+                    eprintln!("denied approval-required tool: {tool_name}");
+                }
+            }
+            AgentEvent::End {
+                text,
+                usage: event_usage,
+                ..
+            } => {
+                final_text = text.clone();
+                usage = serde_json::to_value(event_usage)?;
+            }
+            AgentEvent::Error { message } if output == OutputMode::Human => {
+                eprintln!("error: {message}");
+            }
+            _ => {}
+        }
+        if output == OutputMode::Jsonl {
+            write_jsonl(&json!({
+                "schemaVersion": 1,
+                "command": "code.exec",
+                "type": "event",
+                "sequence": sequence,
+                "event": event,
+            }))?;
+            sequence += 1;
+        }
+    }
+    let worker_result = worker.await;
+    if cancelled {
+        return Err(CliError::new(
+            "operation.cancelled",
+            "code execution cancelled",
+            ExitClass::Cancelled,
+        )
+        .with_jsonl_sequence(sequence)
+        .into());
+    }
+    worker_result.map_err(|error| {
+        CliError::new(
+            "code.exec.failed",
+            format!("code execution failed: {error:#}"),
+            ExitClass::Failure,
+        )
+        .with_jsonl_sequence(sequence)
+    })?;
+    if let Some(tool_name) = approval_required {
+        return Err(CliError::new(
+            "approval.required",
+            format!(
+                "tool `{tool_name}` requires approval that cannot be requested in non-interactive execution"
+            ),
+            ExitClass::Failure,
+        )
+        .with_suggestion("Run the task interactively with `a3s code` or adjust the configured permission policy.")
+        .with_details(json!({"tool": tool_name}))
+        .with_jsonl_sequence(sequence)
+        .into());
+    }
+    let emitted_stream = !streamed.is_empty();
+    if final_text.is_empty() {
+        final_text = streamed.clone();
+    }
+    if output == OutputMode::Human {
+        if !final_text.is_empty() && !emitted_stream {
+            println!("{final_text}");
+        } else if emitted_stream && !streamed.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+    if output == OutputMode::Jsonl {
+        write_jsonl(&json!({
+            "schemaVersion": 1,
+            "command": "code.exec",
+            "type": "result",
+            "sequence": sequence,
+            "ok": true,
+            "data": {"text": final_text, "usage": usage, "sessionId": session_id},
+        }))?;
+        return Ok(());
+    }
+    render_value(
+        output,
+        "code.exec",
+        json!({"text": final_text, "usage": usage, "sessionId": session_id}),
+        || {},
+    )
+}
+
+async fn read_prompt(
+    prompt: Option<String>,
+    prompt_file: Option<&std::path::Path>,
+) -> anyhow::Result<String> {
+    let prompt = if let Some(prompt) = prompt {
+        prompt
+    } else if let Some(path) = prompt_file {
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("could not inspect prompt file {}", path.display()))?;
+        if !metadata.is_file() || metadata.len() > MAX_PROMPT_BYTES {
+            bail!("prompt file must be a regular UTF-8 file no larger than 16 MiB");
+        }
+        std::fs::read_to_string(path)
+            .with_context(|| format!("could not read prompt file {}", path.display()))?
+    } else {
+        if std::io::stdin().is_terminal() {
+            bail!("a prompt, --prompt-file, or piped stdin is required");
+        }
+        let mut bytes = Vec::new();
+        tokio::io::stdin()
+            .take(MAX_PROMPT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .context("could not read prompt from stdin")?;
+        if bytes.len() as u64 > MAX_PROMPT_BYTES {
+            bail!("piped prompt exceeds 16 MiB");
+        }
+        String::from_utf8(bytes).context("piped prompt must be UTF-8")?
+    };
+    if prompt.trim().is_empty() {
+        bail!("prompt is empty");
+    }
+    Ok(prompt)
+}
+
+fn execution_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("exec-{nanos:016x}-{:x}", std::process::id())
+}

@@ -2,10 +2,10 @@
 
 pub(crate) const DEFAULT_AUTO_COMPACT_THRESHOLD: f64 = 0.85;
 
-/// A starter `config.acl` (HCL-like ACL) with placeholders, generated on first
+/// A starter A3S ACL `config.acl` with placeholders, generated on first
 /// launch so a new user has something to edit instead of an error.
 pub(crate) fn config_template() -> &'static str {
-    r#"# A3S coding-agent config (HCL-like ACL).
+    r#"# A3S coding-agent config (A3S ACL).
 # Fill in your provider apiKey/baseUrl + a model, set default_model, then save
 # with Ctrl+S. Docs: https://a3s-lab.github.io/a3s/
 
@@ -283,7 +283,7 @@ fn auto_compact_threshold_from_text(text: &str) -> Result<Option<f64>, String> {
     }
 }
 
-/// Extract a top-level `key = "value"` scalar from HCL-ish text. Only lines at
+/// Extract a top-level `key = "value"` scalar from A3S ACL text. Only lines at
 /// brace depth 0 count, so a same-named key inside a `providers { … }` block
 /// can't shadow it. The core's CodeConfig ignores unknown keys, so the option
 /// lives in the same config.acl without breaking its typed parse.

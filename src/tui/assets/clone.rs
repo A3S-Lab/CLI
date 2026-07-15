@@ -12,9 +12,7 @@ pub(crate) async fn clone_asset_source(
     url: String,
     root: std::path::PathBuf,
 ) -> Result<AssetCloneResult, String> {
-    if !looks_like_git_url(&url) {
-        return Err("expected a git URL".to_string());
-    }
+    validate_git_url(&url)?;
     let root = absolute_clone_root(root)?;
     let name = source_name_from_git_url(&url);
     let path = unique_clone_path(&root.join(name));
@@ -46,18 +44,36 @@ fn absolute_clone_root(root: std::path::PathBuf) -> Result<std::path::PathBuf, S
     if root.is_absolute() {
         return Ok(root);
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(&root))
-        .map_err(|e| format!("could not resolve clone root {}: {e}", root.display()))
+    Err(format!(
+        "clone root must be an absolute path: {}",
+        root.display()
+    ))
 }
 
-fn looks_like_git_url(url: &str) -> bool {
+fn validate_git_url(url: &str) -> Result<(), String> {
     let value = url.trim();
-    value.starts_with("https://")
-        || value.starts_with("http://")
-        || value.starts_with("ssh://")
-        || value.starts_with("git@")
-        || value.starts_with("file://")
+    if value != url || value.chars().any(char::is_control) {
+        return Err("expected a git URL".to_string());
+    }
+    if value.starts_with("git@") {
+        return Ok(());
+    }
+    if !["https://", "http://", "ssh://", "file://"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+    {
+        return Err("expected a git URL".to_string());
+    }
+    let parsed = reqwest::Url::parse(value).map_err(|_| "expected a git URL".to_string())?;
+    if parsed.password().is_some()
+        || matches!(parsed.scheme(), "http" | "https") && !parsed.username().is_empty()
+    {
+        return Err("git URL must not contain credentials".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("git URL must not contain a query or fragment".to_string());
+    }
+    Ok(())
 }
 
 fn source_name_from_git_url(url: &str) -> String {
@@ -138,11 +154,31 @@ mod tests {
     }
 
     #[test]
-    fn git_url_detection_accepts_remote_and_file_urls() {
-        assert!(looks_like_git_url("https://github.com/acme/a.git"));
-        assert!(looks_like_git_url("git@github.com:acme/a.git"));
-        assert!(looks_like_git_url("file:///tmp/a.git"));
-        assert!(!looks_like_git_url("make a new agent"));
+    fn git_url_validation_accepts_safe_remote_and_file_urls() {
+        assert!(validate_git_url("https://github.com/acme/a.git").is_ok());
+        assert!(validate_git_url("ssh://git@github.com/acme/a.git").is_ok());
+        assert!(validate_git_url("git@github.com:acme/a.git").is_ok());
+        assert!(validate_git_url("file:///tmp/a.git").is_ok());
+        assert_eq!(
+            validate_git_url("make a new agent").unwrap_err(),
+            "expected a git URL"
+        );
+    }
+
+    #[test]
+    fn git_url_validation_rejects_secret_bearing_or_ambiguous_urls() {
+        assert_eq!(
+            validate_git_url("https://token@github.com/acme/a.git").unwrap_err(),
+            "git URL must not contain credentials"
+        );
+        assert_eq!(
+            validate_git_url("https://github.com/acme/a.git?token=secret").unwrap_err(),
+            "git URL must not contain a query or fragment"
+        );
+        assert_eq!(
+            validate_git_url("https://github.com/acme/a.git#main").unwrap_err(),
+            "git URL must not contain a query or fragment"
+        );
     }
 
     #[tokio::test]

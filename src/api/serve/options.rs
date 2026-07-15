@@ -4,13 +4,15 @@ use std::path::PathBuf;
 const DEFAULT_HOST: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 29653;
 
-#[derive(Debug)]
-pub(super) struct ServeOptions {
-    pub addr: SocketAddr,
-    pub workspace: PathBuf,
-    pub web_dir: Option<PathBuf>,
-    pub api_only: bool,
-    pub help: bool,
+#[derive(Clone, Debug)]
+pub(crate) struct ServeOptions {
+    pub(crate) addr: SocketAddr,
+    pub(crate) workspace: PathBuf,
+    pub(crate) config_path: Option<PathBuf>,
+    pub(crate) web_dir: Option<PathBuf>,
+    pub(crate) api_only: bool,
+    pub(crate) background: bool,
+    pub(crate) help: bool,
 }
 
 impl ServeOptions {
@@ -21,8 +23,10 @@ impl ServeOptions {
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(DEFAULT_PORT);
         let mut workspace = std::env::current_dir()?;
+        let mut config_path = None;
         let mut web_dir = std::env::var_os("A3S_CODE_WEB_DIR").map(PathBuf::from);
         let mut api_only = false;
+        let mut background = false;
         let mut help = false;
 
         let mut index = 0;
@@ -44,6 +48,9 @@ impl ServeOptions {
                 "--workspace" | "-w" => {
                     workspace = PathBuf::from(take_value(args, &mut index, "--workspace")?);
                 }
+                "--config" => {
+                    config_path = Some(PathBuf::from(take_value(args, &mut index, "--config")?));
+                }
                 "--web-dir" => {
                     web_dir = Some(PathBuf::from(take_value(args, &mut index, "--web-dir")?));
                 }
@@ -51,7 +58,11 @@ impl ServeOptions {
                     api_only = true;
                     index += 1;
                 }
-                other => anyhow::bail!("unknown a3s code serve option `{other}`"),
+                "-d" | "--detach" => {
+                    background = true;
+                    index += 1;
+                }
+                other => anyhow::bail!("unknown a3s web option `{other}`"),
             }
         }
 
@@ -59,10 +70,39 @@ impl ServeOptions {
         Ok(Self {
             addr,
             workspace,
+            config_path,
             web_dir,
             api_only,
+            background,
             help,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_background_mode_with_explicit_network_options() {
+        let options = ServeOptions::parse(&[
+            "-d".into(),
+            "--host".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            "0".into(),
+        ])
+        .expect("valid web options");
+
+        assert!(options.background);
+        assert_eq!(options.addr.ip().to_string(), "127.0.0.1");
+        assert_eq!(options.addr.port(), 0);
+    }
+
+    #[test]
+    fn reports_unknown_options_for_the_top_level_web_command() {
+        let error = ServeOptions::parse(&["--unknown".into()]).expect_err("unknown option");
+        assert!(error.to_string().contains("unknown a3s web option"));
     }
 }
 

@@ -2,34 +2,30 @@
 
 mod support;
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use support::{
-    a3s_bin, host_supports_standalone_box_asset, install_fake_download_tools, make_executable,
-    sh_quote, TempWorkspace,
+    a3s_bin, box_release_target, configure_component_env, make_executable, sh_quote,
+    start_fake_box_release, TempWorkspace,
 };
 
 #[test]
 fn box_command_delegates_to_configured_a3s_box() {
-    let tmp = TempWorkspace::new("delegate");
-    let bin_dir = tmp.path("bin");
-    let args_log = tmp.path("args.log");
-    make_executable(
-        &bin_dir.join("a3s-box"),
-        &format!(
-            r#"#!/bin/sh
-printf '%s\n' "$@" > {}
-printf 'delegated:%s\n' "$*"
-exit 0
-"#,
-            sh_quote(&args_log)
-        ),
+    let temp = TempWorkspace::new("delegate");
+    let bin_dir = temp.path("bin");
+    let args_log = temp.path("args.log");
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-box 2.5.2\\n'\n  exit 0\nfi\nprintf '%s\\n' \"$@\" > {}\nprintf 'delegated:%s\\n' \"$*\"\nexit 0\n",
+        sh_quote(&args_log)
     );
+    make_executable(&bin_dir.join("a3s-box"), &script);
 
-    let output = Command::new(a3s_bin())
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
         .args(["box", "ps", "--format", "json"])
         .env("A3S_BOX_INSTALL_DIR", &bin_dir)
-        .env("PATH", "")
         .output()
         .expect("failed to run a3s box");
 
@@ -47,20 +43,18 @@ exit 0
 
 #[test]
 fn box_command_propagates_a3s_box_exit_status() {
-    let tmp = TempWorkspace::new("exit-status");
-    let bin_dir = tmp.path("bin");
+    let temp = TempWorkspace::new("exit-status");
+    let bin_dir = temp.path("bin");
     make_executable(
         &bin_dir.join("a3s-box"),
-        r#"#!/bin/sh
-printf 'failing-box:%s\n' "$*"
-exit 7
-"#,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-box 2.5.2\\n'\n  exit 0\nfi\nprintf 'failing-box:%s\\n' \"$*\"\nexit 7\n",
     );
 
-    let output = Command::new(a3s_bin())
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
         .args(["box", "run", "bad"])
         .env("A3S_BOX_INSTALL_DIR", &bin_dir)
-        .env("PATH", "")
         .output()
         .expect("failed to run a3s box");
 
@@ -72,45 +66,68 @@ exit 7
 }
 
 #[test]
-fn box_command_auto_installs_with_download_progress() {
-    if !host_supports_standalone_box_asset() {
-        eprintln!("skipping standalone install test on unsupported host target");
+fn box_command_auto_installs_a_verified_release() {
+    if box_release_target().is_none() {
+        eprintln!("skipping release install test on unsupported host target");
         return;
     }
+    let temp = TempWorkspace::new("auto-install");
+    let server = start_fake_box_release(&temp, "2.5.2", None);
 
-    let tmp = TempWorkspace::new("auto-install");
-    let bin_dir = tmp.path("install-bin");
-    let home_dir = tmp.path("home");
-    let tool_dir = tmp.path("tools");
-    let curl_log = tmp.path("curl.log");
-    install_fake_download_tools(&tool_dir, &curl_log, None);
-
-    let output = Command::new(a3s_bin())
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
         .args(["box", "version"])
-        .env("A3S_BOX_INSTALL_DIR", &bin_dir)
-        .env("HOME", &home_dir)
-        .env("PATH", &tool_dir)
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
         .output()
         .expect("failed to run a3s box");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
         "installed-box:version\n"
     );
-
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("a3s: a3s-box is not installed; installing it now..."));
-    assert!(stderr.contains("a3s: downloading a3s-box 2.5.2"));
-    assert!(stderr.contains("#### download progress 100.0%"));
-    assert!(stderr.contains("a3s: extracting a3s-box 2.5.2..."));
-    assert!(stderr.contains("a3s: installing a3s-box into"));
-    assert!(stderr.contains("a3s: installed a3s-box to"));
+    assert!(stderr.contains("component 'box' is not installed; installing it now"));
+    assert!(stderr.contains("resolving release for 'box'"));
+    assert!(stderr.contains("downloading 'box' 2.5.2"));
 
-    assert!(bin_dir.join("a3s-box").is_file());
-    let curl_invocations = std::fs::read_to_string(curl_log).expect("curl log should be written");
-    assert!(curl_invocations.contains("/releases/latest"));
-    assert!(curl_invocations.contains("--progress-bar"));
-    assert!(curl_invocations.contains("--show-error"));
-    assert!(curl_invocations.contains("a3s-box-v2.5.2-"));
+    let receipt = temp.path("state/components/box.json");
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(receipt).unwrap()).unwrap();
+    assert_eq!(receipt["componentId"], "box");
+    assert_eq!(receipt["version"], "2.5.2");
+    assert_eq!(receipt["provenance"], "github-release");
+    let executable = PathBuf::from(receipt["executablePath"].as_str().unwrap());
+    assert!(executable.is_file());
+    assert!(executable.starts_with(temp.path("data/components/box/2.5.2")));
+
+    let requests = server.requests();
+    assert!(requests
+        .iter()
+        .any(|path| path.ends_with("/repos/A3S-Lab/Box/releases/latest")));
+    assert!(requests
+        .iter()
+        .any(|path| path.contains("/assets/a3s-box-v2.5.2-")));
+}
+
+#[test]
+fn box_command_respects_no_auto_install() {
+    let temp = TempWorkspace::new("no-auto-install");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["box", "version"])
+        .env("A3S_NO_AUTO_INSTALL", "1")
+        .output()
+        .expect("failed to run a3s box");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("A3S_NO_AUTO_INSTALL"));
+    assert!(stderr.contains("a3s install box"));
 }

@@ -5,7 +5,7 @@
 //! Messages API with Claude Code OAuth credentials or the installed `claude`
 //! CLI stream-json transport when the raw OAuth bridge is rejected.
 
-mod code_cli;
+pub(crate) mod code_cli;
 mod credentials;
 mod model;
 mod raw_messages;

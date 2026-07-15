@@ -26,6 +26,9 @@ use futures::stream::{self, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::process::Command;
 
+use crate::cli::args::OutputMode;
+use crate::cli::output::{render_value, write_jsonl};
+
 mod collect;
 mod view;
 pub(crate) use collect::{collect_processes, AgentKind, ProcessRow, Risk};
@@ -4889,6 +4892,31 @@ struct TopOptions {
     external_action: Arc<Mutex<Option<ExternalAction>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MachineOutput {
+    Json,
+    Jsonl,
+}
+
+#[derive(Debug)]
+pub(crate) struct TopInterrupted {
+    next_sequence: u64,
+}
+
+impl TopInterrupted {
+    pub(crate) fn next_sequence(&self) -> u64 {
+        self.next_sequence
+    }
+}
+
+impl std::fmt::Display for TopInterrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("top monitoring cancelled")
+    }
+}
+
+impl std::error::Error for TopInterrupted {}
+
 impl Default for TopOptions {
     fn default() -> Self {
         Self {
@@ -4917,7 +4945,24 @@ impl Default for TopOptions {
 }
 
 pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
+    run_with_output(args, None, tokio_util::sync::CancellationToken::new()).await
+}
+
+pub(crate) async fn run_machine(
+    args: Vec<String>,
+    output: MachineOutput,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
+    run_with_output(args, Some(output), cancellation).await
+}
+
+async fn run_with_output(
+    args: Vec<String>,
+    forced_output: Option<MachineOutput>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
     let mut base_options = parse_options(args)?;
+    let machine_output = forced_output.or_else(|| base_options.json.then_some(MachineOutput::Json));
     let force_all_containers = base_options.force_all_containers;
     let force_active_containers = base_options.force_active_containers;
     base_options.config = load_top_config().unwrap_or_default();
@@ -4926,8 +4971,8 @@ pub async fn run(args: Vec<String>) -> anyhow::Result<()> {
         force_all_containers,
         force_active_containers,
     );
-    if base_options.json {
-        run_json_snapshot(base_options).await?;
+    if let Some(output) = machine_output {
+        run_machine_snapshots(base_options, output, cancellation).await?;
         return Ok(());
     }
     loop {
@@ -4998,42 +5043,78 @@ fn apply_cli_overrides(
     }
 }
 
-async fn run_json_snapshot(options: TopOptions) -> anyhow::Result<()> {
+async fn run_machine_snapshots(
+    options: TopOptions,
+    output: MachineOutput,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
     let connector = options.config.connector;
     let show_all_containers = options.config.show_all_containers;
     let interval = options.interval;
     let container_target = options.container_query.clone();
-    let max_snapshots = options
-        .json_count
-        .unwrap_or(if options.watch { usize::MAX } else { 1 });
-    let streaming = options.watch || max_snapshots > 1;
+    let max_snapshots = match output {
+        MachineOutput::Json => 1,
+        MachineOutput::Jsonl => options.json_count.unwrap_or(usize::MAX),
+    };
     let mut app = TopApp::new(options);
     let mut observer = ObserverState::default();
     let mut emitted = 0usize;
 
     while emitted < max_snapshots {
-        let (snapshot, next_observer) = collect_snapshot(
-            connector,
-            show_all_containers,
-            container_target.clone(),
-            observer,
-        )
-        .await;
+        let (snapshot, next_observer) = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(TopInterrupted {
+                    next_sequence: emitted as u64 + 1,
+                }
+                .into());
+            }
+            snapshot = collect_snapshot(
+                connector,
+                show_all_containers,
+                container_target.clone(),
+                observer,
+            ) => snapshot,
+        };
         observer = next_observer.clone();
         app.apply_snapshot(snapshot, next_observer, connector);
 
-        let json = top_snapshot_json(&app, unix_millis());
-        if streaming {
-            println!("{}", serde_json::to_string(&json)?);
-        } else {
-            println!("{}", serde_json::to_string_pretty(&json)?);
+        let data = top_snapshot_json(&app, unix_millis());
+        match output {
+            MachineOutput::Json => render_value(OutputMode::Json, "top", data, || {})?,
+            MachineOutput::Jsonl => write_jsonl(&serde_json::json!({
+                "schemaVersion": 1,
+                "command": "top",
+                "type": "snapshot",
+                "sequence": emitted as u64 + 1,
+                "data": data,
+            }))?,
         }
         emitted += 1;
 
         if emitted >= max_snapshots {
             break;
         }
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(TopInterrupted {
+                    next_sequence: emitted as u64 + 1,
+                }
+                .into());
+            }
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+    if output == MachineOutput::Jsonl {
+        write_jsonl(&serde_json::json!({
+            "schemaVersion": 1,
+            "command": "top",
+            "type": "result",
+            "sequence": emitted as u64 + 1,
+            "ok": true,
+            "data": {"snapshots": emitted},
+        }))?;
     }
     Ok(())
 }
@@ -5483,13 +5564,10 @@ fn parse_options(args: Vec<String>) -> anyhow::Result<TopOptions> {
                 options.watch = true;
             }
             "-h" => options.start_help = true,
-            "--help" => {
-                print_help();
-                std::process::exit(0);
-            }
-            "-v" | "-V" | "--version" => {
-                print_version();
-                std::process::exit(0);
+            "--help" | "-v" | "-V" | "--version" => {
+                return Err(anyhow::anyhow!(
+                    "help and version flags must be handled by the root CLI parser"
+                ));
             }
             other if other.starts_with('-') => {
                 return Err(anyhow::anyhow!("unknown a3s top option '{other}'"));
@@ -5510,42 +5588,6 @@ fn env_connector() -> Option<ContainerConnector> {
     std::env::var("A3S_TOP_CONNECTOR")
         .ok()
         .and_then(|value| ContainerConnector::from_label(&value))
-}
-
-fn print_help() {
-    println!(
-        "a3s top — live monitor for a3s-box containers, coding agents, and diagnostics\n\n\
-         usage:\n  \
-           a3s top [container] [--agents|--sessions|--containers|--processes|--events] [--connector a3s-box|docker|runc] [-a|--active] [--all] [-f|--filter a3s-box] [-s|--sort cpu|mem|net|block|pids|state|id|uptime|name|tokens] [--risk all|medium|high] [--kind all|tool|security|file|egress|llm|other] [-r|--reverse] [--compact] [--watch 1500ms] [--json] [--count 10] [-h]\n\n\
-         options:\n  \
-           --container ID open a ctop-style single-container view by name, CID, short CID, or ID prefix\n  \
-           --processes open the advanced raw process diagnostics view\n  \
-           -a, --active show active/running containers only, matching ctop\n  \
-           --all include stopped, exited, and dead containers\n  \
-           -f, --filter TEXT filter visible rows, matching ctop\n  \
-           -s, --sort FIELD sort by cpu, mem, net, block, pids, state, id, uptime, name, or tokens\n  \
-           -r, --reverse reverse sort order\n  \
-           -h open the interactive help dialog at startup; --help prints this help\n  \
-           --risk all|medium|high filter agent/process/session/event risk\n  \
-           --kind all|tool|security|file|egress|llm|other filter observer event kind\n  \
-           --compact restore the default compact column set, overriding saved columns\n  \
-           --json print one machine-readable snapshot and exit; combine with --watch for NDJSON\n  \
-           --count N limit JSON snapshots, useful with --json --watch\n  \
-           -i, --invert reverse terminal colors · -v, --version show version\n\n\
-         keys:\n  \
-           Tab/Shift+Tab switch Agents/Containers · ↑/↓ select · Home/End jump · / or f filter · h help · s select sort · r reverse · Space/p pause\n  \
-           ! risk filter · Enter container menu · ← logs · → container view · x detail · a all containers · H header · o focus agent/container/session · l logs · e shell · w browser\n  \
-           g event kind filter · C connector · c columns · S save config · K terminate/stop · Esc clear filter/panel · q quit\n\n\
-         observer:\n  \
-           auto-discovers Claude, Codex, and A3S Code logs; use A3S_TOP_OBSERVER_LOG(S) to add explicit NDJSON/JSON files\n  \
-           set A3S_TOP_OBSERVER_AUTO=0 to disable auto-discovery\n  \
-           set A3S_TOP_CONNECTOR=a3s-box|docker|runc to change the default container connector\n  \
-           runC connector honors RUNC_ROOT and RUNC_SYSTEMD_CGROUP"
-    );
-}
-
-fn print_version() {
-    println!("a3s top {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn top_keymap() -> Keymap<TopKey> {
@@ -5896,7 +5938,7 @@ async fn run_external_action(action: ExternalAction) -> anyhow::Result<()> {
             );
             match connector {
                 ContainerConnector::A3sBox => {
-                    let a3s_box = crate::box_cmd::ensure_a3s_box()?;
+                    let a3s_box = a3s::components::resolve_or_install("box").await?;
                     let status = std::process::Command::new(a3s_box)
                         .args(["shell", &id])
                         .status()?;
@@ -6265,11 +6307,7 @@ async fn ensure_a3s_box_binary() -> anyhow::Result<PathBuf> {
     // are not cached, so a missing binary is retried next refresh).
     static A3S_BOX_BIN: tokio::sync::OnceCell<PathBuf> = tokio::sync::OnceCell::const_new();
     A3S_BOX_BIN
-        .get_or_try_init(|| async {
-            tokio::task::spawn_blocking(crate::box_cmd::ensure_a3s_box)
-                .await
-                .map_err(|err| anyhow::anyhow!("a3s-box installer task failed: {err}"))?
-        })
+        .get_or_try_init(|| a3s::components::resolve_or_install("box"))
         .await
         .cloned()
 }

@@ -852,9 +852,9 @@ fn agent_scaffold_readme(name: &str, description: &str) -> String {
          - `.a3s/` contains only `asset.acl`.\n\n\
          ## Lifecycle\n\n\
          - `a3s code agent review agents/{name}/agent.md`\n\
-         - `a3s code agent publish agentic agents/{name}/agent.md`\n\
+         - `a3s code agent publish agents/{name}/agent.md --kind agentic`\n\
          - `a3s code agent run agents/{name}/agent.md`\n\
-         - `a3s code agent status agentic agents/{name}/agent.md`\n\n\
+         - `a3s code agent status agents/{name}/agent.md --kind agentic`\n\n\
          ## Safety\n\n\
          Keep secrets out of this package. Review tool permissions before publishing."
     )
@@ -4127,7 +4127,7 @@ impl App {
 
     /// Open the `/agent` picker.
     pub(crate) fn open_agent_panel(&mut self) {
-        let root = agent_dir();
+        let root = self.asset_directories.agent.clone();
         let agents = list_agents(&root);
         if agents.is_empty() {
             self.pending_agent_subcommand = None;
@@ -4148,7 +4148,7 @@ impl App {
         &mut self,
         package_path: &std::path::Path,
     ) -> Option<Cmd<Msg>> {
-        let root = agent_dir();
+        let root = self.asset_directories.agent.clone();
         let agents = list_agents(&root);
         let Some(sel) = agents
             .iter()

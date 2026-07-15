@@ -1441,7 +1441,7 @@ pub(crate) async fn publish_flow_to_os_with_local_path(
 impl App {
     /// Open the `/flow` picker (login-gated by the caller).
     pub(crate) fn open_flow_panel(&mut self) {
-        let root = flow_dir();
+        let root = self.asset_directories.flow.clone();
         let flows = list_flows(&root);
         if flows.is_empty() {
             self.pending_flow_subcommand = None;

@@ -1,5 +1,5 @@
 mod capabilities;
-mod config;
+pub(crate) mod config;
 mod context;
 mod dto;
 mod health;
@@ -8,11 +8,15 @@ mod knowledge;
 mod loops;
 mod module;
 mod os;
+mod permissions;
 mod plugins;
 mod processes;
 mod session_runtime;
+mod session_store;
 mod state;
 mod workspace;
 
+pub(super) use kernel::KernelService;
 pub(super) use module::CodeWebModule;
+pub(super) use session_store::CodeWebSessionRepository;
 pub(super) use state::CodeWebState;

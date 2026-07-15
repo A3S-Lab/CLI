@@ -56,7 +56,7 @@ This is a deliberate, verified choice:
 - **Inside the workspace backend** so the agent's sandboxed file tools can write it. Agent file I/O is normalized through `ctx.resolve_workspace_path` (`crates/code/core/src/tools/types.rs:121`); a vault *outside* the workspace backend is silently unreachable by the agent. This is a hard constraint.
 - **Under `.a3s/`** (alongside the already-committed `.a3s/agents/` and `.a3s/skills/`, discovered by the same cwd walk-up at `crates/cli/src/tui/config.rs:56-79`) so the feature is opt-in, project-scoped, **committable/team-shared**, and does not pollute the repo root.
 - **Chosen over `~/.a3s/`** so it is project-scoped and survives clone, and **kept strictly separate from `~/.a3s/memory/`** (the per-user, append-only agent memory). Different formats, different owners. **Do not fuse them.**
-- Path is overridable via a `kb_dir` key in `.a3s/config.acl` (HCL/`.acl` preferred over TOML, per AGENTS.md). Created on first `/kb` if missing.
+- Path is overridable via a `kb_dir` key in `.a3s/config.acl` (A3S ACL is preferred over TOML, per AGENTS.md). Created on first `/kb` if missing.
 
 The `.a3s/kb/` directory is visible to the `/ide` tree walker (`ide_children`, `mod.rs:630`, which seeds from cwd and does not skip `.a3s/`) with **zero new wiring**.
 

@@ -400,7 +400,7 @@ impl App {
         // back to a standalone store only for legacy/manual session paths where
         // the core did not expose a memory handle.
         let mem = self.session.memory().cloned();
-        let dir = memory_dir();
+        let dir = self.memory_dir.clone();
         Some(cmd::cmd(move || async move {
             let res = async {
                 if let Some(mem) = mem {

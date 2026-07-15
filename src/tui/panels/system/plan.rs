@@ -161,8 +161,8 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
         .show_slug(false)
         .rows(rows.clone())
         .max_running_rows(4)
-        .margin(2)
-        .child_indent(5)
+        .margin(PAD)
+        .child_indent(PAD + 3)
         .marker("•")
         .accent_color(ACCENT)
         .active_color(ACCENT)
@@ -190,7 +190,7 @@ fn task_queue_lines(
         .task_queue()
         .completed(completed)
         .queued_tasks(queued)
-        .margin(2)
+        .margin(PAD)
         .header_color(TN_GRAY)
         .running_color(TN_YELLOW)
         .queued_color(TN_GRAY);
@@ -220,7 +220,7 @@ fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
     let chrome = agent_chrome(&theme);
     let mut lines = chrome
         .checklist(items)
-        .indent(2)
+        .indent(PAD)
         .connector(true)
         .active_color(TN_ORANGE)
         .done_color(TN_GRAY)
@@ -238,7 +238,7 @@ fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
         lines.push(a3s_tui::style::fit_visible(
             &Style::new()
                 .fg(TN_GRAY)
-                .render(&format!("     … {hidden} more")),
+                .render(&format!("{}… {hidden} more", " ".repeat(PAD + 3))),
             width,
         ));
     }
@@ -393,8 +393,11 @@ mod tests {
             .map(|line| a3s_tui::style::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
+        let plain_rows = plain.lines().collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 2);
+        assert!(plain_rows[0].starts_with("• "), "{plain}");
+        assert!(plain_rows[1].starts_with("   • "), "{plain}");
         assert!(plain.contains("Extract reusable term"), "{plain}");
         assert!(!plain.contains("extract-reusable-term"), "{plain}");
         assert!(plain.contains("1 running · 1/2 done"), "{plain}");
@@ -426,6 +429,9 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 4);
+        assert!(plain[0].starts_with('─'), "{plain:?}");
+        assert!(plain[1].starts_with("● "), "{plain:?}");
+        assert!(plain[2].starts_with("◦ "), "{plain:?}");
         assert!(plain[0].contains("tasks · ✓ 3 done"), "{plain:?}");
         assert!(plain[1].contains("● running"), "{plain:?}");
         assert!(plain[2].contains("◦ first queued job"), "{plain:?}");
@@ -458,8 +464,11 @@ mod tests {
             .map(|line| a3s_tui::style::strip_ansi(line))
             .collect::<Vec<_>>()
             .join("\n");
+        let plain_rows = plain.lines().collect::<Vec<_>>();
 
         assert_eq!(lines.len(), 6);
+        assert!(plain_rows[0].starts_with("⎿  ◻"), "{plain}");
+        assert!(plain_rows[1].starts_with("   ◼"), "{plain}");
         assert!(plain.contains("⎿  ◻ collect"), "{plain}");
         assert!(plain.contains("◼ implement"), "{plain}");
         assert!(plain.contains("✔ verify"), "{plain}");
@@ -507,6 +516,13 @@ mod tests {
         assert_eq!(lines.len(), MAX_PLAN_PANEL_ROWS);
         assert!(plain.contains("◼ step 9"), "{plain}");
         assert!(plain.contains("… 2 more"), "{plain}");
+        assert!(
+            plain
+                .lines()
+                .last()
+                .is_some_and(|line| line.starts_with("   …")),
+            "{plain}"
+        );
         assert!(!plain.contains("✔ step 1"), "{plain}");
     }
 

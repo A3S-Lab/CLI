@@ -53,22 +53,25 @@ async fn run_real_os_lifecycle(
         "code",
         "agent",
         "publish",
-        "agentic",
         path(&agentic),
+        "--kind",
+        "agentic",
     ])?)?);
     remote_assets.push(asset_id(&run_ok(&[
         "code",
         "agent",
         "publish",
-        "tool",
         path(&tool),
+        "--kind",
+        "tool",
     ])?)?);
     remote_assets.push(asset_id(&run_ok(&[
         "code",
         "agent",
         "publish",
-        "application",
         path(&app),
+        "--kind",
+        "application",
     ])?)?);
     remote_assets.push(asset_id(&run_ok(&["code", "mcp", "publish", path(&mcp)])?)?);
     remote_assets.push(asset_id(&run_ok(&[
@@ -86,17 +89,31 @@ async fn run_real_os_lifecycle(
     remote_assets.push(asset_id(&run_ok(&["code", "okf", "publish", path(&okf)])?)?);
 
     for args in [
-        vec!["code", "agent", "status", "agentic", path(&agentic)],
-        vec!["code", "agent", "status", "tool", path(&tool)],
-        vec!["code", "agent", "status", "application", path(&app)],
+        vec![
+            "code",
+            "agent",
+            "status",
+            path(&agentic),
+            "--kind",
+            "agentic",
+        ],
+        vec!["code", "agent", "status", path(&tool), "--kind", "tool"],
+        vec![
+            "code",
+            "agent",
+            "status",
+            path(&app),
+            "--kind",
+            "application",
+        ],
         vec!["code", "agent", "run", path(&agentic)],
         vec!["code", "agent", "deploy", path(&app)],
-        vec!["code", "agent", "open", "agentic", path(&agentic)],
-        vec!["code", "agent", "open", "tool", path(&tool)],
-        vec!["code", "agent", "open", "application", path(&app)],
-        vec!["code", "agent", "logs", "agentic", path(&agentic)],
-        vec!["code", "agent", "logs", "tool", path(&tool)],
-        vec!["code", "agent", "logs", "application", path(&app)],
+        vec!["code", "agent", "open", path(&agentic), "--kind", "agentic"],
+        vec!["code", "agent", "open", path(&tool), "--kind", "tool"],
+        vec!["code", "agent", "open", path(&app), "--kind", "application"],
+        vec!["code", "agent", "logs", path(&agentic), "--kind", "agentic"],
+        vec!["code", "agent", "logs", path(&tool), "--kind", "tool"],
+        vec!["code", "agent", "logs", path(&app), "--kind", "application"],
         vec!["code", "mcp", "status", path(&mcp)],
         vec!["code", "mcp", "deploy", path(&mcp)],
         vec!["code", "mcp", "open", path(&mcp)],
@@ -145,11 +162,11 @@ async fn run_real_os_lifecycle(
     }
 
     for args in [
-        vec!["code", "agent", "list", suffix],
-        vec!["code", "mcp", "list", suffix],
-        vec!["code", "skill", "list", suffix],
-        vec!["code", "flow", "list", suffix],
-        vec!["code", "okf", "list", suffix],
+        vec!["code", "agent", "list", "--location", "os", suffix],
+        vec!["code", "mcp", "list", "--location", "os", suffix],
+        vec!["code", "skill", "list", "--location", "os", suffix],
+        vec!["code", "flow", "list", "--location", "os", suffix],
+        vec!["code", "okf", "list", "--location", "os", suffix],
         vec!["code", "agent", "activity", suffix],
         vec!["code", "mcp", "activity", suffix],
         vec!["code", "skill", "activity", suffix],

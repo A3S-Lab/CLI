@@ -124,7 +124,7 @@ impl App {
     }
 
     pub(super) fn open_agent_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = agent_dir();
+        let root = self.asset_directories.agent.clone();
         let agents = panels::agent::list_agents(&root);
         let Some(sel) = agents
             .iter()
@@ -141,7 +141,7 @@ impl App {
     }
 
     pub(super) fn open_mcp_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = mcp_dir();
+        let root = self.asset_directories.mcp.clone();
         let projects = panels::mcp::list_mcp_projects(&root);
         let Some(sel) = projects
             .iter()
@@ -162,7 +162,7 @@ impl App {
     }
 
     pub(super) fn open_skill_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = skill_dir();
+        let root = self.asset_directories.skill.clone();
         let skills = panels::skill::list_skill_assets(&root);
         let Some(sel) = skills
             .iter()
@@ -179,7 +179,7 @@ impl App {
     }
 
     pub(super) fn open_okf_package_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = panels::okf::okf_package_dir(&self.cwd);
+        let root = self.asset_directories.okf.clone();
         let packages = panels::okf::list_okf_packages(&root);
         let Some(sel) = packages
             .iter()
@@ -200,7 +200,7 @@ impl App {
     }
 
     pub(super) fn open_flow_panel_focused(&mut self, cloned_path: &std::path::Path) {
-        let root = flow_dir();
+        let root = self.asset_directories.flow.clone();
         let flows = panels::flow::list_flows(&root);
         let Some(sel) = flows
             .iter()
@@ -226,7 +226,7 @@ impl App {
                 None
             }
             panels::agent::AgentSubcommand::Clone(url) => {
-                self.clone_asset_command("agent", url, agent_dir())
+                self.clone_asset_command("agent", url, self.asset_directories.agent.clone())
             }
             panels::agent::AgentSubcommand::List(query) => {
                 self.open_asset_list_panel(os_asset_category_query("agent", &query))
@@ -324,7 +324,7 @@ impl App {
                 None
             }
             panels::mcp::McpSubcommand::Clone(url) => {
-                self.clone_asset_command("mcp", url, mcp_dir())
+                self.clone_asset_command("mcp", url, self.asset_directories.mcp.clone())
             }
             panels::mcp::McpSubcommand::List(query) => {
                 self.open_asset_list_panel(os_asset_category_query("mcp", &query))
@@ -394,7 +394,7 @@ impl App {
                 None
             }
             panels::skill::SkillSubcommand::Clone(url) => {
-                self.clone_asset_command("skill", url, skill_dir())
+                self.clone_asset_command("skill", url, self.asset_directories.skill.clone())
             }
             panels::skill::SkillSubcommand::List(query) => {
                 self.open_asset_list_panel(os_asset_category_query("skill", &query))

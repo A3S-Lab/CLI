@@ -347,7 +347,7 @@ impl App {
     /// Skill dirs for the session: the discovered Claude/Codex dirs plus the
     /// login-gated built-in OS `a3s-os-capabilities` skill when signed in.
     pub(crate) fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
-        let mut dirs = agent_skill_dirs(&self.cwd);
+        let mut dirs = agent_skill_dirs_with_configured(&self.cwd, &self.asset_directories.skill);
         // Always-available built-in skills (the `okf` LLM-wiki / knowledge compiler).
         if let Some(d) = ensure_builtin_skills_dir() {
             dirs.push(d);

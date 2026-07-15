@@ -21,8 +21,12 @@ a3s-boot = "0.1.1"
 a3s-memory = "0.1.2"
 a3s-tui = "=0.1.10"
 a3s-search = { version = "1.4.0", features = ["lightpanda"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "net", "fs", "signal"] }
+a3s-acl = "0.2.1"
+a3s-updater = "0.3.0"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -39,6 +43,7 @@ reqwest = { version = "0.11", default-features = false, features = ["json", "rus
 sha2 = "0.10"
 axum = "0.8"
 comrak = { version = "0.36", default-features = false }
+tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
@@ -52,9 +57,11 @@ strip = true
 # Monorepo development builds should exercise the local A3S crates instead of
 # waiting for every submodule change to be published to crates.io.
 a3s-code-core = { path = "../code/core" }
+a3s-acl = { path = "../acl" }
 a3s-boot = { path = "../boot" }
 a3s-common = { path = "../common" }
 a3s-lane = { path = "../lane" }
 a3s-memory = { path = "../memory" }
 a3s-search = { path = "../search" }
 a3s-tui = { path = "../tui" }
+a3s-updater = { path = "../updater" }

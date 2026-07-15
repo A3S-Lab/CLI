@@ -1,8 +1,6 @@
-use a3s_code_core::config::CodeConfig;
-use std::path::Path;
-
+use crate::a3s_os;
 use crate::account_providers::{codex, AccountProvider};
-use crate::{a3s_os, config};
+use a3s_code_core::config::CodeConfig;
 
 use super::route::{ModelRoute, ModelSource};
 
@@ -19,22 +17,39 @@ pub(crate) struct ModelEntry {
 pub(crate) struct ModelCatalog {
     pub(crate) entries: Vec<ModelEntry>,
     pub(crate) warnings: Vec<String>,
-    pub(crate) config_default: Option<String>,
 }
 
 impl ModelCatalog {
-    pub(crate) async fn discover(refresh_remote: bool) -> Self {
-        let mut catalog = Self::default();
-        let code_config = load_config(&mut catalog.warnings);
-        if let Some(config) = code_config.as_ref() {
-            catalog.config_default = config.default_model.clone();
-            catalog.add_config_models(config);
+    /// Discover models for an already resolved invocation configuration.
+    ///
+    /// Typed CLI entry points use this path so `--config` and `-C` never fall
+    /// back to process-wide config discovery.
+    pub(crate) async fn discover_with_config(config: &CodeConfig, refresh_remote: bool) -> Self {
+        Self::discover_from_config(config, refresh_remote).await
+    }
+
+    /// Build the non-network catalog used for the initial Web settings view.
+    pub(crate) fn local_with_config(config: &CodeConfig) -> Self {
+        let mut catalog = Self::configured(config);
+        for provider in AccountProvider::ALL {
+            catalog.add_local_account_models(provider);
         }
+        catalog.sort_and_deduplicate();
+        catalog
+    }
+
+    pub(crate) fn configured(config: &CodeConfig) -> Self {
+        let mut catalog = Self::default();
+        catalog.add_config_models(config);
+        catalog.sort_and_deduplicate();
+        catalog
+    }
+
+    async fn discover_from_config(config: &CodeConfig, refresh_remote: bool) -> Self {
+        let mut catalog = Self::default();
+        catalog.add_config_models(config);
         catalog.add_local_account_models(AccountProvider::Claude);
-        let os_config = code_config
-            .as_ref()
-            .and_then(|config| config.os.as_ref())
-            .cloned();
+        let os_config = config.os.clone();
         let (codex, workbuddy, os) = tokio::join!(
             discover_codex_models(refresh_remote),
             discover_account_models(AccountProvider::CodeBuddy, refresh_remote),
@@ -47,18 +62,17 @@ impl ModelCatalog {
         catalog
     }
 
-    /// Validate one route without probing unrelated credential sources.
-    pub(crate) async fn route_available(route: &ModelRoute) -> bool {
+    /// Validate one route against an already resolved invocation config
+    /// without probing unrelated credential sources.
+    pub(crate) async fn route_available_with_config(
+        route: &ModelRoute,
+        config: &CodeConfig,
+    ) -> bool {
         match route.source {
-            ModelSource::Config => {
-                let mut warnings = Vec::new();
-                let Some(config) = load_config(&mut warnings) else {
-                    return false;
-                };
-                config.list_models().into_iter().any(|(provider, model)| {
-                    format!("{}/{}", provider.name, model.id) == route.model
-                })
-            }
+            ModelSource::Config => config
+                .list_models()
+                .into_iter()
+                .any(|(provider, model)| format!("{}/{}", provider.name, model.id) == route.model),
             ModelSource::Claude | ModelSource::CodeBuddy => {
                 let Some(provider) = route.source.account_provider() else {
                     return false;
@@ -79,13 +93,11 @@ impl ModelCatalog {
                         .iter()
                         .any(|model| model.slug == route.model)
             }
-            ModelSource::OsGateway => {
-                discover_os_models(load_config(&mut Vec::new()).and_then(|config| config.os))
-                    .await
-                    .entries
-                    .iter()
-                    .any(|entry| &entry.route == route)
-            }
+            ModelSource::OsGateway => discover_os_models(config.os.clone())
+                .await
+                .entries
+                .iter()
+                .any(|entry| &entry.route == route),
         }
     }
 
@@ -272,17 +284,6 @@ async fn discover_os_models(os_config: Option<a3s_code_core::config::OsConfig>) 
             .push(format!("A3S OS model discovery failed: {error}")),
     }
     discovery
-}
-
-fn load_config(warnings: &mut Vec<String>) -> Option<CodeConfig> {
-    let path = config::find_config()?;
-    match CodeConfig::from_file(Path::new(&path)) {
-        Ok(config) => Some(config),
-        Err(error) => {
-            warnings.push(format!("could not parse {path}: {error}"));
-            None
-        }
-    }
 }
 
 fn source_rank(source: ModelSource) -> usize {

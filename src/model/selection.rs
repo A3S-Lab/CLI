@@ -47,23 +47,6 @@ pub(crate) fn save(selection: &ModelSelection) -> std::io::Result<()> {
     save_at(&path, selection)
 }
 
-pub(crate) fn reset() -> std::io::Result<bool> {
-    let path = selection_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
-    let legacy = path
-        .parent()
-        .and_then(Path::parent)
-        .map(|root| root.join("model-selection.json"));
-    let mut removed = false;
-    for candidate in std::iter::once(path).chain(legacy) {
-        if candidate.exists() {
-            std::fs::remove_file(candidate)?;
-            removed = true;
-        }
-    }
-    Ok(removed)
-}
-
 fn load_at(path: &Path) -> std::io::Result<Option<ModelSelection>> {
     if !path.exists() {
         return Ok(None);

@@ -9,14 +9,15 @@ needed.
 
 ```
 a3s code                       # launch the included A3S Code TUI
-a3s code serve                 # start the A3S Code API + Shu Xiao'an web UI
-a3s box ps                     # install Box if missing, then run `box ps`
-a3s bench run ./tasks/smoke --agent codex # install Bench if missing, then run the task
-a3s install box                # explicitly install an optional component
-a3s list                       # show Code, Box, Bench, and other A3S tools
-a3s update bench               # update one installed component
-a3s search doctor              # validate search config and browser runtime
-a3s search browser list        # inspect Chrome and Lightpanda
+a3s web -d                     # start A3S Web in the background
+a3s box ps                     # run Box, installing it on first real use
+a3s bench run ./tasks/smoke --agent codex
+a3s search doctor              # run the registered Search product
+a3s use browser open https://example.com
+a3s list                       # list registered components and external tools
+a3s install use                # install or repair a registered component
+a3s upgrade use                # upgrade one managed component
+a3s uninstall use              # remove component-owned files
 a3s --version
 ```
 
@@ -178,6 +179,30 @@ a project's locked task, agent, plan, evidence, or report data. Benchmark
 project state always uses `.a3s/bench/`; no separate top-level benchmark state
 directory is created.
 
+## Components And A3S Use
+
+The umbrella CLI owns the catalog and delegates domain-specific runtimes to
+their parent component:
+
+```sh
+a3s list --json
+a3s install use
+a3s install use/browser
+a3s install use/office
+a3s uninstall use/office
+
+a3s use capabilities --json
+a3s use browser render https://example.com
+a3s use browser open https://example.com --session research
+a3s use browser snapshot --session research --json
+a3s use browser close --session research
+```
+
+Browser and Office are built-in Use domains. Independently implemented domains
+can be explicitly installed from A3S ACL packages that declare native CLI,
+standard MCP, and/or `SKILL.md` surfaces. A3S does not define an extension
+JSON-RPC protocol; `--json` remains a one-command CLI result.
+
 ## A3S Code TUI
 
 `a3s code` launches the interactive A3S Code terminal UI in the current
@@ -218,31 +243,40 @@ Use this README as the TUI capability guide:
 CLI for the same asset, model, knowledge, research, and OS surfaces. The CLI
 forms are useful in scripts, release checks, terminals without a full-screen UI,
 and docs that need reproducible examples. Commands that read or mutate OS
-resources require `a3s code login`; local discovery, config, memory, KB, review
-prompts, and `deepresearch` report generation work without an OS session.
+resources require `a3s auth login os`; local discovery, config, memory, KB, and
+review prompts keep working without an OS session. Root-owned reads support
+`--output json`; use JSON rather than scraping human tables.
 
 Start, resume, and update the TUI:
 
 ```sh
 a3s code                         # launch the TUI in the current workspace
-a3s code serve                   # start local API and Shu Xiao'an web UI
 a3s code resume                  # resume the newest saved TUI session here
 a3s code resume 018f-session-id  # resume a specific saved session
-a3s code update                  # upgrade the CLI and restart into this session
+a3s self update                  # update the a3s executable
 ```
 
 Start the local Web API and bundled 书小安 frontend:
 
 ```sh
-a3s code serve
-a3s code serve --workspace /path/to/project
-a3s code serve --host 127.0.0.1 --port 29653
-a3s code serve --api-only
+a3s web start
+a3s web start --detach
+a3s -C /path/to/project web start
+a3s web start --host 127.0.0.1 --port 29653
+a3s web start --api-only
 ```
 
 The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
 the TUI. By default it serves the Rsbuild output from `apps/web/dist/workspace`; pass
-`--web-dir` to serve a different frontend build.
+`--web-dir` to serve a different frontend build. Background mode returns only
+after the service binds successfully and prints its PID, URL, and log path
+(`~/.a3s/logs/web.log` by default).
+
+Web tasks, visible messages, titles, goals, effort, model selection, and
+execution mode are saved under `~/.a3s/code-web` and restored before the API
+starts accepting requests. Set `A3S_CODE_WEB_STATE_DIR` to isolate that store.
+Default mode allows read-only tools and pauses mutating tools for Web HITL
+approval; plan mode denies mutations, while auto mode runs without approval.
 
 Code Web sessions auto-save Core snapshots under `~/.a3s/code-web/sessions`
 and restore when `a3s code serve` starts again. Browser-only metadata such as
@@ -266,41 +300,34 @@ loopback-only.
 Inspect and create `config.acl`:
 
 ```sh
-a3s code config path                 # print the discovered config path
-a3s code config init                 # create the preferred default config
-a3s code config init .a3s/config.acl # create a project-local config
-a3s code config cat                  # print the active config
-a3s code config check                # summarize providers, models, and OS config
-a3s code config edit                 # open VISUAL/EDITOR, or print the path
-a3s code config dirs                 # print config, asset, memory, KB, and OKF dirs
-a3s code dirs                        # shorthand for the same directory summary
+a3s config path                       # print the active config path
+a3s config init                       # create the user config
+a3s config init --scope workspace     # create .a3s/config.acl
+a3s config show                       # print a redacted effective summary
+a3s config validate                   # validate the effective A3S ACL
+a3s config edit --scope workspace     # open VISUAL/EDITOR, or print the path
+a3s config paths                      # print config, asset, memory, KB, and OKF paths
 ```
 
 Sign in to A3S OS and check account state:
 
 ```sh
-a3s login                      # open the configured OS OAuth login flow
-a3s login "$A3S_OS_TOKEN"      # store an existing OS bearer token
-a3s logout                     # remove the stored OS session
-
-# Compatibility aliases under the Code command:
-a3s code login
-a3s code logout
-a3s code auth status           # show OS endpoint, account, and expiry
-a3s code auth login            # alias for interactive login
-a3s code auth logout           # alias for logout
+a3s auth login os              # open the configured OS OAuth login flow
+printf '%s' "$A3S_OS_TOKEN" | a3s auth login os --token-stdin
+a3s auth status os             # show OS endpoint, account, and expiry
+a3s auth logout os             # remove the stored OS session
 ```
 
-Inspect every product-owned account without copying its OAuth credentials into
-`config.acl`:
+Inspect managed and externally owned account sources without copying OAuth
+credentials into `config.acl`:
 
 ```sh
-a3s account list
-a3s account login claude-code  # delegates to `claude auth login`
-a3s account login codex        # delegates to `codex login`
-a3s account login a3s-os       # same OAuth flow as `a3s login`
-a3s account logout a3s-os
+a3s auth list
 ```
+
+Claude Code, Codex, and WorkBuddy continue to own their login flows and local
+credential stores. The A3S CLI only reports whether those accounts are
+available; `a3s auth login/logout` manages the configured A3S OS session.
 
 Model routes use one catalog shared by the root CLI and the Code TUI. Custom
 provider models come from `config.acl`; Claude Code, Codex, WorkBuddy, and A3S
@@ -314,67 +341,74 @@ a3s model use claude-code/claude-opus-4-6
 a3s model use codex/gpt-5.2-codex
 a3s model use workbuddy/glm-5.1
 a3s model use a3s-os/my-model
-a3s model reset               # return to config.acl's default_model
-a3s model config              # print the active config.acl path
+a3s model use openai/gpt-5 --scope workspace
+a3s model reset --scope user
 ```
 
-`a3s model use` writes only `~/.a3s/tui/model-selection.json`; it does not mutate a
-project's `config.acl` or copy Claude, Codex, WorkBuddy, or A3S OS tokens. The existing
-`a3s code model` command is a compatibility entrypoint to the same catalog.
-Selecting a route probes only that route's credential source; `model list`
-refreshes Codex, WorkBuddy, and A3S OS catalogs concurrently.
+`a3s model use` validates the route and updates `default_model` in the selected
+A3S ACL layer while preserving unrelated ACL text. `--config` always targets
+that explicit file; otherwise `--scope user|workspace` selects the layer. No
+Claude, Codex, WorkBuddy, or A3S OS token is copied. Selecting a route probes
+only that credential source; `model list` refreshes independent account catalogs
+concurrently.
 
 List runtime-callable models:
 
 ```sh
-a3s code models
-a3s code model
-a3s code model list
+a3s model list
+a3s model current
 ```
 
 The model commands list `config.acl` models, local Claude/Codex/WorkBuddy
 account models, and signed-in OS gateway models from the unified gateway.
-Codex models are refreshed through the installed Codex CLI so the list follows
-the current account's picker-visible catalog, with `models_cache.json` as an
-offline fallback. WorkBuddy models are discovered through its installed
-CodeBuddy CLI. They are not the same thing as digital asset repository entries
-whose category happens to be `model`.
+Codex uses its current account catalog with its cache as an offline fallback;
+WorkBuddy discovery uses its installed CodeBuddy CLI. These runtime routes are
+not digital asset repository entries whose category happens to be `model`.
 
 Find local asset sources, clone repositories, and inspect OS assets:
 
 ```sh
-a3s code agent local
-a3s code agent local reviewer
+a3s code agent list --location local
+a3s code agent list --location local reviewer
 a3s code agent clone https://github.com/acme/reviewer-agent.git
-a3s code agent list reviewer
+a3s code agent list --location os reviewer
 a3s code agent activity failed
 
-a3s code mcp local weather
+a3s code mcp list --location local weather
 a3s code mcp clone https://github.com/acme/weather-mcp.git
-a3s code mcp list weather
+a3s code mcp list --location os weather
 a3s code mcp activity running
 
-a3s code skill local summarize
-a3s code flow local release
-a3s code okf local security
+a3s code skill list --location local summarize
+a3s code flow list --location local release
+a3s code okf list --location local security
+
+# One versioned JSON document; relative ACL asset roots resolve from -C.
+a3s -C /path/to/project --output json code agent list --location local
 ```
 
-`local`, `clone`, and `review` are local developer conveniences. `list`,
-`activity`, and every publish/deploy/open/log/status operation call OS APIs and
-therefore need a configured `os = "https://..."` plus a valid login.
+`list --location local`, `clone`, and `review` are local developer operations.
+`list --location os`, `activity`, and every publish/deploy/open/log/status
+operation call OS APIs and therefore need a configured `os = "https://..."`
+plus a valid login. `list --location all` returns local and OS results together
+and fails explicitly when the OS side is unavailable.
+
+Clone URLs must not embed credentials, query strings, or fragments. Use an SSH
+remote or the platform Git credential manager for private repositories so
+tokens never enter argv or machine output.
 
 Run agent lifecycle commands:
 
 ```sh
 a3s code agent review agents/reviewer
-a3s code agent publish agentic agents/reviewer
-a3s code agent publish application agents/portal
-a3s code agent publish tool agents/sql-checker
+a3s code agent publish agents/reviewer --kind agentic
+a3s code agent publish agents/portal --kind application
+a3s code agent publish agents/sql-checker --kind tool
 a3s code agent run agents/reviewer
 a3s code agent deploy agents/portal
-a3s code agent open agentic agents/reviewer
-a3s code agent logs tool agents/sql-checker
-a3s code agent status application agents/portal
+a3s code agent open agents/reviewer --kind agentic
+a3s code agent logs agents/sql-checker --kind tool
+a3s code agent status agents/portal --kind application
 ```
 
 An Agent asset is a package directory. `agent.md`, `agent.yaml`, or
@@ -866,7 +900,7 @@ flowchart TD
 
 Add an OS endpoint to `config.acl`, then sign in:
 
-```hcl
+```acl
 os = "https://os.example.com"
 ```
 
@@ -1051,7 +1085,21 @@ back into the next Claude turn as structured history.
 
 When Codex CLI is logged in (`codex login`), the Codex tab can switch the
 current session to Codex account models using `$CODEX_HOME/auth.json` or
-`~/.codex/auth.json`. Codex auth can also be used as a normal config provider:
+`~/.codex/auth.json`.
+
+When WorkBuddy is installed and signed in, the WorkBuddy tab locates its
+bundled CodeBuddy CLI (or `codebuddy`/`cbc` on `PATH`), reuses the account state
+under `~/.workbuddy`, and refreshes the models entitled to that account. A3S
+does not read or copy WorkBuddy tokens. `A3S_CODEBUDDY_CLI` can select a
+non-standard CLI installation. WorkBuddy's streamed tagged tool calls are
+normalized into native A3S host-tool events so execution remains inside A3S.
+
+The A3S Web task Composer consumes the same account-model discovery and client
+routing as the TUI. Account-backed entries are source-qualified as
+`claude-code/<model>`, `codex/<model>`, or `workbuddy/<model>` and never expose
+local credentials to the browser.
+
+Codex auth can also be used as a normal config provider:
 
 ```acl
 default_model = "codex/model-slug"

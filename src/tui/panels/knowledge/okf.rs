@@ -173,6 +173,7 @@ fn looks_path_like(s: &str) -> bool {
         || s.ends_with(".yml")
 }
 
+#[cfg(test)]
 pub(crate) fn okf_package_dir(cwd: &str) -> std::path::PathBuf {
     std::path::Path::new(cwd).join("okf")
 }
@@ -1328,7 +1329,7 @@ impl App {
                 None
             }
             OkfCommand::Clone(url) => {
-                let root = okf_package_dir(&self.cwd);
+                let root = self.asset_directories.okf.clone();
                 self.clone_asset_command("okf", url, root)
             }
             OkfCommand::List(query) => {
@@ -1349,7 +1350,7 @@ impl App {
                     return None;
                 }
                 self.textarea.clear();
-                let root = okf_package_dir(&self.cwd);
+                let root = self.asset_directories.okf.clone();
                 match scaffold_okf_package(&description, &root) {
                     Ok(dev) => {
                         self.agent_dev = None;
@@ -1480,7 +1481,7 @@ impl App {
     }
 
     pub(crate) fn open_okf_package_panel(&mut self) {
-        let root = okf_package_dir(&self.cwd);
+        let root = self.asset_directories.okf.clone();
         let packages = list_okf_packages(&root);
         if packages.is_empty() {
             self.pending_okf_subcommand = None;

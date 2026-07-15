@@ -1,473 +1,439 @@
 #![cfg(unix)]
 
-#[allow(dead_code)]
 mod support;
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Command;
 
-use sha2::{Digest, Sha256};
-
-use support::{a3s_bin, make_executable, sh_quote, TempWorkspace};
-
-const INSTALL_HELP: &str = "usage: a3s install <code|box|bench>\n\n\
-`code` is included with a3s; installing it verifies and repairs its companion tools.\n\
-Box and Bench are downloaded only by explicit install or first real use.\n";
-
-const UPDATE_HELP: &str = "usage: a3s update [code|box|bench]\n\n\
-With no component, this updates Code for compatibility with earlier releases.\n";
-
-const BOX_HELP: &str = "usage: a3s box <args...>\n\n\
-Arguments are forwarded to a3s-box. Box is installed automatically on first use.\n";
-
-const BENCH_HELP: &str = "usage:\n\
-   a3s bench list [--all] [--json]\n\
-   a3s bench info <task-id|./path> [--all] [--json]\n\
-   a3s bench run <task-id|./path> --agent <asset> [--json]\n\
-   a3s bench result [run-id] [--json]\n\
-   a3s bench advanced <command> ...\n\n\
-Bench is a private control component installed automatically on first real use;\n\
-it is never added to PATH. Candidate and Judge Agent Assets are executed only\n\
-by A3S OS Runtime. Local task paths must start with ./ or ../.\n";
-
-const LIST_HELP: &str = "usage: a3s list\n\n\
-Show managed Code, Box, and Bench components plus other a3s-* tools on PATH.\n";
-
-struct OfflineEnv {
-    _tmp: TempWorkspace,
-    components_dir: PathBuf,
-    box_install_dir: PathBuf,
-    home_dir: PathBuf,
-    tools_dir: PathBuf,
-    curl_log: PathBuf,
-}
-
-impl OfflineEnv {
-    fn new(name: &str) -> Self {
-        let tmp = TempWorkspace::new(name);
-        let components_dir = tmp.path("components");
-        let box_install_dir = tmp.path("box-bin");
-        let home_dir = tmp.path("home");
-        let tools_dir = tmp.path("tools");
-        let curl_log = tmp.path("curl.log");
-        make_executable(
-            &tools_dir.join("curl"),
-            &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 97\n",
-                sh_quote(&curl_log)
-            ),
-        );
-        Self {
-            _tmp: tmp,
-            components_dir,
-            box_install_dir,
-            home_dir,
-            tools_dir,
-            curl_log,
-        }
-    }
-
-    fn run(&self, args: &[&str]) -> Output {
-        Command::new(a3s_bin())
-            .args(args)
-            .env("A3S_COMPONENTS_DIR", &self.components_dir)
-            .env("A3S_BOX_INSTALL_DIR", &self.box_install_dir)
-            .env("HOME", &self.home_dir)
-            .env("PATH", &self.tools_dir)
-            .env("RUST_BACKTRACE", "0")
-            .output()
-            .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
-    }
-
-    fn assert_no_install_or_network(&self) {
-        self.assert_no_component_install();
-        assert!(
-            !self.curl_log.exists(),
-            "curl was unexpectedly invoked: {}",
-            std::fs::read_to_string(&self.curl_log).unwrap_or_default()
-        );
-    }
-
-    fn assert_no_component_install(&self) {
-        assert!(
-            !self.components_dir.exists(),
-            "component state was unexpectedly created at {}",
-            self.components_dir.display()
-        );
-        assert!(
-            !self.box_install_dir.exists(),
-            "Box install directory was unexpectedly created at {}",
-            self.box_install_dir.display()
-        );
-    }
-}
+use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
 
 #[test]
-fn exact_component_help_is_offline_and_does_not_install() {
-    let env = OfflineEnv::new("component-help");
-    for (command, expected) in [
-        ("install", INSTALL_HELP),
-        ("update", UPDATE_HELP),
-        ("box", BOX_HELP),
-        ("bench", BENCH_HELP),
-        ("list", LIST_HELP),
-    ] {
-        for help in ["-h", "--help", "help"] {
-            let args = [command, help];
-            let output = env.run(&args);
-            assert!(
-                output.status.success(),
-                "a3s {args:?} failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
-            assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-            env.assert_no_install_or_network();
-        }
-    }
-
-    for (args, expected) in [
-        (&["box", "run", "--help"][..], BOX_HELP),
-        (&["bench", "run", "--help"][..], BENCH_HELP),
-    ] {
-        let output = env.run(args);
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-        env.assert_no_install_or_network();
-    }
-}
-
-#[test]
-fn optional_component_version_flags_do_not_install() {
-    let env = OfflineEnv::new("component-version");
-    for (component, expected) in [
-        ("box", "a3s box engine: not installed"),
-        ("bench", "a3s bench control component: not installed"),
-    ] {
-        let output = env.run(&[component, "--version"]);
-        assert!(output.status.success());
-        assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-        env.assert_no_install_or_network();
-    }
-}
-
-#[test]
-fn install_requires_one_known_component_without_side_effects() {
-    let env = OfflineEnv::new("install-errors");
-    for (args, message) in [
-        (
-            &["install"][..],
-            "missing component; choose code, box, or bench",
-        ),
-        (
-            &["install", "unknown"][..],
-            "unknown component 'unknown'; choose code, box, or bench",
-        ),
-    ] {
-        let output = env.run(args);
-        assert_eq!(output.status.code(), Some(2));
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            format!("a3s: {message}\n\n{INSTALL_HELP}\n")
-        );
-        env.assert_no_install_or_network();
-    }
-}
-
-#[test]
-fn installing_code_is_offline_and_does_not_install_box_or_bench() {
-    let env = OfflineEnv::new("install-code");
-    let output = env.run(&["install", "code"]);
+fn list_json_separates_catalog_components_from_external_tools() {
+    let temp = TempWorkspace::new("component-list");
+    let bin = temp.path("bin");
+    let marker = temp.path("unknown-ran");
+    make_executable(
+        &bin.join("a3s-use"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
+    );
+    make_executable(
+        &bin.join("a3s-local-tool"),
+        &format!("#!/bin/sh\nprintf ran > {}\n", sh_quote(&marker)),
+    );
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["list", "--json"])
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
 
     assert!(
         output.status.success(),
-        "a3s install code failed: {}",
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schemaVersion"], 1);
+    assert_eq!(report["command"], "component.list");
+    let components = report["data"]["components"].as_array().unwrap();
+    let use_component = components
+        .iter()
+        .find(|component| component["id"] == "use")
+        .unwrap();
+    assert_eq!(use_component["presence"], "external");
+    assert_eq!(use_component["health"], "ready");
+    assert!(components
+        .iter()
+        .any(|component| component["id"] == "use/browser"));
+    assert_eq!(report["data"]["externalTools"][0]["command"], "local-tool");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("is installed (included with a3s)"),
-        "Code inclusion was not explained: {}",
-        String::from_utf8_lossy(&output.stdout)
+        !marker.exists(),
+        "listing must not execute unknown PATH tools"
     );
-    if cfg!(target_os = "macos") && !output.stderr.is_empty() {
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("companion repair failed"),
-            "unexpected macOS warning: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    } else {
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    }
-    env.assert_no_install_or_network();
 }
 
 #[test]
-fn missing_bench_lookup_happens_on_explicit_install_or_first_real_use() {
-    if !matches!(
-        (std::env::consts::OS, std::env::consts::ARCH),
-        ("macos" | "linux", "aarch64" | "x86_64")
-    ) {
+fn install_without_components_lists_the_typed_catalog_without_mutation() {
+    let temp = TempWorkspace::new("component-available");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command.args(["install", "--json"]).output().unwrap();
+
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let ids = report["data"]["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|component| component["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"use"));
+    assert!(ids.contains(&"use/browser"));
+    assert!(ids.contains(&"use/office"));
+    assert!(!temp.path("state/components").exists());
+}
+
+#[test]
+fn unsafe_component_ids_fail_at_the_parser_boundary() {
+    let temp = TempWorkspace::new("unsafe-component-id");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["--output", "json", "install", "use/../box"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["command"], "a3s");
+    assert_eq!(error["error"]["code"], "usage.invalid");
+    assert!(!temp.path("state/components").exists());
+    assert!(!temp.path("data/components").exists());
+}
+
+#[test]
+fn install_dry_run_plans_without_network_or_mutation() {
+    let temp = TempWorkspace::new("component-install-dry-run");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args([
+            "install",
+            "box",
+            "--source",
+            "release",
+            "--dry-run",
+            "--json",
+        ])
+        .env("A3S_UPDATER_GITHUB_API_BASE", "http://127.0.0.1:1")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["command"], "component.install");
+    assert_eq!(result["data"]["dryRun"], true);
+    assert_eq!(result["data"]["plans"][0]["component"], "box");
+    assert!(!temp.path("state/components").exists());
+    assert!(!temp.path("data/components").exists());
+}
+
+#[test]
+fn offline_install_fails_before_any_network_or_mutation() {
+    if support::box_release_target().is_none() {
+        eprintln!("skipping offline network test on unsupported host target");
         return;
     }
+    let temp = TempWorkspace::new("component-install-offline");
+    let server = support::start_fake_box_release(&temp, "2.5.2", None);
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args([
+            "--offline",
+            "install",
+            "box",
+            "--source",
+            "release",
+            "--json",
+        ])
+        .env_remove("A3S_OFFLINE")
+        .env_remove("A3S_NO_AUTO_INSTALL")
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+        .output()
+        .unwrap();
 
-    for (name, args, delayed) in [
-        ("bench-explicit-install", &["install", "bench"][..], false),
-        ("bench-first-real-use", &["bench", "run", "smoke"][..], true),
-    ] {
-        let env = OfflineEnv::new(name);
-        let output = env.run(args);
-        assert_eq!(output.status.code(), Some(1));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("Bench control component may not be published yet"),
-            "unexpected a3s {args:?} diagnostic: {stderr}"
-        );
-        assert_eq!(
-            stderr.contains("Bench control component is not installed; installing it now"),
-            delayed,
-            "only a delayed first real use should report the missing component: {stderr}"
-        );
-
-        let curl_log = std::fs::read_to_string(&env.curl_log)
-            .expect("explicit install and first real use should query the Bench release");
-        assert!(
-            curl_log.contains("A3S-Lab/a3s-bench/releases/latest"),
-            "unexpected release lookup: {curl_log}"
-        );
-        env.assert_no_component_install();
-    }
+    assert!(!output.status.success());
+    assert!(server.requests().is_empty(), "offline install used network");
+    assert!(!temp.path("state/components").exists());
+    assert!(!temp.path("data/components").exists());
 }
 
 #[test]
-fn bare_and_explicit_code_update_share_the_code_updater() {
-    let env = OfflineEnv::new("update-code-aliases");
+fn info_and_doctor_have_machine_readable_results() {
+    let temp = TempWorkspace::new("component-inspection");
+
+    let mut info = Command::new(a3s_bin());
+    configure_component_env(&mut info, &temp);
+    let output = info.args(["info", "code", "--json"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["schemaVersion"], 1);
+    assert_eq!(result["command"], "component.info");
+    assert_eq!(result["data"]["component"]["id"], "code");
+
+    let mut doctor = Command::new(a3s_bin());
+    configure_component_env(&mut doctor, &temp);
+    let output = doctor.args(["doctor", "code", "--json"]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["schemaVersion"], 1);
+    assert_eq!(result["command"], "component.doctor");
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["data"]["healthy"], true);
+    assert_eq!(result["data"]["checks"][0]["id"], "code");
+}
+
+#[test]
+fn multi_component_partial_failure_preserves_every_outcome() {
+    let temp = TempWorkspace::new("component-partial");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["install", "code", "use/acme/slack", "--json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(3));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["command"], "component.install");
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "component.partial");
+    assert_eq!(
+        result["error"]["details"]["operations"][0]["component"],
+        "code"
+    );
+    assert_eq!(
+        result["error"]["details"]["failures"][0]["component"],
+        "use/acme/slack"
+    );
+}
+
+#[test]
+fn use_proxy_preserves_arguments_and_child_status() {
+    let temp = TempWorkspace::new("use-proxy");
+    let bin = temp.path("use-bin");
+    let args_log = temp.path("use-args.log");
     make_executable(
-        &env.tools_dir.join("curl"),
+        &bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nprintf 'https://github.com/A3S-Lab/Cli/releases/tag/v{}\\n'\nexit 0\n",
-            sh_quote(&env.curl_log),
-            env!("CARGO_PKG_VERSION")
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" > {}\nprintf 'use:%s\\n' \"$*\"\nif [ \"$1\" = \"fail\" ]; then exit 9; fi\nexit 0\n",
+            sh_quote(&args_log)
+        ),
+    );
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args([
+            "use",
+            "browser",
+            "open",
+            "https://example.com",
+            "--session",
+            "research",
+            "--json",
+        ])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "use:browser open https://example.com --session research --json\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&args_log).unwrap(),
+        "browser\nopen\nhttps://example.com\n--session\nresearch\n--json\n"
+    );
+
+    let mut failing = Command::new(a3s_bin());
+    configure_component_env(&mut failing, &temp);
+    let output = failing
+        .args(["use", "fail"])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(9));
+}
+
+#[test]
+fn proxy_receives_the_versioned_invocation_context() {
+    let temp = TempWorkspace::new("proxy-context");
+    let workspace = temp.path("workspace");
+    let launch_directory = temp.path("launch");
+    let bin = temp.path("use-bin");
+    let context_log = temp.path("proxy-context.log");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&launch_directory).unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    make_executable(
+        &bin.join("a3s-use"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$PWD\" \"$A3S_CLI_CONTEXT_VERSION\" \"$A3S_CLI_DIRECTORY\" \"$A3S_CLI_OUTPUT\" \"$A3S_CLI_OFFLINE\" \"$A3S_CLI_NON_INTERACTIVE\" \"$A3S_CLI_NO_PROGRESS\" \"$A3S_CONFIG_FILE\" \"$A3S_OFFLINE\" \"$A3S_NON_INTERACTIVE\" \"$A3S_NO_PROGRESS\" > {}\nprintf '%s\\n' \"$@\" >> {}\nexit 17\n",
+            sh_quote(&context_log),
+            sh_quote(&context_log),
         ),
     );
 
-    for args in [&["update"][..], &["update", "code"][..]] {
-        let output = env.run(args);
-        assert!(
-            output.status.success(),
-            "a3s {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("already up to date"),
-            "a3s {args:?} did not use the Code updater: {}",
-            String::from_utf8_lossy(&output.stdout)
-        );
-        if cfg!(target_os = "macos") && !output.stderr.is_empty() {
-            assert!(
-                String::from_utf8_lossy(&output.stderr).contains("install repair failed"),
-                "unexpected macOS warning: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        } else {
-            assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-        }
-        env.assert_no_component_install();
-    }
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .current_dir(&launch_directory)
+        .arg("-C")
+        .arg(&workspace)
+        .args([
+            "--config",
+            "child.acl",
+            "--offline",
+            "use",
+            "browser",
+            "open",
+            "value with spaces",
+            "--native-json",
+        ])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .env_remove("A3S_OFFLINE")
+        .env_remove("A3S_NON_INTERACTIVE")
+        .env_remove("A3S_NO_PROGRESS")
+        .output()
+        .unwrap();
 
-    let curl_log = std::fs::read_to_string(&env.curl_log)
-        .expect("both Code updates should query the release redirect");
-    let calls = curl_log.lines().collect::<Vec<_>>();
-    assert_eq!(calls.len(), 2, "unexpected curl calls: {curl_log}");
-    assert!(
-        calls
-            .iter()
-            .all(|call| call.contains("A3S-Lab/Cli/releases/latest")),
-        "Code update touched a non-Code release endpoint: {curl_log}"
+    assert_eq!(output.status.code(), Some(17));
+    let lines = std::fs::read_to_string(&context_log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(lines[0], canonical_workspace.display().to_string());
+    assert_eq!(lines[1], "1");
+    assert_eq!(lines[2], canonical_workspace.display().to_string());
+    assert_eq!(lines[3], "human");
+    assert_eq!(lines[4], "true");
+    assert_eq!(lines[5], "true");
+    assert_eq!(lines[6], "true");
+    assert_eq!(
+        lines[7],
+        canonical_workspace.join("child.acl").display().to_string()
+    );
+    assert_eq!(&lines[8..11], ["1", "1", "1"]);
+    assert_eq!(
+        &lines[11..],
+        ["browser", "open", "value with spaces", "--native-json"]
     );
 }
 
 #[test]
-fn updating_missing_box_and_bench_points_to_install_without_network() {
-    let env = OfflineEnv::new("missing-update");
-    for (component, expected) in [
-        ("box", "run `a3s install box` first"),
-        ("bench", "run `a3s install bench` first"),
-    ] {
-        let output = env.run(&["update", component]);
-        assert_eq!(
-            output.status.code(),
-            Some(1),
-            "unexpected status for update {component}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(expected),
-            "missing install guidance for {component}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        env.assert_no_install_or_network();
-    }
+fn root_machine_output_is_not_silently_applied_to_native_proxies() {
+    let temp = TempWorkspace::new("proxy-root-output");
+    let marker = temp.path("proxy-ran");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["--output", "json", "use", "browser", "status"])
+        .env("A3S_USE_BIN", &marker)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        !marker.exists(),
+        "proxy resolution or execution should not run"
+    );
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["command"], "use");
+    assert_eq!(error["error"]["code"], "usage.invalid");
 }
 
 #[test]
-fn list_always_shows_code_box_bench_without_creating_components() {
-    let env = OfflineEnv::new("component-list");
-    let output = env.run(&["list"]);
+fn external_use_install_uses_cli_json_not_custom_rpc() {
+    let temp = TempWorkspace::new("extension-install");
+    let bin = temp.path("use-bin");
+    let args_log = temp.path("extension-args.log");
+    make_executable(
+        &bin.join("a3s-use"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{{\"component\":{{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true}}\\n'; exit 0; fi\nexit 2\n",
+            sh_quote(&args_log)
+        ),
+    );
+    let package = temp.path("package");
+    std::fs::create_dir_all(&package).unwrap();
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args([
+            "install",
+            "use/acme/slack",
+            "--from",
+            package.to_str().unwrap(),
+            "--allow-unsigned",
+            "--json",
+        ])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
 
     assert!(
         output.status.success(),
-        "a3s list failed: {}",
+        "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let component_rows = stdout
-        .lines()
-        .filter(|line| matches!(*line, "  code" | "  box" | "  bench"))
-        .collect::<Vec<_>>();
-    assert_eq!(component_rows, vec!["  code", "  box", "  bench"]);
-    assert!(stdout.contains("managed components\n"));
-    assert!(stdout.contains("other a3s-* tools on PATH\n  none found\n"));
-    env.assert_no_install_or_network();
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(
+        result["data"]["operations"][0]["component"],
+        "use/acme/slack"
+    );
+    let arguments = std::fs::read_to_string(args_log).unwrap();
+    assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
+    assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
 }
 
 #[test]
-fn managed_bench_forwards_arguments_and_exit_status() {
-    let env = OfflineEnv::new("bench-proxy");
-    let args_log = env._tmp.path("bench-args.log");
-    install_fake_bench_bundle(&env.components_dir, &args_log, 23);
-
-    let output = env.run(&["bench", "run", "./smoke task", "--agent", "asset name"]);
-
-    assert_eq!(output.status.code(), Some(23));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "fake-bench:run ./smoke task --agent asset name\n"
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    assert_eq!(
-        std::fs::read_to_string(args_log).expect("fake Bench should record arguments"),
-        "run\n./smoke task\n--agent\nasset name\n"
-    );
-    assert!(
-        !env.curl_log.exists(),
-        "an installed Bench control component must not trigger a release lookup"
-    );
-}
-
-fn install_fake_bench_bundle(components_dir: &Path, args_log: &Path, exit_code: i32) {
-    let version = "1.2.3";
-    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => "darwin-arm64",
-        ("macos", "x86_64") => "darwin-x86_64",
-        ("linux", "aarch64") => "linux-arm64",
-        ("linux", "x86_64") => "linux-x86_64",
-        _ => "test-target",
-    };
-    let relative_root = format!("versions/{version}/{target}");
-    let bench_root = components_dir.join("bench");
-    let package_root = bench_root.join(&relative_root);
-    let entrypoint = package_root.join("bin/a3s-bench");
+fn built_in_use_runtime_lifecycle_delegates_native_component_commands() {
+    let temp = TempWorkspace::new("use-runtime-lifecycle");
+    let bin = temp.path("use-bin");
+    let args_log = temp.path("runtime-args.log");
     make_executable(
-        &entrypoint,
+        &bin.join("a3s-use"),
         &format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf 'fake-bench:%s\\n' \"$*\"\nexit {exit_code}\n",
-            sh_quote(args_log)
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nprintf '%s\\n' \"$@\" >> {}\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"1.0.136\"}}}}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"uninstall\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true}}}}\\n'; exit 0; fi\nexit 2\n",
+            sh_quote(&args_log)
         ),
     );
 
-    write_json(
-        &package_root.join("component.json"),
-        &format!(
-            r#"{{
-  "schema": "a3s.component.v1",
-  "component": "bench",
-  "version": "{version}",
-  "target": "{target}",
-  "cli_protocol": "a3s-bench-cli/v1",
-  "entrypoint": "bin/a3s-bench",
-  "required_files": []
-}}"#
-        ),
+    let mut install = Command::new(a3s_bin());
+    configure_component_env(&mut install, &temp);
+    let output = install
+        .args(["install", "use/office", "--json"])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    let payload_sha256 = bench_payload_sha256(&package_root);
-    write_json(
-        &package_root.join("receipt.json"),
-        &format!(
-            r#"{{
-  "schema": "a3s.component-receipt.v1",
-  "component": "bench",
-  "version": "{version}",
-  "target": "{target}",
-  "source_url": "https://github.com/A3S-Lab/a3s-bench/releases/download/v{version}/a3s-bench-{version}-{target}.tar.gz",
-  "archive_sha256": "{}",
-  "payload_sha256": "{payload_sha256}",
-  "entrypoint": "bin/a3s-bench",
-  "cli_protocol": "a3s-bench-cli/v1"
-}}"#,
-            "a".repeat(64)
-        ),
+
+    let mut uninstall = Command::new(a3s_bin());
+    configure_component_env(&mut uninstall, &temp);
+    let output = uninstall
+        .args(["uninstall", "use/office", "--json"])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    write_json(
-        &bench_root.join("current.json"),
-        &format!(
-            r#"{{
-  "schema": "a3s.component-current.v1",
-  "component": "bench",
-  "version": "{version}",
-  "target": "{target}",
-  "path": "{relative_root}",
-  "archive_sha256": "{}"
-}}"#,
-            "a".repeat(64)
-        ),
-    );
-}
 
-fn bench_payload_sha256(root: &Path) -> String {
-    let mut files = Vec::new();
-    let mut pending = vec![root.to_path_buf()];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(dir).expect("Bench fixture directory should be readable") {
-            let path = entry
-                .expect("Bench fixture entry should be readable")
-                .path();
-            if path.is_dir() {
-                pending.push(path);
-            } else if path
-                .strip_prefix(root)
-                .expect("Bench fixture path should stay under root")
-                != Path::new("receipt.json")
-            {
-                files.push(path);
-            }
-        }
-    }
-    files.sort_by(|left, right| {
-        left.strip_prefix(root)
-            .unwrap()
-            .cmp(right.strip_prefix(root).unwrap())
-    });
-
-    let mut hasher = Sha256::new();
-    for path in files {
-        let relative = path.strip_prefix(root).unwrap().to_str().unwrap();
-        let contents = std::fs::read(&path).expect("Bench fixture file should be readable");
-        hasher.update((relative.len() as u64).to_le_bytes());
-        hasher.update(relative.as_bytes());
-        hasher.update((contents.len() as u64).to_le_bytes());
-        hasher.update(contents);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn write_json(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("JSON fixture parent should be created");
-    }
-    std::fs::write(path, contents).expect("JSON fixture should be written");
+    let arguments = std::fs::read_to_string(args_log).unwrap();
+    assert!(arguments.contains("component\ninstall\noffice\n--json\n"));
+    assert!(arguments.contains("component\nuninstall\noffice\n--json\n"));
+    assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
 }

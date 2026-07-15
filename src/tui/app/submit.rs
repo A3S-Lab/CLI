@@ -382,7 +382,11 @@ impl App {
             if let Some(parsed) = panels::flow::parse_flow_subcommand(&description) {
                 match parsed {
                     Ok(panels::flow::FlowSubcommand::Clone(url)) => {
-                        return self.clone_asset_command("workflow", url, flow_dir());
+                        return self.clone_asset_command(
+                            "workflow",
+                            url,
+                            self.asset_directories.flow.clone(),
+                        );
                     }
                     Ok(panels::flow::FlowSubcommand::List(query)) => {
                         return self
@@ -402,7 +406,7 @@ impl App {
                         return None;
                     }
                     Ok(panels::flow::FlowSubcommand::Review(target)) => {
-                        let root = flow_dir();
+                        let root = self.asset_directories.flow.clone();
                         let flows = panels::flow::list_flows(&root);
                         let picked = match target {
                             Some(target) => flows
@@ -480,7 +484,7 @@ impl App {
                 }
                 return None;
             }
-            let dir = flow_dir();
+            let dir = self.asset_directories.flow.clone();
             match panels::flow::scaffold_flow_asset(&description, &dir) {
                 Ok(path) => {
                     self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
@@ -523,7 +527,7 @@ impl App {
                 self.open_agent_panel();
                 return None;
             }
-            let dir = agent_dir();
+            let dir = self.asset_directories.agent.clone();
             match panels::agent::scaffold_agent_package(&description, &dir) {
                 Ok(dev) => {
                     self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
@@ -561,7 +565,7 @@ impl App {
                 self.open_mcp_panel();
                 return None;
             }
-            let dir = mcp_dir();
+            let dir = self.asset_directories.mcp.clone();
             match panels::mcp::scaffold_mcp_project(&description, &dir) {
                 Ok(dev) => {
                     self.agent_dev = None;
@@ -610,7 +614,7 @@ impl App {
                 self.open_skill_panel();
                 return None;
             }
-            let dir = skill_dir();
+            let dir = self.asset_directories.skill.clone();
             match panels::skill::scaffold_skill_asset(&description, &dir) {
                 Ok(dev) => {
                     self.agent_dev = None;
@@ -765,21 +769,8 @@ impl App {
             }
             "/config" => {
                 self.textarea.clear();
-                // Resolve the config; if there's none, generate a starter so the
-                // user always lands in the editor with something to edit.
-                let path = find_config().map(std::path::PathBuf::from).or_else(|| {
-                    let p = default_config_path()?;
-                    let _ = write_template_config(&p);
-                    Some(p)
-                });
-                match path {
-                    Some(p) => self.open_config_in_ide(&p),
-                    None => self.push_line(
-                        &Style::new()
-                            .fg(TN_YELLOW)
-                            .render("  could not locate a home directory for ~/.a3s/config.acl"),
-                    ),
-                }
+                let path = self.config_path.clone();
+                self.open_config_in_ide(&path);
                 return None;
             }
             "/model" => {
@@ -831,7 +822,8 @@ impl App {
                 // Hot-reload: re-discover skill dirs, refresh the UI catalog,
                 // and rebuild the session so the core skill registry and
                 // next Claude/system prompt see the same skills.
-                let dirs = agent_skill_dirs(&self.cwd);
+                let dirs =
+                    agent_skill_dirs_with_configured(&self.cwd, &self.asset_directories.skill);
                 self.skills = load_skills(&dirs);
                 self.skill_count = count_skill_files(&dirs);
                 let profile = self.session_rebuild_profile();
@@ -861,7 +853,7 @@ impl App {
                 self.textarea.clear();
                 // Open immediately ("loading…"); load the file snapshot off the
                 // UI thread, with live session memory as a fallback.
-                let dir = memory_dir();
+                let dir = self.memory_dir.clone();
                 self.memory = Some(MemPanel {
                     entries: Vec::new(),
                     sel: 0,

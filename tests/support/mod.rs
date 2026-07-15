@@ -1,5 +1,14 @@
+#![allow(dead_code)]
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
+use std::time::Duration;
+
+use sha2::{Digest, Sha256};
 
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -12,8 +21,11 @@ impl TempWorkspace {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("a3s-cli-{name}-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap_or_else(|err| {
-            panic!("failed to create temp workspace {}: {err}", root.display())
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| {
+            panic!(
+                "failed to create temp workspace {}: {error}",
+                root.display()
+            )
         });
         Self { root }
     }
@@ -33,28 +45,41 @@ pub fn a3s_bin() -> &'static str {
     env!("CARGO_BIN_EXE_a3s")
 }
 
-pub fn host_supports_standalone_box_asset() -> bool {
-    cfg!(all(target_os = "macos", target_arch = "aarch64"))
-        || cfg!(all(target_os = "linux", target_arch = "aarch64"))
-        || cfg!(all(target_os = "linux", target_arch = "x86_64"))
+pub fn configure_component_env(command: &mut std::process::Command, workspace: &TempWorkspace) {
+    command
+        .env("A3S_DATA_HOME", workspace.path("data"))
+        .env("A3S_STATE_HOME", workspace.path("state"))
+        .env("A3S_CACHE_HOME", workspace.path("cache"))
+        .env("HOME", workspace.path("home"))
+        .env("PATH", "");
+}
+
+pub fn box_release_target() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "macos-arm64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("linux", "x86_64") => "linux-x86_64",
+        _ => return None,
+    })
 }
 
 pub fn make_executable(path: &Path, body: &str) {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap_or_else(|err| {
+        std::fs::create_dir_all(parent).unwrap_or_else(|error| {
             panic!(
-                "failed to create parent directory {}: {err}",
+                "failed to create parent directory {}: {error}",
                 parent.display()
             )
         });
     }
     std::fs::write(path, body)
-        .unwrap_or_else(|err| panic!("failed to write executable {}: {err}", path.display()));
+        .unwrap_or_else(|error| panic!("failed to write executable {}: {error}", path.display()));
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|err| panic!("failed to chmod executable {}: {err}", path.display()));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap_or_else(
+            |error| panic!("failed to chmod executable {}: {error}", path.display()),
+        );
     }
 }
 
@@ -62,75 +87,138 @@ pub fn sh_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
 }
 
-pub fn install_fake_download_tools(
-    tool_dir: &Path,
-    curl_log: &Path,
+pub fn start_fake_box_release(
+    workspace: &TempWorkspace,
+    version: &str,
     installed_args_log: Option<&Path>,
-) {
-    let curl_log = sh_quote(curl_log);
-    make_executable(
-        &tool_dir.join("curl"),
-        &format!(
-            r#"#!/bin/sh
-printf 'curl:%s\n' "$*" >> {curl_log}
-case "$*" in
-  *"/releases/latest"*)
-    printf '%s\n' 'https://github.com/A3S-Lab/Box/releases/tag/v2.5.2'
-    exit 0
-    ;;
-esac
-
-out=''
-prev=''
-for arg in "$@"; do
-  if [ "$prev" = '-o' ] || [ "$prev" = '--output' ]; then
-    out="$arg"
-  fi
-  prev="$arg"
-done
-
-if [ -z "$out" ]; then
-  printf 'missing curl output path\n' >&2
-  exit 2
-fi
-
-printf '#### download progress 100.0%%\n' >&2
-printf 'fake tarball\n' > "$out"
-exit 0
-"#
-        ),
-    );
-
+) -> FakeReleaseServer {
+    let target = box_release_target().expect("test host must support a Box release");
+    let package_name = format!("a3s-box-v{version}-{target}");
+    let package_root = workspace.path("release").join(&package_name);
     let installed_log_line = installed_args_log
         .map(|path| format!("printf '%s\\n' \"$@\" >> {}\n", sh_quote(path)))
         .unwrap_or_default();
-    make_executable(
-        &tool_dir.join("tar"),
-        &format!(
-            r#"#!/bin/sh
-dest=''
-prev=''
-for arg in "$@"; do
-  if [ "$prev" = '-C' ]; then
-    dest="$arg"
-  fi
-  prev="$arg"
-done
-
-if [ -z "$dest" ]; then
-  printf 'missing tar destination\n' >&2
-  exit 2
-fi
-
-/bin/mkdir -p "$dest"
-/bin/cat > "$dest/a3s-box" <<'A3S_BOX_SCRIPT'
-#!/bin/sh
-{installed_log_line}printf 'installed-box:%s\n' "$*"
-exit 0
-A3S_BOX_SCRIPT
-/bin/chmod +x "$dest/a3s-box"
-exit 0
-"#
-        ),
+    let script = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf 'a3s-box {version}\\n'\n  exit 0\nfi\n{installed_log_line}printf 'installed-box:%s\\n' \"$*\"\nexit 0\n"
     );
+    make_executable(&package_root.join("a3s-box"), &script);
+
+    let archive_name = format!("{package_name}.tar.gz");
+    let archive_path = workspace.path(&archive_name);
+    let status = std::process::Command::new("tar")
+        .arg("czf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(workspace.path("release"))
+        .arg(&package_name)
+        .status()
+        .expect("failed to run tar for release fixture");
+    assert!(status.success(), "failed to create release fixture");
+    let archive = std::fs::read(&archive_path).expect("failed to read release fixture");
+    FakeReleaseServer::start(version, &archive_name, archive)
+}
+
+pub struct FakeReleaseServer {
+    api_base: String,
+    requests: Arc<Mutex<Vec<String>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl FakeReleaseServer {
+    fn start(version: &str, asset_name: &str, archive: Vec<u8>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind release server");
+        listener
+            .set_nonblocking(true)
+            .expect("failed to configure release server");
+        let address = listener.local_addr().unwrap();
+        let api_base = format!("http://{address}");
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        let release = serde_json::to_vec(&serde_json::json!({
+            "tag_name": format!("v{version}"),
+            "body": "fixture",
+            "assets": [{
+                "name": asset_name,
+                "browser_download_url": format!("{api_base}/assets/{asset_name}"),
+                "digest": format!("sha256:{digest}")
+            }]
+        }))
+        .unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let asset_path = format!("/assets/{asset_name}");
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        serve_request(stream, &release, &asset_path, &archive, &thread_requests);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            api_base,
+            requests,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn api_base(&self) -> &str {
+        &self.api_base
+    }
+
+    pub fn requests(&self) -> Vec<String> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeReleaseServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn serve_request(
+    mut stream: TcpStream,
+    release: &[u8],
+    asset_path: &str,
+    archive: &[u8],
+    requests: &Arc<Mutex<Vec<String>>>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buffer = [0_u8; 8192];
+    let Ok(size) = stream.read(&mut buffer) else {
+        return;
+    };
+    let request = String::from_utf8_lossy(&buffer[..size]);
+    let path = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/")
+        .to_string();
+    requests.lock().unwrap().push(path.clone());
+    let (status, content_type, body) = if path == asset_path {
+        ("200 OK", "application/gzip", archive)
+    } else if path.ends_with("/repos/A3S-Lab/Box/releases/latest") {
+        ("200 OK", "application/json", release)
+    } else {
+        ("404 Not Found", "text/plain", b"not found".as_slice())
+    };
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
 }

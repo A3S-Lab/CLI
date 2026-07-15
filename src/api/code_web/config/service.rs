@@ -1,14 +1,16 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use a3s_boot::{BootError, Result as BootResult};
-use a3s_code_core::mcp::{McpServerConfig, McpTransportConfig};
-use a3s_code_core::{ModelConfig, ProviderConfig};
-use serde::Serialize;
+use a3s_code_core::{CodeConfig, ModelConfig};
 use serde_json::{json, Value};
 
+use super::categories::{apply_category_patch, category_settings, SettingsCategory};
+use super::persistence::persist_config_sections;
+use super::validation::validate_config;
 use crate::api::code_web::state::CodeWebState;
 use crate::config;
+use crate::model::catalog::{ModelCatalog, ModelEntry};
+use crate::model::route::ModelSource;
 
 pub(in crate::api::code_web) struct ConfigService {
     state: Arc<CodeWebState>,
@@ -19,7 +21,7 @@ impl ConfigService {
         Self { state }
     }
 
-    pub(in crate::api::code_web) fn system_info(&self) -> serde_json::Value {
+    pub(in crate::api::code_web) fn system_info(&self) -> Value {
         json!({
             "appName": "书小安",
             "logoUrl": "/logo.png",
@@ -27,7 +29,7 @@ impl ConfigService {
         })
     }
 
-    pub(in crate::api::code_web) fn assistant_settings(&self) -> serde_json::Value {
+    pub(in crate::api::code_web) fn assistant_settings(&self) -> Value {
         let code_config = self.state.code_config_snapshot();
         json!({
             "name": "书小安",
@@ -37,10 +39,11 @@ impl ConfigService {
         })
     }
 
-    pub(in crate::api::code_web) fn app_settings(&self) -> serde_json::Value {
+    pub(in crate::api::code_web) fn app_settings(&self) -> Value {
         let code_config = self.state.code_config_snapshot();
         let workspace = self.state.default_workspace.display().to_string();
         let storage_path = config::memory_dir().display().to_string();
+        let config_path = self.state.config_path.as_path();
         json!({
             "general": {
                 "appName": "书小安",
@@ -48,6 +51,7 @@ impl ConfigService {
                 "splashScreen": true,
                 "restoreWorkspace": true,
                 "workspacePath": workspace,
+                "localStoragePath": storage_path,
             },
             "appearance": {
                 "theme": "system",
@@ -56,59 +60,67 @@ impl ConfigService {
                 "activityBar": true,
                 "zoomLevel": 1,
             },
-            "editor": {},
-            "llm": Self::llm_settings_from_config(&code_config),
-            "ocr": {
-                "defaultBackend": "",
-                "backends": [],
-            },
-            "security": {
-                "allowTelemetry": false,
-                "checkUpdates": true,
-            },
-            "network": {
-                "connectionTimeout": 30000,
-                "readTimeout": 30000,
-                "proxyPool": [],
-            },
-            "search": {
-                "enabledEngines": ["ddg"],
-                "language": "zh-CN",
-                "safesearch": "moderate",
-                "timeout": 10,
-                "limit": 8,
-            },
-            "storage": {
-                "defaultProvider": "local",
-                "localStoragePath": storage_path,
-            },
+            "llm": category_settings(SettingsCategory::Llm, &code_config, config_path),
+            "agent": category_settings(SettingsCategory::Agent, &code_config, config_path),
+            "context": category_settings(SettingsCategory::Context, &code_config, config_path),
+            "integrations": category_settings(
+                SettingsCategory::Integrations,
+                &code_config,
+                config_path,
+            ),
         })
     }
 
-    pub(in crate::api::code_web) fn config_category(
-        &self,
-        name: &str,
-    ) -> BootResult<serde_json::Value> {
-        let normalized = normalize_category_name(name);
-        if normalized == "llm" || normalized == "ai" {
-            let code_config = self.state.code_config_snapshot();
-            return Ok(Self::llm_settings_from_config(&code_config));
-        }
-
-        let settings = self.app_settings();
-        Ok(settings
-            .get(normalized)
-            .cloned()
-            .unwrap_or_else(|| json!({})))
+    pub(in crate::api::code_web) fn config_category(&self, name: &str) -> BootResult<Value> {
+        let category = SettingsCategory::parse(name)?;
+        let config = self.state.code_config_snapshot();
+        Ok(category_settings(
+            category,
+            &config,
+            &self.state.config_path,
+        ))
     }
 
     pub(in crate::api::code_web) fn update_app_settings(
         &self,
-        patch: Value,
-    ) -> BootResult<serde_json::Value> {
-        if let Some(llm) = patch.get("llm").or_else(|| patch.get("ai")) {
-            self.update_llm_settings(llm)?;
+        request: Value,
+    ) -> BootResult<Value> {
+        let mut config = self
+            .state
+            .code_config
+            .write()
+            .map_err(|_| BootError::Internal("code config lock was poisoned".to_string()))?;
+        let mut candidate = config.clone();
+        let mut sections = Vec::new();
+
+        for (category, keys) in [
+            (SettingsCategory::Llm, &["llm", "ai"][..]),
+            (SettingsCategory::Agent, &["agent", "execution"][..]),
+            (
+                SettingsCategory::Context,
+                &["context", "storage", "memory"][..],
+            ),
+            (
+                SettingsCategory::Integrations,
+                &["integrations", "integration", "tools"][..],
+            ),
+        ] {
+            let Some(patch) = keys.iter().find_map(|key| request.get(*key)).cloned() else {
+                continue;
+            };
+            sections.extend(apply_category_patch(category, &mut candidate, patch)?);
         }
+
+        if sections.is_empty() {
+            return Err(BootError::BadRequest(
+                "settings update did not contain llm, agent, context, or integrations".to_string(),
+            ));
+        }
+
+        ensure_valid(&candidate)?;
+        let persisted = persist_config_sections(&self.state.config_path, &candidate, &sections)?;
+        *config = persisted;
+        drop(config);
         Ok(self.app_settings())
     }
 
@@ -116,15 +128,61 @@ impl ConfigService {
         &self,
         name: &str,
         patch: Value,
-    ) -> BootResult<serde_json::Value> {
-        let normalized = normalize_category_name(name);
-        if normalized == "llm" || normalized == "ai" {
-            self.update_llm_settings(&patch)?;
-        }
-        self.config_category(normalized)
+    ) -> BootResult<Value> {
+        let category = SettingsCategory::parse(name)?;
+        let mut config = self
+            .state
+            .code_config
+            .write()
+            .map_err(|_| BootError::Internal("code config lock was poisoned".to_string()))?;
+        let persisted =
+            update_category_document(&self.state.config_path, &config, category, patch)?;
+        *config = persisted;
+        Ok(category_settings(
+            category,
+            &config,
+            &self.state.config_path,
+        ))
     }
 
-    pub(in crate::api::code_web) fn llm_diagnostics(&self) -> serde_json::Value {
+    pub(in crate::api::code_web) fn validate(&self, request: Value) -> BootResult<Value> {
+        if let Some(content) = request.get("content").and_then(Value::as_str) {
+            return Ok(match CodeConfig::from_acl(content) {
+                Ok(config) => validation_response(&config, validate_config(&config)),
+                Err(error) => json!({
+                    "valid": false,
+                    "issues": [error.to_string()],
+                    "summary": null,
+                }),
+            });
+        }
+
+        let category_name = request
+            .get("category")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                BootError::BadRequest(
+                    "validation requires `content` or a `category` and `patch`".to_string(),
+                )
+            })?;
+        let category = SettingsCategory::parse(category_name)?;
+        let patch = request
+            .get("patch")
+            .or_else(|| request.get("settings"))
+            .cloned()
+            .ok_or_else(|| BootError::BadRequest("validation patch is required".to_string()))?;
+        let mut candidate = self.state.code_config_snapshot();
+        if let Err(error) = apply_category_patch(category, &mut candidate, patch) {
+            return Ok(json!({
+                "valid": false,
+                "issues": [error.to_string()],
+                "summary": config_summary(&candidate),
+            }));
+        }
+        Ok(validation_response(&candidate, validate_config(&candidate)))
+    }
+
+    pub(in crate::api::code_web) fn llm_diagnostics(&self) -> Value {
         let code_config = self.state.code_config_snapshot();
         let default_model = code_config.default_model.clone().unwrap_or_default();
         let default_ref = split_model_ref(&default_model);
@@ -173,14 +231,22 @@ impl ConfigService {
         })
     }
 
-    pub(in crate::api::code_web) fn model_catalog(&self) -> serde_json::Value {
-        model_catalog_from_config(&self.state.code_config_snapshot())
+    pub(in crate::api::code_web) fn model_catalog(&self) -> Value {
+        let config = self.state.code_config_snapshot();
+        let catalog = ModelCatalog::local_with_config(&config);
+        model_catalog_from_entries(&config, &catalog.entries, catalog.warnings)
+    }
+
+    pub(in crate::api::code_web) async fn refresh_model_catalog(&self) -> Value {
+        let config = self.state.code_config_snapshot();
+        let catalog = ModelCatalog::discover_with_config(&config, true).await;
+        model_catalog_from_entries(&config, &catalog.entries, catalog.warnings)
     }
 
     pub(in crate::api::code_web) fn fetch_provider_models(
         &self,
         request: Value,
-    ) -> BootResult<serde_json::Value> {
+    ) -> BootResult<Value> {
         let provider_name = request
             .get("providerName")
             .or_else(|| request.get("provider_name"))
@@ -224,175 +290,78 @@ impl ConfigService {
             "models": models,
         }))
     }
+}
 
-    fn llm_settings_from_config(config: &a3s_code_core::CodeConfig) -> serde_json::Value {
-        json!({
-            "defaultModel": config.default_model.clone().unwrap_or_default(),
-            "providers": config
-                .providers
-                .iter()
-                .map(provider_settings)
-                .collect::<Vec<_>>(),
-            "mcpServers": sanitized_json_value(&config.mcp_servers),
-            "maxToolRounds": config.max_tool_rounds,
-            "maxParallelTasks": config.max_parallel_tasks,
-            "autoParallel": config.auto_parallel,
-            "thinkingBudget": config.thinking_budget,
-            "llmApiTimeoutMs": config.llm_api_timeout_ms,
-        })
-    }
+fn update_category_document(
+    path: &std::path::Path,
+    current: &CodeConfig,
+    category: SettingsCategory,
+    patch: Value,
+) -> BootResult<CodeConfig> {
+    let mut candidate = current.clone();
+    let sections = apply_category_patch(category, &mut candidate, patch)?;
+    ensure_valid(&candidate)?;
+    persist_config_sections(path, &candidate, &sections)
+}
 
-    fn update_llm_settings(&self, value: &Value) -> BootResult<()> {
-        let mut config = self
-            .state
-            .code_config
-            .write()
-            .map_err(|_| BootError::Internal("code config lock was poisoned".to_string()))?;
-
-        if let Some(default_model) = value
-            .get("defaultModel")
-            .or_else(|| value.get("default_model"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-        {
-            config.default_model = (!default_model.is_empty()).then(|| default_model.to_string());
-        }
-
-        if let Some(providers_value) = value.get("providers") {
-            let mut providers: Vec<ProviderConfig> =
-                serde_json::from_value(providers_value.clone()).map_err(|error| {
-                    BootError::BadRequest(format!("invalid llm.providers: {error}"))
-                })?;
-            preserve_provider_secrets(&mut providers, &config.providers);
-            config.providers = providers;
-        }
-
-        if let Some(mcp_servers_value) =
-            value.get("mcpServers").or_else(|| value.get("mcp_servers"))
-        {
-            let mut servers: Vec<McpServerConfig> =
-                serde_json::from_value(mcp_servers_value.clone()).map_err(|error| {
-                    BootError::BadRequest(format!("invalid llm.mcpServers: {error}"))
-                })?;
-            preserve_mcp_secrets(&mut servers, &config.mcp_servers);
-            config.mcp_servers = servers;
-        }
-
-        if let Some(max_tool_rounds) = optional_usize(
-            value
-                .get("maxToolRounds")
-                .or_else(|| value.get("max_tool_rounds")),
-        ) {
-            config.max_tool_rounds = Some(max_tool_rounds);
-        }
-        if let Some(max_parallel_tasks) = optional_usize(
-            value
-                .get("maxParallelTasks")
-                .or_else(|| value.get("max_parallel_tasks")),
-        ) {
-            config.max_parallel_tasks = Some(max_parallel_tasks);
-        }
-        if let Some(thinking_budget) = optional_usize(
-            value
-                .get("thinkingBudget")
-                .or_else(|| value.get("thinking_budget")),
-        ) {
-            config.thinking_budget = Some(thinking_budget);
-        }
-        if let Some(timeout_ms) = optional_u64(
-            value
-                .get("llmApiTimeoutMs")
-                .or_else(|| value.get("llm_api_timeout_ms")),
-        ) {
-            config.llm_api_timeout_ms = Some(timeout_ms);
-        }
-        if let Some(auto_parallel) = optional_bool(
-            value
-                .get("autoParallel")
-                .or_else(|| value.get("auto_parallel")),
-        ) {
-            config.auto_parallel = Some(auto_parallel);
-        }
-
+fn ensure_valid(config: &CodeConfig) -> BootResult<()> {
+    let issues = validate_config(config);
+    if issues.is_empty() {
         Ok(())
+    } else {
+        Err(BootError::BadRequest(format!(
+            "configuration is invalid: {}",
+            issues.join("; ")
+        )))
     }
 }
 
-const REDACTED_SECRET: &str = "[configured]";
-
-fn normalize_category_name(name: &str) -> &str {
-    name.trim()
-}
-
-fn provider_settings(provider: &ProviderConfig) -> serde_json::Value {
+fn validation_response(config: &CodeConfig, issues: Vec<String>) -> Value {
     json!({
-        "name": provider.name,
-        "apiKey": redact_secret(provider.api_key.as_deref()),
-        "baseUrl": provider.base_url,
-        "headers": redact_headers(&provider.headers),
-        "sessionIdHeader": provider.session_id_header,
-        "models": provider
-            .models
-            .iter()
-            .map(model_settings)
-            .collect::<Vec<_>>(),
+        "valid": issues.is_empty(),
+        "issues": issues,
+        "summary": config_summary(config),
     })
 }
 
-fn model_settings(model: &ModelConfig) -> serde_json::Value {
+fn config_summary(config: &CodeConfig) -> Value {
     json!({
-        "id": model.id,
-        "name": display_model_name(model),
-        "family": optional_text(&model.family),
-        "apiKey": redact_secret(model.api_key.as_deref()),
-        "baseUrl": model.base_url,
-        "headers": redact_headers(&model.headers),
-        "sessionIdHeader": model.session_id_header,
-        "attachment": model.attachment,
-        "reasoning": model.reasoning,
-        "toolCall": model.tool_call,
-        "temperature": model.temperature,
-        "releaseDate": model.release_date,
-        "modalities": {
-            "input": model.modalities.input,
-            "output": model.modalities.output,
-        },
-        "cost": {
-            "input": model.cost.input,
-            "output": model.cost.output,
-            "cacheRead": model.cost.cache_read,
-            "cacheWrite": model.cost.cache_write,
-        },
-        "limit": {
-            "context": model.limit.context,
-            "output": model.limit.output,
-        },
+        "defaultModel": config.default_model,
+        "providers": config.providers.len(),
+        "models": config.providers.iter().map(|provider| provider.models.len()).sum::<usize>(),
+        "mcpServers": config.mcp_servers.len(),
     })
 }
 
-fn display_model_name(model: &ModelConfig) -> &str {
-    optional_text(&model.name).unwrap_or(model.id.as_str())
-}
-
-fn model_catalog_from_config(config: &a3s_code_core::CodeConfig) -> serde_json::Value {
-    let items = config
-        .providers
+fn model_catalog_from_entries(
+    config: &CodeConfig,
+    entries: &[ModelEntry],
+    mut warnings: Vec<String>,
+) -> Value {
+    let items = entries
         .iter()
-        .flat_map(|provider| {
-            provider.models.iter().map(move |model| {
-                json!({
-                    "id": format!("{}/{}", provider.name, model.id),
-                    "name": display_model_name(model),
-                    "source": provider.name,
-                    "contextWindow": (model.limit.context > 0).then_some(model.limit.context),
-                    "reasoning": model.reasoning,
-                    "toolCall": model.tool_call,
-                })
+        .map(|entry| {
+            let id = entry.route.to_string();
+            let source = match entry.route.source {
+                ModelSource::Config => entry
+                    .route
+                    .model
+                    .split_once('/')
+                    .map(|(provider, _)| provider)
+                    .unwrap_or("config"),
+                source => source.label(),
+            };
+            json!({
+                "id": id,
+                "name": entry.display_name,
+                "source": source,
+                "contextWindow": entry.context_window,
+                "reasoning": entry.reasoning,
+                "toolCall": entry.tool_call,
             })
         })
         .collect::<Vec<_>>();
     let default_model = config.default_model.clone();
-    let mut warnings = Vec::new();
     if items.is_empty() {
         warnings
             .push("No models are configured. Add a provider and model in Settings.".to_string());
@@ -415,80 +384,17 @@ fn model_catalog_from_config(config: &a3s_code_core::CodeConfig) -> serde_json::
     })
 }
 
-fn optional_text(value: &str) -> Option<&str> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then_some(trimmed)
-}
-
-fn redact_secret(value: Option<&str>) -> Option<&'static str> {
-    value
-        .filter(|secret| has_secret(Some(secret)))
-        .map(|_| REDACTED_SECRET)
+fn display_model_name(model: &ModelConfig) -> &str {
+    let name = model.name.trim();
+    if name.is_empty() {
+        model.id.as_str()
+    } else {
+        name
+    }
 }
 
 fn has_secret(value: Option<&str>) -> bool {
     value.is_some_and(|secret| !secret.trim().is_empty())
-}
-
-fn redact_headers(headers: &HashMap<String, String>) -> HashMap<String, String> {
-    headers
-        .iter()
-        .map(|(key, value)| {
-            if is_sensitive_key(key) && !value.trim().is_empty() {
-                (key.clone(), REDACTED_SECRET.to_string())
-            } else {
-                (key.clone(), value.clone())
-            }
-        })
-        .collect()
-}
-
-fn sanitized_json_value<T: Serialize>(value: &T) -> serde_json::Value {
-    let mut value = serde_json::to_value(value).unwrap_or_else(|_| json!([]));
-    redact_secrets_in_value(&mut value);
-    value
-}
-
-fn redact_secrets_in_value(value: &mut Value) {
-    match value {
-        Value::Object(object) => {
-            for (key, child) in object.iter_mut() {
-                if is_sensitive_key(key) {
-                    if child.as_str().is_some_and(|text| !text.trim().is_empty()) {
-                        *child = Value::String(REDACTED_SECRET.to_string());
-                    } else {
-                        redact_secrets_in_value(child);
-                    }
-                } else {
-                    redact_secrets_in_value(child);
-                }
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                redact_secrets_in_value(child);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_lowercase())
-        .collect::<String>();
-    normalized.contains("apikey")
-        || normalized.contains("authorization")
-        || normalized.contains("accesstoken")
-        || normalized.contains("refreshtoken")
-        || normalized.contains("clientsecret")
-        || normalized.contains("secretkey")
-        || normalized == "token"
-        || normalized == "password"
-        || normalized.ends_with("token")
-        || normalized.ends_with("secret")
 }
 
 fn split_model_ref(value: &str) -> Option<(String, String)> {
@@ -502,118 +408,18 @@ fn split_model_ref(value: &str) -> Option<(String, String)> {
     }
 }
 
-fn optional_usize(value: Option<&Value>) -> Option<usize> {
-    match value {
-        Some(Value::Number(number)) => number.as_u64().map(|value| value as usize),
-        Some(Value::String(text)) => text.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-fn optional_u64(value: Option<&Value>) -> Option<u64> {
-    match value {
-        Some(Value::Number(number)) => number.as_u64(),
-        Some(Value::String(text)) => text.trim().parse().ok(),
-        _ => None,
-    }
-}
-
-fn optional_bool(value: Option<&Value>) -> Option<bool> {
-    match value {
-        Some(Value::Bool(value)) => Some(*value),
-        Some(Value::String(text)) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "yes" | "1" => Some(true),
-            "false" | "no" | "0" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn preserve_provider_secrets(providers: &mut [ProviderConfig], existing: &[ProviderConfig]) {
-    for provider in providers {
-        let Some(previous) = existing.iter().find(|item| item.name == provider.name) else {
-            continue;
-        };
-        preserve_secret(&mut provider.api_key, previous.api_key.as_deref());
-        preserve_headers(&mut provider.headers, &previous.headers);
-        for model in &mut provider.models {
-            let Some(previous_model) = previous.models.iter().find(|item| item.id == model.id)
-            else {
-                continue;
-            };
-            preserve_secret(&mut model.api_key, previous_model.api_key.as_deref());
-            preserve_headers(&mut model.headers, &previous_model.headers);
-        }
-    }
-}
-
-fn preserve_mcp_secrets(servers: &mut [McpServerConfig], existing: &[McpServerConfig]) {
-    for server in servers {
-        let Some(previous) = existing.iter().find(|item| item.name == server.name) else {
-            continue;
-        };
-        preserve_headers(&mut server.env, &previous.env);
-        preserve_mcp_transport_secrets(&mut server.transport, &previous.transport);
-    }
-}
-
-fn preserve_mcp_transport_secrets(
-    transport: &mut McpTransportConfig,
-    previous: &McpTransportConfig,
-) {
-    match (transport, previous) {
-        (
-            McpTransportConfig::Http { headers, .. },
-            McpTransportConfig::Http {
-                headers: previous_headers,
-                ..
-            },
-        )
-        | (
-            McpTransportConfig::StreamableHttp { headers, .. },
-            McpTransportConfig::StreamableHttp {
-                headers: previous_headers,
-                ..
-            },
-        ) => preserve_headers(headers, previous_headers),
-        _ => {}
-    }
-}
-
-fn preserve_secret(value: &mut Option<String>, previous: Option<&str>) {
-    let should_restore = match value.as_deref().map(str::trim) {
-        None | Some("") => previous.is_some_and(|text| !text.trim().is_empty()),
-        Some(REDACTED_SECRET) => true,
-        Some(_) => false,
-    };
-    if should_restore {
-        *value = previous.map(str::to_string);
-    }
-}
-
-fn preserve_headers(headers: &mut HashMap<String, String>, previous: &HashMap<String, String>) {
-    for (key, previous_value) in previous {
-        match headers.get_mut(key) {
-            Some(value) if value.trim() == REDACTED_SECRET => {
-                *value = previous_value.clone();
-            }
-            Some(_) => {}
-            None if !previous_value.trim().is_empty() => {
-                headers.insert(key.clone(), previous_value.clone());
-            }
-            None => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::model_catalog_from_config;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::model::route::ModelRoute;
 
     #[test]
     fn model_catalog_uses_qualified_ids_and_provider_sources() {
-        let config: a3s_code_core::CodeConfig = serde_json::from_value(serde_json::json!({
+        let config: CodeConfig = serde_json::from_value(serde_json::json!({
             "defaultModel": "openai/gpt-test",
             "providers": [{
                 "name": "openai",
@@ -628,12 +434,149 @@ mod tests {
         }))
         .expect("valid config");
 
-        let catalog = model_catalog_from_config(&config);
+        let entries = ModelCatalog::configured(&config).entries;
+        let catalog = model_catalog_from_entries(&config, &entries, Vec::new());
         assert_eq!(catalog["defaultModel"], "openai/gpt-test");
         assert_eq!(catalog["items"][0]["id"], "openai/gpt-test");
         assert_eq!(catalog["items"][0]["source"], "openai");
         assert_eq!(catalog["items"][0]["contextWindow"], 128000);
         assert_eq!(catalog["items"][0]["reasoning"], true);
         assert_eq!(catalog["warnings"].as_array().map(Vec::len), Some(0));
+    }
+
+    #[test]
+    fn model_catalog_merges_signed_in_account_models() {
+        let config: CodeConfig = serde_json::from_value(serde_json::json!({
+            "defaultModel": "openai/gpt-test",
+            "providers": [{
+                "name": "openai",
+                "models": [{ "id": "gpt-test", "name": "GPT Test" }]
+            }]
+        }))
+        .expect("valid config");
+        let mut entries = ModelCatalog::configured(&config).entries;
+        entries.extend([
+            ModelEntry {
+                route: ModelRoute::new(ModelSource::Codex, "gpt-5.6-sol").unwrap(),
+                display_name: "gpt-5.6-sol".to_string(),
+                context_window: Some(200_000),
+                reasoning: true,
+                tool_call: true,
+            },
+            ModelEntry {
+                route: ModelRoute::new(ModelSource::CodeBuddy, "glm-5.1").unwrap(),
+                display_name: "glm-5.1".to_string(),
+                context_window: None,
+                reasoning: true,
+                tool_call: true,
+            },
+        ]);
+
+        let catalog = model_catalog_from_entries(&config, &entries, Vec::new());
+
+        assert_eq!(catalog["defaultModel"], "openai/gpt-test");
+        assert_eq!(catalog["items"].as_array().map(Vec::len), Some(3));
+        assert_eq!(catalog["items"][1]["id"], "codex/gpt-5.6-sol");
+        assert_eq!(catalog["items"][1]["source"], "Codex");
+        assert_eq!(catalog["items"][1]["contextWindow"], 200_000);
+        assert_eq!(catalog["items"][1]["reasoning"], true);
+        assert_eq!(catalog["items"][1]["toolCall"], true);
+        assert_eq!(catalog["items"][2]["id"], "workbuddy/glm-5.1");
+        assert_eq!(catalog["items"][2]["source"], "WorkBuddy");
+    }
+
+    #[test]
+    fn category_update_persists_selected_section_and_preserves_unknown_acl() {
+        let directory = temp_directory("category-update");
+        let path = directory.join("config.acl");
+        let source = r#"# keep this comment
+default_model = "openai/model-a"
+
+providers "openai" {
+  models "model-a" { name = "Model A" }
+  models "model-b" { name = "Model B" }
+}
+
+future_feature { enabled = true }
+"#;
+        fs::write(&path, source).expect("write initial config");
+        let current = CodeConfig::from_acl(source).expect("parse initial config");
+
+        let updated = update_category_document(
+            &path,
+            &current,
+            SettingsCategory::Llm,
+            json!({ "defaultModel": "openai/model-b" }),
+        )
+        .expect("persist category");
+
+        let persisted = fs::read_to_string(&path).expect("read persisted config");
+        assert_eq!(updated.default_model.as_deref(), Some("openai/model-b"));
+        assert!(persisted.contains("# keep this comment"));
+        assert!(persisted.contains("future_feature { enabled = true }"));
+        assert!(persisted.contains("default_model = \"openai/model-b\""));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn validation_failure_never_mutates_memory_or_disk() {
+        let directory = temp_directory("validation-failure");
+        let path = directory.join("config.acl");
+        let source = r#"default_model = "openai/model-a"
+providers "openai" { models "model-a" { name = "Model A" } }
+"#;
+        fs::write(&path, source).expect("write initial config");
+        let current = CodeConfig::from_acl(source).expect("parse initial config");
+
+        let error = update_category_document(
+            &path,
+            &current,
+            SettingsCategory::Llm,
+            json!({ "defaultModel": "missing/model" }),
+        )
+        .expect_err("invalid model must fail");
+
+        assert!(error.to_string().contains("default model"));
+        assert_eq!(current.default_model.as_deref(), Some("openai/model-a"));
+        assert_eq!(fs::read_to_string(&path).expect("unchanged config"), source);
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn write_failure_never_mutates_memory() {
+        let directory = temp_directory("write-failure");
+        let path = directory.join("config.acl");
+        fs::create_dir(&path).expect("make config path a directory");
+        let source = r#"default_model = "openai/model-a"
+providers "openai" {
+  models "model-a" { name = "Model A" }
+  models "model-b" { name = "Model B" }
+}
+"#;
+        let current = CodeConfig::from_acl(source).expect("parse initial config");
+
+        update_category_document(
+            &path,
+            &current,
+            SettingsCategory::Llm,
+            json!({ "defaultModel": "openai/model-b" }),
+        )
+        .expect_err("directory config path must fail");
+
+        assert_eq!(current.default_model.as_deref(), Some("openai/model-a"));
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    fn temp_directory(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "a3s-code-web-config-{name}-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create temp directory");
+        directory
     }
 }

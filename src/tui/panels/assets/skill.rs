@@ -1511,7 +1511,7 @@ impl App {
     }
 
     pub(crate) fn open_skill_panel(&mut self) {
-        let root = skill_dir();
+        let root = self.asset_directories.skill.clone();
         let skills = list_skill_assets(&root);
         if skills.is_empty() {
             self.pending_skill_subcommand = None;

@@ -1,6 +1,8 @@
 use a3s_code_core::{AgentSession, TokenUsage};
 use serde::{Deserialize, Serialize};
 
+use super::session_store::CodeWebSessionMetadata;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::api::code_web) struct CreateSessionRequest {
@@ -42,6 +44,13 @@ pub(in crate::api::code_web) struct ShellSessionRequest {
     pub command: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::api::code_web) struct ConfirmToolUseRequest {
+    pub approved: bool,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::api::code_web) struct HealthResponse {
@@ -74,8 +83,7 @@ impl SessionResponse {
         model: Option<String>,
         follow_default_model: bool,
         permission_mode: String,
-        title: Option<String>,
-        agent_id: Option<String>,
+        metadata: &CodeWebSessionMetadata,
     ) -> Self {
         let workspace = session.workspace().display().to_string();
         Self {
@@ -86,9 +94,18 @@ impl SessionResponse {
             follow_default_model,
             permission_mode,
             state: "connected".to_string(),
-            title,
-            agent_id: Some(agent_id.unwrap_or_else(|| "default".to_string())),
-            created_at: chrono::Utc::now().timestamp_millis(),
+            title: metadata.title.clone(),
+            agent_id: Some(
+                metadata
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| "default".to_string()),
+            ),
+            created_at: if metadata.created_at > 0 {
+                metadata.created_at
+            } else {
+                chrono::Utc::now().timestamp_millis()
+            },
         }
     }
 }

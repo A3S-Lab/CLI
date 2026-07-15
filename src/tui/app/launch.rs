@@ -1,6 +1,7 @@
 //! TUI session construction, resume, and terminal launch flow.
 
 use super::*;
+use crate::cli::context::InvocationContext;
 
 fn push_resumed_text_entry(transcript: &mut Transcript, role: &str, pending: &mut String) {
     if pending.trim().is_empty() {
@@ -97,36 +98,49 @@ pub(super) fn resumed_transcript_entries(history: &[Message]) -> Vec<TranscriptE
     transcript.into_entries()
 }
 
-pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
+/// Launch Code using the directory, configuration, and platform paths resolved
+/// once at the typed CLI boundary. This function never changes process CWD.
+pub(crate) async fn run_in(
+    args: Vec<String>,
+    workspace: &Path,
+    context: &InvocationContext,
+) -> anyhow::Result<()> {
     // `a3s code resume [id]` continues a saved session (newest if no id given);
     // otherwise a fresh id. Existence is verified against the store below.
     let resuming = args.first().map(String::as_str) == Some("resume");
     let explicit_id = if resuming { args.get(1).cloned() } else { None };
     let mut session_id = explicit_id.clone().unwrap_or_else(new_session_id);
-    // First launch: if there's no config, generate a starter template at
-    // ~/.a3s/config.acl and open it in the built-in IDE (see `created_config`).
-    let (config_path, created_config) = match find_config() {
-        Some(p) => (p, false),
-        None => {
-            let p = default_config_path()
-                .ok_or_else(|| anyhow::anyhow!("no HOME directory found for ~/.a3s/config.acl"))?;
-            write_template_config(&p)
-                .map_err(|e| anyhow::anyhow!("failed to write starter config {p:?}: {e}"))?;
-            (p.to_string_lossy().into_owned(), true)
-        }
+    // First launch creates a user starter only when no explicit, workspace, or
+    // user ACL layer exists.
+    let created_config = if context.explicit_config.is_none()
+        && crate::commands::config_resolver::workspace_config_path(workspace).is_none()
+        && context
+            .user_config_path()
+            .is_none_or(|path| !path.is_file())
+    {
+        let path = context
+            .user_config_path()
+            .ok_or_else(|| anyhow::anyhow!("no HOME directory found for ~/.a3s/config.acl"))?;
+        write_template_config(&path)
+            .map_err(|error| anyhow::anyhow!("failed to write starter config {path:?}: {error}"))?;
+        true
+    } else {
+        false
     };
+    let runtime_configuration =
+        crate::commands::config::resolve_code_runtime_configuration(context)?;
+    let config_path = runtime_configuration.config_path;
+    let code_config = runtime_configuration.config;
+    let asset_directories = runtime_configuration.asset_directories;
+    let memory_dir = runtime_configuration.memory_dir;
     let agent = Arc::new(
-        Agent::new(config_path.clone())
+        Agent::from_config(code_config.clone())
             .await
-            .map_err(|e| anyhow::anyhow!("failed to load agent from {config_path}: {e}"))?,
+            .map_err(|error| anyhow::anyhow!("failed to load effective agent config: {error}"))?,
     );
-    let workspace = std::env::current_dir()?.to_string_lossy().to_string();
+    let workspace = workspace.to_string_lossy().into_owned();
 
     // Configured "provider/model" ids (+ context windows) + the default model.
-    let code_config = a3s_code_core::config::CodeConfig::from_file(std::path::Path::new(
-        &config_path,
-    ))
-    .map_err(|error| anyhow::anyhow!("failed to load config from {config_path}: {error}"))?;
     let mut models: Vec<String> = Vec::new();
     let mut model_ctx: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for (p, m) in code_config.list_models() {
@@ -212,7 +226,7 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
         .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
     // a3s's own (they share the markdown + YAML-frontmatter format).
-    let mut claude_dirs = agent_skill_dirs(&workspace);
+    let mut claude_dirs = agent_skill_dirs_with_configured(&workspace, &asset_directories.skill);
     // Restore the persisted OS login *before* building the session, so its
     // login-gated built-in `a3s-os-capabilities` skill is materialized and
     // loaded from the first turn (only when signed in).
@@ -282,6 +296,7 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
     let initial_files = initial_manifest.file_paths();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
     let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
+    let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let session = match agent
         .resume_session_async(
             session_id.as_str(),
@@ -297,8 +312,8 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
                     .with_auto_save(true)
                     .with_auto_compact(true)
                     .with_max_context_tokens(context_limit as usize)
-                    .with_auto_compact_threshold(AUTO_COMPACT_THRESHOLD as f32)
-                    .with_file_memory(memory_dir())
+                    .with_auto_compact_threshold(auto_compact_threshold as f32)
+                    .with_file_memory(memory_dir.clone())
                     .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                     .with_max_tool_rounds(initial_budget.max_tool_rounds)
                     .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -339,8 +354,8 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
                             .with_auto_save(true)
                             .with_auto_compact(true)
                             .with_max_context_tokens(context_limit as usize)
-                            .with_auto_compact_threshold(AUTO_COMPACT_THRESHOLD as f32)
-                            .with_file_memory(memory_dir())
+                            .with_auto_compact_threshold(auto_compact_threshold as f32)
+                            .with_file_memory(memory_dir.clone())
                             .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                             .with_max_tool_rounds(initial_budget.max_tool_rounds)
                             .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -418,6 +433,7 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         return run_smoke(
             session,
+            Path::new(&workspace),
             os_session.is_some(),
             deep_research_report_tool_gate,
         )
@@ -491,6 +507,10 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
         account_model_errors: HashMap::new(),
         llm_override: launch_llm_override,
         code_config: Arc::new(code_config),
+        asset_directories,
+        config_path: config_path.clone(),
+        memory_dir,
+        auto_compact_threshold,
         os_config,
         os_session,
         os_refreshing: false,
@@ -668,7 +688,7 @@ pub(crate) async fn run(args: Vec<String>) -> anyhow::Result<()> {
              provider apiKey/baseUrl + model, Ctrl+S to save, Esc to close, then restart \
              `a3s code` to load it.",
         )));
-        app.open_config_in_ide(std::path::Path::new(&config_path));
+        app.open_config_in_ide(&config_path);
         app.rebuild_viewport();
     }
 

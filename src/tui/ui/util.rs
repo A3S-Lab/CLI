@@ -185,7 +185,7 @@ pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
     }
 
     let prefix = Style::new().fg(ACCENT).render(&format!(
-        "  ✦ Compacting context… {} / {} ",
+        "✦ Compacting context… {} / {} ",
         fmt_elapsed(elapsed),
         fmt_elapsed(crate::compact::MANUAL_COMPACT_TIMEOUT),
     ));
@@ -539,6 +539,7 @@ mod tests {
         let rendered = compact_progress_line(Duration::from_secs(15), 80);
         let plain = strip_ansi(&rendered);
 
+        assert!(plain.starts_with("✦ Compacting context"), "{plain}");
         assert!(plain.contains("Compacting context"), "{plain}");
         assert!(plain.contains("15s / 1m 00s"), "{plain}");
         assert!(!plain.contains('%'), "{plain}");

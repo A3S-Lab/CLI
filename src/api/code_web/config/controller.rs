@@ -64,6 +64,14 @@ impl ConfigController {
         self.service.update_config_category(&name, request)
     }
 
+    #[post("/validate")]
+    async fn validate_config(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.validate(request)
+    }
+
     #[get("/diagnostics/llm")]
     async fn llm_diagnostics(&self) -> BootResult<serde_json::Value> {
         Ok(self.service.llm_diagnostics())
@@ -72,6 +80,11 @@ impl ConfigController {
     #[get("/llm/models")]
     async fn model_catalog(&self) -> BootResult<serde_json::Value> {
         Ok(self.service.model_catalog())
+    }
+
+    #[get("/llm/models/refresh")]
+    async fn refresh_model_catalog(&self) -> BootResult<serde_json::Value> {
+        Ok(self.service.refresh_model_catalog().await)
     }
 
     #[post("/llm/providers/models/fetch")]

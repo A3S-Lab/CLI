@@ -324,7 +324,7 @@ impl RuntimeTool {
             }
         });
         let results: Vec<Value> = futures::future::join_all(fetches).await;
-        emit_runtime_subagent_ends(ctx, &invocation_ids, &results);
+        emit_runtime_subagent_ends(ctx, &batch_id, &invocation_ids, &results);
 
         let mut summary = json!({
             "batchId": batch_id,
@@ -409,7 +409,12 @@ fn emit_runtime_subagent_starts(
     }
 }
 
-fn emit_runtime_subagent_ends(ctx: &ToolContext, invocation_ids: &[String], results: &[Value]) {
+fn emit_runtime_subagent_ends(
+    ctx: &ToolContext,
+    batch_id: &str,
+    invocation_ids: &[String],
+    results: &[Value],
+) {
     let Some(tx) = &ctx.agent_event_tx else {
         return;
     };
@@ -430,7 +435,7 @@ fn emit_runtime_subagent_ends(ctx: &ToolContext, invocation_ids: &[String], resu
         let output = value_to_compact_string(&output);
         let _ = tx.send(AgentEvent::SubagentEnd {
             task_id: runtime_subagent_task_id(invocation_id),
-            session_id: format!("runtime-invocation-{invocation_id}"),
+            session_id: format!("runtime-{batch_id}-{idx}"),
             agent: "runtime".to_string(),
             output,
             success,
@@ -904,22 +909,32 @@ mod tests {
             match event {
                 AgentEvent::SubagentStart {
                     task_id,
+                    session_id,
                     agent,
                     description,
                     ..
-                } => starts.push((task_id, agent, description)),
-                AgentEvent::SubagentEnd { task_id, agent, .. } => ends.push((task_id, agent)),
+                } => starts.push((task_id, session_id, agent, description)),
+                AgentEvent::SubagentEnd {
+                    task_id,
+                    session_id,
+                    agent,
+                    ..
+                } => ends.push((task_id, session_id, agent)),
                 _ => {}
             }
         }
         assert_eq!(starts.len(), 2, "{starts:?}");
         assert_eq!(ends.len(), 2, "{ends:?}");
         assert_eq!(starts[0].0, "runtime-inv-1");
-        assert_eq!(starts[0].1, "runtime");
-        assert_eq!(starts[0].2, "a");
+        assert_eq!(starts[0].1, "runtime-batch-1-0");
+        assert_eq!(starts[0].2, "runtime");
+        assert_eq!(starts[0].3, "a");
         assert_eq!(starts[1].0, "runtime-inv-2");
+        assert_eq!(starts[1].1, "runtime-batch-1-1");
         assert_eq!(ends[0].0, "runtime-inv-1");
+        assert_eq!(ends[0].1, starts[0].1);
         assert_eq!(ends[1].0, "runtime-inv-2");
+        assert_eq!(ends[1].1, starts[1].1);
     }
 
     #[tokio::test]

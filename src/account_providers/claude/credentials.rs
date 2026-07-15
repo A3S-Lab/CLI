@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
-#[cfg(target_os = "macos")]
-use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) struct ClaudeCredentials {
@@ -150,8 +148,7 @@ pub(crate) fn has_claude_login() -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        static KEYCHAIN_LOGIN: OnceLock<bool> = OnceLock::new();
-        if *KEYCHAIN_LOGIN.get_or_init(|| ClaudeCredentials::from_macos_keychain().is_ok()) {
+        if ClaudeCredentials::from_macos_keychain().is_ok() {
             return true;
         }
     }

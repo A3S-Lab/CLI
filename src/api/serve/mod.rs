@@ -3,42 +3,71 @@ use std::sync::Arc;
 
 use a3s_boot::{BootApplication, BootError};
 use a3s_code_core::{Agent, CodeConfig};
+use anyhow::Context;
+use axum::routing::{get, post};
+use axum::Json;
+use tokio::sync::Notify;
 
 use crate::config;
 
 use self::api_gateway::ApiGateway;
 use self::options::ServeOptions;
-use super::code_web::{CodeWebModule, CodeWebState};
+use super::code_web::{CodeWebModule, CodeWebSessionRepository, CodeWebState, KernelService};
 use super::web::{api_only_fallback, find_default_web_dir, serve_static};
 
 mod api_gateway;
+mod background;
 mod options;
+
+pub(crate) use background::{
+    open as open_instance, read_log_tail, status as instance_status, stop as stop_instance,
+    WebInstanceRecord, WebInstanceStatus,
+};
 
 const API_PREFIX: &str = "/api";
 const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
+pub(crate) enum ServeOutcome {
+    Help,
+    ForegroundStopped,
+    Detached(WebInstanceRecord),
+}
+
 pub(crate) fn usage_text() -> String {
     [
-        "a3s code serve".to_string(),
+        "a3s web".to_string(),
         String::new(),
         "usage:".to_string(),
-        "  a3s code serve [--host 127.0.0.1] [--port 29653]".to_string(),
-        "                 [--workspace <path>] [--web-dir <path>] [--api-only]".to_string(),
+        "  a3s web [-d] [--host 127.0.0.1] [--port 29653]".to_string(),
+        "          [--workspace <path>] [--config <path>] [--web-dir <path>] [--api-only]"
+            .to_string(),
         String::new(),
         "Starts the local Boot-backed A3S Code API and serves the Shu Xiao'an web UI.".to_string(),
+        "Use -d to start in the background; the command prints its PID, URL, and log path."
+            .to_string(),
     ]
     .join("\n")
         + "\n"
 }
 
-pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
+pub(crate) async fn run(args: &[String]) -> anyhow::Result<ServeOutcome> {
     let options = ServeOptions::parse(args)?;
     if options.help {
         print!("{}", usage_text());
-        return Ok(());
+        return Ok(ServeOutcome::Help);
+    }
+    if options.background {
+        return Ok(ServeOutcome::Detached(
+            background::start(args, &options).await?,
+        ));
     }
 
-    let config_path = ensure_config_path()?;
+    run_foreground(options).await?;
+    Ok(ServeOutcome::ForegroundStopped)
+}
+
+async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
+    let config_path = ensure_config_path(&options)?;
     let code_config = CodeConfig::from_file(Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("failed to parse {config_path}: {e}"))?;
     let agent = Arc::new(
@@ -46,12 +75,22 @@ pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("failed to load A3S Code from {config_path}: {e}"))?,
     );
+    let session_repository = Arc::new(
+        CodeWebSessionRepository::open_default()
+            .await
+            .context("failed to open A3S Code Web session store")?,
+    );
     let state = Arc::new(CodeWebState::new(
         agent,
         PathBuf::from(&config_path),
         options.workspace.clone(),
         code_config,
+        session_repository,
     ));
+    let restored_sessions = KernelService::new(Arc::clone(&state))
+        .restore_persisted_sessions()
+        .await
+        .map_err(boot_to_anyhow)?;
 
     let app = BootApplication::builder()
         .global_prefix(API_PREFIX)
@@ -81,27 +120,74 @@ pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
         })
     };
 
+    let shutdown = Arc::new(Notify::new());
+    let instance_nonce = std::env::var(background::INSTANCE_NONCE_ENV).ok();
+    let router = if let Some(nonce) = instance_nonce.as_deref() {
+        let status_path = format!("/.a3s/web/{nonce}/status");
+        let stop_path = format!("/.a3s/web/{nonce}/stop");
+        let status_nonce = nonce.to_string();
+        let stop_signal = Arc::clone(&shutdown);
+        router
+            .route(
+                &status_path,
+                get(move || {
+                    let nonce = status_nonce.clone();
+                    async move {
+                        Json(serde_json::json!({
+                            "schemaVersion": 1,
+                            "pid": std::process::id(),
+                            "nonce": nonce,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                &stop_path,
+                post(move || {
+                    let signal = Arc::clone(&stop_signal);
+                    async move {
+                        signal.notify_one();
+                        Json(serde_json::json!({"ok": true}))
+                    }
+                }),
+            )
+    } else {
+        router
+    };
+
     let listener = tokio::net::TcpListener::bind(options.addr)
         .await
         .map_err(|e| anyhow::anyhow!("failed to bind {}: {e}", options.addr))?;
     let actual_addr = listener.local_addr()?;
+    background::notify_ready(actual_addr)?;
     println!("A3S Code API:  http://{actual_addr}/api/health");
     if options.api_only {
-        println!("A3S Code Web:  disabled (--api-only)");
+        println!("A3S Web:       disabled (--api-only)");
     } else {
-        println!("A3S Code Web:  http://{actual_addr}/");
+        println!("A3S Web:       http://{actual_addr}/");
     }
     println!("Workspace:     {}", options.workspace.display());
     println!("Config:        {config_path}");
+    println!("Tasks restored: {restored_sessions}");
     println!("Press Ctrl+C to stop.");
 
+    let shutdown_signal = Arc::clone(&shutdown);
     let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = shutdown_signal.notified() => {}
+            }
         })
         .await
         .map_err(|e| anyhow::anyhow!("server failed: {e}"));
     let shutdown_result = app.shutdown().await.map_err(boot_to_anyhow);
+    if let (Some(path), Some(nonce)) = (
+        std::env::var_os(background::INSTANCE_FILE_ENV),
+        instance_nonce.as_deref(),
+    ) {
+        background::remove_instance_if_owned(Path::new(&path), nonce);
+    }
 
     match (serve_result, shutdown_result) {
         (Err(error), _) => Err(error),
@@ -110,15 +196,21 @@ pub(crate) async fn run(args: &[String]) -> anyhow::Result<()> {
     }
 }
 
-fn ensure_config_path() -> anyhow::Result<String> {
-    if let Some(path) = config::find_config() {
-        return Ok(path);
+fn ensure_config_path(options: &ServeOptions) -> anyhow::Result<String> {
+    if let Some(path) = options.config_path.as_ref() {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    for directory in options.workspace.ancestors() {
+        let candidate = directory.join(".a3s/config.acl");
+        if candidate.is_file() {
+            return Ok(candidate.to_string_lossy().into_owned());
+        }
     }
 
     let path = config::default_config_path().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
     config::write_template_config(&path)?;
     anyhow::bail!(
-        "created starter config at {}; fill in a provider/model, then rerun `a3s code serve`",
+        "created starter config at {}; fill in a provider/model, then rerun `a3s web`",
         path.display()
     );
 }

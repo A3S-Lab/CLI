@@ -13,3 +13,4 @@ mod sleep;
 mod sleep_controller;
 
 pub(super) use module::KernelModule;
+pub(in crate::api) use service::KernelService;

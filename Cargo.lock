@@ -6,16 +6,20 @@ version = 4
 name = "a3s"
 version = "0.8.2"
 dependencies = [
+ "a3s-acl 0.2.1",
  "a3s-boot",
  "a3s-code-core",
  "a3s-memory",
  "a3s-search",
  "a3s-tui",
+ "a3s-updater 0.3.0",
  "anyhow",
  "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "clap",
+ "clap_complete",
  "comrak",
  "futures",
  "http-body-util",
@@ -34,8 +38,6 @@ dependencies = [
 [[package]]
 name = "a3s-acl"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35b83be97f61abdd33096446eae063f9d65d98e84c446560b59d3c744194287e"
 
 [[package]]
 name = "a3s-acl"
@@ -191,11 +193,11 @@ dependencies = [
 name = "a3s-search"
 version = "1.4.1"
 dependencies = [
- "a3s-acl 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "a3s-updater",
+ "a3s-acl 0.2.1",
+ "a3s-updater 0.2.0",
+ "a3s-use-browser",
  "anyhow",
  "async-trait",
- "chromiumoxide",
  "clap",
  "dom_smoothie",
  "futures",
@@ -210,13 +212,13 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
- "which 7.0.3",
- "zip 2.4.2",
 ]
 
 [[package]]
 name = "a3s-tui"
 version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f3c361ca79b367aeb2e72af03ea8c49f28a6027579553a187e46219f618a5f3"
 dependencies = [
  "comrak",
  "crossterm",
@@ -242,6 +244,53 @@ dependencies = [
  "serde_json",
  "tar",
  "tokio",
+]
+
+[[package]]
+name = "a3s-updater"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "reqwest 0.12.28",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "a3s-use-browser"
+version = "0.1.0"
+source = "git+https://github.com/A3S-Lab/Use?rev=0ef4694172c09656d8a7c8f049dbaa4b05b7e274#0ef4694172c09656d8a7c8f049dbaa4b05b7e274"
+dependencies = [
+ "a3s-use-core",
+ "async-trait",
+ "chromiumoxide",
+ "fs2",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "url",
+ "which 7.0.3",
+ "zip 2.4.2",
+]
+
+[[package]]
+name = "a3s-use-core"
+version = "0.1.0"
+source = "git+https://github.com/A3S-Lab/Use?rev=0ef4694172c09656d8a7c8f049dbaa4b05b7e274#0ef4694172c09656d8a7c8f049dbaa4b05b7e274"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -961,6 +1010,15 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "db8b397918185f0161ff3d6fcaa9e4bfc09b8367caf6e1d4a2848e5477ed027b"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -4712,6 +4770,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]
@@ -5521,3 +5580,7 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "a3s-tui"
+version = "0.1.9"

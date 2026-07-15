@@ -179,7 +179,7 @@ fn should_fetch_account_models(
         && !failed
 }
 
-pub(crate) async fn rebuild_agent_session(
+pub(in crate::tui) async fn rebuild_agent_session(
     agent: Arc<Agent>,
     workspace: String,
     session_id: String,
@@ -742,8 +742,8 @@ impl App {
             // Auto-compact against this model's real context window.
             .with_auto_compact(true)
             .with_max_context_tokens(profile.context_limit as usize)
-            .with_auto_compact_threshold(AUTO_COMPACT_THRESHOLD as f32)
-            .with_file_memory(memory_dir())
+            .with_auto_compact_threshold(self.auto_compact_threshold as f32)
+            .with_file_memory(self.memory_dir.clone())
             // The numeric cap remains available to explicit `parallel_task`
             // calls at every effort. Runtime-driven fan-out is a separate
             // ultracode orchestration capability, not a Codex reasoning level.
