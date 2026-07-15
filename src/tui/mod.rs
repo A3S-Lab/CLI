@@ -274,6 +274,7 @@ const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 90 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
+const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const DEEP_RESEARCH_TOOL_COMPLETION_GRACE_MS: u64 = 15_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
 #[allow(dead_code)]
@@ -693,16 +694,23 @@ impl App {
                 abort.abort();
             }
 
+            let close = settle_session_close_for_quit(
+                async move {
+                    session.close().await;
+                },
+                Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
+            );
             match stream_join {
                 Some(stream_join) => {
-                    let close = session.close();
                     let settle = settle_stream_join_for_quit(
                         stream_join,
                         Duration::from_millis(GRACEFUL_QUIT_STREAM_GRACE_MS),
                     );
                     let _ = tokio::join!(close, settle);
                 }
-                None => session.close().await,
+                None => {
+                    close.await;
+                }
             }
 
             Msg::QuitReady

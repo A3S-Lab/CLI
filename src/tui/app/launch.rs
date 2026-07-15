@@ -613,7 +613,7 @@ pub(crate) async fn run_in(
         ultracode_synthesis_inflight: false,
         ultracode_synthesis_used: false,
         instructions,
-        workspace_manifest,
+        workspace_manifest: Arc::clone(&workspace_manifest),
         workspace_manifest_rx,
         workspace_services,
         gradient_until: None,
@@ -742,7 +742,7 @@ pub(crate) async fn run_in(
         app.replace_session(s);
     }
 
-    ProgramBuilder::new(app)
+    let program_result = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
         // screen. Drag-copy is app-owned: on release we write the selected text to
@@ -750,7 +750,13 @@ pub(crate) async fn run_in(
         .with_mouse_support()
         .with_fps(120)
         .run()
-        .await?;
+        .await;
+
+    // Tokio cannot cancel an already-running blocking workspace scan during
+    // runtime teardown. Stop manifest discovery while the host still owns an
+    // explicit handle, before dropping the remaining workspace services.
+    workspace_manifest.shutdown();
+    program_result?;
 
     let final_session = active_session
         .lock()

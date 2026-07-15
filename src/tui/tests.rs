@@ -1047,6 +1047,43 @@ async fn graceful_quit_settles_a_completed_stream() {
 }
 
 #[tokio::test]
+async fn graceful_quit_settles_a_completed_session_close() {
+    assert!(
+        settle_session_close_for_quit(async {}, Duration::from_secs(1)).await,
+        "an already-completed session close should settle without forced abort"
+    );
+}
+
+#[tokio::test]
+async fn graceful_quit_aborts_a_session_close_after_its_deadline() {
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let close = {
+        let dropped = Arc::clone(&dropped);
+        async move {
+            let _drop_flag = DropFlag(dropped);
+            std::future::pending::<()>().await;
+        }
+    };
+
+    assert!(
+        !settle_session_close_for_quit(close, Duration::from_millis(10)).await,
+        "a stuck session close must be force-aborted after the host deadline"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the aborted close task must run its cancellation destructors"
+    );
+}
+
+#[tokio::test]
 async fn graceful_quit_aborts_a_stream_after_its_own_deadline() {
     struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
 

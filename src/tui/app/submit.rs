@@ -842,10 +842,7 @@ impl App {
                     // Quick version check only; the actual upgrade runs in the
                     // shell after the TUI exits (run()), so brew's/curl's own
                     // progress shows and the restart picks up the new binary.
-                    let latest = tokio::task::spawn_blocking(crate::update::fetch_latest)
-                        .await
-                        .ok()
-                        .flatten();
+                    let latest = crate::update::fetch_latest_async().await;
                     Msg::UpdatePlan(latest)
                 }));
             }

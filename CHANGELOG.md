@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remains a compile/package preview until its managed lifecycle and persistent
   Browser conformance gates pass.
 
+### Fixed
+
+- Made `a3s code` shutdown bounded so session cleanup, version checks, and
+  workspace discovery cannot keep the process alive after the session is
+  saved. The macOS PTY regression also verifies that no workspace scan process
+  group survives exit.
+
 ## [0.8.2] - 2026-07-15
 
 ### Fixed

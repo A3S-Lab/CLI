@@ -44,6 +44,29 @@ pub(super) fn discard_started_stream(
     })
 }
 
+/// Bound host shutdown even when an extension or transport ignores session
+/// cancellation. The owned task is aborted on expiry so the TUI can finish
+/// exiting instead of waiting forever for session cleanup.
+pub(super) async fn settle_session_close_for_quit<F>(close: F, grace: Duration) -> bool
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut close = tokio::spawn(close);
+    match tokio::time::timeout(grace, &mut close).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            close.abort();
+            let _ = tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                &mut close,
+            )
+            .await;
+            false
+        }
+    }
+}
+
 /// Give an active stream a bounded opportunity to observe session cancellation.
 /// If it does not finish, abort its task and briefly wait for Tokio to run the
 /// cancellation destructor so dropping the TUI cannot silently detach it.
