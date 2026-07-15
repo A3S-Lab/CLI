@@ -91,10 +91,9 @@ fn box_command_auto_installs_a_verified_release() {
         String::from_utf8_lossy(&output.stdout),
         "installed-box:version\n"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("component 'box' is not installed; installing it now"));
-    assert!(stderr.contains("resolving release for 'box'"));
-    assert!(stderr.contains("downloading 'box' 2.5.2"));
+    // Captured stderr is non-interactive, so progress output stays quiet while
+    // the first-use install still completes successfully.
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
 
     let receipt = temp.path("state/components/box.json");
     let receipt: serde_json::Value =
@@ -128,6 +127,6 @@ fn box_command_respects_no_auto_install() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("A3S_NO_AUTO_INSTALL"));
+    assert!(stderr.contains("first-use installation is disabled"));
     assert!(stderr.contains("a3s install box"));
 }

@@ -78,8 +78,8 @@ jobs:
               -A "a3s-release-check/1.0" \
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
-          if ! crate_exists a3s-code-core 5.2.4; then
-            echo "::error::a3s-code-core 5.2.4 is not on crates.io yet — cannot publish a3s"; exit 1
+          if ! crate_exists a3s-code-core 5.2.8; then
+            echo "::error::a3s-code-core 5.2.8 is not on crates.io yet — cannot publish a3s"; exit 1
           fi
           if ! crate_exists a3s-boot 0.1.1; then
             echo "::error::a3s-boot 0.1.1 is not on crates.io yet — cannot publish a3s"; exit 1

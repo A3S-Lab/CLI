@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -153,7 +153,13 @@ impl FakeReleaseServer {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
-                        serve_request(stream, &release, &asset_path, &archive, &thread_requests);
+                        let release = release.clone();
+                        let asset_path = asset_path.clone();
+                        let archive = archive.clone();
+                        let requests = Arc::clone(&thread_requests);
+                        std::thread::spawn(move || {
+                            serve_request(stream, &release, &asset_path, &archive, &requests);
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -219,6 +225,11 @@ fn serve_request(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(body);
+    let mut response = Vec::with_capacity(header.len() + body.len());
+    response.extend_from_slice(header.as_bytes());
+    response.extend_from_slice(body);
+    if stream.write_all(&response).is_ok() {
+        let _ = stream.flush();
+        let _ = stream.shutdown(Shutdown::Write);
+    }
 }

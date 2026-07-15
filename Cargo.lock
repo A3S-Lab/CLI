@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "a3s-acl 0.2.1",
  "a3s-boot",
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "5.2.4"
+version = "5.2.8"
 dependencies = [
  "a3s-acl 0.2.1 (git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22)",
  "a3s-common",
@@ -99,6 +99,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "lopdf",
+ "lsp-types",
  "notify",
  "pdf-extract",
  "pin-project-lite",
@@ -121,6 +122,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
  "zip 0.6.6",
 ]
@@ -192,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-search"
-version = "1.4.1"
+version = "1.4.3"
 dependencies = [
  "a3s-acl 0.2.1",
  "a3s-updater 0.2.0",
@@ -264,7 +266,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-browser"
-version = "0.1.1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827c7c995e3ef1dbd55c5740619d04295965a2337e26b63fd8f7ddbcb35bd048"
 dependencies = [
  "a3s-use-core",
  "async-trait",
@@ -284,7 +288,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-use-core"
-version = "0.1.1"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac94bac6994ad7a2e4421ba9544ca3096c1462c38f6e1b1f3eb22f530e9d179"
 dependencies = [
  "serde",
  "serde_json",
@@ -1579,6 +1585,15 @@ dependencies = [
 
 [[package]]
 name = "fluent-uri"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17c704e9dbe1ddd863da1e6ff3567795087b1eb201ce80d8fa81162e1516500d"
+dependencies = [
+ "bitflags 1.3.2",
+]
+
+[[package]]
+name = "fluent-uri"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc74ac4d8359ae70623506d512209619e5cf8f347124910440dbc221714b328e"
@@ -2177,7 +2192,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tokio",
  "tower-service",
  "tracing",
@@ -2560,6 +2575,19 @@ name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
+
+[[package]]
+name = "lsp-types"
+version = "0.97.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53353550a17c04ac46c585feb189c2db82154fc84b79c7a66c96c2c644f66071"
+dependencies = [
+ "bitflags 1.3.2",
+ "fluent-uri 0.1.4",
+ "serde",
+ "serde_json",
+ "serde_repr",
+]
 
 [[package]]
 name = "mac"
@@ -3252,7 +3280,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls 0.23.41",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -3289,7 +3317,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.4",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -3447,7 +3475,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "348e860aeb0b7bd035778fd11dd9cd5290d32e4aed3b8f2274a00287a9fd362b"
 dependencies = [
  "ahash",
- "fluent-uri",
+ "fluent-uri 0.4.1",
  "getrandom 0.3.4",
  "hashbrown 0.17.1",
  "itoa",
@@ -3884,6 +3912,17 @@ dependencies = [
  "itoa",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "serde_repr"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175ee3e80ae9982737ca543e96133087cbd9a485eecc3bc4de9c1a37b47ea59c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]
@@ -5578,3 +5617,11 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "a3s-use-browser"
+version = "0.1.1"
+
+[[patch.unused]]
+name = "a3s-use-core"
+version = "0.1.1"

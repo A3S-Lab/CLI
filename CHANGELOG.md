@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-15
+
 ### Added
 
 - Added typed `list`, `info`, `install`, `upgrade`, `uninstall`, and `doctor`
@@ -18,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reorganized the umbrella command surface around typed Clap trees, immutable
+  invocation context, explicit application services, and registered component
+  proxies. Unknown top-level commands no longer discover and execute arbitrary
+  `a3s-*` binaries from `PATH`.
 - Made macOS and Linux the current component/runtime support targets; Windows
   remains a compile/package preview until its managed lifecycle and persistent
   Browser conformance gates pass.

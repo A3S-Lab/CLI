@@ -2,7 +2,7 @@
 
 mod support;
 
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -12,7 +12,37 @@ use std::{io::Read, io::Write, net::TcpListener};
 use support::{a3s_bin, make_executable, TempWorkspace};
 
 fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(a3s_bin())
+    command(home, config, args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
+}
+
+fn run_with_stdin(
+    home: &std::path::Path,
+    config: &std::path::Path,
+    args: &[&str],
+    input: &str,
+) -> Output {
+    let mut command = command(home, config, args);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"));
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write protected token input");
+    child.wait_with_output().expect("collect a3s output")
+}
+
+fn command(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::new(a3s_bin());
+    command
         .args(args)
         .env("HOME", home)
         .env("A3S_CONFIG_FILE", config)
@@ -21,9 +51,34 @@ fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Outpu
         .env_remove("CODEX_HOME")
         .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
-        .env("RUST_BACKTRACE", "0")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
+        .env("RUST_BACKTRACE", "0");
+    command
+}
+
+fn run_json(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> serde_json::Value {
+    let mut json_args = vec!["--json"];
+    json_args.extend_from_slice(args);
+    let output = run(home, config, &json_args);
+    assert!(
+        output.status.success(),
+        "a3s {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "a3s {args:?} returned invalid JSON: {error}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    })
+}
+
+fn model_by_id<'a>(response: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+    response["data"]["models"]
+        .as_array()
+        .expect("model list data")
+        .iter()
+        .find(|model| model["id"] == id)
+        .unwrap_or_else(|| panic!("model {id:?} missing from {response}"))
 }
 
 fn fixture() -> (TempWorkspace, std::path::PathBuf, std::path::PathBuf) {
@@ -55,55 +110,43 @@ providers "openai" {
 fn model_list_use_current_and_reset_share_one_selection() {
     let (_workspace, home, config) = fixture();
 
-    let list = run(&home, &config, &["model", "list"]);
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(stdout.contains("openai/gpt-test"));
-    assert!(stdout.contains("config.acl"));
-    assert!(stdout.contains("context=32000"));
+    let list = run_json(&home, &config, &["model", "list"]);
+    let configured = model_by_id(&list, "openai/gpt-test");
+    assert_eq!(configured["source"], "config.acl");
+    assert_eq!(configured["contextWindow"], 32_000);
 
-    let config_path = run(&home, &config, &["model", "config"]);
+    let config_path = run(&home, &config, &["config", "path"]);
     assert_eq!(
         String::from_utf8_lossy(&config_path.stdout).trim(),
         config.display().to_string()
     );
 
-    let use_model = run(&home, &config, &["model", "use", "openai/gpt-test"]);
-    assert!(use_model.status.success());
-    assert!(String::from_utf8_lossy(&use_model.stdout).contains("Active model: openai/gpt-test"));
-
-    let selection = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
-    assert!(selection.contains(r#""source": "config""#));
-    assert!(selection.contains(r#""model": "openai/gpt-test""#));
-
-    let current = run(&home, &config, &["model", "current"]);
-    assert_eq!(
-        String::from_utf8_lossy(&current.stdout),
-        "openai/gpt-test\n"
-    );
-
-    let reset = run(&home, &config, &["model", "reset"]);
-    assert!(reset.status.success());
+    let selected = run_json(&home, &config, &["model", "use", "openai/gpt-test"]);
+    assert_eq!(selected["data"]["model"], "openai/gpt-test");
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "openai/gpt-test""#));
     assert!(!home.join(".a3s/tui/model-selection.json").exists());
 
-    let current = run(&home, &config, &["model", "current"]);
-    assert_eq!(
-        String::from_utf8_lossy(&current.stdout),
-        "openai/gpt-test (config.acl default)\n"
-    );
+    let current = run_json(&home, &config, &["model", "current"]);
+    assert_eq!(current["data"]["model"], "openai/gpt-test");
+    assert_eq!(current["data"]["source"], "config.acl");
+
+    let reset = run_json(&home, &config, &["model", "reset"]);
+    assert_eq!(reset["data"]["previous"], "openai/gpt-test");
+    assert!(!home.join(".a3s/tui/model-selection.json").exists());
+
+    let current = run_json(&home, &config, &["model", "current"]);
+    assert!(current["data"]["model"].is_null());
 }
 
 #[test]
 fn model_use_rejects_routes_missing_from_the_catalog() {
     let (_workspace, home, config) = fixture();
+    let before = std::fs::read_to_string(&config).unwrap();
     let output = run(&home, &config, &["model", "use", "codex/not-entitled"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("is not available"));
-    assert!(!home.join(".a3s/tui/model-selection.json").exists());
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), before);
 }
 
 #[test]
@@ -121,12 +164,10 @@ fn claude_code_login_models_are_selectable_without_copying_credentials() {
     )
     .unwrap();
 
-    let list = run(&home, &config, &["model", "list"]);
-    assert!(list.status.success());
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(stdout.contains("claude-code/claude-opus-4-6"));
-    assert!(stdout.contains("Claude Code"));
-    assert!(!stdout.contains("claude-secret"));
+    let list = run_json(&home, &config, &["model", "list"]);
+    let model = model_by_id(&list, "claude-code/claude-opus-4-6");
+    assert_eq!(model["source"], "Claude Code");
+    assert!(!list.to_string().contains("claude-secret"));
 
     let selected = run(
         &home,
@@ -134,9 +175,9 @@ fn claude_code_login_models_are_selectable_without_copying_credentials() {
         &["model", "use", "claude-code/claude-opus-4-6"],
     );
     assert!(selected.status.success());
-    let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
-    assert!(preference.contains(r#""source": "claude""#));
-    assert!(!preference.contains("claude-secret"));
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "claude-code/claude-opus-4-6""#));
+    assert!(!acl.contains("claude-secret"));
 }
 
 #[test]
@@ -154,18 +195,17 @@ fn codex_login_models_are_selectable_from_the_product_cache() {
     )
     .unwrap();
 
-    let list = run(&home, &config, &["model", "list"]);
-    assert!(list.status.success());
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(stdout.contains("codex/gpt-test-codex"));
-    assert!(stdout.contains("context=64000"));
-    assert!(!stdout.contains("codex-secret"));
+    let list = run_json(&home, &config, &["model", "list"]);
+    let model = model_by_id(&list, "codex/gpt-test-codex");
+    assert_eq!(model["source"], "Codex");
+    assert_eq!(model["contextWindow"], 64_000);
+    assert!(!list.to_string().contains("codex-secret"));
 
     let selected = run(&home, &config, &["model", "use", "codex/gpt-test-codex"]);
     assert!(selected.status.success());
-    let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
-    assert!(preference.contains(r#""source": "codex""#));
-    assert!(!preference.contains("codex-secret"));
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "codex/gpt-test-codex""#));
+    assert!(!acl.contains("codex-secret"));
 }
 
 #[test]
@@ -183,17 +223,16 @@ fn workbuddy_login_models_are_discovered_without_copying_account_state() {
         "#!/bin/sh\nprintf '%s\\n' 'Currently supported models for your account:' '  - glm-5.1' '  - kimi-k2.7'\n",
     );
 
-    let list = run(&home, &config, &["model", "list"]);
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
+    let list = run_json(&home, &config, &["model", "list"]);
+    assert_eq!(
+        model_by_id(&list, "workbuddy/glm-5.1")["source"],
+        "WorkBuddy"
     );
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(stdout.contains("workbuddy/glm-5.1"));
-    assert!(stdout.contains("workbuddy/kimi-k2.7"));
-    assert!(stdout.contains("WorkBuddy"));
-    assert!(!stdout.contains("workbuddy-secret"));
+    assert_eq!(
+        model_by_id(&list, "workbuddy/kimi-k2.7")["source"],
+        "WorkBuddy"
+    );
+    assert!(!list.to_string().contains("workbuddy-secret"));
 
     let selected = run(&home, &config, &["model", "use", "workbuddy/glm-5.1"]);
     assert!(
@@ -201,9 +240,9 @@ fn workbuddy_login_models_are_discovered_without_copying_account_state() {
         "{}",
         String::from_utf8_lossy(&selected.stderr)
     );
-    let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
-    assert!(preference.contains(r#""source": "codebuddy""#));
-    assert!(!preference.contains("workbuddy-secret"));
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "workbuddy/glm-5.1""#));
+    assert!(!acl.contains("workbuddy-secret"));
 }
 
 #[test]
@@ -239,28 +278,24 @@ fn a3s_os_gateway_models_are_selectable_without_storing_the_os_token() {
     body.push_str(&format!("\nos = \"http://{address}\"\n"));
     std::fs::write(&config, body).unwrap();
 
-    let login = run(&home, &config, &["login", "os-secret"]);
+    let login = run_with_stdin(
+        &home,
+        &config,
+        &["auth", "login", "os", "--token-stdin"],
+        "os-secret",
+    );
     assert!(login.status.success());
-    let list = run(&home, &config, &["model", "list"]);
-    assert!(
-        list.status.success(),
-        "{}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&list.stdout);
-    assert!(
-        stdout.contains("a3s-os/gateway-model"),
-        "stdout: {stdout}\nstderr: {}",
-        String::from_utf8_lossy(&list.stderr)
-    );
-    assert!(stdout.contains("context=128000"));
-    assert!(!stdout.contains("os-secret"));
+    let list = run_json(&home, &config, &["model", "list"]);
+    let model = model_by_id(&list, "a3s-os/gateway-model");
+    assert_eq!(model["source"], "A3S OS");
+    assert_eq!(model["contextWindow"], 128_000);
+    assert!(!list.to_string().contains("os-secret"));
 
     let selected = run(&home, &config, &["model", "use", "a3s-os/gateway-model"]);
     assert!(selected.status.success());
-    let preference = std::fs::read_to_string(home.join(".a3s/tui/model-selection.json")).unwrap();
-    assert!(preference.contains(r#""source": "os_gateway""#));
-    assert!(!preference.contains("os-secret"));
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "a3s-os/gateway-model""#));
+    assert!(!acl.contains("os-secret"));
     server.join().unwrap();
 }
 
@@ -358,9 +393,14 @@ fn model_list_discovers_slow_remote_sources_concurrently() {
     let mut body = std::fs::read_to_string(&config).unwrap();
     body.push_str(&format!("\nos = \"http://{address}\"\n"));
     std::fs::write(&config, body).unwrap();
-    assert!(run(&home, &config, &["login", "os-secret"])
-        .status
-        .success());
+    assert!(run_with_stdin(
+        &home,
+        &config,
+        &["auth", "login", "os", "--token-stdin"],
+        "os-secret",
+    )
+    .status
+    .success());
 
     let output = run(&home, &config, &["model", "list"]);
     server.join().unwrap();

@@ -4,64 +4,71 @@ mod support;
 
 use std::process::Command;
 
-use support::{a3s_bin, TempWorkspace};
-
-fn run(home: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(a3s_bin())
-        .args(args)
-        .env("HOME", home)
-        .env_remove("A3S_CONFIG_FILE")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
-}
+use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
 
 #[test]
-fn search_read_only_commands_do_not_create_runtime_state() {
-    let workspace = TempWorkspace::new("search-read-only");
-    let home = workspace.path("home");
-    std::fs::create_dir_all(&home).unwrap();
-
-    for args in [
-        &["search", "--help"][..],
-        &["search", "engines"][..],
-        &["search", "status"][..],
-        &["search", "browser", "list"][..],
-        &["search", "doctor"][..],
-    ] {
-        let output = run(&home, args);
-        assert!(
-            output.status.success(),
-            "a3s {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    assert!(
-        !home.join(".a3s").exists(),
-        "read-only search commands created managed state"
+fn search_proxy_forwards_native_arguments_and_exit_status() {
+    let workspace = TempWorkspace::new("search-proxy");
+    let bin_dir = workspace.path("bin");
+    let args_log = workspace.path("args.log");
+    make_executable(
+        &bin_dir.join("a3s-search"),
+        &format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then\n\
+               printf 'a3s-search 1.4.3\\n'\n\
+               exit 0\n\
+             fi\n\
+             printf '%s\\n' \"$@\" > {}\n\
+             if [ \"$1\" = \"fail\" ]; then exit 9; fi\n\
+             printf '{{\"engines\":[\"ddg\",\"chrome\"]}}\\n'\n",
+            sh_quote(&args_log)
+        ),
     );
+
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &workspace);
+    let output = command
+        .args(["search", "engines", "--format", "json"])
+        .env("A3S_SEARCH_INSTALL_DIR", &bin_dir)
+        .output()
+        .expect("failed to run a3s search");
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"engines\":[\"ddg\",\"chrome\"]}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&args_log).expect("argument log"),
+        "engines\n--format\njson\n"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    assert!(!workspace.path("state/components/search.json").exists());
+
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &workspace);
+    let failed = command
+        .args(["search", "fail"])
+        .env("A3S_SEARCH_INSTALL_DIR", &bin_dir)
+        .output()
+        .expect("failed to run a3s search failure fixture");
+    assert_eq!(failed.status.code(), Some(9));
 }
 
 #[test]
-fn search_engine_catalog_and_browser_lifecycle_are_visible() {
-    let workspace = TempWorkspace::new("search-catalog");
-    let home = workspace.path("home");
-    std::fs::create_dir_all(&home).unwrap();
+fn search_proxy_requires_an_explicit_registered_installation() {
+    let workspace = TempWorkspace::new("search-missing");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &workspace);
+    let output = command
+        .args(["search", "engines"])
+        .output()
+        .expect("failed to run a3s search");
 
-    let engines = run(&home, &["search", "engines"]);
-    let text = String::from_utf8_lossy(&engines.stdout);
-    for expected in ["ddg", "baidu", "bing_cn", "chrome", "lightpanda"] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
-
-    let help = run(&home, &["search", "--help"]);
-    let text = String::from_utf8_lossy(&help.stdout);
-    for expected in [
-        "browser list",
-        "browser install",
-        "browser update",
-        "browser repair",
-    ] {
-        assert!(text.contains(expected), "missing {expected}: {text}");
-    }
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("component 'search' is not installed"));
+    assert!(stderr.contains("a3s install search"));
+    assert!(!workspace.path("state/components/search.json").exists());
 }

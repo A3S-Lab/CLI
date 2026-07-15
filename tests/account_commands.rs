@@ -2,12 +2,43 @@
 
 mod support;
 
-use std::process::{Command, Output};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 use support::{a3s_bin, make_executable, TempWorkspace};
 
 fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(a3s_bin())
+    command(home, config, args)
+        .output()
+        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
+}
+
+fn run_with_stdin(
+    home: &std::path::Path,
+    config: &std::path::Path,
+    args: &[&str],
+    input: &str,
+) -> Output {
+    let mut command = command(home, config, args);
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"));
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write protected token input");
+    child.wait_with_output().expect("collect a3s output")
+}
+
+fn command(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Command {
+    let mut command = Command::new(a3s_bin());
+    command
         .args(args)
         .env("HOME", home)
         .env("A3S_CONFIG_FILE", config)
@@ -16,13 +47,12 @@ fn run(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> Outpu
         .env_remove("CODEX_HOME")
         .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
-        .env("RUST_BACKTRACE", "0")
-        .output()
-        .unwrap_or_else(|error| panic!("failed to run a3s {args:?}: {error}"))
+        .env("RUST_BACKTRACE", "0");
+    command
 }
 
 #[test]
-fn product_account_commands_delegate_authentication_to_the_owning_cli() {
+fn external_account_commands_never_mutate_owner_credentials() {
     let workspace = TempWorkspace::new("account-product-delegation");
     let home = workspace.path("home");
     let config = workspace.path("config.acl");
@@ -41,22 +71,18 @@ fn product_account_commands_delegate_authentication_to_the_owning_cli() {
     }
 
     for args in [
-        &["account", "login", "claude-code"][..],
-        &["account", "logout", "claude-code"][..],
-        &["account", "login", "codex"][..],
-        &["account", "logout", "codex"][..],
+        &["auth", "login", "claude-code"][..],
+        &["auth", "logout", "claude-code"][..],
+        &["auth", "login", "codex"][..],
+        &["auth", "logout", "codex"][..],
     ] {
         let output = run(&home, &config, args);
         assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+            !output.status.success(),
+            "external credential mutation unexpectedly succeeded for {args:?}"
         );
     }
-    assert_eq!(
-        std::fs::read_to_string(log).unwrap(),
-        "claude:auth login\nclaude:auth logout\ncodex:login\ncodex:logout\n"
-    );
+    assert!(!log.exists(), "A3S must not invoke an external login owner");
 }
 
 #[test]
@@ -65,21 +91,44 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
     let home = workspace.path("home");
     let config = workspace.path("config.acl");
     std::fs::create_dir_all(&home).unwrap();
-    std::fs::write(&config, "os = \"https://os.example.test\"\n").unwrap();
+    std::fs::write(&config, "os = \"http://127.0.0.1:1\"\n").unwrap();
 
-    let login = run(&home, &config, &["account", "login", "a3s-os", "secret"]);
+    let login = run_with_stdin(
+        &home,
+        &config,
+        &[
+            "--offline",
+            "--json",
+            "auth",
+            "login",
+            "os",
+            "--token-stdin",
+        ],
+        "secret",
+    );
     assert!(login.status.success());
+    assert!(!String::from_utf8_lossy(&login.stdout).contains("secret"));
 
-    let output = run(&home, &config, &["account", "list"]);
+    let output = run(&home, &config, &["--json", "auth", "list"]);
     assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("claude-code\tsigned-out"));
-    assert!(stdout.contains("codex\tsigned-out"));
-    assert!(stdout.contains("workbuddy\tsigned-out"));
-    assert!(stdout.contains("a3s-os\tsigned-in\thttps://os.example.test"));
-    assert!(!stdout.contains("secret"));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let providers = value["data"]["providers"].as_array().unwrap();
+    let os = providers
+        .iter()
+        .find(|provider| provider["id"] == "os")
+        .unwrap();
+    assert_eq!(os["ownership"], "managed");
+    assert_eq!(os["signedIn"], true);
+    for id in ["claude-code", "codex", "workbuddy"] {
+        let provider = providers
+            .iter()
+            .find(|provider| provider["id"] == id)
+            .unwrap();
+        assert_eq!(provider["ownership"], "external");
+    }
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
 
-    let logout = run(&home, &config, &["account", "logout", "a3s-os"]);
+    let logout = run(&home, &config, &["auth", "logout", "os"]);
     assert!(logout.status.success());
     assert!(!home.join(".a3s/os-auth.json").exists());
 }
@@ -97,10 +146,17 @@ fn codex_account_stays_signed_in_when_only_the_id_token_has_expired() {
     )
     .unwrap();
 
-    let output = run(&home, &config, &["account", "status"]);
+    let output = run(&home, &config, &["--json", "auth", "list"]);
     assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let codex = value["data"]["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["id"] == "codex")
+        .unwrap();
+    assert_eq!(codex["signedIn"], true);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("codex\tsigned-in\t-"), "{stdout}");
     assert!(!stdout.contains("codex-secret"));
     assert!(!stdout.contains("codex-refresh-secret"));
 }
