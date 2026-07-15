@@ -14,7 +14,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=5.2.8"
+a3s-code-core = "=5.3.0"
 a3s-boot = "0.1.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.

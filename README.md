@@ -216,9 +216,14 @@ consume its unified capability snapshot and keep one watcher for the process.
 Browser, Office, and enabled external MCP/Skill surfaces are projected into
 every active Code session. Code registers a dedicated `use` worker that can
 invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
-delegation tools are denied. A session rebuild replays the current surfaces,
-and a Web process shares the watcher across all concurrent sessions. Starting
-Code never installs Use as a side effect.
+delegation tools are denied. The worker's current capability IDs and purpose are
+published in the live `task` and `parallel_task` definitions, so the parent
+model can select it without a hard-coded prompt. Application failures do not
+fall back to another execution surface, and an Office
+`use.office.outcome_unknown` result is never retried automatically. A session
+rebuild replays the current surfaces, and a Web process shares the watcher
+across all concurrent sessions. Starting Code never installs Use as a side
+effect.
 
 ### Platform support
 

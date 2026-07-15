@@ -182,6 +182,30 @@ runtime gates pass; WSL follows the Linux contract.
 | `a3s-flow` | Cross-domain durable workflows | Low-level Browser or Office actions |
 | `a3s-code` | Agent tools, approvals, task-level policy | Product component installation |
 
+### 5.1 Code Use Worker
+
+Every TUI or Web Code session attached to an already-installed Use component
+registers one stable worker named `use`. The parent model discovers that worker
+through the live `task` and `parallel_task` definitions; the catalog includes
+the current capability IDs and is rebuilt after capability snapshot changes.
+Hidden implementation helpers never enter that catalog.
+
+The worker is a capability boundary, not another package manager:
+
+- it can see and call only `mcp__use_*` tools;
+- it cannot use workspace, shell, unrelated MCP, or recursive task tools;
+- packaged `SKILL.md` text supplies domain guidance but cannot expand those
+  permissions or authorize installation;
+- it returns the capability route, observable result, session/object
+  references, and typed failures to the parent;
+- it never retries application mutations automatically, and
+  `use.office.outcome_unknown` is reported as potentially applied.
+
+Live MCP additions refresh delegation before the next child run. A run already
+in progress keeps its accepted execution boundary and settles through normal
+MCP and session cancellation. Starting Code does not install Use; installation
+remains an explicit umbrella component action.
+
 ## 6. Core Architectural Decisions
 
 ### 6.1 Library First

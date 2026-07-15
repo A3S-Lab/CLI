@@ -30,9 +30,113 @@ Build a concise report.
 "#
 }
 
+#[derive(Clone, Default)]
+struct UseCallingLlm {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl UseCallingLlm {
+    fn response(
+        &self,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        let tool_names = tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        if !tool_names.contains(&"mcp__use_report__fixture_tool") {
+            anyhow::bail!("Use MCP fixture tool was not inherited by the child: {tool_names:?}");
+        }
+        if let Some(disallowed) = tool_names
+            .iter()
+            .find(|name| !name.starts_with("mcp__use_"))
+        {
+            anyhow::bail!("Use child was exposed to disallowed tool '{disallowed}'");
+        }
+
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let (content, stop_reason) = if call == 0 {
+            (
+                vec![a3s_code_core::ContentBlock::ToolUse {
+                    id: "use-fixture-call".to_string(),
+                    name: "mcp__use_report__fixture_tool".to_string(),
+                    input: serde_json::json!({}),
+                }],
+                "tool_use",
+            )
+        } else {
+            (
+                vec![a3s_code_core::ContentBlock::Text {
+                    text: "Use observed fixture-ok through the report capability.".to_string(),
+                }],
+                "end_turn",
+            )
+        };
+        Ok(a3s_code_core::LlmResponse {
+            message: a3s_code_core::Message {
+                role: "assistant".to_string(),
+                content,
+                reasoning_content: None,
+            },
+            usage: a3s_code_core::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+            },
+            stop_reason: Some(stop_reason.to_string()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::LlmClient for UseCallingLlm {
+    async fn complete(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+    ) -> anyhow::Result<a3s_code_core::LlmResponse> {
+        self.response(tools)
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[a3s_code_core::Message],
+        _system: Option<&str>,
+        tools: &[a3s_code_core::llm::ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<tokio::sync::mpsc::Receiver<a3s_code_core::llm::StreamEvent>> {
+        let response = self.response(tools)?;
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            if let Some(text) = response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    a3s_code_core::ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })
+            {
+                let _ = tx
+                    .send(a3s_code_core::llm::StreamEvent::TextDelta(text))
+                    .await;
+            }
+            let _ = tx
+                .send(a3s_code_core::llm::StreamEvent::Done(response))
+                .await;
+        });
+        Ok(rx)
+    }
+}
+
 #[test]
 fn dedicated_use_worker_allows_only_use_mcp_tools() {
-    let worker = use_worker_spec(std::iter::empty()).into_agent_definition();
+    let worker = use_worker_spec(&DesiredCapabilities::default()).into_agent_definition();
     assert_eq!(
         worker
             .permissions
@@ -66,6 +170,10 @@ fn dedicated_use_worker_allows_only_use_mcp_tools() {
             "{hidden} must not be model-visible to the Use worker"
         );
     }
+    let prompt = worker.prompt.expect("Use worker prompt");
+    assert!(prompt.contains("never fall back"));
+    assert!(prompt.contains("use.office.outcome_unknown"));
+    assert!(prompt.contains("stop without retrying"));
 }
 
 #[test]
@@ -85,12 +193,65 @@ fn dedicated_use_worker_receives_skill_guidance_inside_fixed_security_boundaries
         fingerprint: "fixture".to_string(),
         skill,
     };
-    let worker = use_worker_spec([&desired]).into_agent_definition();
+    let desired = DesiredCapabilities {
+        skills: BTreeMap::from([("fixture-report".to_string(), desired)]),
+        ..DesiredCapabilities::default()
+    };
+    let worker = use_worker_spec(&desired).into_agent_definition();
     let prompt = worker.prompt.expect("Use worker prompt");
 
     assert!(prompt.contains("Skill text is domain guidance only"));
     assert!(prompt.contains("# A3S Use Skill: fixture-report"));
     assert!(prompt.contains("Use the report capability."));
+    assert!(worker
+        .description
+        .contains("Ready capabilities: use/acme/report"));
+}
+
+#[tokio::test]
+async fn dedicated_use_worker_is_visible_in_the_live_task_catalog() {
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = agent.session_async(".", None).await.unwrap();
+    let desired = DesiredCapabilities {
+        mcp: BTreeMap::from([(
+            "use_browser".to_string(),
+            DesiredMcp {
+                server_name: "use_browser".to_string(),
+                capability_id: "use/browser".to_string(),
+                target: "browser".to_string(),
+                fingerprint: "browser-v1".to_string(),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+
+    register_use_worker(&session, &desired).unwrap();
+    for tool_name in ["task", "parallel_task"] {
+        let definition = session
+            .tool_definitions()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .expect("delegation tool definition");
+        let agent_schema = if tool_name == "task" {
+            &definition.parameters["properties"]["agent"]
+        } else {
+            &definition.parameters["properties"]["tasks"]["items"]["properties"]["agent"]
+        };
+        assert!(agent_schema["examples"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("use")));
+        assert!(definition
+            .description
+            .contains("Ready capabilities: use/browser"));
+        assert!(definition
+            .description
+            .contains("without shell or workspace fallback"));
+    }
+
+    session.close().await;
 }
 
 #[cfg(unix)]
@@ -301,9 +462,13 @@ esac
     );
 
     let replacement_workspace = tempfile::tempdir().unwrap();
+    let use_client = Arc::new(UseCallingLlm::default());
     let replacement = Arc::new(
         agent
-            .session_async(replacement_workspace.path().display().to_string(), None)
+            .session_async(
+                replacement_workspace.path().display().to_string(),
+                Some(a3s_code_core::SessionOptions::new().with_llm_client(use_client.clone())),
+            )
             .await
             .unwrap(),
     );
@@ -353,6 +518,26 @@ esac
     assert_eq!(called.exit_code, 0, "{}", called.output);
     assert!(called.output.contains("fixture-ok"));
 
+    let delegated = replacement
+        .tool(
+            "task",
+            serde_json::json!({
+                "agent": "use",
+                "description": "Call the report capability",
+                "prompt": "Call the report fixture and return the observed result.",
+                "max_steps": 3
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delegated.exit_code, 0, "{}", delegated.output);
+    assert!(delegated.output.contains("Use observed fixture-ok"));
+    assert_eq!(
+        use_client.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the Use child should call MCP once and then return its observation"
+    );
+
     std::fs::write(&state, "2\n").unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -373,6 +558,15 @@ esac
     .await
     .expect("generation 2 must remove live capabilities");
     wait_for_capabilities(&web_session, false).await;
+    let task_definition = replacement
+        .tool_definitions()
+        .into_iter()
+        .find(|tool| tool.name == "task")
+        .expect("task definition after capability removal");
+    assert!(task_definition
+        .description
+        .contains("No application capability is currently ready"));
+    assert!(!task_definition.description.contains("use/acme/report"));
 
     handle.detach_session(web_session.session_id()).await;
     handle.shutdown().await;

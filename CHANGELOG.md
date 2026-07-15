@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Promoted the dedicated A3S Use worker into the live `task` and
+  `parallel_task` agent catalog with current capability IDs, MCP routes, and
+  Skill guidance. It returns observable application evidence and never falls
+  back to shell, workspace, unrelated MCP, or recursive delegation.
+- Updated the A3S Code Core baseline to 5.3.0 so packaged CLI builds include
+  the live worker-definition contract used by the dedicated Use worker.
+
+### Fixed
+
+- Completed the Parent → Use worker → live `mcp__use_*` path for hot-plugged
+  capabilities. Office `use.office.outcome_unknown` mutations are surfaced as
+  potentially applied and are never retried automatically.
+
 ## [0.9.0] - 2026-07-15
 
 ### Added
