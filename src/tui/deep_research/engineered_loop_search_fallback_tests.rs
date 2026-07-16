@@ -1,16 +1,17 @@
-struct DefaultEmptyBraveSearchTool {
+struct DefaultEmptyAdaptiveSearchTool {
     default_calls: Arc<AtomicUsize>,
     fallback_calls: Arc<AtomicUsize>,
+    configuration_bound: Arc<AtomicUsize>,
 }
 
 #[async_trait::async_trait]
-impl Tool for DefaultEmptyBraveSearchTool {
+impl Tool for DefaultEmptyAdaptiveSearchTool {
     fn name(&self) -> &str {
         "fallback_planned_web_search"
     }
 
     fn description(&self) -> &str {
-        "Returns no default results and deterministic results for the bounded Brave fallback."
+        "Returns no default results and deterministic results for the bounded automatic fallback."
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -22,15 +23,26 @@ impl Tool for DefaultEmptyBraveSearchTool {
         args: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutput> {
-        let uses_brave = args
+        let uses_automatic_fallback = args
             .get("engines")
             .and_then(serde_json::Value::as_array)
             .is_some_and(|engines| {
-                engines.len() == 1 && engines[0].as_str() == Some("brave")
+                engines.len() == 2
+                    && engines[0].as_str() == Some("bing_cn")
+                    && engines[1].as_str() == Some("brave")
             });
-        if !uses_brave {
+        if !uses_automatic_fallback {
             self.default_calls.fetch_add(1, Ordering::SeqCst);
-            return Ok(ToolOutput::success("[]"));
+            let selection_source = if self.configuration_bound.load(Ordering::SeqCst) == 0 {
+                "builtin_default"
+            } else {
+                "config"
+            };
+            return Ok(ToolOutput::success("[]").with_metadata(serde_json::json!({
+                "status": "complete",
+                "engine_selection_source": selection_source,
+                "selected_engines": ["ddg", "wiki"]
+            })));
         }
         self.fallback_calls.fetch_add(1, Ordering::SeqCst);
         Ok(ToolOutput::success(
@@ -40,14 +52,14 @@ impl Tool for DefaultEmptyBraveSearchTool {
                     "url": "https://official.example/status",
                     "content": "Adaptive loop current status is operational.",
                     "published_date": "2026-07-12",
-                    "engines": ["Brave"]
+                    "engines": ["Bing"]
                 },
                 {
                     "title": "Independent current status",
                     "url": "https://independent.example/status",
                     "content": "Adaptive loop current status is operational.",
                     "published_date": "2026-07-12",
-                    "engines": ["Brave"]
+                    "engines": ["Bing"]
                 }
             ])
             .to_string(),
@@ -56,7 +68,7 @@ impl Tool for DefaultEmptyBraveSearchTool {
 }
 
 #[tokio::test]
-async fn empty_default_search_uses_one_bounded_brave_fallback_per_planned_query() {
+async fn empty_builtin_search_uses_one_bounded_multi_engine_fallback_per_planned_query() {
     let workspace = std::env::temp_dir().join(format!(
         "a3s-search-fallback-{}-{}",
         std::process::id(),
@@ -91,9 +103,11 @@ async fn empty_default_search_uses_one_bounded_brave_fallback_per_planned_query(
     );
     let default_calls = Arc::new(AtomicUsize::new(0));
     let fallback_calls = Arc::new(AtomicUsize::new(0));
-    executor.register_dynamic_tool(Arc::new(DefaultEmptyBraveSearchTool {
+    let configuration_bound = Arc::new(AtomicUsize::new(0));
+    executor.register_dynamic_tool(Arc::new(DefaultEmptyAdaptiveSearchTool {
         default_calls: Arc::clone(&default_calls),
         fallback_calls: Arc::clone(&fallback_calls),
+        configuration_bound: Arc::clone(&configuration_bound),
     }));
     executor.register_dynamic_tool(Arc::new(PlannedLoopFetchTool));
     a3s_code_core::tools::register_dynamic_workflow(executor.registry());
@@ -124,6 +138,14 @@ async fn empty_default_search_uses_one_bounded_brave_fallback_per_planned_query(
     assert_eq!(fallback_calls.load(Ordering::SeqCst), 2);
     assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
     assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
+
+    configuration_bound.store(1, Ordering::SeqCst);
+    let _configured_result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("configured search selection should remain authoritative");
+    assert_eq!(default_calls.load(Ordering::SeqCst), 4);
+    assert_eq!(fallback_calls.load(Ordering::SeqCst), 2);
 
     let _ = std::fs::remove_dir_all(&workspace);
 }

@@ -273,7 +273,31 @@ impl App {
         if let Some(spec) = spec {
             match research_report_view_action(self.deep_research_loop.is_some()) {
                 ResearchReportViewAction::DeferUntilDeepResearchComplete => {
-                    self.deep_research_outcome = DeepResearchRunOutcome::Completed;
+                    self.deep_research_outcome = self
+                        .deep_research_loop
+                        .as_ref()
+                        .map(|state| {
+                            let workflow_output = self
+                                .deep_research_workflow
+                                .output
+                                .as_deref()
+                                .unwrap_or_default();
+                            let evidence_scope = self
+                                .deep_research_workflow
+                                .args
+                                .as_ref()
+                                .map(|args| {
+                                    deep_research_evidence_scope_from_args(args, &state.query)
+                                })
+                                .unwrap_or_default();
+                            deep_research_report_outcome_for_workflow(
+                                &state.query,
+                                evidence_scope,
+                                workflow_output,
+                                self.deep_research_workflow.metadata.as_ref(),
+                            )
+                        })
+                        .unwrap_or(DeepResearchRunOutcome::Completed);
                     self.pending_deep_research_report_view = Some(spec);
                 }
                 ResearchReportViewAction::OpenNow => {

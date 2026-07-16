@@ -2,6 +2,38 @@
 
 use super::*;
 
+/// Return the final workflow projection committed by the event-sourced
+/// runtime. The tool's display output is only a transport projection and can
+/// be truncated or replaced by diagnostic text; the completed snapshot is the
+/// durable source of truth for report classification and synthesis.
+pub(super) fn deep_research_canonical_workflow_output(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> String {
+    let Some(dynamic_workflow) = workflow_metadata
+        .and_then(|metadata| metadata.get("dynamic_workflow"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return workflow_output.to_string();
+    };
+    let completed = dynamic_workflow
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("completed"));
+    if !completed {
+        return workflow_output.to_string();
+    }
+    let Some(output) = dynamic_workflow
+        .get("snapshot")
+        .and_then(|snapshot| snapshot.get("output"))
+        .filter(|output| !output.is_null())
+    else {
+        return workflow_output.to_string();
+    };
+
+    serde_json::to_string(output).unwrap_or_else(|_| workflow_output.to_string())
+}
+
 pub(super) fn deep_research_prompt_workflow_output(workflow_output: &str) -> String {
     let value = match serde_json::from_str::<serde_json::Value>(workflow_output) {
         Ok(value) => value,
@@ -78,6 +110,13 @@ pub(super) fn deep_research_sanitize_workflow_metadata(
 }
 
 pub(super) fn deep_research_workflow_output_digest(value: &serde_json::Value) -> serde_json::Value {
+    if value
+        .get("evidence_items")
+        .and_then(serde_json::Value::as_array)
+        .is_some()
+    {
+        return deep_research_accepted_evidence_payload_digest(value);
+    }
     let mut digest = serde_json::Map::new();
     copy_json_field(&mut digest, value, "query");
     digest.insert(
@@ -204,6 +243,208 @@ pub(super) fn deep_research_workflow_output_digest(value: &serde_json::Value) ->
     }
 
     serde_json::Value::Object(digest)
+}
+
+fn deep_research_accepted_evidence_payload_digest(value: &serde_json::Value) -> serde_json::Value {
+    let mut evidence_items = Vec::new();
+    let mut evidence_items_omitted = 0usize;
+    let mut seen = std::collections::HashSet::new();
+    for item in value
+        .get("evidence_items")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(compact) = deep_research_compact_evidence_object(item, None, &mut seen) else {
+            continue;
+        };
+        if evidence_items.len() < DEEP_RESEARCH_MAX_DIGEST_EVIDENCE {
+            evidence_items.push(compact);
+        } else {
+            evidence_items_omitted = evidence_items_omitted.saturating_add(1);
+        }
+    }
+    let mut digest = serde_json::Map::new();
+    let requested_status = value
+        .get("collection_status")
+        .and_then(serde_json::Value::as_str);
+    let collection_status = if evidence_items.is_empty() {
+        "degraded"
+    } else if requested_status == Some("completed") {
+        "completed"
+    } else {
+        "degraded"
+    };
+    digest.insert(
+        "collection_status".to_string(),
+        serde_json::Value::String(collection_status.to_string()),
+    );
+    digest.insert(
+        "evidence_items".to_string(),
+        serde_json::Value::Array(evidence_items),
+    );
+    if evidence_items_omitted > 0 {
+        digest.insert(
+            "evidence_items_omitted".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(evidence_items_omitted as u64)),
+        );
+    }
+    if let Some(context) = value
+        .get("report_context")
+        .and_then(deep_research_report_context_digest)
+    {
+        digest.insert("report_context".to_string(), context);
+    }
+    serde_json::Value::Object(digest)
+}
+
+fn deep_research_report_context_digest(value: &serde_json::Value) -> Option<serde_json::Value> {
+    let context = value.as_object()?;
+    let mut compact_context = serde_json::Map::new();
+
+    if let Some(plan) = context.get("plan").and_then(serde_json::Value::as_object) {
+        let mut compact_plan = serde_json::Map::new();
+        for (key, limit) in [
+            ("report_title", 300usize),
+            ("answer_shape", 100),
+            ("execution_route", 100),
+        ] {
+            if let Some(value) = plan.get(key).and_then(serde_json::Value::as_str) {
+                compact_plan.insert(
+                    key.to_string(),
+                    serde_json::Value::String(deep_research_digest_text(value, limit)),
+                );
+            }
+        }
+        for key in ["phases", "tracks", "stop_conditions"] {
+            let values = deep_research_compact_string_array(plan.get(key), 6, 500);
+            if !values.is_empty() {
+                compact_plan.insert(key.to_string(), serde_json::Value::Array(values));
+            }
+        }
+        if !compact_plan.is_empty() {
+            compact_context.insert("plan".to_string(), serde_json::Value::Object(compact_plan));
+        }
+    }
+
+    if let Some(checker) = context
+        .get("checker")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut compact_checker = serde_json::Map::new();
+        for (key, limit) in [
+            ("decision", 100usize),
+            ("report_summary", 1_200),
+            ("coverage_summary", 1_200),
+        ] {
+            if let Some(value) = checker.get(key).and_then(serde_json::Value::as_str) {
+                compact_checker.insert(
+                    key.to_string(),
+                    serde_json::Value::String(deep_research_digest_text(value, limit)),
+                );
+            }
+        }
+        for key in [
+            "verified_findings",
+            "unresolved_gaps",
+            "limitations",
+            "contradictions",
+        ] {
+            let values = deep_research_compact_string_array(checker.get(key), 10, 1_000);
+            if !values.is_empty() {
+                compact_checker.insert(key.to_string(), serde_json::Value::Array(values));
+            }
+        }
+        for (key, label_key) in [
+            ("track_assessments", "track"),
+            ("stop_condition_assessments", "stop_condition"),
+        ] {
+            let assessments =
+                deep_research_compact_checker_assessments(checker.get(key), label_key);
+            if !assessments.is_empty() {
+                compact_checker.insert(key.to_string(), serde_json::Value::Array(assessments));
+            }
+        }
+        if !compact_checker.is_empty() {
+            compact_context.insert(
+                "checker".to_string(),
+                serde_json::Value::Object(compact_checker),
+            );
+        }
+    }
+
+    if let Some(verification) = context
+        .get("verification")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut compact_verification = serde_json::Map::new();
+        for key in ["status", "checker_completed", "prior_checker_retained"] {
+            if let Some(value) = verification.get(key) {
+                let safe_value = match value {
+                    serde_json::Value::String(value) => {
+                        serde_json::Value::String(deep_research_digest_text(value, 100))
+                    }
+                    serde_json::Value::Bool(value) => serde_json::Value::Bool(*value),
+                    _ => continue,
+                };
+                compact_verification.insert(key.to_string(), safe_value);
+            }
+        }
+        if !compact_verification.is_empty() {
+            compact_context.insert(
+                "verification".to_string(),
+                serde_json::Value::Object(compact_verification),
+            );
+        }
+    }
+
+    (!compact_context.is_empty()).then_some(serde_json::Value::Object(compact_context))
+}
+
+fn deep_research_compact_checker_assessments(
+    value: Option<&serde_json::Value>,
+    label_key: &str,
+) -> Vec<serde_json::Value> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_object)
+        .take(6)
+        .filter_map(|assessment| {
+            let plan_index = assessment.get("plan_index")?.as_u64()?;
+            let status = assessment.get("status")?.as_str()?;
+            if !matches!(status, "supported" | "bounded" | "uncovered") {
+                return None;
+            }
+            let finding = assessment.get("finding")?.as_str()?;
+            let mut compact = serde_json::Map::new();
+            compact.insert("plan_index".to_string(), serde_json::json!(plan_index));
+            compact.insert("status".to_string(), serde_json::json!(status));
+            compact.insert(
+                "finding".to_string(),
+                serde_json::json!(deep_research_digest_text(finding, 1_000)),
+            );
+            if let Some(label) = assessment
+                .get(label_key)
+                .and_then(serde_json::Value::as_str)
+            {
+                compact.insert(
+                    label_key.to_string(),
+                    serde_json::json!(deep_research_digest_text(label, 300)),
+                );
+            }
+            let source_urls =
+                deep_research_compact_string_array(assessment.get("source_urls"), 4, 1_000);
+            if !source_urls.is_empty() {
+                compact.insert(
+                    "source_urls".to_string(),
+                    serde_json::Value::Array(source_urls),
+                );
+            }
+            Some(serde_json::Value::Object(compact))
+        })
+        .collect()
 }
 
 pub(super) fn deep_research_collection_status(value: &serde_json::Value) -> &'static str {

@@ -10,7 +10,8 @@
     const visible = visibleEvidenceText(text);
     if (
       /search code,\s*repositories,\s*users,\s*issues,\s*pull requests/i.test(text) ||
-      /(?:data-color-mode|:focus-visible|--color-|headermenu|github copilot|write better code with ai|__next_f\.push|__next_data__|webpack|datalayer|adsbygoogle|google_ad_client)/i.test(text) ||
+      /(?:data-color-mode|:focus-visible|--color-|headermenu|github copilot|write better code with ai|__next_f\.push|self\.\\?_\\?_next\\?_f\.push|__next_data__|webpack|datalayer|adsbygoogle|google_ad_client|globalnav|createaccountbutton|signinlabel)/i.test(text) ||
+      /node_id.{0,400}(?:followers_url|following_url|stargazers_url)/i.test(text) ||
       /^(?:provide feedback|sign in|sign up|navigation menu|appearance settings|search or jump to)$/i.test(visible)
     ) {
       return true;
@@ -29,12 +30,99 @@
         .filter((term) => !stopwords.has(term))
     ).slice(0, 16);
   };
+  const researchContextText = () => {
+    const planValues = (value) => {
+      if (typeof value === "string") {
+        return [value];
+      }
+      if (Array.isArray(value)) {
+        return value.flatMap(planValues);
+      }
+      if (!value || typeof value !== "object") {
+        return [];
+      }
+      return [
+        value.title,
+        value.focus,
+        value.name,
+        value.success_criterion
+      ].filter((item) => typeof item === "string");
+    };
+    return [
+      String(query || ""),
+      ...planValues(researchPlan && researchPlan.tracks),
+      ...planValues(researchPlan && researchPlan.search_queries),
+      ...planValues(researchPlan && researchPlan.phases)
+    ].join(" ");
+  };
+  const sourceIdentityTerms = (value) => {
+    let decoded = String(value || "").toLowerCase();
+    try {
+      decoded = decodeURIComponent(decoded);
+    } catch (_err) {
+      // Keep the original URL when malformed percent escapes prevent decoding.
+    }
+    const infrastructureTerms = new Set([
+      "api", "blob", "com", "dev", "docs", "documentation", "example", "git",
+      "github", "gitlab", "guide", "head", "html", "http", "https", "index",
+      "main", "markdown", "master", "pages", "raw", "readme", "repository",
+      "source", "tree", "wiki", "www"
+    ]);
+    const terms = [];
+    for (const token of decoded.match(/[a-z0-9][a-z0-9+_.-]{2,}/g) || []) {
+      terms.push(token);
+      terms.push(...token.split(/[-_.]+/));
+    }
+    return uniqueStrings(terms)
+      .filter((term) =>
+        term.length >= 3 &&
+        !/^\d+$/.test(term) &&
+        !infrastructureTerms.has(term)
+      )
+      .slice(0, 16);
+  };
+  const pageIdentityTerms = (item, text) => uniqueStrings([
+    ...sourceIdentityTerms(item && item.url),
+    ...pageHeadingTitles(text).flatMap((title) => evidenceFocusTerms(title))
+  ]).slice(0, 24);
+  const contextAnchoredIdentityTerms = (item, text) => {
+    const context = researchContextText();
+    return pageIdentityTerms(item, text)
+      .filter((term) => queryTermMatches(context, term))
+      .slice(0, 12);
+  };
+  const pageEvidenceFocusTerms = (item, text) => {
+    const explicit = evidenceFocusTerms(
+      Array.isArray(item && item.evidence_queries)
+        ? item.evidence_queries.join(" ")
+        : ""
+    );
+    return uniqueStrings([
+      ...explicit,
+      ...contextAnchoredIdentityTerms(item, text),
+      ...queryTerms()
+    ]).slice(0, 24);
+  };
+  const sourceMatchesEvidenceFocus = (item) => {
+    const focus = Array.isArray(item && item.evidence_queries)
+      ? item.evidence_queries.join(" ")
+      : "";
+    const terms = evidenceFocusTerms(focus);
+    if (terms.length === 0) {
+      return true;
+    }
+    const text = `${item.title || ""} ${item.url || ""} ${item.content || ""}`;
+    const matched = terms.filter((term) => queryTermMatches(text, term)).length;
+    return matched >= Math.min(2, terms.length);
+  };
   const evidenceSnippet = (text, fallback, limit, focus) => {
     const compactFallback = compactText(fallback || "", limit);
     if (!isNonEmptyString(text)) {
       return compactFallback;
     }
-    const focusedTerms = evidenceFocusTerms(focus);
+    const focusedTerms = Array.isArray(focus)
+      ? uniqueStrings(focus).slice(0, 24)
+      : evidenceFocusTerms(focus);
     const terms = focusedTerms.length > 0 ? focusedTerms : queryTerms();
     const lines = text
       .split(/\n+/)
@@ -67,7 +155,7 @@
       ? Array.from(selectedIndexes)
           .sort((a, b) => a - b)
           .map((index) => lines[index].line)
-      : lines.slice(0, 3).map((item) => item.line))
+      : (terms.length === 0 ? lines.slice(0, 3).map((item) => item.line) : []))
       .join(" ");
     return compactText(selected || compactFallback, limit);
   };
@@ -92,13 +180,18 @@
     if (match) {
       return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${match[3]}/${match[4]}`;
     }
+    match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/wiki\/(.+?)(?:[?#].*)?$/i);
+    if (match) {
+      const page = match[3].replace(/\.md$/i, "");
+      return `https://raw.githubusercontent.com/wiki/${match[1]}/${match[2]}/${page}.md`;
+    }
     match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/releases\/?(?:[?#].*)?$/i);
     if (match) {
       return `https://api.github.com/repos/${match[1]}/${match[2]}/releases?per_page=10`;
     }
     match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/?(?:[?#].*)?$/i);
     if (match) {
-      return `https://api.github.com/repos/${match[1]}/${match[2]}`;
+      return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/HEAD/README.md`;
     }
     match = url.match(/^https:\/\/(?:www\.)?crates\.io\/crates\/([^/?#]+)\/?(?:[?#].*)?$/i);
     return match ? `https://crates.io/api/v1/crates/${match[1]}` : url;
@@ -190,7 +283,7 @@
     };
   };
   const directWebQueries = () => {
-    if (plannedSearchQueries.length > 0) {
+    if (requestedSearchQueries !== null || plannedSearchQueries.length > 0) {
       return uniqueStrings(plannedSearchQueries).slice(0, directWebSearchLimit);
     }
     const base = searchableQueryText();
@@ -226,7 +319,9 @@
     const minimumScore = queryTerms().length <= 1 ? 1 : 3;
     const ranked = items
       .map((item) => Object.assign({}, item, { relevance_score: sourceRelevanceScore(item) }))
-      .filter((item) => item.planned_seed === true || item.relevance_score >= minimumScore)
+      .filter((item) => item.planned_seed === true || (
+        item.relevance_score >= minimumScore && sourceMatchesEvidenceFocus(item)
+      ))
       .sort((a, b) => b.relevance_score - a.relevance_score);
     for (const item of ranked) {
       const url = isNonEmptyString(item.url) ? item.url.trim() : "";
@@ -351,6 +446,24 @@
     const matchable = fetchedTextForQueryMatching(text);
     return terms.length === 0 || terms.some((term) => queryTermMatches(matchable, term));
   };
+  const textMatchesEvidenceFocus = (text, item) => {
+    const matchable = fetchedTextForQueryMatching(text);
+    const explicitTerms = evidenceFocusTerms(
+      Array.isArray(item && item.evidence_queries)
+        ? item.evidence_queries.join(" ")
+        : ""
+    );
+    if (explicitTerms.length > 0) {
+      const matched = explicitTerms.filter((term) => queryTermMatches(matchable, term)).length;
+      return matched >= Math.min(2, explicitTerms.length);
+    }
+    const anchoredTerms = contextAnchoredIdentityTerms(item, text);
+    if (anchoredTerms.length > 0) {
+      const matched = anchoredTerms.filter((term) => queryTermMatches(matchable, term)).length;
+      return matched >= Math.min(2, anchoredTerms.length);
+    }
+    return textMatchesQuery(text);
+  };
   const normalizedSourceDate = (value) => {
     if (!isNonEmptyString(value)) {
       return "";
@@ -360,9 +473,9 @@
       ? ""
       : date;
   };
-  const fetchedPageTitle = (text, url) => {
-    const candidates = [];
-    for (const [index, line] of String(text || "").split(/\r?\n/).entries()) {
+  const pageHeadingTitles = (text) => {
+    const titles = [];
+    for (const line of String(text || "").split(/\r?\n/)) {
       const match = line.trim().match(/^#\s+(.+)$/);
       if (!match) {
         continue;
@@ -372,15 +485,21 @@
         .replace(/[*_`]/g, "")
         .trim();
       if (title.length >= 3 && title.length <= 180 && !isPageChromeLine(title)) {
-        candidates.push({
-          title,
-          index,
-          score: sourceRelevanceScore({ title, url: "", content: "" })
-        });
+        titles.push(title);
       }
     }
-    return candidates
-      .filter((candidate) => Number.isFinite(candidate.score) && candidate.score > 0)
+    return uniqueStrings(titles);
+  };
+  const fetchedPageTitle = (text, url) => {
+    const context = researchContextText();
+    const identityTerms = sourceIdentityTerms(url);
+    return pageHeadingTitles(text)
+      .map((title, index) => {
+        const titleTerms = evidenceFocusTerms(title);
+        const identityMatches = identityTerms.filter((term) => queryTermMatches(title, term)).length;
+        const contextMatches = titleTerms.filter((term) => queryTermMatches(context, term)).length;
+        return { title, index, score: identityMatches * 4 + contextMatches * 2 };
+      })
       .sort((left, right) => right.score - left.score || left.index - right.index)
       .map((candidate) => candidate.title)[0] || "";
   };
@@ -403,17 +522,125 @@
     }
     return host;
   };
+  const resolveFetchedPageLink = (target, baseUrl) => {
+    const value = String(target || "")
+      .trim()
+      .replace(/^<|>$/g, "")
+      .replace(/&amp;/gi, "&");
+    if (!value || /^(?:#|mailto:|javascript:|data:|tel:)/i.test(value)) {
+      return "";
+    }
+    if (/^https?:\/\//i.test(value)) {
+      return normalizeObservedSource(value);
+    }
+    const base = String(baseUrl || "").match(/^(https?):\/\/([^/?#]+)(\/[^?#]*)?/i);
+    if (!base) {
+      return "";
+    }
+    if (/^\/\//.test(value)) {
+      return normalizeObservedSource(`${base[1]}:${value}`);
+    }
+    const targetPath = value.split(/[?#]/, 1)[0];
+    const basePath = base[3] || "/";
+    const joinedPath = targetPath.startsWith("/")
+      ? targetPath
+      : `${basePath.endsWith("/") ? basePath : basePath.replace(/[^/]*$/, "")}${targetPath}`;
+    const segments = [];
+    for (const segment of joinedPath.split("/")) {
+      if (!segment || segment === ".") {
+        continue;
+      }
+      if (segment === "..") {
+        segments.pop();
+        continue;
+      }
+      segments.push(segment);
+    }
+    return normalizeObservedSource(`${base[1]}://${base[2]}/${segments.join("/")}`);
+  };
+  const fetchedPageCandidateLeads = (results, fetches) => {
+    const context = researchContextText();
+    const resultByKey = new Map(
+      results.map((item) => [canonicalObservedSourceKey(item.url), item])
+    );
+    const candidates = [];
+    for (const fetch of fetches) {
+      if (!fetch.ok || !isNonEmptyString(fetch.output)) {
+        continue;
+      }
+      const sourceItem = resultByKey.get(canonicalObservedSourceKey(fetch.url)) || {};
+      const explicitTerms = evidenceFocusTerms(
+        Array.isArray(sourceItem.evidence_queries)
+          ? sourceItem.evidence_queries.join(" ")
+          : ""
+      );
+      const observed = [];
+      const markdownLinks = /\[([^\]]*)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g;
+      for (const match of String(fetch.output).matchAll(markdownLinks)) {
+        observed.push({ title: visibleEvidenceText(match[1]), target: match[2] });
+      }
+      const htmlLinks = /\bhref\s*=\s*["']([^"']+)["']/gi;
+      for (const match of String(fetch.output).matchAll(htmlLinks)) {
+        observed.push({ title: "", target: match[1] });
+      }
+      const sourceCandidates = [];
+      for (const link of observed) {
+        const url = resolveFetchedPageLink(link.target, fetch.fetch_url || fetch.url);
+        const key = canonicalObservedSourceKey(url);
+        if (!url || !key || key === canonicalObservedSourceKey(fetch.fetch_url || fetch.url)) {
+          continue;
+        }
+        // Rank the link by its own anchor and target, not by repeated identity
+        // tokens inherited from the fetched parent page or repository host.
+        const linkSignalText = `${link.title || ""} ${link.target || ""}`;
+        const identityTerms = sourceIdentityTerms(linkSignalText);
+        const anchored = identityTerms.filter((term) => queryTermMatches(context, term)).length;
+        const explicit = explicitTerms
+          .filter((term) => queryTermMatches(linkSignalText, term)).length;
+        if (anchored === 0 && explicit === 0) {
+          continue;
+        }
+        sourceCandidates.push({
+          title: link.title || sourceTitleFromUrl(url),
+          url,
+          queries: uniqueStrings(
+            Array.isArray(sourceItem.evidence_queries) ? sourceItem.evidence_queries : []
+          ).slice(0, 2),
+          observed_from: normalizeObservedSource(fetch.url),
+          source_observed: true,
+          relevance_score: anchored * 5 + explicit * 2 +
+            (observedSourceHost(url) === observedSourceHost(fetch.url) ? 2 : 0)
+        });
+      }
+      candidates.push(...sourceCandidates
+        .sort((left, right) => right.relevance_score - left.relevance_score)
+        .slice(0, 3));
+    }
+    const seen = new Set();
+    return candidates
+      .sort((left, right) => right.relevance_score - left.relevance_score)
+      .filter((item) => {
+        const key = canonicalObservedSourceKey(item.url);
+        if (!key || seen.has(key) || excludedSourceKeys.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      })
+      .slice(0, directWebFetchLimit * 2)
+      .map(({ relevance_score: _score, ...item }) => item);
+  };
   const sourceFromSearchResult = (item, fetches) => {
     const fetched = fetchedTextForUrl(fetches, item.url);
-    const fallback = item.planned_seed === true
-      ? String(item.content || "")
-      : (item.content || `Search result for ${query}`);
+    if (!fetched) {
+      return null;
+    }
     const quote = sanitizeEvidenceText(
       evidenceSnippet(
         fetched,
-        fallback,
+        "",
         1000,
-        Array.isArray(item.evidence_queries) ? item.evidence_queries.join(" ") : ""
+        pageEvidenceFocusTerms(item, fetched)
       )
     );
     const safeUrl = normalizeObservedSource(item.url);
@@ -428,15 +655,17 @@
       return null;
     }
     const provenance = item.engines.length > 0 ? ` via ${item.engines.join(", ")}` : "";
-    const authority = isPrimarySourceUrl(safeUrl) ? "Primary or authoritative source" : "Independent web source";
+    const authority = /^https?:\/\/(?:www\.)?github\.com\//i.test(safeUrl)
+      ? "Repository source; project authority must be established from its ownership and content"
+      : (isPrimarySourceUrl(safeUrl)
+        ? "Primary or authoritative source"
+        : "Web source; publisher relationship and claims require independent corroboration");
     return {
       title: title || item.url,
       url_or_path: safeUrl,
       quote_or_fact: quote,
       date: normalizedSourceDate(item.date) || undefined,
-      reliability: fetched
-        ? `${authority}; page text fetched${provenance}.`
-        : `${authority}; search result only${provenance}.`
+      reliability: `${authority}; page text fetched${provenance}.`
     };
   };
   const directWebResearchFromSources = (searches, fetches, collectionErrors) => {
@@ -461,11 +690,34 @@
     const safeCollectionErrors = uniqueStrings(
       collectionErrors.map(sanitizeEvidenceText).filter(Boolean)
     );
+    const resultCandidateLeads = results.slice(0, directWebMaxResults).map((item) => ({
+      title: sanitizeEvidenceText(compactText(item.title || sourceTitleFromUrl(item.url), 180)),
+      url: normalizeObservedSource(item.url),
+      queries: uniqueStrings(Array.isArray(item.evidence_queries) ? item.evidence_queries : [])
+        .slice(0, 2)
+        .map((value) => compactText(value, 180))
+    })).filter((item) => item.url);
+    const candidateLeads = [];
+    const candidateKeys = new Set();
+    for (const lead of [
+      ...resultCandidateLeads,
+      ...fetchedPageCandidateLeads(results, fetches)
+    ]) {
+      const key = canonicalObservedSourceKey(lead.url);
+      if (!key || candidateKeys.has(key)) {
+        continue;
+      }
+      candidateKeys.add(key);
+      candidateLeads.push(lead);
+      if (candidateLeads.length >= directWebMaxResults + directWebFetchLimit) {
+        break;
+      }
+    }
     const sources = results
-      .filter((item) => item.planned_seed !== true || isNonEmptyString(fetchedTextForUrl(fetches, item.url)))
+      .filter((item) => isNonEmptyString(fetchedTextForUrl(fetches, item.url)))
       .map((item) => sourceFromSearchResult(item, fetches))
       .filter((source) => isEvidenceSource(source));
-    const fetchedCount = fetches.filter((item) => item.ok).length;
+    const fetchedCount = sources.length;
     const fetchedHostCount = new Set(
       fetches
         .filter((item) => item.ok)
@@ -503,6 +755,8 @@
       failed_count: sources.length > 0 ? 0 : 1,
       all_success: sources.length > 0 && safeCollectionErrors.length === 0,
       partial_failure: sources.length > 0 && safeCollectionErrors.length > 0,
+      candidate_urls: candidateLeads.map((item) => item.url),
+      candidate_leads: candidateLeads,
       results: []
     };
     if (sources.length === 0) {
@@ -519,7 +773,7 @@
       };
     }
     const structured = {
-      summary: `Direct collection found ${sources.length} traceable source(s).`,
+      summary: `Direct collection retained ${sources.length} source(s) with relevant fetched page text.`,
       sources,
       key_evidence: sources.slice(0, 8).map((source) => `${source.title}: ${source.quote_or_fact}`),
       contradictions: [],
@@ -527,7 +781,10 @@
         ? "medium-high: source pages were fetched."
         : "medium: search snippets only.",
       gaps: uniqueStrings([
-        fetchedCount === 0 ? "No full page text was fetched." : "",
+        fetchedCount === 0 ? "No relevant substantive page text was retained." : "",
+        candidateLeads.length > sources.length
+          ? `${candidateLeads.length - sources.length} search result(s) remain discovery leads, not evidence.`
+          : "",
         safeCollectionErrors.length > 0 ? `Collection errors: ${safeCollectionErrors.slice(0, 3).join("; ")}` : ""
       ]).filter(Boolean)
     };

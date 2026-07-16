@@ -119,11 +119,10 @@ async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> an
         let report_dir = context.resolve_path(report_dir);
         synthesis.artifacts = relocate_research_artifacts(&synthesis.artifacts, &report_dir)?;
     }
-    let fallback = synthesis.status == research_runtime::DeepResearchReportStatus::FallbackDraft;
-    let status = if fallback {
-        "fallback-draft"
-    } else {
-        "completed"
+    let (status, incomplete) = match synthesis.status {
+        research_runtime::DeepResearchReportStatus::Completed => ("completed", false),
+        research_runtime::DeepResearchReportStatus::Qualified => ("qualified", false),
+        research_runtime::DeepResearchReportStatus::Degraded => ("degraded", true),
     };
     let data = json!({
         "status": status,
@@ -133,14 +132,14 @@ async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> an
             "html": synthesis.artifacts.html,
         },
     });
-    if fallback {
+    if incomplete {
         if output == OutputMode::Human {
             print_research_result(&synthesis);
         }
         return Err(CliError::new(
             "research.incomplete",
             format!(
-                "DeepResearch did not complete; fallback draft written at {}",
+                "DeepResearch could not validate a completed report; degraded report written at {}",
                 synthesis.artifacts.html.display()
             ),
             ExitClass::Failure,

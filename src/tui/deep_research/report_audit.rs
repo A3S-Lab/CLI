@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::OnceLock;
+
+use regex::Regex;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReportAudit {
@@ -66,6 +69,289 @@ pub(crate) fn audit_report(
     }
 }
 
+/// Reject quantitative assertions that are absent from the closed evidence
+/// package. This is intentionally a host-side publication gate: a model can
+/// paraphrase prose, but it cannot introduce a new threshold, range, version,
+/// date, multiplier, or approximate magnitude and still publish the report.
+pub(crate) fn validate_quantitative_grounding(
+    markdown: &str,
+    grounding_texts: &[String],
+) -> Result<(), String> {
+    let unsupported = unsupported_quantitative_atoms(markdown, grounding_texts);
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "content rejected: report introduced ungrounded quantitative claim(s): {}",
+        unsupported
+            .into_iter()
+            .take(8)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+/// Preserve a checker-qualified report without preserving claims the evidence
+/// gate rejected. Structural Markdown rows are removed as a unit; prose is
+/// reduced sentence by sentence. A deterministic boundary note makes the
+/// omission visible without spending another model turn or publishing a
+/// generic recovery report.
+pub(crate) fn sanitize_ungrounded_quantitative_claims(
+    markdown: &str,
+    grounding_texts: &[String],
+) -> Option<String> {
+    let mut changed = false;
+    let mut output = Vec::new();
+    for line in markdown.lines() {
+        if unsupported_quantitative_atoms(line, grounding_texts).is_empty() {
+            output.push(line.to_string());
+            continue;
+        }
+        changed = true;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#')
+            || trimmed.starts_with('|')
+            || trimmed.starts_with('>')
+            || trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+            || ordered_prefix_regex().is_match(line)
+        {
+            continue;
+        }
+        let retained = line
+            .split_inclusive(['.', '!', '?', '。', '！', '？', ';', '；'])
+            .filter(|sentence| unsupported_quantitative_atoms(sentence, grounding_texts).is_empty())
+            .map(str::trim)
+            .filter(|sentence| !sentence.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !retained.is_empty() {
+            output.push(retained);
+        }
+    }
+    if !changed {
+        return None;
+    }
+    while output.last().is_some_and(|line| line.trim().is_empty()) {
+        output.pop();
+    }
+    let cjk = markdown.chars().any(is_cjk);
+    output.push(String::new());
+    if cjk {
+        output.push("## 证据边界".to_string());
+        output.push(String::new());
+        output.push(
+            "宿主证据校验已移除缺少已接纳来源依据的定量阈值或建议；不得从保留内容反推出被移除的阈值。"
+                .to_string(),
+        );
+    } else {
+        output.push("## Evidence boundary".to_string());
+        output.push(String::new());
+        output.push(
+            "Host evidence validation removed quantitative thresholds or recommendations that were absent from the accepted source facts; no omitted threshold should be inferred from the retained report."
+                .to_string(),
+        );
+    }
+    Some(output.join("\n"))
+}
+
+fn unsupported_quantitative_atoms(text: &str, grounding_texts: &[String]) -> Vec<String> {
+    let accepted = grounding_texts
+        .iter()
+        .flat_map(|text| quantitative_atoms(text))
+        .collect::<HashSet<_>>();
+    let mut unsupported = quantitative_atoms(text)
+        .into_iter()
+        .filter(|atom| !quantity_is_grounded(atom, &accepted))
+        .collect::<Vec<_>>();
+    unsupported.sort();
+    unsupported.dedup();
+    unsupported
+}
+
+pub(crate) fn quantitative_claim_is_grounded(text: &str, grounding_texts: &[String]) -> bool {
+    let accepted = grounding_texts
+        .iter()
+        .flat_map(|text| quantitative_atoms(text))
+        .collect::<HashSet<_>>();
+    quantitative_atoms(text)
+        .iter()
+        .all(|atom| quantity_is_grounded(atom, &accepted))
+}
+
+fn quantity_is_grounded(atom: &str, accepted: &HashSet<String>) -> bool {
+    if accepted.contains(atom) {
+        return true;
+    }
+    // A non-comparative point may be quoted from a grounded range. The reverse
+    // is unsafe: seeing `1M-10M` never licenses a new `<1M` recommendation.
+    if has_comparator(atom) {
+        return false;
+    }
+    accepted
+        .iter()
+        .filter(|candidate| !has_comparator(candidate))
+        .any(|candidate| range_components(candidate).any(|part| part == atom))
+}
+
+fn has_comparator(atom: &str) -> bool {
+    atom.starts_with(['<', '>', '~'])
+        || atom.contains("以下")
+        || atom.contains("以上")
+        || atom.contains("以内")
+        || atom.contains("左右")
+        || atom.starts_with("数")
+        || atom.starts_with("几")
+        || atom.starts_with("多")
+}
+
+fn range_components(atom: &str) -> impl Iterator<Item = &str> {
+    atom.split(['-', '–', '—', '~', '至', '到'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+}
+
+fn quantitative_atoms(text: &str) -> Vec<String> {
+    let scrubbed = scrub_markdown_scaffolding(text);
+    let mut atoms = quantity_regex()
+        .find_iter(&scrubbed)
+        .map(|found| normalize_quantity(found.as_str()))
+        .filter(|atom| material_quantity(atom))
+        .collect::<Vec<_>>();
+    atoms.extend(
+        cjk_quantity_regex()
+            .find_iter(&scrubbed)
+            .map(|found| normalize_quantity(found.as_str()))
+            .filter(|atom| material_cjk_quantity(atom)),
+    );
+    atoms.sort();
+    atoms.dedup();
+    atoms
+}
+
+fn scrub_markdown_scaffolding(text: &str) -> String {
+    let without_urls = url_regex().replace_all(text, " ");
+    let without_citations = citation_regex().replace_all(&without_urls, " ");
+    ordered_prefix_regex()
+        .replace_all(&without_citations, "${prefix}")
+        .into_owned()
+}
+
+fn normalize_quantity(value: &str) -> String {
+    let mut value = value
+        .to_lowercase()
+        .replace([' ', '\t', '\n', ',', '_'], "")
+        .replace(['–', '—', '−', '－'], "-")
+        .replace('×', "x");
+    for (from, to) in [
+        ("atleast", ">="),
+        ("atmost", "<="),
+        ("lessthan", "<"),
+        ("morethan", ">"),
+        ("upto", "<="),
+        ("under", "<"),
+        ("below", "<"),
+        ("over", ">"),
+        ("above", ">"),
+        ("大约", "~"),
+        ("至少", ">="),
+        ("至多", "<="),
+        ("低于", "<"),
+        ("少于", "<"),
+        ("高于", ">"),
+        ("超过", ">"),
+        ("about", "~"),
+        ("around", "~"),
+        ("约", "~"),
+        ("≈", "~"),
+        ("≤", "<="),
+        ("≥", ">="),
+    ] {
+        value = value.replace(from, to);
+    }
+    for (suffix, prefix) in [("以下", "<"), ("以内", "<="), ("以上", ">"), ("左右", "~")] {
+        if let Some(stem) = value.strip_suffix(suffix) {
+            value = format!("{prefix}{stem}");
+        }
+    }
+    value
+}
+
+fn material_quantity(atom: &str) -> bool {
+    if atom.is_empty() {
+        return false;
+    }
+    let digits = atom.chars().filter(char::is_ascii_digit).count();
+    let plain_integer = atom.chars().all(|ch| ch.is_ascii_digit());
+    !plain_integer || digits >= 4 || atom.parse::<u64>().is_ok_and(|value| value >= 1_000)
+}
+
+fn material_cjk_quantity(atom: &str) -> bool {
+    atom.contains(['万', '亿'])
+        || atom.contains("以下")
+        || atom.contains("以上")
+        || atom.contains("以内")
+        || atom.contains("左右")
+        || atom.starts_with(['数', '几', '多', '<', '>', '~'])
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{3040}'..='\u{30ff}'
+            | '\u{ac00}'..='\u{d7af}'
+    )
+}
+
+fn quantity_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?ix)
+            (?:(?:at\s+least|at\s+most|less\s+than|more\s+than|up\s+to|under|over|below|above|about|around)\s*|[<>≤≥≈~]\s*|(?:低于|高于|少于|超过|至少|至多|约|大约)\s*)?
+            v?\d[\d,_]*(?:\.\d+)*
+            (?:\s*(?:vcpu|seconds?|minutes?|hours?|days?|years?|vectors?|bytes?|qps|rps|kib|mib|gib|tib|kb|mb|gb|tb|ms|sec|dims?|%|x|×|万|亿|维|倍|个|项|条|人|次|度|年|月|日|小时|分钟|秒|k|m|b))?
+            (?:\s*(?:[-–—~至到/:])\s*v?\d[\d,_]*(?:\.\d+)*(?:\s*(?:vcpu|seconds?|minutes?|hours?|days?|years?|vectors?|bytes?|qps|rps|kib|mib|gib|tib|kb|mb|gb|tb|ms|sec|dims?|%|x|×|万|亿|维|倍|个|项|条|人|次|度|年|月|日|小时|分钟|秒|k|m|b))?){0,2}
+            \s*(?:\+|以下|以上|以内|左右)?",
+        )
+        .expect("quantitative grounding regex must compile")
+    })
+}
+
+fn cjk_quantity_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r"(?:约|大约|超过|不足|低于|高于|至少|至多)?(?:数|几|多|[一二三四五六七八九两])?(?:十|百|千|万|亿){1,3}(?:余|多|级)?(?:以下|以上|以内|左右)?",
+        )
+        .expect("CJK quantitative grounding regex must compile")
+    })
+}
+
+fn url_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| Regex::new(r"https?://[^\s<>()]+").expect("URL regex must compile"))
+}
+
+fn citation_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"\[(?:\d+(?:\s*[-,–]\s*\d+)*)\]").expect("citation regex must compile")
+    })
+}
+
+fn ordered_prefix_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(?m)^(?P<prefix>\s*(?:#{1,6}\s*)?)\d{1,3}[.)、]\s+")
+            .expect("ordered-list prefix regex must compile")
+    })
+}
+
 fn claim_matches(report: &str, claim: &str) -> bool {
     let claim = normalize(claim);
     if claim.is_empty() || report.contains(&claim) {
@@ -126,5 +412,62 @@ mod tests {
         );
         assert!(!audit.passed);
         assert!(audit.reason.contains("less than half"));
+    }
+
+    #[test]
+    fn rejects_new_threshold_even_when_the_magnitude_appears_in_a_range() {
+        let error = validate_quantitative_grounding(
+            "Use pgvector below 1M vectors; the benchmark covers 1M-10M vectors.",
+            &["The benchmark covers 1M-10M vectors.".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.contains("<1m"), "{error}");
+    }
+
+    #[test]
+    fn rejects_the_unverified_threshold_forms_seen_in_a_real_report() {
+        let error = validate_quantitative_grounding(
+            "向量规模 < 100 万；百万级以下可选 A；> 数百万考虑 B；规模 <1 GB。",
+            &["公开基准覆盖 1M-10M 向量，最大样例约 8.6GB。".to_string()],
+        )
+        .unwrap_err();
+        assert!(error.contains("<100万"), "{error}");
+        assert!(error.contains("数百万"), "{error}");
+        assert!(error.contains("<1gb"), "{error}");
+    }
+
+    #[test]
+    fn accepts_grounded_ranges_versions_dates_and_multipliers() {
+        validate_quantitative_grounding(
+            "Version v0.8.5 was reviewed in 2026. The 1M-10M test reports 10x.",
+            &["v0.8.5; 2026; 1M-10M vectors; 10x".to_string()],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn ignores_markdown_list_and_citation_numbers() {
+        validate_quantitative_grounding(
+            "1. First point [1]\n2. Second point [2]\n\n[1] https://example.com/2026/item",
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn qualified_sanitization_removes_only_ungrounded_sentences() {
+        let sanitized = sanitize_ungrounded_quantitative_claims(
+            "# Report\n\nUse A below 1M vectors. The benchmark covers 1M-10M vectors.\n\n| Choice | Boundary |\n| --- | --- |\n| A | below 1M |\n\n## Sources\n\n- https://example.com/benchmark",
+            &["The benchmark covers 1M-10M vectors.".to_string()],
+        )
+        .expect("the unsupported threshold should be removed");
+        assert!(!sanitized.contains("below 1M"), "{sanitized}");
+        assert!(sanitized.contains("covers 1M-10M"), "{sanitized}");
+        assert!(sanitized.contains("## Evidence boundary"), "{sanitized}");
+        validate_quantitative_grounding(
+            &sanitized,
+            &["The benchmark covers 1M-10M vectors.".to_string()],
+        )
+        .unwrap();
     }
 }

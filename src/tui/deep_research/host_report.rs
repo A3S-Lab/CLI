@@ -199,10 +199,15 @@ pub(super) fn deep_research_evidence_package_is_complete_for_query(
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> bool {
-    if deep_research_workflow_needs_recovery_report(workflow_output) {
+    let canonical_output =
+        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    if deep_research_workflow_needs_recovery_report_with_metadata(
+        &canonical_output,
+        workflow_metadata,
+    ) {
         return false;
     }
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(workflow_output) {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) {
         if value.get("plan").is_some() {
             if value
                 .pointer("/checker/decision")
@@ -238,12 +243,61 @@ pub(super) fn deep_research_evidence_package_is_complete_for_query(
             return !evidence.is_empty() && source_families >= required_families;
         }
     }
-    let evidence = serde_json::from_str::<serde_json::Value>(workflow_output)
+    let evidence = serde_json::from_str::<serde_json::Value>(&canonical_output)
         .ok()
         .map(|value| deep_research_collect_structured_evidence(&value))
         .unwrap_or_default();
     let _ = (query, evidence_scope, workflow_metadata);
     !evidence.is_empty()
+}
+
+pub(super) fn deep_research_report_outcome_for_workflow(
+    query: &str,
+    evidence_scope: DeepResearchEvidenceScope,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> DeepResearchRunOutcome {
+    let canonical_output =
+        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    if deep_research_workflow_needs_recovery_report_with_metadata(
+        &canonical_output,
+        workflow_metadata,
+    ) {
+        return DeepResearchRunOutcome::Degraded;
+    }
+    let explicitly_qualified = serde_json::from_str::<serde_json::Value>(canonical_output.trim())
+        .ok()
+        .is_some_and(|workflow| {
+            workflow
+                .pointer("/verification/status")
+                .and_then(serde_json::Value::as_str)
+                == Some("degraded")
+                || workflow
+                    .pointer("/checker/decision")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("degrade")
+                || workflow
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|mode| mode.contains("degraded"))
+        });
+    if explicitly_qualified {
+        return DeepResearchRunOutcome::Qualified;
+    }
+    if deep_research_evidence_package_is_complete_for_query(
+        query,
+        evidence_scope,
+        &canonical_output,
+        workflow_metadata,
+    ) {
+        DeepResearchRunOutcome::Completed
+    } else {
+        // Traceable evidence can remain useful when the final checker is
+        // unavailable or explicitly leaves bounded gaps. Publish that report
+        // with a qualified lifecycle instead of discarding the evidence into
+        // a generic recovery artifact or claiming full completion.
+        DeepResearchRunOutcome::Qualified
+    }
 }
 
 pub(super) struct DeepResearchConvergenceContext<'a> {
@@ -321,7 +375,9 @@ pub(super) fn deep_research_convergence_input(
             }
         }
     }
-    let output_value = serde_json::from_str::<serde_json::Value>(workflow_output).ok();
+    let canonical_output =
+        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    let output_value = serde_json::from_str::<serde_json::Value>(&canonical_output).ok();
     let completed_rounds = output_value
         .as_ref()
         .and_then(|value| value.pointer("/research/completed_rounds"))
@@ -379,7 +435,10 @@ pub(super) fn recover_missing_deep_research_report(
         );
     };
 
-    if deep_research_workflow_needs_recovery_report(workflow_output) {
+    if deep_research_workflow_needs_recovery_report_with_metadata(
+        workflow_output,
+        workflow_metadata,
+    ) {
         return match materialize_deep_research_recovery_report(
             workspace,
             query,
@@ -452,7 +511,10 @@ pub(super) fn materialize_deep_research_timeout_completed_report(
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> Option<ResearchReportArtifacts> {
-    if deep_research_workflow_needs_recovery_report(workflow_output) {
+    if deep_research_workflow_needs_recovery_report_with_metadata(
+        workflow_output,
+        workflow_metadata,
+    ) {
         return None;
     }
     [Some(streamed_text), prior_synthesis_text]

@@ -64,7 +64,6 @@ async function run(ctx, inputs) {
     typeof plannerStep.metadata.mode_used === "string"
     ? plannerStep.metadata.mode_used
     : "unknown";
-  const plannedSynthesisTimeoutMs = Number(plannedBudget.synthesis_timeout_ms);
   const configuredCheckerTimeoutMs = Math.max(
     5000,
     Math.min(
@@ -84,18 +83,14 @@ async function run(ctx, inputs) {
     },
     0
   );
-  const checkerLatencyBaseMs = Math.max(
-    Number.isFinite(plannedSynthesisTimeoutMs) && plannedSynthesisTimeoutMs > 0
-      ? plannedSynthesisTimeoutMs
-      : 45000,
-    Number.isFinite(plannerObservedLatencyMs) && plannerObservedLatencyMs > 0
-      ? plannerObservedLatencyMs
-      : 0,
-    observedCheckerLatencyMs
-  );
+  const checkerLatencyBaseMs = observedCheckerLatencyMs > 0
+    ? Math.ceil(observedCheckerLatencyMs * 1.35)
+    : (Number.isFinite(plannerObservedLatencyMs) && plannerObservedLatencyMs > 0
+      ? Math.ceil(plannerObservedLatencyMs * 2)
+      : 30000);
   const checkerReserveMs = Math.min(
     configuredCheckerTimeoutMs,
-    Math.max(5000, checkerLatencyBaseMs)
+    Math.max(30000, checkerLatencyBaseMs)
   );
   const workflowClosureReserveMs = 5000;
   const retrievalStepElapsedMs = (stepId, output) => {
@@ -124,14 +119,6 @@ async function run(ctx, inputs) {
   const plannedOrInput = (planKey, inputKey) => input.research_plan_fixture === true
     ? input[inputKey]
     : (plannedBudget[planKey] ?? input[inputKey]);
-  const fallbackTracks = [
-    { title: "Facts and timeline", focus: "facts, dates, actors" },
-    { title: "Primary sources", focus: "official evidence" },
-    { title: "Independent analysis", focus: "analysis and disagreements" },
-    { title: "Quantitative evidence", focus: "numbers and measurements" },
-    { title: "Contradictions", focus: "conflicting claims" },
-    { title: "Risks and caveats", focus: "uncertainty and recency" },
-  ];
   const requestedLocalParallelTasks = Number(
     plannedOrInput("max_parallel_tasks", "local_max_parallel_tasks")
   );
@@ -142,11 +129,6 @@ async function run(ctx, inputs) {
   const maxResearchRounds = Number.isFinite(requestedResearchRounds) && requestedResearchRounds > 0
     ? Math.max(1, Math.min(4, Math.floor(requestedResearchRounds)))
     : 1;
-  const initialFallbackTrackCount = Math.min(
-    fallbackTracks.length,
-    maxLocalParallelTasks,
-    1
-  );
   const requestedLocalMaxSteps = Number(plannedOrInput("max_steps_per_task", "local_max_steps"));
   const localMaxSteps = Number.isFinite(requestedLocalMaxSteps) && requestedLocalMaxSteps > 0
     ? Math.floor(requestedLocalMaxSteps)
@@ -247,17 +229,17 @@ async function run(ctx, inputs) {
     : null;
   const requestedSearchQueries = Array.isArray(input.search_queries)
     ? input.search_queries.filter((item) => typeof item === "string" && item.trim())
-    : [];
-  const plannedSearchQueries = requestedSearchQueries.length > 0
+    : null;
+  const plannedSearchQueries = requestedSearchQueries !== null
     ? requestedSearchQueries
     : (researchPlan && Array.isArray(researchPlan.search_queries)
       ? researchPlan.search_queries.filter((item) => typeof item === "string" && item.trim())
       : []);
-  const requestedSeedUrls = Array.isArray(input.seed_urls) ? input.seed_urls : [];
+  const requestedSeedUrls = Array.isArray(input.seed_urls) ? input.seed_urls : null;
   const excludedSourceUrls = Array.isArray(input.excluded_urls)
     ? input.excluded_urls.filter((item) => typeof item === "string" && /^https?:\/\//i.test(item.trim()))
     : [];
-  const plannedSeedUrls = (requestedSeedUrls.length > 0
+  const plannedSeedUrls = (requestedSeedUrls !== null
     ? requestedSeedUrls
     : (researchPlan && Array.isArray(researchPlan.seed_urls) ? researchPlan.seed_urls : []))
         .filter((item) => typeof item === "string" && /^https?:\/\//i.test(item.trim()))
@@ -276,8 +258,7 @@ async function run(ctx, inputs) {
         return true;
       })
     : [];
-  const tracks = (providedTracks.length > 0 ? providedTracks : fallbackTracks)
-    .slice(0, providedTracks.length > 0 ? maxLocalParallelTasks : initialFallbackTrackCount);
+  const tracks = providedTracks.slice(0, maxLocalParallelTasks);
   const packMakerTracks = (roundTracks) => {
     if (plannerStructuredMode !== "prompt" || !Array.isArray(roundTracks) || roundTracks.length <= 1) {
       return roundTracks;
@@ -480,10 +461,11 @@ async function run(ctx, inputs) {
     isStringArray(value.gaps, true);
   const isLowValueSourceUrl = (url) => {
     const lower = String(url || "").toLowerCase();
-    return /\.(?:7z|aac|apk|avi|avif|bin|bmp|bz2|deb|dmg|eot|exe|flac|gif|gz|ico|iso|jpe?g|m4a|mov|mp3|mp4|mpeg|msi|ogg|opus|otf|pkg|png|rar|rpm|svg|tar|tiff?|tgz|ttf|wasm|wav|webm|webp|woff2?|xz|zip)\/?$/.test(lower) ||
+    return /[{}]/.test(lower) ||
+      /\.(?:7z|aac|apk|avi|avif|bin|bmp|bz2|deb|dmg|eot|exe|flac|gif|gz|ico|iso|jpe?g|m4a|mov|mp3|mp4|mpeg|msi|ogg|opus|otf|pkg|png|rar|rpm|svg|tar|tiff?|tgz|ttf|wasm|wav|webm|webp|woff2?|xz|zip)\/?$/.test(lower) ||
       /^https?:\/\/(?:[^/]+\.)?gravatar\.com(?:\/|$)/.test(lower) ||
       /^https?:\/\/avatars\.githubusercontent\.com(?:\/|$)/.test(lower) ||
-      /^https?:\/\/api\.github\.com\/users\/[^/]+\/?$/.test(lower);
+      /^https?:\/\/api\.github\.com\/users\/[^/]+(?:\/|$)/.test(lower);
   };
   const normalizeObservedSource = (value) => {
     let text = String(value || "").trim();
@@ -491,6 +473,9 @@ async function run(ctx, inputs) {
       return "";
     }
     if (/^https?:\/\//i.test(text)) {
+      if (/[\u2026\uFFFD\s]/.test(text)) {
+        return "";
+      }
       text = text.split('#', 1)[0].split('?', 1)[0];
       const match = text.match(/^(https?):\/\/([^/]+)(.*)$/i);
       const scheme = match ? match[1].toLowerCase() : "";

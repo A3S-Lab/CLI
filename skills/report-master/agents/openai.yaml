@@ -1,3 +1,4 @@
 interface:
   display_name: "Report Master"
   short_description: "Build strategy-led, evidence-grounded visual reports"
+  default_prompt: "Turn verified research into a polished, content-shaped report with a distinct reading experience."

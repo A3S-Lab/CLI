@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 const REPORT_MIN_CHARS: usize = 120;
-const REPORT_MAX_CHARS: usize = 60_000;
+const REPORT_MAX_CHARS: usize = 30_000;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -129,6 +129,60 @@ impl ReportVisualStance {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReportSectionRhythm {
+    Anchor,
+    Dense,
+    #[default]
+    Breathing,
+}
+
+impl ReportSectionRhythm {
+    pub(crate) fn class_name(self) -> &'static str {
+        match self {
+            Self::Anchor => "rhythm-anchor",
+            Self::Dense => "rhythm-dense",
+            Self::Breathing => "rhythm-breathing",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReportSectionComposition {
+    #[default]
+    Prose,
+    KeyPoints,
+    Comparison,
+    Timeline,
+    Process,
+    Evidence,
+    SourceLedger,
+}
+
+impl ReportSectionComposition {
+    pub(crate) fn class_name(self) -> &'static str {
+        match self {
+            Self::Prose => "composition-prose",
+            Self::KeyPoints => "composition-key-points",
+            Self::Comparison => "composition-comparison",
+            Self::Timeline => "composition-timeline",
+            Self::Process => "composition-process",
+            Self::Evidence => "composition-evidence",
+            Self::SourceLedger => "composition-source-ledger",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReportSectionTreatment {
+    pub(crate) heading: String,
+    pub(crate) rhythm: ReportSectionRhythm,
+    pub(crate) composition: ReportSectionComposition,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportPresentation {
@@ -139,6 +193,7 @@ pub(crate) struct ReportPresentation {
     pub(crate) hero: ReportHero,
     pub(crate) visual_stance: ReportVisualStance,
     pub(crate) rationale: String,
+    pub(crate) section_plan: Vec<ReportSectionTreatment>,
 }
 
 impl ReportPresentation {
@@ -201,7 +256,7 @@ pub(super) fn deep_research_report_generation_args(
                     "type": "string",
                     "minLength": REPORT_MIN_CHARS,
                     "maxLength": REPORT_MAX_CHARS,
-                    "description": "The complete source-backed human-facing report in Markdown."
+                    "description": "The complete source-backed human-facing report in Markdown. Aim for 1,500-3,000 words or the equivalent in the query language, normally using 4-8 level-two sections; finish the bounded report instead of expanding toward the maximum."
                 },
                 "editorial": {
                     "type": "object",
@@ -273,11 +328,38 @@ pub(super) fn deep_research_report_generation_args(
                         "rationale": {
                             "type": "string",
                             "minLength": 12,
-                            "maxLength": 500,
-                            "description": "A concise private explanation tying the choices to content structure and audience. It is never rendered."
+                            "maxLength": 240,
+                            "description": "One concise private sentence naming the dominant information relationship, reader use, and resulting high-level structural choice. It is never rendered."
+                        },
+                        "section_plan": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 12,
+                            "description": "One compact entry for every level-two Markdown heading, in report order. Copy each heading exactly and choose rhythm and composition from that section's information relationship rather than its topic words.",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": false,
+                                "properties": {
+                                    "heading": {
+                                        "type": "string",
+                                        "minLength": 1,
+                                        "maxLength": 180,
+                                        "description": "The exact level-two Markdown heading without the ## marker."
+                                    },
+                                    "rhythm": {
+                                        "type": "string",
+                                        "enum": ["anchor", "dense", "breathing"]
+                                    },
+                                    "composition": {
+                                        "type": "string",
+                                        "enum": ["prose", "key_points", "comparison", "timeline", "process", "evidence", "source_ledger"]
+                                    }
+                                },
+                                "required": ["heading", "rhythm", "composition"]
+                            }
                         }
                     },
-                    "required": ["narrative_mode", "archetype", "palette", "density", "hero", "visual_stance", "rationale"]
+                    "required": ["narrative_mode", "archetype", "palette", "density", "hero", "visual_stance", "rationale", "section_plan"]
                 }
             },
             "required": ["markdown", "editorial", "presentation"]
@@ -285,9 +367,9 @@ pub(super) fn deep_research_report_generation_args(
         "schema_name": "deep_research_report",
         "schema_description": "A complete evidence-grounded DeepResearch report plus a semantic coverage map and content-driven report-master presentation lock",
         "prompt": prompt,
-        "system": "You are a closed-evidence research writer and report art director. Return only the requested object. Spend the completion budget on a genuinely useful Markdown report; keep each private coverage field to one or two precise sentences. Audit every planned track through finding, interpretation, implication, and uncertainty. Choose presentation from the argument, audience, evidence shape, and reading occasion; do not reuse a default style or infer design from topic keywords. Do not invoke or discuss tools, delegation, files, workflows, or the writing process.",
+        "system": "You are a closed-evidence research writer. Return only the requested object and prioritize the report content. Finish a useful bounded Markdown report in this call; keep each private coverage field to one or two precise sentences. Audit every planned track through finding, interpretation, implication, and uncertainty. Only supported checker track and stop-condition assessments are checked findings; bounded or uncovered assessments remain gaps. Omit unsupported domain knowledge entirely, even when it could be labeled as common knowledge, inference, likely, or unverified. When the checked evidence cannot support the requested conclusion, say so in the thesis and provide decision criteria and evidence gaps instead of a ranking. After the Markdown outline is final, choose the small global presentation lock and one compact section-plan entry per exact H2. Select rhythm and composition from each section's information relationship and reader use; the host safely renders those choices. Do not generate HTML or CSS. Do not invoke or discuss tools, delegation, files, workflows, or the writing process.",
         "mode": "tool",
-        "max_repair_attempts": 1,
+        "max_repair_attempts": 0,
         "timeout_ms": timeout_ms.clamp(1_000, 600_000)
     })
 }
@@ -314,6 +396,9 @@ pub(super) fn deep_research_report_from_generation(
     report.markdown = report.markdown.trim().to_string();
     report.editorial.thesis = report.editorial.thesis.trim().to_string();
     report.presentation.rationale = report.presentation.rationale.trim().to_string();
+    for section in &mut report.presentation.section_plan {
+        section.heading = section.heading.trim().to_string();
+    }
     if report.markdown.chars().count() < REPORT_MIN_CHARS {
         return Err("structured report response did not contain substantive Markdown".to_string());
     }
@@ -325,7 +410,141 @@ pub(super) fn deep_research_report_from_generation(
             "structured report response did not audit any planned research track".to_string(),
         );
     }
+    reconcile_section_plan(&report.markdown, &mut report.presentation.section_plan)?;
     Ok(report)
+}
+
+fn reconcile_section_plan(
+    markdown: &str,
+    section_plan: &mut Vec<ReportSectionTreatment>,
+) -> Result<(), String> {
+    let markdown_headings = markdown_level_two_headings(markdown);
+    if markdown_headings.is_empty() {
+        return Err(
+            "structured report response did not contain any level-two Markdown sections"
+                .to_string(),
+        );
+    }
+    if section_plan.is_empty() {
+        return Ok(());
+    }
+
+    // Presentation metadata is advisory. A model can finish a strong report and
+    // then rename, insert, or reorder one heading while constructing the private
+    // section plan. Reconcile that local drift deterministically instead of
+    // discarding the report and spending another model turn on unchanged prose.
+    let mut remaining = std::mem::take(section_plan)
+        .into_iter()
+        .enumerate()
+        .map(|(index, treatment)| Some((index, treatment)))
+        .collect::<Vec<_>>();
+    let mut reconciled = std::iter::repeat_with(|| None)
+        .take(markdown_headings.len())
+        .collect::<Vec<Option<ReportSectionTreatment>>>();
+
+    // Preserve treatments by semantic heading first, regardless of plan order.
+    for (markdown_index, heading) in markdown_headings.iter().enumerate() {
+        let normalized = normalize_section_heading(heading);
+        let Some(plan_index) = remaining.iter().position(|entry| {
+            entry.as_ref().is_some_and(|(_, treatment)| {
+                normalize_section_heading(&treatment.heading) == normalized
+            })
+        }) else {
+            continue;
+        };
+        let Some((_, mut treatment)) = remaining[plan_index].take() else {
+            continue;
+        };
+        treatment.heading = heading.clone();
+        reconciled[markdown_index] = Some(treatment);
+    }
+
+    // For renamed headings, retain the nearest unclaimed positional treatment.
+    // This keeps the model's content-driven rhythm/composition choice without
+    // pretending that stale metadata is an independently valid section.
+    for (markdown_index, heading) in markdown_headings.iter().enumerate() {
+        if reconciled[markdown_index].is_some() {
+            continue;
+        }
+        let nearest = remaining
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| {
+                entry
+                    .as_ref()
+                    .map(|(original_index, _)| (slot, original_index.abs_diff(markdown_index)))
+            })
+            .min_by_key(|(_, distance)| *distance)
+            .map(|(slot, _)| slot);
+        let mut treatment = nearest
+            .and_then(|slot| remaining[slot].take())
+            .map(|(_, treatment)| treatment)
+            .unwrap_or_else(|| ReportSectionTreatment {
+                heading: heading.clone(),
+                rhythm: ReportSectionRhythm::Breathing,
+                composition: ReportSectionComposition::Prose,
+            });
+        treatment.heading = heading.clone();
+        reconciled[markdown_index] = Some(treatment);
+    }
+
+    *section_plan = reconciled.into_iter().flatten().collect();
+    Ok(())
+}
+
+fn markdown_level_two_headings(markdown: &str) -> Vec<String> {
+    let mut headings = Vec::new();
+    let mut active_fence = None;
+
+    for raw_line in markdown.lines() {
+        let Some(line) = markdown_line_after_optional_indent(raw_line) else {
+            continue;
+        };
+        if let Some((active_marker, active_length)) = active_fence {
+            if markdown_fence(line).is_some_and(|(marker, length, suffix)| {
+                marker == active_marker && length >= active_length && suffix.trim().is_empty()
+            }) {
+                active_fence = None;
+            }
+            continue;
+        }
+        if let Some((marker, length, _)) = markdown_fence(line) {
+            active_fence = Some((marker, length));
+            continue;
+        }
+        if let Some(heading) = line
+            .strip_prefix("## ")
+            .filter(|heading| !heading.starts_with('#'))
+            .map(clean_section_heading)
+            .filter(|heading| !heading.is_empty())
+        {
+            headings.push(heading);
+        }
+    }
+
+    headings
+}
+
+fn markdown_line_after_optional_indent(line: &str) -> Option<&str> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    (indent <= 3).then(|| &line[indent..])
+}
+
+fn markdown_fence(line: &str) -> Option<(u8, usize, &str)> {
+    let marker = *line.as_bytes().first()?;
+    if !matches!(marker, b'`' | b'~') {
+        return None;
+    }
+    let length = line.bytes().take_while(|byte| *byte == marker).count();
+    (length >= 3).then(|| (marker, length, &line[length..]))
+}
+
+fn normalize_section_heading(heading: &str) -> String {
+    clean_section_heading(heading).to_lowercase()
+}
+
+fn clean_section_heading(heading: &str) -> String {
+    heading.trim().trim_end_matches('#').trim().to_string()
 }
 
 #[cfg(test)]
@@ -361,7 +580,24 @@ mod tests {
                 "density": "compact",
                 "hero": "metrics",
                 "visual_stance": "safe",
-                "rationale": "A decision-first analytical treatment fits the compact evidence set."
+                "rationale": "A decision-first analytical treatment fits the compact evidence set.",
+                "section_plan": [
+                    {
+                        "heading": "Findings",
+                        "rhythm": "anchor",
+                        "composition": "key_points"
+                    },
+                    {
+                        "heading": "Sources",
+                        "rhythm": "dense",
+                        "composition": "source_ledger"
+                    },
+                    {
+                        "heading": "Limitations",
+                        "rhythm": "breathing",
+                        "composition": "prose"
+                    }
+                ]
             }
         })
     }
@@ -372,7 +608,7 @@ mod tests {
 
         assert_eq!(args["mode"], "tool");
         assert_eq!(args["timeout_ms"], 160_000);
-        assert_eq!(args["max_repair_attempts"], 1);
+        assert_eq!(args["max_repair_attempts"], 0);
         assert_eq!(args["schema"]["additionalProperties"], false);
         assert_eq!(
             args["schema"]["properties"]["markdown"]["maxLength"],
@@ -388,9 +624,28 @@ mod tests {
                 "field-notes"
             ])
         );
-        assert!(args["system"]
-            .as_str()
-            .is_some_and(|system| system.contains("do not reuse a default style")));
+        assert_eq!(
+            args["schema"]["properties"]["presentation"]["properties"]["section_plan"]["items"]
+                ["properties"]["composition"]["enum"],
+            serde_json::json!([
+                "prose",
+                "key_points",
+                "comparison",
+                "timeline",
+                "process",
+                "evidence",
+                "source_ledger"
+            ])
+        );
+        assert!(args["schema"]["properties"]["presentation"]["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&serde_json::json!("section_plan"))));
+        assert!(args["system"].as_str().is_some_and(|system| system
+            .to_ascii_lowercase()
+            .contains("prioritize the report content")));
+        assert!(args["system"].as_str().is_some_and(|system| {
+            system.contains("one compact section-plan entry per exact H2")
+        }));
     }
 
     #[test]
@@ -410,6 +665,10 @@ mod tests {
         assert_eq!(report.presentation.archetype, ReportArchetype::Analytical);
         assert_eq!(report.presentation.hero, ReportHero::Metrics);
         assert_eq!(
+            report.presentation.section_plan[0].composition,
+            ReportSectionComposition::KeyPoints
+        );
+        assert_eq!(
             deep_research_report_markdown_from_generation(&output, 0).unwrap(),
             markdown
         );
@@ -426,5 +685,125 @@ mod tests {
 
         let error = deep_research_report_from_generation(&output, 0).unwrap_err();
         assert!(error.contains("violated its contract"), "{error}");
+    }
+
+    #[test]
+    fn report_generation_reconciles_a_section_plan_missing_a_report_section() {
+        let markdown = format!(
+            "# Report\n\n## Findings\n\n{}\n\n## Sources\n\n- https://example.com/source\n\n## Limitations\n\nBounded evidence.",
+            "Substantive source-backed analysis. ".repeat(5)
+        );
+        let mut object = valid_object(markdown);
+        object["presentation"]["section_plan"]
+            .as_array_mut()
+            .unwrap()
+            .remove(2);
+        let output = serde_json::json!({ "object": object }).to_string();
+
+        let report = deep_research_report_from_generation(&output, 0).unwrap();
+        assert_eq!(report.presentation.section_plan.len(), 3);
+        assert_eq!(report.presentation.section_plan[2].heading, "Limitations");
+        assert_eq!(
+            report.presentation.section_plan[2].composition,
+            ReportSectionComposition::Prose
+        );
+        assert_eq!(
+            report.presentation.section_plan[2].rhythm,
+            ReportSectionRhythm::Breathing
+        );
+    }
+
+    #[test]
+    fn report_generation_rejects_an_omitted_section_plan() {
+        let markdown = format!(
+            "# Report\n\n## Findings\n\n{}\n\n## Sources\n\n- https://example.com/source",
+            "Evidence-backed finding. ".repeat(8)
+        );
+        let mut object = valid_object(markdown);
+        object["presentation"]
+            .as_object_mut()
+            .expect("presentation fixture")
+            .remove("section_plan");
+        let output = serde_json::json!({ "object": object }).to_string();
+
+        let error = deep_research_report_from_generation(&output, 0).unwrap_err();
+        assert!(error.contains("section_plan"), "{error}");
+    }
+
+    #[test]
+    fn report_generation_reorders_a_section_plan_into_report_order() {
+        let markdown = format!(
+            "# Report\n\n## Findings\n\n{}\n\n## Sources\n\n- https://example.com/source\n\n## Limitations\n\nBounded evidence.",
+            "Substantive source-backed analysis. ".repeat(5)
+        );
+        let mut object = valid_object(markdown);
+        object["presentation"]["section_plan"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 1);
+        let output = serde_json::json!({ "object": object }).to_string();
+
+        let report = deep_research_report_from_generation(&output, 0).unwrap();
+        let headings = report
+            .presentation
+            .section_plan
+            .iter()
+            .map(|section| section.heading.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(headings, vec!["Findings", "Sources", "Limitations"]);
+        assert_eq!(
+            report.presentation.section_plan[0].composition,
+            ReportSectionComposition::KeyPoints
+        );
+        assert_eq!(
+            report.presentation.section_plan[1].composition,
+            ReportSectionComposition::SourceLedger
+        );
+    }
+
+    #[test]
+    fn report_generation_preserves_positional_treatments_for_renamed_headings() {
+        let markdown = format!(
+            "# Report\n\n## Decision\n\n{}\n\n## Evidence base\n\n- https://example.com/source\n\n## Boundaries\n\nBounded evidence.",
+            "Substantive source-backed analysis. ".repeat(5)
+        );
+        let output = serde_json::json!({ "object": valid_object(markdown) }).to_string();
+
+        let report = deep_research_report_from_generation(&output, 0).unwrap();
+        let headings = report
+            .presentation
+            .section_plan
+            .iter()
+            .map(|section| section.heading.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(headings, vec!["Decision", "Evidence base", "Boundaries"]);
+        assert_eq!(
+            report.presentation.section_plan[0].composition,
+            ReportSectionComposition::KeyPoints
+        );
+        assert_eq!(
+            report.presentation.section_plan[1].composition,
+            ReportSectionComposition::SourceLedger
+        );
+    }
+
+    #[test]
+    fn report_generation_rejects_unstructured_markdown_instead_of_inventing_sections() {
+        let markdown = "Substantive source-backed analysis. ".repeat(8);
+        let output = serde_json::json!({ "object": valid_object(markdown) }).to_string();
+
+        let error = deep_research_report_from_generation(&output, 0).unwrap_err();
+        assert!(error.contains("level-two Markdown sections"), "{error}");
+    }
+
+    #[test]
+    fn report_generation_ignores_heading_like_code_when_validating_the_section_plan() {
+        let markdown = format!(
+            "# Report\n\n## Findings\n\n{}\n\n```markdown\n## This is example code\n```\n\n    ## This is indented code\n\n## Sources\n\n- https://example.com/source\n\n## Limitations\n\nBounded evidence.",
+            "Substantive source-backed analysis. ".repeat(5)
+        );
+        let output = serde_json::json!({ "object": valid_object(markdown) }).to_string();
+
+        assert!(deep_research_report_from_generation(&output, 0).is_ok());
     }
 }

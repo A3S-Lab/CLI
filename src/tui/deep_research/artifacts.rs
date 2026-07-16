@@ -6,9 +6,9 @@ use super::deep_research_report_generation::{
     ReportEditorialPlan, ReportPresentation, ReportTrackCoverage,
 };
 use super::{
-    deep_research_collection_status, deep_research_sanitize_evidence_text,
-    deep_research_workflow_metadata_digest, deep_research_workflow_output_digest,
-    RESEARCH_VIEW_MARKER,
+    deep_research_canonical_workflow_output, deep_research_collection_status,
+    deep_research_sanitize_evidence_text, deep_research_workflow_metadata_digest,
+    deep_research_workflow_output_digest, RESEARCH_VIEW_MARKER,
 };
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

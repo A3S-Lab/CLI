@@ -51,9 +51,24 @@
       const checkerKind = roundDirectResearch ? "round_follow_up" : "round";
       const checkerId = checkerStepId(checkerKind, latestRound);
       const checkerFailure = stepFailures[checkerId];
-      const checkerDecision = structuredTaskOutput(stepOutputs[checkerId]);
+      const makerEvidenceForChecker = aggregateResearchRounds(
+        localRounds,
+        "checking_evidence",
+        []
+      );
+      const checkerEvidenceForDecision = {
+        direct: directEvidence,
+        maker: makerEvidenceForChecker
+      };
+      const checkerDecision = validateCheckerDecision(
+        structuredTaskOutput(stepOutputs[checkerId]),
+        checkerEvidenceForDecision
+      );
       const priorRoundChecker = roundDirectResearch
-        ? structuredTaskOutput(stepOutputs[checkerStepId("round", latestRound)])
+        ? validateCheckerDecision(
+            structuredTaskOutput(stepOutputs[checkerStepId("round", latestRound)]),
+            checkerEvidenceForDecision
+          )
         : null;
       if (
         !checkerDecision &&
@@ -70,11 +85,11 @@
         const completedOutput = {
           query,
           plan: researchPlan,
-          checker: budgetFinalizedChecker(
+          checker: budgetClosedChecker(
             priorRoundChecker,
-            "The previously verified findings remain reportable with explicit limitations; the targeted follow-up is retained as evidence, but another independent checker pass cannot finish inside the workflow budget."
+            "The targeted follow-up is retained, but the prior checker requested more evidence and another independent checker pass cannot finish; the run remains degraded."
           ),
-          mode: directEvidence ? "hybrid_direct_web_parallel" : "local_parallel_task",
+          mode: directEvidence ? "hybrid_direct_web_parallel_degraded" : "local_parallel_task_degraded",
           research: aggregate,
           budget_limited: true
         };
@@ -84,11 +99,11 @@
         return { type: "complete", output: completedOutput };
       }
       if (!checkerDecision && !checkerFailure) {
-        const makerEvidence = aggregateResearchRounds(localRounds, "checking_evidence", []);
-        const scheduled = scheduleChecker(checkerKind, latestRound, {
-          direct: directEvidence,
-          maker: makerEvidence
-        });
+        const scheduled = scheduleChecker(
+          checkerKind,
+          latestRound,
+          checkerEvidenceForDecision
+        );
         if (scheduled) {
           return scheduled;
         }
@@ -142,8 +157,8 @@
         const completedOutput = {
           query,
           plan: researchPlan,
-          checker: budgetFinalizedChecker(checkerDecision),
-          mode: directEvidence ? "hybrid_direct_web_parallel" : "local_parallel_task",
+          checker: budgetClosedChecker(checkerDecision),
+          mode: directEvidence ? "hybrid_direct_web_parallel_degraded" : "local_parallel_task_degraded",
           research: aggregate,
           budget_limited: true
         };
@@ -179,7 +194,11 @@
         query,
         plan: researchPlan,
         checker: checkerDecision,
-        mode: directEvidence ? "hybrid_direct_web_parallel" : "local_parallel_task",
+        mode: checkerDecision && checkerDecision.decision === "degrade"
+          ? (directEvidence
+              ? "hybrid_direct_web_parallel_degraded"
+              : "local_parallel_task_degraded")
+          : (directEvidence ? "hybrid_direct_web_parallel" : "local_parallel_task"),
         research: aggregate
       };
       if (directEvidence) {
@@ -214,8 +233,9 @@
     }
 
     if (localRoundFailures.length > 0) {
-      const priorDirectChecker = structuredTaskOutput(
-        stepOutputs[checkerStepId("direct", 0)]
+      const priorDirectChecker = validateCheckerDecision(
+        structuredTaskOutput(stepOutputs[checkerStepId("direct", 0)]),
+        directEvidence
       );
       const retainedRounds = collectRetainedFailureRounds(stepFailures, "local_research");
       if (retainedRounds.length > 0) {

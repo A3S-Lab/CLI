@@ -60,6 +60,9 @@ pub(crate) fn report_contract() -> String {
        writing budget on `markdown`; the map is not a second report. Reuse the full plan-track \
        name when practical, or an unambiguous semantic label. Do not replace analysis with source \
        counts, evidence-track counts, or process commentary.\n\
+     - Use only `supported` checker track/stop-condition assessments as checked findings. Treat \
+       `bounded` and `uncovered` assessments as report gaps, never as permission to complete the \
+       missing comparison, ranking, recommendation, or factual matrix from prior knowledge.\n\
      - Match the query's language in the title, headings, prose, tables, limitations, confidence, \
        and source annotations. Keep proper names and source quotations in their original language.\n\
      - Write for a human reader. Use specific subject-matter headings, edited prose, and only the \
@@ -73,12 +76,13 @@ pub(crate) fn report_contract() -> String {
        that appears only inside a summary, quotation, key-evidence string, title, limitation, or \
        prior report is not an accepted source anchor; keep its readable label if useful, but do \
        not emit that URL as a link, citation, or Sources entry.\n\
-     - Choose `presentation` only after understanding the argument, audience, evidence shape, and \
-       reading occasion. Communication mode and visual archetype are independent decisions. Give \
-       a content-specific rationale; do not select a style from subject keywords, reuse a default \
-       look, or generate arbitrary HTML/CSS. The host-owned renderer applies only approved \
-       report-master layouts, palettes, responsive behavior, accessibility, print styles, and \
-       deterministic artifact writes."
+     - Finish the evidence-backed `markdown` and private coverage map before choosing the compact \
+       `presentation` lock. Name the dominant information relationship and reader use in one \
+       concise rationale. After the Markdown outline is final, copy every H2 exactly into one \
+       ordered `section_plan` entry and choose its rhythm and composition from that section's \
+       information relationship. The host safely renders those choices with approved \
+       report-master layouts, responsive behavior, accessibility, print styles, and deterministic \
+       artifact writes. Do not generate HTML or CSS."
         .to_string()
 }
 
@@ -99,6 +103,11 @@ fn closed_evidence_contract() -> &'static str {
        evidence collection.\n\
      - Use only claims and original source URLs or paths present in the supplied evidence package. \
        Never invent claims, sources, URLs, quotations, or citations.\n\
+     - Unsupported domain knowledge must be omitted, not included under labels such as common \
+       knowledge, inference, likely, unverified, or not independently verified. State the missing \
+       conclusion as a gap without asserting the answer that the evidence failed to establish. \
+       Do not fill comparison tables, rankings, recommendations, or platform matrices from prior \
+       knowledge.\n\
      - If evidence is incomplete, promptly return a finished, polished degraded report that \
        explicitly separates supported findings from gaps, unavailable conclusions, and confidence \
        limits. If there is no usable evidence, return an explicit evidence-insufficient failure \
@@ -220,9 +229,21 @@ pub(crate) fn synthesis_prompt(params: SynthesisPrompt<'_>) -> String {
          `[tool output truncated]` notices, or lines such as \
          `● Searched ...` / `● Ran ...` in the user-facing answer or report. Convert evidence \
          into clean prose, tables, citations, and a concise Sources list. If \
-         `report_context` is present, use its reader-facing title, report summary, and \
-         verified findings as the checked writing brief; carry every unresolved gap and \
-         contradiction into the limitations section. Never turn `coverage_summary` or \
+         `report_context` is present, use its reader-facing title plus supported track and \
+         stop-condition assessments as the checked writing brief. `report_summary` is orientation, \
+         not an independent fact source. Carry every bounded/uncovered assessment, unresolved gap, \
+         limitation, and contradiction into the limitations section. Only when verification \
+         explicitly records that the checker did not complete, state in natural reader-facing \
+         language that independent rechecking was unavailable. A completed checker with bounded \
+         evidence is an evidence-coverage limitation, not a failed verification process; describe \
+         its exact unsupported obligation and never mention lifecycle or publication metadata. \
+         If its checker decision is `degrade`, the thesis and \
+         first sentence must say that the unsupported requested decision cannot be made from the \
+         retained evidence; do \
+         not provide the unsupported ranking or recommendation later in the report. A useful \
+         degraded report explains the supported facts, decision criteria, and exact evidence \
+         needed to close the gap. Do not expose internal status labels such as \
+         `qualified`, and do not describe those findings as fully verified. Never turn `coverage_summary` or \
          collection status into a domain conclusion. If \
          `collection_status` is `failed` or `degraded`, prefer a transparent failure-aware report \
          from the returned error/gap details and any partial evidence. Do not restart collection; \
@@ -389,6 +410,10 @@ mod tests {
             prompt.contains("evidence-insufficient failure report"),
             "{prompt}"
         );
+        assert!(
+            prompt.contains("Unsupported domain knowledge must be omitted"),
+            "{prompt}"
+        );
         assert!(prompt.contains("fail or degrade explicitly"), "{prompt}");
         assert!(prompt.contains("report-master"), "{prompt}");
         assert!(prompt.contains("query's language"), "{prompt}");
@@ -418,7 +443,11 @@ mod tests {
         );
         assert!(prompt.contains("report.md"), "{prompt}");
         assert!(prompt.contains("index.html"), "{prompt}");
-        assert!(prompt.contains("host-owned renderer"), "{prompt}");
+        assert!(prompt.contains("copy every H2 exactly"), "{prompt}");
+        assert!(
+            prompt.contains("choose its rhythm and composition"),
+            "{prompt}"
+        );
         assert!(!prompt.contains("expected_offset"), "{prompt}");
 
         let scope_index = prompt.find(CONFLICTING_SCOPE).expect("evidence scope");
@@ -458,6 +487,10 @@ mod tests {
 
         assert_closed_report_phase(&prompt);
         assert!(prompt.contains("Use only the Evidence digest"), "{prompt}");
+        assert!(
+            prompt.contains("do not provide the unsupported ranking or recommendation"),
+            "{prompt}"
+        );
         assert!(
             !prompt.contains("use additional tools or skills"),
             "{prompt}"

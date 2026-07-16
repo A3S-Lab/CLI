@@ -40,6 +40,7 @@ base64 = "0.22"
 futures = "0.3"
 http-body-util = "0.1"
 rand = "0.8"
+regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 axum = "0.8"
