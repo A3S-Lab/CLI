@@ -230,6 +230,64 @@ fn late_subagent_snapshot_cannot_restore_footer_after_deep_research_settlement()
     ));
 }
 
+#[test]
+fn use_subagent_capability_identity_reaches_live_and_completed_tui_surfaces() {
+    let mut projection = RuntimeProjection::default();
+    let now = Instant::now();
+    projection.restore_subagent(
+        "use-restored".into(),
+        "use".into(),
+        "Inspect the application".into(),
+        now,
+        false,
+    );
+    projection.record_subagent_progress(
+        "use-restored",
+        &serde_json::json!({
+            "tool": "mcp__use_browser__agent_browser_open",
+            "exit_code": 0
+        }),
+    );
+
+    let live = projection.subagents()[0];
+    let live_view = a3s_tui::components::SubagentTracker::new("Application work")
+        .row(a3s_tui::components::SubagentRow::new(
+            live.display_agent(),
+            live.description.clone(),
+        ))
+        .view(80);
+    let live_plain = a3s_tui::style::strip_ansi(&live_view);
+    assert!(live_plain.contains("Using Browser"), "{live_plain}");
+    assert!(!live_plain.contains("mcp__use_"), "{live_plain}");
+
+    let completed = projection.end_subagent(
+        "use-restored".into(),
+        "use".into(),
+        "Browser evidence collected.".into(),
+        true,
+        now,
+    );
+    let mut transcript = Transcript::default();
+    transcript.finish_subagent_with_outcome(
+        completed.task_id,
+        completed.display_agent,
+        completed.description,
+        completed.outcome,
+        completed.output,
+        true,
+    );
+    let completed_plain = a3s_tui::style::strip_ansi(
+        &transcript
+            .render_transcript_with_activity(80, 76, false)
+            .join("\n"),
+    );
+    assert!(
+        completed_plain.contains("Used Browser"),
+        "{completed_plain}"
+    );
+    assert!(!completed_plain.contains("mcp__use_"), "{completed_plain}");
+}
+
 async fn deep_research_settlement_test_session(label: &str) -> (Arc<AgentSession>, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "a3s-deep-research-settlement-{label}-{}-{}",

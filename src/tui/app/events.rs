@@ -294,6 +294,7 @@ impl App {
                 task_id, metadata, ..
             } => {
                 self.mark_agent_activity();
+                self.runtime.record_subagent_progress(&task_id, &metadata);
                 // Per-child OUTPUT tokens for the panel's `↓`. Each child turn-end
                 // reports that turn's completion_tokens once, so SUM them across
                 // turns (tool-event progress carries no usage, so it won't add).

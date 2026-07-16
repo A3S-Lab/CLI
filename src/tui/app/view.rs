@@ -96,7 +96,8 @@ impl App {
                 };
                 prompt.push_str(&format!(
                     "- [{status}] {}: {}\n",
-                    agent.agent, agent.description
+                    agent.display_agent(),
+                    agent.description
                 ));
             }
         }
@@ -193,7 +194,7 @@ impl App {
     pub(super) fn push_subagent_completion(&mut self, completed: CompletedSubagent) {
         self.messages.finish_subagent_with_outcome(
             completed.task_id,
-            completed.agent,
+            completed.display_agent,
             completed.description,
             completed.outcome,
             completed.output,

@@ -100,6 +100,10 @@ impl App {
                         instant_from_epoch_ms(snapshot.started_ms),
                         restored.parent_result_expected,
                     );
+                    for progress in &snapshot.progress {
+                        self.runtime
+                            .record_subagent_progress(&snapshot.task_id, &progress.metadata);
+                    }
                     if snapshot.status == a3s_code_core::SubagentStatus::Running {
                         if self.session.is_closed() {
                             let completed = self.runtime.end_subagent_with_outcome(

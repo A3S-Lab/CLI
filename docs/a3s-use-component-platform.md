@@ -209,6 +209,13 @@ only after its MCP projection connects; a removed or replaced route is withdrawn
 from the worker catalog before its prior connection drains. Starting Code does
 not install Use; installation remains an explicit umbrella component action.
 
+TUI and Web derive presentation from the existing standard subagent progress
+stream. The TUI renders ordered capability identities such as `Using Browser`
+and `Used Browser`; Web renders `Use · Browser` and readable action evidence.
+Only an exact worker identity of `use` plus an observed `mcp__use_<route>__*`
+tool can produce those labels, and restored task snapshots replay the same
+projection. This presentation adds no transport or permission surface.
+
 ## 6. Core Architectural Decisions
 
 ### 6.1 Library First

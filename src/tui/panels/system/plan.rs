@@ -139,7 +139,7 @@ impl App {
                     None => SubagentRowStatus::Running,
                 };
                 chrome
-                    .subagent_row(s.agent.clone(), s.description.clone())
+                    .subagent_row(s.display_agent(), s.description.clone())
                     .status(status)
                     .elapsed_seconds(elapsed.as_secs())
                     .tokens(s.tokens)
