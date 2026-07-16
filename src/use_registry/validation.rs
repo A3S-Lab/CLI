@@ -3,6 +3,7 @@
 use super::{RegistrySnapshot, SCHEMA_VERSION};
 use a3s_code_core::skills::Skill;
 use anyhow::{bail, Context};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -72,6 +73,17 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                 binding.id
             );
         }
+        if let Some(skill) = binding
+            .skills
+            .iter()
+            .find(|skill| !skill.sha256.is_empty() && !is_lower_sha256(&skill.sha256))
+        {
+            bail!(
+                "A3S Use capability '{}' projects an invalid Skill digest '{}'",
+                binding.id,
+                skill.sha256
+            );
+        }
         if let Some(mcp) = &binding.mcp {
             if mcp.target.is_empty() {
                 bail!(
@@ -87,6 +99,7 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
 pub(super) async fn load_managed_skill(
     package_root: &Path,
     skill_path: &Path,
+    expected_sha256: Option<&str>,
 ) -> anyhow::Result<Arc<Skill>> {
     if !package_root.is_absolute() || !skill_path.is_absolute() {
         bail!("A3S Use Skill paths and package roots must be absolute");
@@ -112,12 +125,43 @@ pub(super) async fn load_managed_skill(
             skill_path.display()
         );
     }
+    let bytes = tokio::fs::read(&canonical)
+        .await
+        .with_context(|| format!("failed to read A3S Use skill {}", canonical.display()))?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if let Some(expected_sha256) = expected_sha256 {
+        if actual_sha256 != expected_sha256 {
+            bail!(
+                "A3S Use Skill '{}' digest does not match the capability registry",
+                canonical.display()
+            );
+        }
+    }
+
     let shown = canonical.clone();
-    tokio::task::spawn_blocking(move || Skill::from_file(canonical))
+    tokio::task::spawn_blocking(move || parse_skill_bytes(&canonical, bytes))
         .await
         .context("A3S Use skill loader task failed")?
         .with_context(|| format!("failed to load A3S Use skill {}", shown.display()))
         .map(Arc::new)
+}
+
+fn parse_skill_bytes(path: &Path, bytes: Vec<u8>) -> anyhow::Result<Skill> {
+    let content = String::from_utf8(bytes).context("A3S Use Skill must be UTF-8")?;
+    let mut skill = Skill::parse(&content).context("failed to parse skill file")?;
+    if skill.name.is_empty() {
+        if let Some(stem) = path.file_stem() {
+            skill.name = stem.to_string_lossy().to_string();
+        }
+    }
+    Ok(skill)
+}
+
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 pub(super) fn concise_stderr_suffix(stderr: &str) -> String {
