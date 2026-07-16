@@ -143,7 +143,7 @@ jobs:
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
           required_crates=(
-            "a3s-code-core 5.3.3"
+            "a3s-code-core 5.3.4"
             "a3s-boot 0.1.2"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"

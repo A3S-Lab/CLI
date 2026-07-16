@@ -11,9 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Updated the A3S Code Core baseline to 5.3.3 so shared language runtimes keep
-  one cancellation-safe startup generation and cannot publish stale readiness
-  after workspace removal or shutdown.
+- Updated the A3S Code Core baseline to 5.3.4 so shared language runtimes keep
+  one cancellation-safe startup generation, cannot publish stale readiness
+  after workspace removal or shutdown, and prepare a saved source before the
+  first workspace-symbol search.
 
 ### Fixed
 

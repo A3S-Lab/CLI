@@ -14,7 +14,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=5.3.3"
+a3s-code-core = "=5.3.4"
 a3s-boot = "=0.1.2"
 a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
