@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ordered and deduplicated, restored tracker snapshots replay the same
   identity, and ordinary workers or unrelated MCP tools are never reclassified.
 
+### Fixed
+
+- Kept `--version` inside native product proxies so `a3s use --version` and
+  sibling proxy commands report the delegated component version instead of the
+  umbrella CLI version.
+
 ## [0.9.1] - 2026-07-16
 
 ### Changed

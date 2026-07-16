@@ -258,6 +258,16 @@ fn use_proxy_preserves_arguments_and_child_status() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(9));
+
+    let mut version = Command::new(a3s_bin());
+    configure_component_env(&mut version, &temp);
+    let output = version
+        .args(["use", "--version"])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "a3s-use 0.1.0\n");
 }
 
 #[test]

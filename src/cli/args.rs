@@ -148,7 +148,11 @@ pub(crate) struct PassthroughArgs {
 }
 
 #[derive(Clone, Debug, Args)]
-#[command(trailing_var_arg = true, disable_help_flag = true)]
+#[command(
+    trailing_var_arg = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
 pub(crate) struct ProxyArgs {
     #[arg(allow_hyphen_values = true)]
     pub args: Vec<OsString>,
