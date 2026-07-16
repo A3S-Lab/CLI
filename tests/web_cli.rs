@@ -177,6 +177,45 @@ fn detached_web_process_serves_health_until_stopped() {
 }
 
 #[test]
+fn detached_web_exposes_confined_code_intelligence_routes() {
+    let root = temp_directory("code-intelligence-web");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let state_dir = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::create_dir_all(root.join("src")).expect("create source directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S Code Intelligence test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &state_dir);
+
+    let status = http_json(
+        &address,
+        "GET",
+        "/api/v1/workspace/code-intelligence/status",
+        None,
+        "200",
+    );
+    assert!(status["state"].is_string(), "{status:#}");
+    assert!(status["capabilities"].is_object(), "{status:#}");
+    assert!(status["languages"].is_array(), "{status:#}");
+
+    let traversal = http_get(
+        &address,
+        "/api/v1/workspace/code-intelligence/outline?path=..%2F..%2Foutside.rs",
+    );
+    assert!(traversal.starts_with("HTTP/1.1 400"), "{traversal}");
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean Code Intelligence Web fixture");
+}
+
+#[test]
 fn global_directory_and_relative_acl_reach_detached_web() {
     let root = temp_directory("global-context-web");
     let launch_directory = root.join("launch");

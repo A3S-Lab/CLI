@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.9.1"
+version = "0.9.2"
 dependencies = [
  "a3s-acl",
  "a3s-boot",
@@ -75,9 +75,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "5.3.2"
+version = "5.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da8f43aa04ca80edbc543575a5b2bfc9e1cf48e76aecf74a61f67d536f8172c2"
+checksum = "2ea4c48286d828e09fb44df83144d05b2d41db25e4695f3bdce768e7a46e0399"
 dependencies = [
  "a3s-acl",
  "a3s-common",

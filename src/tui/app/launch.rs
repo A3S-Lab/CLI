@@ -6,6 +6,7 @@ use crate::cli::context::InvocationContext;
 
 const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
+const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
     let tui_dir = workspace.join(".a3s/tui");
@@ -152,7 +153,15 @@ async fn shutdown_code_intelligence(provider: Arc<LocalCodeIntelligence>) -> boo
         "Code Intelligence cleanup did not settle before host exit; aborting the shutdown task"
     );
     shutdown.abort();
-    let _ = shutdown.await;
+    if tokio::time::timeout(CODE_INTELLIGENCE_ABORT_SETTLE, &mut shutdown)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout = ?CODE_INTELLIGENCE_ABORT_SETTLE,
+            "Code Intelligence shutdown task did not acknowledge abort before host exit"
+        );
+    }
     false
 }
 
@@ -990,14 +999,25 @@ pub(crate) async fn run_in(
     // async owner. Stop discovery while this host still has an explicit
     // manifest handle, before the rest of the workspace services are dropped.
     workspace_manifest.shutdown();
+    let final_session = active_session
+        .lock()
+        .map(|session| Arc::clone(&session))
+        .map_err(|_| anyhow::anyhow!("active session lock was poisoned"));
+    if let Ok(session) = &final_session {
+        let session = Arc::clone(session);
+        let _ = settle_session_close_for_quit(
+            async move {
+                session.close().await;
+            },
+            Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
+        )
+        .await;
+    }
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
     program_result?;
 
-    let final_session = active_session
-        .lock()
-        .map(|session| Arc::clone(&session))
-        .map_err(|_| anyhow::anyhow!("active session lock was poisoned"))?;
+    let final_session = final_session?;
     let session_id = final_session.session_id().to_string();
     if let Err(error) = final_session.save().await {
         eprintln!("⚠  could not save session {session_id}: {error}");

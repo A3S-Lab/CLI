@@ -7,12 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-07-16
+
+### Changed
+
+- Updated the A3S Code Core baseline to 5.3.4 so shared language runtimes keep
+  one cancellation-safe startup generation, cannot publish stale readiness
+  after workspace removal or shutdown, and prepare a saved source before the
+  first workspace-symbol search.
+
 ### Fixed
 
 - Restored the Code TUI `/relay` picker for native A3S Code sessions and
   Claude Code or Codex task handoff, added WorkBuddy project transcripts as a
   fourth source, and preserved the selected native session's model, effort,
   execution mode, theme, and paused-goal state during an in-app resume.
+- Guaranteed that `a3s code` returns after printing the session-saved hint even
+  when filesystem discovery, session cleanup, or a language adapter does not
+  settle. Runtime shutdown and cancellation acknowledgement now have explicit
+  deadlines, and the interactive updater no longer starts an unowned blocking
+  installation repair task.
+- Restored packaged Web asset discovery beside release archives and under an
+  installation prefix, including Homebrew symlinks into the Cellar. Release
+  tests now require `web/index.html`, and the Web integration suite verifies
+  code-intelligence route availability and workspace path confinement.
 
 ## [0.9.1] - 2026-07-16
 
