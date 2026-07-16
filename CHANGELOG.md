@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept `--version` inside native product proxies so `a3s use --version` and
+  sibling proxy commands report the delegated component version instead of the
+  umbrella CLI version.
 - Completed the Parent → Use worker → live `mcp__use_*` path for hot-plugged
   capabilities. Office `use.office.outcome_unknown` mutations are surfaced as
   potentially applied and are never retried automatically.
