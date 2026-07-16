@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Projected observed `mcp__use_<route>__*` progress into capability-oriented
+  TUI lifecycle labels such as `Using Browser` and `Used Browser`. Routes stay
+  ordered and deduplicated, restored tracker snapshots replay the same
+  identity, and ordinary workers or unrelated MCP tools are never reclassified.
 - Added typed `list`, `info`, `install`, `upgrade`, `uninstall`, and `doctor`
   component lifecycle commands for Code, Box, Bench, Search, Use, and delegated
   Use capabilities.

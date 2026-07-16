@@ -264,6 +264,12 @@ rebuild replays the current surfaces, and a Web process shares the watcher
 across all concurrent sessions. Starting Code never installs Use as a side
 effect.
 
+The TUI derives capability lifecycle labels only from standard MCP progress
+emitted by the dedicated `use` worker: Browser progress appears as
+`Using Browser` while live and `Used Browser` after completion. Multiple routes
+remain ordered and deduplicated, restored task snapshots preserve the same
+identity, and raw MCP tool names do not replace the user-facing worker label.
+
 ### Platform support
 
 macOS and Linux are the supported runtime and managed-artifact targets for the

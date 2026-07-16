@@ -65,7 +65,18 @@ pub(crate) struct SubagentRun {
     pub(crate) success: Option<bool>,
     pub(crate) outcome: Option<SubagentOutcome>,
     pub(crate) output: String,
+    pub(crate) use_capabilities: Vec<String>,
     parent_result_expected: bool,
+}
+
+impl SubagentRun {
+    pub(crate) fn display_agent(&self) -> String {
+        if !is_use_agent(&self.agent) || self.use_capabilities.is_empty() {
+            return self.agent.clone();
+        }
+        let verb = if self.done { "Used" } else { "Using" };
+        format!("{verb} {}", self.use_capabilities.join(" + "))
+    }
 }
 
 /// Typed terminal outcome for a delegated child run.
@@ -86,7 +97,7 @@ impl SubagentOutcome {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompletedSubagent {
     pub(crate) task_id: String,
-    pub(crate) agent: String,
+    pub(crate) display_agent: String,
     pub(crate) description: String,
     pub(crate) output: String,
     pub(crate) success: bool,
@@ -411,6 +422,9 @@ impl RuntimeProjection {
         parent_result_expected: bool,
     ) -> bool {
         if let Some(run) = self.subagents.get_mut(&task_id) {
+            if !is_use_agent(&agent) {
+                run.use_capabilities.clear();
+            }
             run.agent = agent;
             run.description = description;
             run.parent_result_expected |= parent_result_expected;
@@ -432,6 +446,7 @@ impl RuntimeProjection {
                 success: None,
                 outcome: None,
                 output: String::new(),
+                use_capabilities: Vec::new(),
                 parent_result_expected,
             },
         );
@@ -445,6 +460,18 @@ impl RuntimeProjection {
     pub(crate) fn add_subagent_tokens(&mut self, task_id: &str, tokens: u64) {
         if let Some(run) = self.subagents.get_mut(task_id) {
             run.tokens += tokens;
+        }
+    }
+
+    pub(crate) fn record_subagent_progress(&mut self, task_id: &str, metadata: &serde_json::Value) {
+        let Some(run) = self.subagents.get_mut(task_id) else {
+            return;
+        };
+        let Some(capability) = use_capability_from_progress(&run.agent, metadata) else {
+            return;
+        };
+        if !run.use_capabilities.contains(&capability) {
+            run.use_capabilities.push(capability);
         }
     }
 
@@ -488,6 +515,7 @@ impl RuntimeProjection {
                 success: None,
                 outcome: None,
                 output: String::new(),
+                use_capabilities: Vec::new(),
                 // With no observed parent tool there is no other semantic
                 // cell that can own this terminal result.
                 parent_result_expected: false,
@@ -504,9 +532,10 @@ impl RuntimeProjection {
         run.success = Some(outcome.is_success());
         run.outcome = Some(outcome);
         run.ended = Some(now);
+        let display_agent = run.display_agent();
         CompletedSubagent {
             task_id,
-            agent: run.agent.clone(),
+            display_agent,
             description: run.description.clone(),
             output: run.output.clone(),
             success: outcome.is_success(),
@@ -630,6 +659,45 @@ fn subagent_spec_matches(task: &serde_json::Value, agent: &str, description: &st
         && (description.is_empty()
             || task_description.is_empty()
             || task_description == description)
+}
+
+fn use_capability_from_progress(agent: &str, metadata: &serde_json::Value) -> Option<String> {
+    if !is_use_agent(agent) {
+        return None;
+    }
+    let tool = metadata.get("tool")?.as_str()?;
+    let rest = tool.strip_prefix("mcp__use_")?;
+    let (route, operation) = rest.split_once("__")?;
+    if route.is_empty()
+        || operation.is_empty()
+        || !route.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '-' | '_')
+        })
+    {
+        return None;
+    }
+    Some(humanize_identifier(route))
+}
+
+fn is_use_agent(agent: &str) -> bool {
+    agent.trim().eq_ignore_ascii_case("use")
+}
+
+fn humanize_identifier(value: &str) -> String {
+    value
+        .split(['-', '_'])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut characters = word.chars();
+            match characters.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), characters.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
@@ -776,6 +844,65 @@ mod tests {
         assert_eq!(runs[0].tokens, 12);
         assert!(runs[0].done);
         assert!(!runs[1].done);
+    }
+
+    #[test]
+    fn use_subagent_projects_ordered_capabilities_from_standard_mcp_progress() {
+        let mut projection = RuntimeProjection::default();
+        let now = Instant::now();
+        projection.start_subagent(
+            "use-1".into(),
+            "use".into(),
+            "Gather browser evidence and update the workbook".into(),
+            now,
+        );
+
+        for tool in [
+            "mcp__use_browser__agent_browser_open",
+            "mcp__use_browser__browser_snapshot",
+            "mcp__use_office__office_validate",
+        ] {
+            projection.record_subagent_progress(
+                "use-1",
+                &serde_json::json!({ "tool": tool, "exit_code": 0 }),
+            );
+        }
+
+        let run = projection.subagents()[0];
+        assert_eq!(run.use_capabilities, ["Browser", "Office"]);
+        assert_eq!(run.display_agent(), "Using Browser + Office");
+
+        let completed = projection.end_subagent(
+            "use-1".into(),
+            "use".into(),
+            "Evidence collected.".into(),
+            true,
+            now,
+        );
+        assert_eq!(projection.subagents()[0].agent, "use");
+        assert_eq!(completed.display_agent, "Used Browser + Office");
+    }
+
+    #[test]
+    fn use_capability_projection_requires_the_dedicated_use_worker() {
+        let mut projection = RuntimeProjection::default();
+        let now = Instant::now();
+        projection.start_subagent("review".into(), "review".into(), "Audit".into(), now);
+        projection.record_subagent_progress(
+            "review",
+            &serde_json::json!({ "tool": "mcp__use_browser__browser_open" }),
+        );
+        projection.start_subagent("use".into(), "use".into(), "Query MCP".into(), now);
+        projection.record_subagent_progress(
+            "use",
+            &serde_json::json!({ "tool": "mcp__search__find_docs" }),
+        );
+
+        let runs = projection.subagents();
+        assert!(runs[0].use_capabilities.is_empty());
+        assert_eq!(runs[0].display_agent(), "review");
+        assert!(runs[1].use_capabilities.is_empty());
+        assert_eq!(runs[1].display_agent(), "use");
     }
 
     #[test]
