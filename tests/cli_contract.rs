@@ -513,7 +513,13 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
 
 #[test]
 fn research_machine_failures_use_the_canonical_command_contract() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let config = directory.path().join("config.acl");
+    std::fs::write(&config, test_config()).expect("write config");
+
     let output = Command::new(a3s_binary())
+        .arg("--config")
+        .arg(&config)
         .args([
             "--output",
             "json",
