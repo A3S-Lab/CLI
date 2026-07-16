@@ -1019,6 +1019,7 @@ impl App {
                         SessionRebuildAction::GoalRestore => unreachable!("handled above"),
                         SessionRebuildAction::Compact { .. } => "compact context",
                         SessionRebuildAction::Fork { .. } => "fork session",
+                        SessionRebuildAction::Relay { .. } => "resume relay session",
                         SessionRebuildAction::Clear { .. } => "clear session",
                         SessionRebuildAction::Reload { .. } => "reload session",
                         SessionRebuildAction::Refresh { failure_context } => failure_context?,
@@ -1162,6 +1163,9 @@ impl App {
                     TN_CYAN,
                     &format!("⑂ forked into a new session ({short}) — the original is kept"),
                 ));
+            }
+            SessionRebuildAction::Relay { restore } => {
+                self.commit_relay_session(session, restore);
             }
             SessionRebuildAction::Clear { session_id } => {
                 // Commit the UI reset only after the fresh session exists. A

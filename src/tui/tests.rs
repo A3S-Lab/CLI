@@ -8349,7 +8349,7 @@ fn slash_command_registry_is_unique_english_and_idle_safe() {
     }
 
     let removed_commands = [
-        "im", "run", "deploy", "review", "list", "ps", "workflow", "repo", "git", "relay",
+        "im", "run", "deploy", "review", "list", "ps", "workflow", "repo", "git",
     ]
     .into_iter()
     .map(|name| format!("/{name}"))
@@ -8432,6 +8432,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
     let exact = HashSet::from([
         "/logout", "/exit", "/fork", "/clear", "/init", "/compact", "/help", "/auto", "/config",
         "/model", "/effort", "/ide", "/plugin", "/theme", "/reload", "/update", "/memory",
+        "/relay",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -8613,6 +8614,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/relay",
+            handler: Exact,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/help",
             handler: Exact,
             idle_only: false,
@@ -8727,7 +8734,6 @@ fn removed_top_level_aliases_stay_unregistered() {
         "/plugins".to_string(),
         "/quit".to_string(),
         format!("/{}{}", "re", "po"),
-        format!("/{}{}", "re", "lay"),
     ];
     for alias in removed {
         assert!(
@@ -8760,6 +8766,12 @@ fn fork_is_idle_only_and_listed() {
     assert!(IDLE_ONLY.contains(&"/fork"));
     // …and it's offered in the slash menu.
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/fork"));
+}
+
+#[test]
+fn relay_is_idle_only_and_listed() {
+    assert!(IDLE_ONLY.contains(&"/relay"));
+    assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/relay"));
 }
 
 #[test]

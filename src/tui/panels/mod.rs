@@ -64,6 +64,10 @@ pub(crate) mod model;
 mod plan;
 #[path = "system/plugins.rs"]
 mod plugins;
+#[path = "system/relay.rs"]
+pub(crate) mod relay;
+#[path = "system/relay_scan.rs"]
+mod relay_scan;
 #[path = "system/spf.rs"]
 pub(crate) mod spf;
 #[path = "system/theme.rs"]

@@ -361,6 +361,9 @@ struct App {
     model_menu: Option<usize>,
     /// Active tab in the /model panel (0 = config; account tabs when signed in).
     model_tab: usize,
+    /// `/relay` session picker and its stale-result guard.
+    relay_panel: Option<panels::relay::RelayPanel>,
+    relay_scan_seq: u64,
     /// Picker-visible models advertised for the current Codex login.
     codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
     /// Guards the asynchronous Codex catalog refresh from duplicate commands.
@@ -729,6 +732,7 @@ impl App {
             || self.state == State::Awaiting
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
+            || self.relay_panel.is_some()
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()

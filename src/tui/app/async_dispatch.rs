@@ -650,6 +650,9 @@ impl App {
                     }
                 }
             }
+            Msg::RelayData { request_id, result } => {
+                self.apply_relay_scan(request_id, result);
+            }
             Msg::MemoryLoaded(data) => {
                 if let Some(m) = &mut self.memory {
                     let source = if data.loaded_from_session {

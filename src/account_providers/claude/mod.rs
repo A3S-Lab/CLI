@@ -24,7 +24,7 @@ use code_cli::ClaudeCodeCliAdapter;
 use credentials::ClaudeCredentials;
 use raw_messages::RawMessagesClient;
 
-pub(crate) use credentials::has_claude_login;
+pub(crate) use credentials::{claude_config_dir, has_claude_login};
 pub(crate) use model::{canonical_model_name, models};
 
 static PREFER_CLAUDE_CLI_TRANSPORT: AtomicBool = AtomicBool::new(false);

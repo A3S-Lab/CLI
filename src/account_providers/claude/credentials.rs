@@ -117,11 +117,16 @@ impl ClaudeCredentials {
     }
 }
 
-pub(crate) fn claude_credentials_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+pub(crate) fn claude_config_dir() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".claude")))
+}
+
+pub(crate) fn claude_credentials_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    claude_config_dir()
         .map(|dir| dir.join(".credentials.json"))
         .into_iter()
         .for_each(|path| paths.push(path));

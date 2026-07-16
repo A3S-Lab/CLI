@@ -213,6 +213,11 @@ impl App {
                     self.ide_key(&key);
                     return None;
                 }
+                // `/relay` is a modal session picker; execution-mode shortcuts
+                // and composer input must not change behind it.
+                if self.relay_panel.is_some() {
+                    return self.handle_relay_key(&key);
+                }
                 // Shift+Tab cycles run mode in any state.
                 if key.code == KeyCode::BackTab {
                     self.mode = self.mode.next();
@@ -530,6 +535,9 @@ impl App {
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
                     return None;
+                }
+                if self.relay_panel.is_some() {
+                    return self.handle_relay_mouse(&m);
                 }
                 if self.model_menu.is_some() {
                     return self.handle_model_mouse(&m);

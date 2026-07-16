@@ -52,7 +52,9 @@ fn configured_model_preference_from_session(
     configured_model_preference(persisted_model_from_session(session), configured_models)
 }
 
-fn persisted_model_from_session(session: &a3s_code_core::store::SessionData) -> Option<String> {
+pub(super) fn persisted_model_from_session(
+    session: &a3s_code_core::store::SessionData,
+) -> Option<String> {
     session
         .llm_config
         .as_ref()
@@ -60,7 +62,7 @@ fn persisted_model_from_session(session: &a3s_code_core::store::SessionData) -> 
         .or_else(|| session.model_name.clone())
 }
 
-fn configured_model_preference(
+pub(super) fn configured_model_preference(
     model: Option<String>,
     configured_models: &[String],
 ) -> Option<ModelSelectionPreference> {
@@ -74,7 +76,7 @@ fn configured_model_preference(
         })
 }
 
-fn preference_matches_persisted_model(
+pub(super) fn preference_matches_persisted_model(
     preference: &ModelSelectionPreference,
     persisted_model: &str,
 ) -> bool {
@@ -749,6 +751,8 @@ pub(crate) async fn run_in(
         ctx_warned_tier: 0,
         model_menu: None,
         model_tab: 0,
+        relay_panel: None,
+        relay_scan_seq: 0,
         codex_account_models: crate::account_providers::codex::cached_codex_models(),
         codex_models_loading: false,
         codex_models_refreshed_at: None,

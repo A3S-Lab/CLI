@@ -864,6 +864,7 @@ impl App {
                     Msg::UpdatePlan(latest)
                 }));
             }
+            "/relay" => return self.open_relay_panel(),
             "/memory" => {
                 self.textarea.clear();
                 // Open immediately ("loading…"); load the file snapshot off the

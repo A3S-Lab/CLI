@@ -190,6 +190,13 @@ instead of blocking on hidden input.
 `session` group owns less frequent inspection and data lifecycle operations.
 Deleting a session never deletes workspace files or memory.
 
+Inside the TUI, `/relay` is the interactive workspace-session picker. Its A3S
+Code tab resumes a native session together with its per-session model, effort,
+execution mode, theme, and paused-goal state. The Claude Code, Codex, and
+WorkBuddy tabs read only project transcript files and submit the selected
+session's latest user task to the active A3S Code session; they do not import
+external credentials or mutate the external transcript.
+
 The TUI `/ide` surface also exposes Code Intelligence commands for status,
 document or workspace symbols, definitions, declarations, references,
 implementations, and document or workspace diagnostics. Results are modal,

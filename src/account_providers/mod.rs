@@ -14,6 +14,7 @@ mod protocol;
 
 use a3s_code_core::llm::LlmClient;
 use anyhow::Result;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// A local developer-tool account that can back an A3S Code session.
@@ -99,6 +100,16 @@ impl AccountProvider {
         match self {
             Self::Codex => codex::codex_model_context(model),
             Self::Claude | Self::CodeBuddy => None,
+        }
+    }
+
+    /// Root directory owned by the corresponding developer tool. Relay reads
+    /// only its project transcripts; authentication remains provider-owned.
+    pub(crate) fn history_root(self) -> Option<PathBuf> {
+        match self {
+            Self::Claude => claude::claude_config_dir(),
+            Self::Codex => codex::codex_home(),
+            Self::CodeBuddy => codebuddy::workbuddy_config_dir(),
         }
     }
 }

@@ -185,6 +185,9 @@ pub(super) enum SessionRebuildAction {
     Fork {
         session_id: String,
     },
+    Relay {
+        restore: RelayRestoreState,
+    },
     Clear {
         session_id: String,
     },
@@ -203,6 +206,18 @@ pub(super) struct SessionRebuildProfile {
     pub(super) context_limit: u32,
     pub(super) llm_override: Option<LlmOverride>,
     pub(super) compact_summary: Option<String>,
+}
+
+pub(super) struct RelayRestoreState {
+    pub(super) session_id: String,
+    pub(super) model: Option<String>,
+    pub(super) model_source: ModelSelectionSource,
+    pub(super) effort: usize,
+    pub(super) mode: Mode,
+    pub(super) context_limit: u32,
+    pub(super) llm_override: Option<LlmOverride>,
+    pub(super) theme: Option<usize>,
+    pub(super) paused_goal: Option<PausedGoalState>,
 }
 
 pub(super) struct IdeIntelligenceResult {
@@ -419,6 +434,11 @@ pub(super) enum Msg {
     Forked {
         request_id: u64,
         result: Result<String, String>,
+    },
+    /// A background scan of native and external coding-agent transcripts.
+    RelayData {
+        request_id: u64,
+        result: Result<Vec<panels::relay::RelaySession>, String>,
     },
     /// `/memory` graph data loaded (timeline + details + derived graph).
     MemoryLoaded(MemPanelData),

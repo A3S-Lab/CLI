@@ -187,6 +187,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/sleep",
         "consolidate today's work into memory (experience · preferences · knowledge)",
     ),
+    (
+        "/relay",
+        "resume A3S Code or continue a Claude Code, Codex, or WorkBuddy task",
+    ),
     ("/help", "show commands and shortcuts"),
     (
         "/fork",
@@ -201,7 +205,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 pub(super) const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
-    "/fork", "/sleep", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
+    "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).

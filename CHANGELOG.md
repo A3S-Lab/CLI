@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored the Code TUI `/relay` picker for native A3S Code sessions and
+  Claude Code or Codex task handoff, added WorkBuddy project transcripts as a
+  fourth source, and preserved the selected native session's model, effort,
+  execution mode, theme, and paused-goal state during an in-app resume.
+
 ## [0.9.1] - 2026-07-16
 
 ### Added

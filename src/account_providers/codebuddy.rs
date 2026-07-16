@@ -333,7 +333,7 @@ fn is_model_id(value: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | '/' | ':'))
 }
 
-fn workbuddy_config_dir() -> Option<PathBuf> {
+pub(crate) fn workbuddy_config_dir() -> Option<PathBuf> {
     non_empty_env("WORKBUDDY_CONFIG_DIR")
         .or_else(|| non_empty_env("CODEBUDDY_CONFIG_DIR"))
         .map(PathBuf::from)
