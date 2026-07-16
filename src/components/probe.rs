@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PROBE_OUTPUT: u64 = 1024 * 1024;
 
 pub fn probe_version(path: &Path) -> anyhow::Result<String> {

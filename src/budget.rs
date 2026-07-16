@@ -16,6 +16,10 @@ const DEEP_RESEARCH_MIN_PARALLEL_TASKS: usize = 4;
 const DEEP_RESEARCH_MIN_CHILD_STEPS: usize = 200;
 const DEEP_RESEARCH_MIN_WORKFLOW_TOOL_CALLS: usize = 300;
 const DEEP_RESEARCH_MIN_WORKFLOW_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+/// Provider-facing child concurrency is an admission window, not a reasoning
+/// budget. Keep it at Core's proven default and schedule larger workloads in
+/// waves so Ultracode cannot burst 32 requests through one local account.
+const MAX_INTERACTIVE_PROVIDER_CONCURRENCY: usize = 8;
 
 pub(crate) const DEFAULT_TUI_EFFORT_INDEX: usize = 2;
 pub(crate) const DEFAULT_CODE_WEB_EFFORT_ID: &str = "medium";
@@ -129,7 +133,7 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         thinking_budget: 16_384,
         max_tool_rounds: 1_200,
         max_continuation_turns: 12,
-        max_parallel_tasks: 12,
+        max_parallel_tasks: MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
         deep_research_child_steps: 240,
         workflow_max_tool_calls: 360,
         workflow_max_output_bytes: 4 * 1024 * 1024,
@@ -143,7 +147,7 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         thinking_budget: 32_768,
         max_tool_rounds: 1_800,
         max_continuation_turns: 16,
-        max_parallel_tasks: 16,
+        max_parallel_tasks: MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
         deep_research_child_steps: 320,
         workflow_max_tool_calls: 480,
         workflow_max_output_bytes: 6 * 1024 * 1024,
@@ -157,7 +161,7 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         thinking_budget: 65_536,
         max_tool_rounds: 2_400,
         max_continuation_turns: 24,
-        max_parallel_tasks: 24,
+        max_parallel_tasks: MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
         deep_research_child_steps: 480,
         workflow_max_tool_calls: 720,
         workflow_max_output_bytes: 8 * 1024 * 1024,
@@ -171,7 +175,7 @@ pub(crate) const EFFORT_LEVELS: &[BudgetProfile] = &[
         thinking_budget: 65_536,
         max_tool_rounds: 3_200,
         max_continuation_turns: 32,
-        max_parallel_tasks: 32,
+        max_parallel_tasks: MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
         deep_research_child_steps: 640,
         workflow_max_tool_calls: 960,
         workflow_max_output_bytes: 12 * 1024 * 1024,
@@ -379,6 +383,22 @@ mod tests {
             );
         }
         assert!(!effort_uses_automatic_delegation(EFFORT_LEVELS.len()));
+    }
+
+    #[test]
+    fn reasoning_depth_never_expands_the_interactive_provider_window_past_core_default() {
+        for profile in EFFORT_LEVELS {
+            assert!(
+                profile.max_parallel_tasks <= MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
+                "{} would burst {} concurrent child runs through one provider account",
+                profile.id,
+                profile.max_parallel_tasks
+            );
+        }
+        assert_eq!(
+            EFFORT_LEVELS[ULTRACODE_INDEX].max_parallel_tasks, MAX_INTERACTIVE_PROVIDER_CONCURRENCY,
+            "Ultracode should schedule more work in bounded waves, not raise provider concurrency"
+        );
     }
 
     #[test]

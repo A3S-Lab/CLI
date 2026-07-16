@@ -34,6 +34,9 @@ impl Model for App {
     }
 
     fn view(&self) -> String {
+        if let Some(prompt) = self.render_goal_resume_prompt() {
+            return prompt;
+        }
         if let Some(transcript) = &self.transcript_view {
             return self.overlay_approval(transcript.render());
         }
@@ -104,7 +107,7 @@ impl Model for App {
         let gradient = self
             .gradient_until
             .is_some_and(|t| t.elapsed() < ULTRACODE_BORDER_ANIMATION);
-        let mut elabel = if self.research_mode {
+        let elabel = if self.research_mode {
             deep_research_input_scope_hint().to_string()
         } else {
             let profile = &EFFORT_LEVELS[self.effort];
@@ -116,11 +119,6 @@ impl Model for App {
                 _ => format!("◇ {}", profile.label),
             }
         };
-        if !self.pending_images.is_empty() {
-            let count = self.pending_images.len();
-            let noun = if count == 1 { "image" } else { "images" };
-            elabel = format!("📎 {count} {noun} · {elabel}");
-        }
         let (top_separator, separator) = if gradient {
             let lower_phase = self.gradient_frame + BRAND_GRADIENT.len() / 2;
             (
@@ -183,6 +181,8 @@ impl Model for App {
         let typed = self.textarea.view();
         let tint_input = sym != "❯";
         let input_view = input_prompt_line(sym, icolor, &typed, tint_input, composer_width);
+        let attachments = attachment_strip(&self.pending_images, composer_width);
+        let attachment_view = attachments.rows.join("\n");
 
         // Codex-style single footer. Claude-style task/subagent blocks remain
         // separate below it, but persistent session state has only one owner.
@@ -207,6 +207,10 @@ impl Model for App {
             .item(&activity, Constraint::Fixed(1))
             .item(&plan_block, Constraint::Fixed(bottom.plan.len() as u16))
             .item(&top_separator, Constraint::Fixed(1))
+            .item(
+                &attachment_view,
+                Constraint::Fixed(attachments.rows.len().min(u16::MAX as usize) as u16),
+            )
             .item(&input_view, Constraint::Fixed(self.input_height()))
             .item(&separator, Constraint::Fixed(1))
             .item(&status, Constraint::Fixed(1))
@@ -240,7 +244,7 @@ impl Model for App {
         // In the /ide editor, place the cursor at the edit position — inside
         // the right panel: tree width + its left border + the `%4d ` gutter.
         if let Some(ide) = &self.ide {
-            if ide.focus_editor {
+            if ide.focus_editor && ide.intelligence.is_none() {
                 if let Some(f) = &ide.file {
                     let width = self.width as usize;
                     let (tw, _) = panels::spf::ide_split(width);
@@ -291,7 +295,7 @@ pub(super) fn render_session_status_line(
     let mut chips = chips.into_iter();
     let mode = chips.next();
     let context = footer_context_segments(context_limit, last_prompt_tokens, output_tokens);
-    let mode_full = mode.as_ref().map(footer_chip_segment).unwrap_or_default();
+    let mode_full = mode.as_ref().map(footer_mode_segment).unwrap_or_default();
     let mode_compact = mode
         .as_ref()
         .map(footer_compact_mode_segment)
@@ -313,29 +317,56 @@ pub(super) fn render_session_status_line(
         ),
         (footer_row(PAD, " ", [&mode_tiny, &context.tiny]), " "),
     ];
-    let (mut row, separator) = core_candidates
-        .into_iter()
-        .find(|(candidate, _)| a3s_tui::style::visible_len(candidate) <= width)
+    // Active state is more important than static identity. Choose a core
+    // projection that leaves room for the first live chip (normally `/goal`),
+    // then add workspace identity only with the remaining space.
+    let live = chips
+        .map(|chip| footer_chip_segment(&chip))
+        .collect::<Vec<_>>();
+    let preferred_core = live.first().and_then(|detail| {
+        core_candidates.iter().find(|(candidate, separator)| {
+            let joined = if candidate.is_empty() {
+                detail.clone()
+            } else {
+                format!("{candidate}{separator}{detail}")
+            };
+            a3s_tui::style::visible_len(&joined) <= width
+        })
+    });
+    let (mut row, separator) = preferred_core
+        .or_else(|| {
+            core_candidates
+                .iter()
+                .find(|(candidate, _)| a3s_tui::style::visible_len(candidate) <= width)
+        })
+        .cloned()
         .unwrap_or_else(|| (footer_row(0, " ", [&mode_tiny, &context.tiny]), " "));
 
-    // Optional detail is an ordered prefix. Once one field does not fit, lower
-    // priority fields are omitted too: workspace → branch → model → live detail.
-    // The final fit therefore pads an already-bounded row rather than deciding
-    // which semantic field happens to survive a right-edge truncation.
-    let mut optional = Vec::new();
+    for detail in live {
+        let candidate = if row.is_empty() {
+            detail
+        } else {
+            format!("{row}{separator}{detail}")
+        };
+        if a3s_tui::style::visible_len(&candidate) > width {
+            break;
+        }
+        row = candidate;
+    }
+
+    let mut identity = Vec::new();
     let workspace = footer_workspace_segment(cwd);
     if !workspace.is_empty() {
-        optional.push(workspace);
+        identity.push(workspace);
     }
     if let Some(branch) = branch.filter(|branch| !branch.is_empty()) {
-        optional.push(footer_branch_segment(branch));
+        identity.push(footer_branch_segment(branch));
     }
     if let Some(model) = model.filter(|model| !model.is_empty()) {
-        optional.push(footer_model_segment(model, context_limit));
+        identity.push(footer_model_segment(model, context_limit));
     }
-    optional.extend(chips.map(|chip| footer_chip_segment(&chip)));
 
-    for detail in optional {
+    for detail in identity {
         let candidate = if row.is_empty() {
             detail
         } else {
@@ -367,11 +398,11 @@ fn footer_context_segments(
         } else {
             "ctx:?".to_string()
         };
-        let styled = Style::new().fg(TN_GRAY).render(&label);
+        let styled = Style::new().fg(COMPOSER_CHROME.secondary).render(&label);
         return FooterContextSegments {
             full: styled.clone(),
             compact: styled,
-            tiny: Style::new().fg(TN_GRAY).render("ctx?"),
+            tiny: Style::new().fg(COMPOSER_CHROME.secondary).render("ctx?"),
         };
     }
 
@@ -384,7 +415,7 @@ fn footer_context_segments(
         .glyphs('▰', '▱')
         .show_value(false)
         .fg(color)
-        .empty_fg(TN_SUBTLE)
+        .empty_fg(COMPOSER_CHROME.faint)
         .view();
 
     FooterContextSegments {
@@ -406,11 +437,11 @@ fn footer_context_percent(used: usize, limit: usize) -> usize {
 
 fn footer_context_color(percent: usize) -> Color {
     if percent >= 85 {
-        TN_RED
+        COMPOSER_CHROME.error
     } else if percent >= 70 {
-        TN_YELLOW
+        COMPOSER_CHROME.warning
     } else {
-        TN_GRAY
+        COMPOSER_CHROME.active
     }
 }
 
@@ -439,15 +470,18 @@ fn footer_workspace_segment(cwd: &str) -> String {
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or(trimmed);
-    Style::new().fg(ACCENT).bold().render(workspace)
+    Style::new()
+        .fg(COMPOSER_CHROME.active)
+        .bold()
+        .render(workspace)
 }
 
 fn footer_branch_segment(branch: &str) -> String {
     format!(
         "{}{}{}",
-        Style::new().fg(TN_GRAY).render("git:("),
-        Style::new().fg(TN_YELLOW).render(branch),
-        Style::new().fg(TN_GRAY).render(")")
+        Style::new().fg(COMPOSER_CHROME.faint).render("git:("),
+        Style::new().fg(COMPOSER_CHROME.success).render(branch),
+        Style::new().fg(COMPOSER_CHROME.faint).render(")")
     )
 }
 
@@ -457,10 +491,10 @@ fn footer_model_segment(model: &str, context_limit: u32) -> String {
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or(model);
-    let mut segment = Style::new().fg(TN_FG).render(short);
+    let mut segment = Style::new().fg(COMPOSER_CHROME.secondary).render(short);
     if context_limit > 0 {
         segment.push(' ');
-        segment.push_str(&Style::new().fg(TN_GRAY).render(&format!(
+        segment.push_str(&Style::new().fg(COMPOSER_CHROME.secondary).render(&format!(
             "({} context)",
             footer_context_window_label(context_limit as usize)
         )));
@@ -479,27 +513,40 @@ fn footer_context_window_label(limit: usize) -> String {
 }
 
 fn footer_chip_segment(chip: &SessionStatusChip) -> String {
-    let color = chip.color_value().unwrap_or(TN_GRAY);
+    let glyph_color = chip.color_value().unwrap_or(COMPOSER_CHROME.faint);
     format!(
         "{} {}",
-        Style::new().fg(color).render(chip.glyph()),
-        Style::new().fg(color).render(chip.label())
+        Style::new().fg(glyph_color).render(chip.glyph()),
+        Style::new()
+            .fg(COMPOSER_CHROME.secondary)
+            .render(chip.label())
+    )
+}
+
+pub(super) fn footer_mode_segment(chip: &SessionStatusChip) -> String {
+    let glyph_color = chip.color_value().unwrap_or(COMPOSER_CHROME.faint);
+    format!(
+        "{} {}",
+        Style::new().fg(glyph_color).render(chip.glyph()),
+        Style::new()
+            .fg(COMPOSER_CHROME.primary)
+            .render(chip.label())
     )
 }
 
 fn footer_compact_mode_segment(chip: &SessionStatusChip) -> String {
-    let color = chip.color_value().unwrap_or(TN_GRAY);
+    let glyph_color = chip.color_value().unwrap_or(COMPOSER_CHROME.faint);
     let label = chip.label().strip_suffix(" mode").unwrap_or(chip.label());
     format!(
         "{} {}",
-        Style::new().fg(color).render(chip.glyph()),
-        Style::new().fg(color).render(label)
+        Style::new().fg(glyph_color).render(chip.glyph()),
+        Style::new().fg(COMPOSER_CHROME.primary).render(label)
     )
 }
 
 fn footer_tiny_mode_segment(chip: &SessionStatusChip) -> String {
     Style::new()
-        .fg(chip.color_value().unwrap_or(TN_GRAY))
+        .fg(chip.color_value().unwrap_or(COMPOSER_CHROME.faint))
         .render(chip.glyph())
 }
 

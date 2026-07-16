@@ -11,9 +11,13 @@ optional component can also be prepared explicitly.
 a3s code                       # launch the included A3S Code TUI
 a3s web -d                     # start A3S Web in the background
 a3s box ps                     # run Box, installing it on first real use
+a3s up -d                      # converge the local Compose application with Box
+a3s ps                         # list services in the local Compose application
+a3s compose exec api -- sh     # use the complete Box Compose command namespace
 a3s bench run ./tasks/smoke --agent codex
 a3s search doctor              # run the registered Search product
 a3s use browser open https://example.com
+a3s use box compose up -d      # route through Use to the one managed Box
 a3s list                       # list registered components and external tools
 a3s install use                # install or repair a registered component
 a3s upgrade use                # upgrade one managed component
@@ -101,6 +105,37 @@ The first `a3s box ...` command resolves or installs Box. Bench and Search
 require explicit installation so an evaluation or search command never starts
 an unplanned download. Users still type `a3s bench`; its private executable is
 not installed as another public command on `PATH`.
+
+### Compose applications
+
+`a3s compose` is the canonical multi-service application namespace. It resolves
+the registered Box component and forwards the remaining arguments without a
+shell or a second Compose parser:
+
+```sh
+a3s compose config                  # discovers compose.acl first
+a3s compose up -d
+a3s compose exec api -- sh
+a3s compose down --volumes
+a3s compose -f compose.yaml config # explicit YAML remains supported
+```
+
+The everyday project commands also have concise top-level forms:
+
+```sh
+a3s up -d
+a3s ps
+a3s logs --follow api
+a3s down --volumes
+```
+
+These are exact routes to `a3s-box compose up|ps|logs|down`; project discovery,
+service state, networks, volumes, health checks, and rollback remain owned by
+Box. The global `-C/--directory` option selects the Compose project directory.
+Because the route is transparent, newly shipped Box Compose subcommands become
+available under `a3s compose` without a matching umbrella CLI release. The
+canonical `compose.acl` schema, validation, environment resolution, and YAML
+compatibility are all implemented once by Box.
 
 The Bench control component compiles and locks tasks, plans trials, coordinates
 evaluation, and produces scores and reports. It does not execute an Agent.
@@ -204,6 +239,10 @@ a3s use browser render https://example.com
 a3s use browser open https://example.com --session research
 a3s use browser snapshot --session research --json
 a3s use browser close --session research
+a3s use box compose up --detach
+a3s use extension disable acme/slack --json
+a3s use extension enable acme/slack --json
+a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
 ```
 
 Browser and Office are built-in Use domains. Independently implemented domains
@@ -260,6 +299,9 @@ Use this README as the TUI capability guide:
   surfaces fit together during real work.
 - [Inside The TUI](#inside-the-tui) explains the interactive transcript,
   input modes, panels, and keyboard model.
+- [Code Intelligence](docs/code-intelligence.md) documents saved-file symbols,
+  navigation, diagnostics, language prerequisites, and the shared TUI/Web
+  behavior.
 - [Startup, Sessions, And Safety](#startup-sessions-and-safety) covers launch,
   resume, confirmation, and smoke validation.
 - [Effort Profiles](#effort-profiles) explains how `/effort` changes reasoning,
@@ -332,6 +374,16 @@ browser storage. Code Web exposes one A3S Code agent and disables the Core
 read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
+
+The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
+for saved-file symbols, definitions, declarations, references,
+implementations, and diagnostics. Dirty editors remain local and explicitly
+label semantic results as based on the saved version. The agent receives the
+same read-only capability through `code_symbols`, `code_navigation`, and
+`code_diagnostics`; existing `read`, `grep`, `edit`, and `patch` tools remain
+the only source and mutation paths. See the
+[Code Intelligence guide](docs/code-intelligence.md) for commands, keyboard
+actions, language executables, and the typed local HTTP routes.
 
 Inspect and create `config.acl`:
 
@@ -570,7 +622,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
-| Deep research | Prefix a prompt with `?` to start an adaptive, event-sourced research loop. One A3S Code v5.2.2 schema-constrained planner call chooses the title, phases, independent evidence tracks, queries, stable seed URLs, observable stop conditions, route, and independent budgets. New plans use `direct_only`, `direct_then_review`, or `maker_first`; no topic classifier, keyword count, query length, or task template overrides that LLM decision. Public-source routes run query-aware searches and fetches concurrently through `batch`, preserve source anchors and typed partial failures, and give every planned query a fetch opportunity before spending capacity on seed URLs. The LLM may select up to four searches and eight parallel fetches for a substantive investigation, while narrow questions retain smaller budgets. When unconfigured default engines return no results, one bounded Brave fallback runs without overriding explicit search configuration. `direct_then_review` combines cross-track synthesis with the first independent coverage check, removing the redundant no-tool maker turn that slow reasoning providers could spend 120 seconds on; event-sourced `direct_then_maker` runs remain replayable for compatibility. The checker routes missing public benchmarks, maintenance facts, excerpts, and migration documentation to one focused direct follow-up, reserving makers for genuine evidence production or required local/non-web work. Planner, retrieval, maker, checker, report, and wall-clock deadlines are independent; checker latency is learned from v5.2.2 step events, while the 300-second workflow fuse still bounds the run. Accepted evidence and checker decisions drive audited, atomic `report.md` and `index.html` publication through the built-in `report-master` visual system. Reportable evidence survives checker timeout as an explicit provisional report; only runs without traceable evidence become Recovery artifacts. |
+| Deep research | Prefix a prompt with `?` to start an adaptive, event-sourced research loop. One A3S Code v5.2.2 schema-constrained planner call chooses the title, phases, independent evidence tracks, queries, stable seed URLs, observable stop conditions, route, and independent budgets. New plans use `direct_only`, `direct_then_review`, or `maker_first`; no topic classifier, keyword count, query length, or task template overrides that LLM decision. Public-source routes run query-aware searches and fetches concurrently through `batch`, preserve source anchors and typed partial failures, and give every planned query a fetch opportunity before spending capacity on seed URLs. The LLM may select up to four searches and eight parallel fetches for a substantive investigation, while narrow questions retain smaller budgets. When unconfigured default engines return no results, one bounded Brave fallback runs without overriding explicit search configuration. `direct_then_review` combines cross-track synthesis with the first independent coverage check, removing the redundant no-tool maker turn that slow reasoning providers could spend 120 seconds on; event-sourced `direct_then_maker` runs remain replayable for compatibility. The checker routes missing public benchmarks, maintenance facts, excerpts, and migration documentation to one focused direct follow-up, reserving makers for genuine evidence production or required local/non-web work. Planner, retrieval, maker, checker, report, and wall-clock deadlines are independent; checker latency is learned from v5.2.2 step events, while the 300-second workflow fuse still bounds the run. Accepted evidence and checker decisions drive an answer-first structured report: every semantic plan track must be answered or explicitly bounded, with findings connected to interpretation, implication, and uncertainty. The same call selects a content-driven `report-master` narrative mode, visual archetype, palette, density, hero, and stance; the host accepts only typed design tokens and atomically publishes audited `report.md` and `index.html`. Reportable evidence survives checker timeout as an explicit provisional report; only runs without traceable evidence become Recovery artifacts. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle so long sessions continue through repeated compactions. `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -594,8 +646,10 @@ fuse, with the final ten seconds reserved for cancellation and recovery artifact
 publication. It has no subject classifier, topic-specific collector, source
 allowlist, report template, or keyword-based freshness cache; each invocation
 gathers current evidence. Valid structured evidence is materialized as a
-responsive editorial report. If independent checking cannot finish, that
-report is marked provisional; insufficient or untraceable evidence produces an
+responsive report whose analytical, chronicle, executive, field-notes, or
+editorial composition is selected from the report semantics rather than topic
+keywords. If independent checking cannot finish, that report is marked
+provisional; insufficient or untraceable evidence produces an
 explicit degraded Recovery report and a nonzero result.
 
 ### Everyday Capability Paths
@@ -641,6 +695,18 @@ After a terminal model event, the TUI keeps new input queue-only until the
 stream worker finishes persistence and releases the session's single-flight
 lease; synthesis, loop, DeepResearch, and queued continuations cannot overlap
 the previous operation.
+When Core restarts an interrupted response stream, it reuses the same LLM turn
+and message snapshot. A repeated `TurnStart` for that turn restores the TUI's
+pre-attempt transcript, reasoning, Markdown, and tool projection before the
+replacement stream arrives, so retries never append another user message or
+leave duplicated partial output.
+Pending host turns are scheduled by `a3s_lane::PriorityQueue`: explicit user
+input has priority over host-generated continuations, while equal-priority
+messages remain FIFO. A queue item is committed only after Core admits its
+stream; `SessionBusy` and admission timeouts restore the same priority and FIFO
+position. Esc cancels and settles the active worker before consuming exactly
+one queued successor. The bottom queue strip contains pending turns only and
+removes a message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
 reflows semantic arguments, output, diffs, and Markdown after a resize. Streamed
@@ -697,10 +763,22 @@ editor. Project-local config can set model/provider choices, OS endpoint,
 `flow_dir`, `agent_dir`, `mcp_dir`, `skill_dir`, storage, memory, delegation,
 and asset paths.
 
-Sessions auto-save under `<workspace>/.a3s/tui/sessions`. Exiting prints the
-exact resume command; `a3s code resume` without an id resumes the newest saved
-session in that workspace. `/fork` copies the current transcript into a new
-session id while keeping the original, and `/clear` starts a fresh conversation.
+Core session snapshots auto-save under
+`<workspace>/.a3s/tui/sessions/v1/sessions`; TUI-owned per-session state is
+stored under `<workspace>/.a3s/tui/session-state/v1`. Exiting prints the exact
+`a3s code resume <session-id>` command and highlights the command when color
+output is enabled. `a3s code resume` without an id resumes the newest saved
+session in that workspace. Resume restores the selected model and credential
+source, effort profile, execution mode (`default`, `plan`, or `auto`), and syntax
+theme instead of resetting them to launch defaults. `/fork` copies the current
+transcript into a new session id while keeping the original, and `/clear` starts
+a fresh conversation.
+
+If exit interrupts a durable `/goal`, the goal is saved as paused. The resumed
+TUI opens a startup picker with `Resume goal` and `Leave paused`. The first
+choice continues the next goal iteration without changing the restored execution
+mode; the second enters the session with the goal still paused, where
+`/goal resume` can continue it later.
 
 The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
 prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
@@ -755,10 +833,10 @@ only after the replacement is ready with the same persisted identity.
 | --- | ---: | ---: | ---: | ---: | --- |
 | `low` | 2,048 | 240 | 4 | 4 | Fast, minimal changes with narrow verification. |
 | `medium` | 8,192 | 800 | 8 | 8 | Balanced default behavior without extra depth steering. |
-| `high` | 16,384 | 1,200 | 12 | 12 | More deliberate planning, relevant tests, and self-review. |
-| `xhigh` | 32,768 | 1,800 | 16 | 16 | Compare alternatives, probe edge cases, and verify thoroughly. |
-| `max` | 65,536 | 2,400 | 24 | 24 | Maximum rigor for correctness, adversarial checks, and completeness. |
-| `ultracode` | 65,536 | 3,200 | 32 | 32 | Message-gated dynamic workflow mode: trivial turns stay direct; complex turns may use `dynamic_workflow`, A3S Flow replay, host-side `parallel_task`, and signed-in `runtime`. |
+| `high` | 16,384 | 1,200 | 12 | 8 | More deliberate planning, relevant tests, and self-review. |
+| `xhigh` | 32,768 | 1,800 | 16 | 8 | Compare alternatives, probe edge cases, and verify thoroughly. |
+| `max` | 65,536 | 2,400 | 24 | 8 | Maximum rigor for correctness, adversarial checks, and completeness. |
+| `ultracode` | 65,536 | 3,200 | 32 | 8 | Message-gated dynamic workflow mode: trivial turns stay direct; complex turns may use `dynamic_workflow`, A3S Flow replay, host-side `parallel_task`, and signed-in `runtime`. |
 
 For signed-in Codex models, `low`, `medium`, `high`, `xhigh`, and `max` request
 the same-named native reasoning effort. `ultracode` remains an A3S orchestration
@@ -774,8 +852,10 @@ disabled for `low` through `max`; those levels continue to control native Codex
 reasoning independently. `ultracode` enables automatic delegation alongside
 `PlanningMode::Auto`, goal tracking, and dynamic-workflow guidance, while the
 pre-analysis gate still decides whether a turn actually needs planning or
-fan-out. Final-answer synthesis continuations never start another delegation
-wave.
+fan-out. The eight-task value is a shared provider-admission window, not a cap
+on total goal work: larger investigations run in bounded waves without bursting
+one signed-in account. Final-answer synthesis continuations never start another
+delegation wave.
 
 ### Dynamic Workflows
 
@@ -1026,7 +1106,8 @@ These commands are available outside the asset-specific flows:
 | `/ctx save <n>` | Promote a previous session hit into durable memory. |
 | `/sleep` | Consolidate the day's work into memory, including experience, preferences, and knowledge. |
 | `/kb` / `/kb add` / `/kb import` / `/kb search` / `/kb vault` | Manage the local personal knowledge base. |
-| `/goal <text>` | Start a durable goal run: switch to `ultracode`, create `.a3s/loops/goal-*` with state/log/budget and maker/verifier skills, force planning, and continue until Core emits a matching verified `GoalAchieved`. Esc or `/goal clear` cancels the run and invalidates pending retries. |
+| `/goal <text>` | Start a durable goal run: switch to `ultracode`, create `.a3s/loops/goal-*` with state/log/budget and maker/verifier skills, force a dependency-ordered maker → verifier plan, and continue until Core emits a matching verified `GoalAchieved`. Independent read-only work may fan out inside a phase, while progress is persisted only at five-percent checkpoints. Esc or `/goal clear` cancels the run and invalidates pending retries. |
+| `/goal resume` | Continue a durable goal that was left paused during session resume. |
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` | Branch the current transcript into a new session id. |
@@ -1096,7 +1177,7 @@ the skill matcher for the current request.
 | `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
 | `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
 | `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
-| `? <question>` | Starts bounded DeepResearch. Collection is read-only and scope-aware; delegated tracks reserve a structured-finalization turn. Once collection closes, synthesis sees no tools and returns Markdown only; the host validates, persists, and renders the current report pair. Failed collection terminates with an explicit degraded report instead of retrying retrieval. Current-run `Completed` validation rejects stale paths, fallback drafts, leaked tool logs, unsafe links, untraceable citations, and broken Markdown/HTML pairs. |
+| `? <question>` | Starts bounded DeepResearch. Collection is read-only and scope-aware; delegated tracks reserve a structured-finalization turn. Once collection closes, synthesis sees no tools and returns one typed report object containing final Markdown, a private per-track depth map, and a private `report-master` presentation lock. The host validates semantic coverage and citations, then safely renders only approved layout and color tokens. Failed collection terminates with an explicit degraded report instead of retrying retrieval. Current-run `Completed` validation rejects omitted plan tracks, shallow investigation treatments, stale paths, fallback drafts, leaked tool logs, unsafe links, untraceable citations, and broken Markdown/HTML pairs. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |
@@ -1178,12 +1259,24 @@ provider registry for availability, model selection, persistence, and restore.
 ```sh
 cargo test --all-targets
 cargo test --test box_command_soak -- --ignored
+cargo build --manifest-path ../box/src/Cargo.toml -p a3s-box-cli --bin a3s-box
+A3S_BOX_E2E_BIN=../box/src/target/debug/a3s-box cargo test --test compose_acl_e2e -- --ignored --nocapture
+# From the monorepo root; isolates Cargo output from concurrent component builds.
+just use-hotplug-e2e
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
 A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
 ```
 
 The ignored soak test repeats `a3s box` after a fake first-use install and
 verifies later runs reuse the installed `a3s-box`. The ignored
+`compose_acl_e2e` test crosses the real `a3s` and `a3s-box` process boundary,
+checks canonical ACL discovery over conflicting YAML, environment resolution,
+closed-schema rejection, convergent `up`, `ps`, `logs`, `exec`, `down`, and
+post-shutdown storage cleanup against a real MicroVM runtime. The ignored
+Use hot-plug E2E builds the independently released `a3s-use` binary in an
+isolated target directory, then crosses its public process/JSON boundary to
+verify installation, MCP invocation, version replacement, TUI session replay,
+disable, and re-enable convergence. The ignored
 `ctx_compact_real_llm` test drives the configured model (`~/.a3s/config.acl`)
 with matched compressed and uncompressed seeded histories. It asserts that
 streaming usage is reported, compaction shrinks the history, the provider sees

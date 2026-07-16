@@ -7,31 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- Promoted the dedicated A3S Use worker into the live `task` and
-  `parallel_task` agent catalog with current capability IDs, MCP routes, and
-  Skill guidance. It returns observable application evidence and never falls
-  back to shell, workspace, unrelated MCP, or recursive delegation.
-- Updated the A3S Code Core baseline to 5.3.0 so packaged CLI builds include
-  the live worker-definition contract used by the dedicated Use worker.
-
-### Fixed
-
-- Completed the Parent → Use worker → live `mcp__use_*` path for hot-plugged
-  capabilities. Office `use.office.outcome_unknown` mutations are surfaced as
-  potentially applied and are never retried automatically.
-
-## [0.9.0] - 2026-07-15
+## [0.9.1] - 2026-07-16
 
 ### Added
 
 - Added typed `list`, `info`, `install`, `upgrade`, `uninstall`, and `doctor`
   component lifecycle commands for Code, Box, Bench, Search, Use, and delegated
   Use capabilities.
+- Added native Code Intelligence shared by agent tools, the TUI `/ide` editor,
+  and A3S Web. The first release provides saved-file symbols, semantic
+  navigation, and diagnostics for Rust and TypeScript/JavaScript while reusing
+  the existing workspace manifest, file tools, path policy, and editor file
+  selection.
+- Added the canonical `a3s compose ...` Box route and concise
+  `a3s up`, `a3s down`, `a3s ps`, and `a3s logs` application shortcuts. All
+  routes preserve raw child arguments, working-directory context, streams, and
+  the Box process exit status while retaining verified first-use installation.
+  Box now discovers canonical `compose.acl` project files through the same
+  transparent route while explicit Compose YAML remains available.
+- Added `a3s use box ...` as a component-backed route. The root remains the
+  sole Box installer and receipt owner, injects one canonical executable into
+  Use, preserves native argv and status, and never auto-installs Box for
+  unrelated Use commands. External Use domains now expose generation-based
+  enable, disable, snapshot, and watch operations with graceful route draining.
 - Added unified A3S Use capability hot-plug for Code TUI and Web sessions,
-  including one shared Web watcher, live MCP/Skill projection, session rebuild
-  replay, and a permission-isolated `use` worker.
+  including one shared Web watcher, generation-driven MCP/Skill projection,
+  session-rebuild replay, bounded startup discovery, background recovery, and
+  a permission-isolated `use` worker. Capabilities converge across install,
+  upgrade, disable, and re-enable without restarting A3S Code.
 
 ### Changed
 
@@ -42,6 +45,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made macOS and Linux the current component/runtime support targets; Windows
   remains a compile/package preview until its managed lifecycle and persistent
   Browser conformance gates pass.
+- Promoted the dedicated A3S Use worker into the live `task` and
+  `parallel_task` catalog with current capability IDs, MCP routes, and Skill
+  guidance. It returns observable application evidence and never falls back to
+  shell, workspace, unrelated MCP, or recursive delegation.
+- Updated the A3S Code Core baseline to 5.3.2 so packaged CLI builds include
+  the live worker-definition contract used by the dedicated Use worker and
+  position-aware HITL classification for shell commands.
+- Pinned standalone releases to ACL 0.2.2, Boot 0.1.2, Lane 0.5.1, and Updater
+  0.3.0 so packaged builds retain bounded nested-block parsing, typed HTTP
+  failures, deterministic queue lifecycle, and checksum-verified ZIP updates
+  without depending on monorepo paths.
+
+### Fixed
+
+- Completed the Parent → Use worker → live `mcp__use_*` path for hot-plugged
+  capabilities. Office `use.office.outcome_unknown` mutations are surfaced as
+  potentially applied and are never retried automatically.
+- Capped provider-facing child concurrency at eight for every interactive
+  effort profile while retaining larger reasoning, tool-round, and continuation
+  budgets. Ultracode and `/goal` now schedule larger workloads in bounded waves
+  instead of bursting one signed-in provider account.
+- Made `/goal` execute maker and verifier as dependency-ordered phases, with
+  parallelism limited to independent read-only work inside each phase. Goal
+  state writes are now checkpointed at five-percent progress boundaries and
+  unchanged runtime sections are not rewritten.
+- Rendered per-branch `parallel_task` output excerpts, retry attempts, and
+  recovered branch counts without repeating the complete batch output in every
+  plan step or DeepResearch synthesis prompt.
+- Replaced the TUI-local pending-turn heap with `a3s-lane`'s stable typed
+  priority queue. Explicit user messages now outrank automatic continuations,
+  equal-priority turns remain FIFO, failed stream admission restores the exact
+  queue item without losing image attachments, and Esc settles the real Core
+  worker before consuming one queued successor. The bottom queue strip now
+  projects pending turns only, so a claimed message disappears as soon as its
+  execution begins.
+- Stopped workspace discovery before the Code TUI and Web host tear down their
+  Tokio runtimes. In-progress directory scans and Git file enumeration now
+  observe cancellation, so quitting from a large workspace or home directory
+  no longer hangs after the session-saved message. TUI session close and
+  language-service cleanup also have host-level deadlines, and both startup
+  and interactive `/update` checks now terminate their child process when the
+  TUI closes, so unresponsive background work cannot block exit indefinitely.
 
 ## [0.8.2] - 2026-07-15
 

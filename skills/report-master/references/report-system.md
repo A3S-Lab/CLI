@@ -17,6 +17,21 @@ For each material claim, retain its supporting evidence, source family, date/ver
 
 Depth means useful explanatory work: answering why, how, compared with what, what changed, what follows, and what remains unknown. It does not mean adding audit prose.
 
+When DeepResearch supplies semantic plan tracks, build a private treatment for every track before drafting:
+
+```text
+Track:
+Status: answered | bounded
+Finding:
+Interpretation:
+Implication:
+Counterpoint or uncertainty:
+```
+
+The final section structure may combine or reorder tracks for the reader. The private map exists to prevent a polished narrative from silently dropping part of the research question. Do not expose the map as workflow or audit prose.
+
+In a host-owned structured response, keep this map compact: one or two precise sentences per field are enough. Prefer the full plan-track name; otherwise use a unique semantic label rather than an ambiguous paraphrase. The report body receives the writing budget.
+
 ## 2. Strategist pass
 
 Before HTML, lock a report strategy in working memory:
@@ -29,6 +44,7 @@ Dominant thesis:
 Communication mode:
 Mode rationale:
 Visual-style position:
+Visual archetype:
 Evidence boundary:
 Required dimensions:
 Section sequence:
@@ -48,6 +64,18 @@ Choose one dominant mode. A section may lean differently, but do not blend modes
 - **Custom** — use only when no mode has a dominant fit. Describe its concrete sequence and title voice; never use “custom” as a substitute for judgment.
 
 Mode and visual style are independent. A pyramid report may be restrained editorial or bold technical; a narrative report may be archival or minimal.
+
+### Visual archetype: the composition family
+
+In host-rendered reports choose one approved archetype. This is a layout decision, not a synonym for communication mode.
+
+- **Editorial** — long-form synthesis with typographic hierarchy and a persistent reading rail.
+- **Analytical** — comparisons, mechanisms, matrices, and dense evidence with precise geometry.
+- **Chronicle** — ordered change, event arcs, investigations, and turning points with temporal rhythm.
+- **Executive** — restrained, conclusion-first decision material with low ornament and compact scanning.
+- **Field notes** — observations, case work, exploratory findings, and qualified interpretation with an annotated-paper character.
+
+Then independently choose an approved palette (`ocean`, `graphite`, `forest`, `amber`, `plum`), density (`compact`, `balanced`, `spacious`), hero (`statement`, `split`, `metrics`), and stance (`safe`, `shifted`, `bold`). The combination must be explained by audience and information structure. Never map a subject keyword directly to a template or palette.
 
 ### Visual-style position: how the report looks
 
@@ -134,7 +162,11 @@ For every major section:
 
 Use deterministic CSS tokens for consistency, but do not batch-stamp identical HTML across sections. Shared scaffolding is appropriate; editorial composition requires per-section judgment.
 
+In host-owned DeepResearch, express the strategy through the structured `editorial` and `presentation` fields. The host applies a safe renderer whose variants implement these composition families. Never return arbitrary HTML, CSS, class names, scripts, or network assets in those fields. In ordinary file-authoring mode, execute the same lock directly in the standalone HTML.
+
 The cover establishes subject, scope, evidence date, and visual thesis. It must not reproduce the full user prompt. The executive summary answers the question with conclusion, strongest support, implication, and confidence boundary. Methodology and source quality remain compact and secondary. The ending synthesizes consequences or next actions; it must not merely repeat the summary.
+
+Copy citation targets byte-for-byte from accepted evidence. Never guess a corrected URL. When a useful label lacks an accepted target, leave it as plain text or remove the source item. During repair, preserve valid sections and apply the smallest correction that restores the content, source, or presentation contract; do not restart evidence collection or rewrite the whole report for a local defect.
 
 ## 6. Visual system requirements
 
@@ -191,5 +223,6 @@ Reject the report before completion if it:
 - contains a chart whose data or encoding cannot be defended;
 - looks like a generic admin dashboard or mechanically styled Markdown;
 - has no dominant thesis, narrative spine, or meaningful visual hierarchy.
+- omits a semantic plan track without marking its evidence boundary, or lists facts without interpretation and reader consequence.
 
 Repair the artifact locally without restarting research. The final report must be self-contained, useful without workflow context, and visually authoritative.

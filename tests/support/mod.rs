@@ -153,6 +153,14 @@ impl FakeReleaseServer {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        // BSD-derived platforms may propagate O_NONBLOCK from
+                        // the listener to accepted sockets. The fixture reads
+                        // each request on a worker thread, so make that contract
+                        // explicit; otherwise a transient WouldBlock closes the
+                        // connection before reqwest receives the response.
+                        stream
+                            .set_nonblocking(false)
+                            .expect("failed to configure release connection");
                         let release = release.clone();
                         let asset_path = asset_path.clone();
                         let archive = archive.clone();

@@ -269,11 +269,17 @@ fn help_panel() -> HelpPanel {
                     "web seed + local DynamicWorkflowRuntime workflow fan-out; say `no web` for offline evidence",
                 )
                 .row("@<path>", "attach a workspace file from the file picker")
-                .row("Ctrl+V", "attach a clipboard image to the next message"),
+                .row(
+                    "Ctrl+V",
+                    "attach image · click chip to preview · Backspace removes last",
+                ),
         )
         .section(
             HelpSection::new("Keys")
-                .row("Enter", "send; while busy, the message is queued")
+                .row(
+                    "Enter",
+                    "send; while busy, queue the message (Esc interrupts and runs it now)",
+                )
                 .row("Shift+Enter", "insert a newline in the input")
                 .row("Shift+Tab", "cycle run mode: default -> plan -> auto")
                 .row(

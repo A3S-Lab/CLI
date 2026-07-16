@@ -24,21 +24,7 @@ fn has_research_report_substance(markdown: &str, html: &str) -> bool {
     }
 
     let combined = format!("{markdown_text}\n{html_text}").to_lowercase();
-    let placeholder_markers = [
-        "placeholder",
-        "lorem ipsum",
-        "todo",
-        "tbd",
-        "coming soon",
-        "under construction",
-        "not yet available",
-        "待补充",
-        "占位",
-    ];
-    if placeholder_markers
-        .iter()
-        .any(|marker| combined.contains(marker))
-    {
+    if report_contains_placeholder_content(markdown_text) {
         return false;
     }
 
@@ -91,6 +77,35 @@ fn has_research_report_substance(markdown: &str, html: &str) -> bool {
     );
 
     has_findings && has_sources && has_confidence && has_report_source_anchor(&combined)
+}
+
+fn report_contains_placeholder_content(markdown: &str) -> bool {
+    markdown.lines().any(|line| {
+        let normalized = line
+            .trim()
+            .trim_start_matches(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(ch, '#' | '-' | '*' | '+' | '>' | '[' | ']' | '(' | ')')
+            })
+            .trim_matches(|ch: char| {
+                ch.is_whitespace() || matches!(ch, '`' | '*' | '_' | ':' | '.' | '!' | '?')
+            })
+            .to_lowercase();
+        normalized.contains("lorem ipsum")
+            || matches!(
+                normalized.as_str(),
+                "placeholder"
+                    | "todo"
+                    | "tbd"
+                    | "coming soon"
+                    | "under construction"
+                    | "待补充"
+                    | "占位"
+            )
+            || normalized.starts_with("todo: ")
+            || normalized.starts_with("tbd: ")
+            || normalized.starts_with("placeholder: ")
+    })
 }
 pub(crate) fn deep_research_output_has_internal_leak(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();

@@ -23,6 +23,11 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
         "web",
         "top",
         "box",
+        "compose",
+        "up",
+        "down",
+        "ps",
+        "logs",
         "bench",
         "search",
         "use",
@@ -558,7 +563,36 @@ fn session_list_uses_the_common_machine_envelope() {
     std::fs::create_dir_all(&sessions).expect("session directory");
     std::fs::write(
         sessions.join("abc-123.json"),
-        r#"{"id":"abc-123","messages":[]}"#,
+        r#"{
+            "id": "abc-123",
+            "config": {
+                "name": "Test Session",
+                "workspace": ".",
+                "system_prompt": null,
+                "max_context_length": 200000,
+                "auto_compact": false
+            },
+            "state": "Active",
+            "messages": [],
+            "context_usage": {
+                "used_tokens": 0,
+                "max_tokens": 200000,
+                "percent": 0.0,
+                "turns": 0
+            },
+            "total_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "cache_read_tokens": null,
+                "cache_write_tokens": null
+            },
+            "tool_names": [],
+            "thinking_enabled": false,
+            "thinking_budget": null,
+            "created_at": 1700000000,
+            "updated_at": 1700000100
+        }"#,
     )
     .expect("session fixture");
 

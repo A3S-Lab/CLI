@@ -301,8 +301,14 @@ mod source_anchor_tests {
             "{markdown}"
         );
         assert!(!markdown.contains("Verified finding"), "{markdown}");
-        assert!(!markdown.contains("simulated checker timeout"), "{markdown}");
-        assert!(!markdown.contains("DeepResearch Recovery Report"), "{markdown}");
+        assert!(
+            !markdown.contains("simulated checker timeout"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
@@ -1013,6 +1019,81 @@ mod artifact_boundary_tests {
     }
 
     #[test]
+    fn inline_code_outside_sources_is_not_a_local_source_citation() {
+        let query = "Compare two runtimes";
+        let observed = "https://example.com/runtime-status";
+        let markdown = format!(
+            "# Runtime report\n\n## Findings\n\nThe unavailable candidate `crates.io/crates/missing` is a limitation, and `owner/repository` is a repository slug rather than a citation.\n\n## Sources\n\n- [Runtime status]({observed})\n\n## Limitations\n\nConfidence is limited by the unavailable candidate.\n"
+        );
+        let html = deep_research_completed_report_html(query, &markdown);
+        let citations = html_report_source_anchors(&html, query);
+
+        assert!(citations.contains(&observed.to_string()), "{citations:?}");
+        assert!(
+            !citations.contains(&"crates.io/crates/missing".to_string()),
+            "{citations:?}"
+        );
+        assert!(
+            !citations.contains(&"owner/repository".to_string()),
+            "{citations:?}"
+        );
+    }
+
+    #[test]
+    fn rejected_answer_text_does_not_publish_unvalidated_artifacts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-prepublish-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let query = "prepublish validation";
+        let workflow_output = serde_json::json!({
+            "mode": "direct_web",
+            "checker": { "decision": "finalize" },
+            "research": {
+                "status": "success",
+                "results": [{
+                    "success": true,
+                    "structured": {
+                        "summary": "Observed evidence",
+                        "sources": [{
+                            "title": "Observed source",
+                            "url_or_path": "https://example.com/observed",
+                            "quote_or_fact": "Observed fact",
+                            "reliability": "Primary source"
+                        }],
+                        "key_evidence": ["Observed fact"],
+                        "contradictions": [],
+                        "confidence": "high",
+                        "gaps": []
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let answer = "# Report\n\n## Findings\n\nA substantive but untraceable conclusion is presented here with enough detail for the report quality gate.\n\n## Sources\n\n- https://example.com/unobserved\n\n## Limitations\n\nConfidence is limited because this fixture intentionally cites the wrong source.\n";
+
+        assert!(materialize_deep_research_completed_report_from_answer_text(
+            &workspace,
+            query,
+            answer,
+            &workflow_output,
+            None,
+        )
+        .is_none());
+        let report_dir = workspace
+            .join(".a3s/research")
+            .join(deep_research_report_slug(query));
+        assert!(!report_dir.join("report.md").exists());
+        assert!(!report_dir.join("index.html").exists());
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn recovery_report_refuses_hard_linked_artifact_target() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-hard-linked-artifact-{}-{}",
@@ -1046,6 +1127,146 @@ mod artifact_boundary_tests {
         );
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn generated_report_depth_gate_accounts_for_every_semantic_plan_track() {
+        let workflow = serde_json::json!({
+            "plan": {
+                "answer_shape": "investigation",
+                "tracks": ["Mechanism and causes", "Counterevidence and consequences"]
+            }
+        })
+        .to_string();
+        let coverage = |track: &str| ReportTrackCoverage {
+            track: track.to_string(),
+            status: ReportTrackStatus::Answered,
+            finding: format!("A supported finding for {track}."),
+            interpretation: format!("The evidence explains why {track} matters."),
+            implication: "The finding changes the reader's decision boundary.".to_string(),
+            uncertainty: "The conclusion remains bounded by source recency.".to_string(),
+        };
+        let mut generated = GeneratedDeepResearchReport {
+            markdown: "# Report\n\nA substantive source-backed report body with analysis, implications, confidence, and limitations.\n\n## Sources\n\n- https://example.com/source"
+                .to_string(),
+            editorial: ReportEditorialPlan {
+                thesis: "The evidence supports a bounded answer to the investigation.".to_string(),
+                track_coverage: vec![coverage("Mechanism and causes")],
+            },
+            presentation: ReportPresentation {
+                rationale: "An analytical composition fits the causal comparison and decision audience."
+                    .to_string(),
+                ..ReportPresentation::default()
+            },
+        };
+
+        let error = validate_generated_report_depth(&generated, &workflow).unwrap_err();
+        assert!(
+            error.contains("Counterevidence and consequences"),
+            "{error}"
+        );
+
+        generated
+            .editorial
+            .track_coverage
+            .push(coverage("Counterevidence and consequences"));
+        validate_generated_report_depth(&generated, &workflow).unwrap();
+    }
+
+    #[test]
+    fn generated_report_depth_gate_matches_concise_semantic_track_labels() {
+        let planned = vec![
+            (
+                normalize_report_track(
+                    "调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界",
+                ),
+                "调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界".to_string(),
+            ),
+            (
+                normalize_report_track("生态成熟度评估：依赖网络、兼容性与社区治理"),
+                "生态成熟度评估：依赖网络、兼容性与社区治理".to_string(),
+            ),
+            (
+                normalize_report_track(
+                    "Production observability and runtime diagnostics comparison",
+                ),
+                "Production observability and runtime diagnostics comparison".to_string(),
+            ),
+        ];
+        let coverage = vec![
+            (
+                normalize_report_track("调度模型对比"),
+                "调度模型对比".to_string(),
+            ),
+            (
+                normalize_report_track("生态成熟度"),
+                "生态成熟度".to_string(),
+            ),
+            (
+                normalize_report_track("Runtime diagnostics and production observability"),
+                "Runtime diagnostics and production observability".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            matched_planned_report_tracks(&planned, &coverage).len(),
+            planned.len(),
+            "concise labels and genuine paraphrases should satisfy the semantic coverage gate"
+        );
+    }
+
+    #[test]
+    fn generated_report_depth_gate_does_not_reuse_one_generic_coverage_label() {
+        let planned = vec![
+            (
+                normalize_report_track("Operational risk and migration"),
+                "Operational risk and migration".to_string(),
+            ),
+            (
+                normalize_report_track("Operational risk and security"),
+                "Operational risk and security".to_string(),
+            ),
+        ];
+        let coverage = vec![
+            (
+                normalize_report_track("Operational risk"),
+                "Operational risk".to_string(),
+            ),
+        ];
+
+        assert_eq!(
+            matched_planned_report_tracks(&planned, &coverage).len(),
+            1,
+            "one broad treatment must not satisfy multiple planned obligations"
+        );
+    }
+
+    #[test]
+    fn recovery_report_demotes_an_embedded_report_title() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-recovery-title-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let answer = "# A source-backed partial report\n\n## Findings\n\nThe collected evidence supports a bounded partial finding with enough explanation to preserve for the reader, but not enough coverage for a completed report.\n\n## Sources\n\n- https://example.com/partial\n\n## Limitations\n\nThe uncollected dimensions remain unknown and require a later retry.";
+
+        let artifacts = materialize_deep_research_recovery_report(
+            &workspace,
+            "partial report with a title",
+            answer,
+            "workflow failed",
+            None,
+        )
+        .expect("a useful partial synthesis should converge to a valid recovery artifact");
+        let html = std::fs::read_to_string(&artifacts.html).unwrap();
+        assert_eq!(html.to_ascii_lowercase().matches("<h1").count(), 1);
+        assert!(html.contains("A source-backed partial report"));
+
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

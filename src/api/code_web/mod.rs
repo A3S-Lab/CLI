@@ -1,4 +1,5 @@
 mod capabilities;
+mod code_intelligence;
 pub(crate) mod config;
 mod context;
 mod dto;
@@ -15,6 +16,7 @@ mod session_runtime;
 mod session_store;
 mod state;
 mod workspace;
+mod workspace_backend_cache;
 
 pub(super) use kernel::KernelService;
 pub(super) use module::CodeWebModule;

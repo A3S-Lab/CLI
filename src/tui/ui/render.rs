@@ -1,6 +1,21 @@
 //! Rendering of completed tool calls: labels, arg summaries, and file diffs.
 
+use super::batch_view::{BatchItem, BatchOutcome, BatchSummary};
+#[cfg(test)]
+use super::file_change_view::{
+    mix_diff_color, DIFF_DELETE_BG, DIFF_DELETE_MARKER, DIFF_HEADER_ACTION, DIFF_HEADER_BULLET,
+    DIFF_INSERT_BG, DIFF_INSERT_MARKER,
+};
+use super::file_change_view::{render_compact_file_change, render_full_file_change};
+use super::message_chrome::{
+    message_marker, message_status, result_message_tone, tool_message_tone, MessageTone,
+};
 use super::program_preview::{summarize_program_args, summarize_program_calls};
+use super::tool_style::{
+    header_action_color, highlight_explore_detail, highlight_json_wrapped, highlight_shell,
+    highlight_shell_wrapped, highlight_tool_detail,
+};
+use super::tool_transcript_view::{render_tool_transcript_details, ToolTranscriptSection};
 use super::*;
 use a3s_tui::style::{slice_visible_cols, strip_ansi, truncate_visible, visible_len, wrap_words};
 
@@ -8,18 +23,7 @@ const MAX_COMMAND_ROWS: usize = 8;
 const MAX_EXEC_COMMAND_ROWS: usize = 3;
 const MAX_OUTPUT_ROWS: usize = 5;
 const MAX_LOGICAL_OUTPUT_LINES: usize = 10;
-const MAX_DIFF_ROWS: usize = 200;
-const DIFF_HEADER_BULLET: Color = Color::Rgb(120, 123, 125);
-const DIFF_HEADER_ACTION: Color = Color::Rgb(255, 255, 255);
-const DIFF_HEADER_DETAIL: Color = Color::Rgb(220, 220, 220);
-const DIFF_CONTEXT_GUTTER: Color = Color::Rgb(120, 123, 125);
-const DIFF_INSERT_GUTTER: Color = Color::Rgb(122, 139, 131);
-const DIFF_DELETE_GUTTER: Color = Color::Rgb(150, 125, 123);
-const DIFF_INSERT_MARKER: Color = Color::Rgb(0, 194, 0);
-const DIFF_DELETE_MARKER: Color = Color::Rgb(180, 60, 42);
-const DIFF_INSERT_BG: Color = Color::Rgb(24, 59, 42);
-const DIFF_DELETE_BG: Color = Color::Rgb(80, 31, 27);
-const DIFF_CODE_FG: Color = Color::Rgb(203, 214, 247);
+const MAX_BATCH_ITEM_ROWS: usize = 6;
 
 /// Render one tool call for the Ctrl+T transcript.
 ///
@@ -72,56 +76,107 @@ pub(crate) fn render_tool_transcript(input: ToolTranscriptInput<'_>) -> String {
             | ToolCallState::TimedOut
             | ToolCallState::Interrupted
     );
-    let mut parts = Vec::new();
+    let expands_arguments = !has_specialized_tool_verb(name) || mcp_name(name).is_some();
+    let mut header = String::new();
 
     if terminal && state == ToolCallState::Succeeded && is_file_change_tool(name) {
         if let Some(diff) = render_successful_file_change_transcript(name, meta, width) {
-            parts.push(diff);
+            header = diff;
         }
     }
 
-    if parts.is_empty() {
-        let header = if terminal {
+    if header.is_empty() {
+        header = if expands_arguments {
+            render_transcript_tool_identity(name, state, width)
+        } else if terminal {
             render_tool_terminal(name, state, exit_code.unwrap_or(1), "", meta, args, width)
         } else {
             render_live_tool_activity(name, args, "", width, true, state)
         };
-        if !header.is_empty() {
-            parts.push(header);
-        }
     }
 
-    if !has_specialized_tool_verb(name) || mcp_name(name).is_some() {
-        if let Some(args) = args.and_then(|args| serde_json::to_string_pretty(args).ok()) {
-            parts.push(render_full_output(
-                &format!("Arguments:\n{args}"),
-                width,
-                false,
-                "  ",
-            ));
+    let detail_width = width.saturating_sub(4).max(1);
+    let mut sections = Vec::new();
+    if expands_arguments {
+        if let Some(args) = args {
+            let body = render_transcript_arguments(args, detail_width);
+            if !body.is_empty() {
+                sections.push(ToolTranscriptSection::new("Input", body));
+            }
         }
     }
 
     if !output.trim().is_empty() {
-        let output = if !has_specialized_tool_verb(name) || mcp_name(name).is_some() {
+        let structured = !has_specialized_tool_verb(name) || mcp_name(name).is_some();
+        let output = if structured {
             completed_structured_output(output)
         } else {
             output.to_string()
         };
-        parts.push(render_full_output(&output, width, failed, "  "));
+        let body = if structured {
+            render_full_json_output(&output, detail_width, "")
+                .unwrap_or_else(|| render_full_output(&output, detail_width, failed, ""))
+        } else {
+            render_full_output(&output, detail_width, failed, "")
+        };
+        if !body.is_empty() {
+            sections.push(ToolTranscriptSection::new("Result", body));
+        }
     }
 
-    if terminal {
-        parts.push(render_transcript_terminal_status(
-            state, exit_code, duration, width,
-        ));
-    }
+    let status = if terminal {
+        if name == "batch" {
+            if let Some(summary) =
+                BatchSummary::from_metadata(meta, args, state == ToolCallState::Succeeded)
+            {
+                let status = render_batch_transcript_status(&summary, duration, detail_width);
+                (summary.outcome != BatchOutcome::Complete || duration.is_some()).then_some(status)
+            } else {
+                transcript_terminal_status(state, exit_code, duration, detail_width)
+            }
+        } else {
+            transcript_terminal_status(state, exit_code, duration, detail_width)
+        }
+    } else {
+        None
+    };
 
-    parts
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let details = render_tool_transcript_details(sections, status, width);
+    join_cell_parts(header, details)
+}
+
+fn render_transcript_tool_identity(name: &str, state: ToolCallState, width: usize) -> String {
+    let action = match state {
+        ToolCallState::Preparing | ToolCallState::Running => "Calling",
+        ToolCallState::AwaitingApproval => "Awaiting approval for",
+        ToolCallState::Succeeded => "Called",
+        ToolCallState::Failed => "Failed",
+        ToolCallState::Denied => "Denied",
+        ToolCallState::TimedOut => "Timed out",
+        ToolCallState::Interrupted => "Interrupted",
+    };
+    let identity = mcp_display_name(name).unwrap_or_else(|| sanitize_terminal_text(name));
+    render_action_header(
+        action,
+        Some(&identity),
+        width,
+        tool_message_tone(state, true),
+        "  ",
+        false,
+    )
+}
+
+fn transcript_terminal_status(
+    state: ToolCallState,
+    exit_code: Option<i32>,
+    duration: Option<std::time::Duration>,
+    width: usize,
+) -> Option<String> {
+    if state == ToolCallState::Succeeded && duration.is_none() {
+        return None;
+    }
+    let status = render_transcript_terminal_status(state, exit_code, duration, width);
+    (!status.is_empty()).then_some(status)
 }
 
 fn render_exec_transcript(
@@ -134,15 +189,18 @@ fn render_exec_transcript(
 ) -> String {
     let command = sanitize_terminal_text(command);
     let mut rows = Vec::new();
-    let command_width = width.saturating_sub(4).max(1);
-    let mut first = true;
-    for logical in command.split('\n') {
-        let wrapped = wrap_preserving_text(logical, command_width);
-        for row in wrapped {
-            let prefix = if first { "$ " } else { "    " };
-            rows.push(truncate_visible(&format!("{prefix}{row}"), width));
-            first = false;
-        }
+    let command_rows = highlight_shell_wrapped(
+        &command,
+        width.saturating_sub(2).max(1),
+        width.saturating_sub(4).max(1),
+    );
+    for (index, row) in command_rows.into_iter().enumerate() {
+        let prefix = if index == 0 { "$ " } else { "    " };
+        let prefix = Style::new().fg(TN_SUBTLE).render(prefix);
+        rows.push(truncate_visible(
+            &format!("{prefix}{}", row.trim_end()),
+            width,
+        ));
     }
     if rows.is_empty() {
         rows.push("$".to_string());
@@ -164,6 +222,56 @@ fn render_exec_transcript(
         ));
     }
     rows.join("\n")
+}
+
+fn render_transcript_arguments(args: &serde_json::Value, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if let Some(inline) = complete_inline_arguments(args, width) {
+        return highlight_tool_detail(&inline);
+    }
+
+    let serialized = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
+    render_full_json_output(&serialized, width, "")
+        .unwrap_or_else(|| render_full_output(&serialized, width, false, ""))
+}
+
+/// Return a complete, non-truncated one-line argument projection when every
+/// value fits. Nested values deliberately fall back to syntax-highlighted JSON
+/// so the full transcript never exchanges completeness for compactness.
+fn complete_inline_arguments(args: &serde_json::Value, width: usize) -> Option<String> {
+    let inline = match args {
+        serde_json::Value::Object(fields)
+            if fields
+                .values()
+                .all(|value| !value.is_array() && !value.is_object()) =>
+        {
+            if fields.is_empty() {
+                "{}".to_string()
+            } else {
+                fields
+                    .iter()
+                    .map(|(key, value)| {
+                        let value = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
+                        format!("{key}={value}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            }
+        }
+        serde_json::Value::Array(values)
+            if values
+                .iter()
+                .all(|value| !value.is_array() && !value.is_object()) =>
+        {
+            serde_json::to_string(values).ok()?
+        }
+        value if !value.is_array() && !value.is_object() => serde_json::to_string(value).ok()?,
+        _ => return None,
+    };
+    let inline = sanitize_terminal_text(&inline);
+    (!inline.contains('\n') && visible_len(&inline) <= width).then_some(inline)
 }
 
 fn render_full_output(output: &str, width: usize, error: bool, prefix: &str) -> String {
@@ -188,33 +296,109 @@ fn render_full_output(output: &str, width: usize, error: bool, prefix: &str) -> 
     rows.join("\n")
 }
 
+fn render_full_json_output(output: &str, width: usize, prefix: &str) -> Option<String> {
+    if width == 0 {
+        return Some(String::new());
+    }
+    let pretty = pretty_json(output)?;
+    let body_width = width.saturating_sub(visible_len(prefix)).max(1);
+    let mut rows = Vec::new();
+    for logical in pretty.split('\n') {
+        for display_line in responsive_json_display_lines(logical, body_width) {
+            for row in highlight_json_wrapped(&display_line, body_width) {
+                rows.push(render_styled_prefixed_row(prefix, &row, width));
+            }
+        }
+    }
+    Some(rows.join("\n"))
+}
+
+/// Move a complete scalar value below its key when both cannot share a narrow
+/// row. This preserves short values such as `"result-0"` as one scannable token
+/// instead of slicing them after a few characters merely because JSON
+/// indentation consumed the remaining columns.
+fn responsive_json_display_lines(logical: &str, width: usize) -> Vec<String> {
+    if visible_len(logical) <= width {
+        return vec![logical.to_string()];
+    }
+    let trimmed = logical.trim_start_matches(char::is_whitespace);
+    let indent_bytes = logical.len().saturating_sub(trimmed.len());
+    let indent = &logical[..indent_bytes];
+    let Some((key, value)) = trimmed.split_once(": ") else {
+        return vec![logical.to_string()];
+    };
+    let value = value.trim();
+    let is_scalar = value.starts_with('"')
+        || value.starts_with('-')
+        || value.starts_with(|ch: char| ch.is_ascii_digit())
+        || value.starts_with("true")
+        || value.starts_with("false")
+        || value.starts_with("null");
+    if !key.starts_with('"') || !is_scalar {
+        return vec![logical.to_string()];
+    }
+
+    let key_row = format!("{indent}{key}:");
+    let value_row = format!("{indent}  {value}");
+    if visible_len(&key_row) <= width && visible_len(&value_row) <= width {
+        vec![key_row, value_row]
+    } else {
+        vec![logical.to_string()]
+    }
+}
+
 fn render_transcript_terminal_status(
     state: ToolCallState,
     exit_code: Option<i32>,
     duration: Option<std::time::Duration>,
     width: usize,
 ) -> String {
-    let (status, color) = match state {
-        ToolCallState::Succeeded => ("✓".to_string(), TN_GREEN),
-        ToolCallState::Failed => (format!("✗ ({})", exit_code.unwrap_or(1)), TN_RED),
-        ToolCallState::Denied => ("✗ denied".to_string(), TN_RED),
-        ToolCallState::TimedOut => ("✗ timed out".to_string(), TN_RED),
-        ToolCallState::Interrupted => ("✗ interrupted".to_string(), TN_RED),
+    let (glyph, label, tone) = match state {
+        ToolCallState::Succeeded => ("✓", String::new(), MessageTone::Success),
+        ToolCallState::Failed => (
+            "✗",
+            format!("({})", exit_code.unwrap_or(1)),
+            MessageTone::Error,
+        ),
+        ToolCallState::Denied => ("⊘", "denied".to_string(), MessageTone::Warning),
+        ToolCallState::TimedOut => ("◷", "timed out".to_string(), MessageTone::Error),
+        ToolCallState::Interrupted => ("■", "interrupted".to_string(), MessageTone::Warning),
         ToolCallState::Preparing | ToolCallState::AwaitingApproval | ToolCallState::Running => {
             return String::new();
         }
     };
-    let status = Style::new().fg(color).bold().render(&status);
-    let line = match duration {
-        Some(duration) => {
-            let elapsed = Style::new()
-                .fg(TN_GRAY)
-                .render(&format!(" • {}", format_transcript_duration(duration)));
-            format!("{status}{elapsed}")
+    render_wrapped_transcript_status(glyph, &label, tone, duration, width)
+}
+
+fn render_wrapped_transcript_status(
+    glyph: &str,
+    label: &str,
+    tone: MessageTone,
+    duration: Option<std::time::Duration>,
+    width: usize,
+) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut body = label.to_string();
+    if let Some(duration) = duration {
+        if !body.is_empty() {
+            body.push(' ');
         }
-        None => status,
-    };
-    truncate_visible(&line, width)
+        body.push_str("• ");
+        body.push_str(&format_transcript_duration(duration));
+    }
+    if body.is_empty() || width == 1 {
+        return truncate_visible(&message_status(glyph, "", tone, true), width);
+    }
+
+    let body_width = width.saturating_sub(2).max(1);
+    let mut rows = wrap_words(&body, body_width).into_iter();
+    let first = rows.next().unwrap_or_default();
+    std::iter::once(message_status(glyph, &first, tone, true))
+        .chain(rows.map(|row| Style::new().fg(TN_GRAY).render(&row)))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn format_transcript_duration(duration: std::time::Duration) -> String {
@@ -272,7 +456,14 @@ pub(crate) fn render_tool_terminal(
     } else {
         Some(generic_tool_invocation(name, args))
     };
-    let header = render_action_header(action, detail.as_deref(), width, TN_RED, "  ", false);
+    let header = render_action_header(
+        action,
+        detail.as_deref(),
+        width,
+        tool_message_tone(state, true),
+        "  ",
+        false,
+    );
     if name == "dynamic_workflow" && looks_like_structured_payload(output) {
         header
     } else {
@@ -308,6 +499,12 @@ pub(crate) fn render_tool_end(
 
     if name == "dynamic_workflow" {
         return render_dynamic_workflow(output, meta, args, ok, width);
+    }
+
+    if name == "batch" {
+        if let Some(rendered) = render_batch_summary(meta, args, ok, width) {
+            return rendered;
+        }
     }
 
     if name == "program" {
@@ -378,12 +575,14 @@ fn render_completed_tool_output_block(
         if known { tool_verb(name) } else { "Called" },
         (!arg.is_empty()).then_some(arg.as_str()),
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
     let output = completed_structured_output(output);
-    join_cell_parts(header, render_output_branch(&output, width, !ok, false))
+    let body = render_json_output_branch(&output, width, false)
+        .unwrap_or_else(|| render_output_branch(&output, width, !ok, false));
+    join_cell_parts(header, body)
 }
 
 fn render_dynamic_workflow(
@@ -406,7 +605,7 @@ fn render_dynamic_workflow(
         },
         run_id,
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
@@ -449,17 +648,11 @@ fn render_dynamic_workflow(
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("unknown");
-            let glyph = match status.to_ascii_lowercase().as_str() {
-                "completed" | "succeeded" | "success" => "✓",
-                "failed" | "cancelled" | "canceled" => "✗",
-                "running" | "started" => "●",
-                _ => "○",
-            };
-            let failed = matches!(
+            let success = matches!(
                 status.to_ascii_lowercase().as_str(),
-                "failed" | "cancelled" | "canceled"
+                "completed" | "succeeded" | "success"
             );
-            Some((format!("{glyph} {step_id} · {status}"), failed))
+            Some((format!("{step_id} · {status}"), status.to_string(), success))
         })
         .collect::<Vec<_>>();
     if rows.is_empty() {
@@ -468,12 +661,13 @@ fn render_dynamic_workflow(
     let body = rows
         .into_iter()
         .enumerate()
-        .map(|(index, (row, failed))| {
-            render_prefixed_row(
+        .map(|(index, (row, status, success))| {
+            render_lifecycle_row(
                 if index == 0 { "  └ " } else { "    " },
                 &row,
+                &status,
+                success,
                 width,
-                failed,
             )
         })
         .collect::<Vec<_>>()
@@ -505,6 +699,16 @@ fn completed_structured_output(output: &str) -> String {
         .unwrap_or_else(|| output.to_string())
 }
 
+fn pretty_json(output: &str) -> Option<String> {
+    let trimmed = output.trim();
+    if !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+}
+
 fn looks_like_failure_diagnostic(output: &str) -> bool {
     if looks_like_structured_payload(output) {
         return false;
@@ -522,6 +726,33 @@ fn looks_like_failure_diagnostic(output: &str) -> bool {
     ]
     .iter()
     .any(|marker| lower.contains(marker))
+}
+
+fn render_lifecycle_row(
+    prefix: &str,
+    label: &str,
+    status: &str,
+    success: bool,
+    width: usize,
+) -> String {
+    let (glyph, tone) = lifecycle_status_presentation(status, success);
+    let label = sanitize_terminal_text(label);
+    let row = message_status(glyph, &label, tone, true);
+    render_styled_prefixed_row(prefix, &row, width)
+}
+
+fn lifecycle_status_presentation(status: &str, success: bool) -> (&'static str, MessageTone) {
+    if success {
+        return ("✓", MessageTone::Success);
+    }
+    match status.trim().to_ascii_lowercase().as_str() {
+        "running" | "started" | "in_progress" | "in-progress" => ("●", MessageTone::Active),
+        "cancelled" | "canceled" | "denied" => ("⊘", MessageTone::Warning),
+        "interrupted" => ("■", MessageTone::Warning),
+        "timed out" | "timed_out" | "timeout" => ("◷", MessageTone::Error),
+        "pending" | "queued" | "unknown" => ("○", MessageTone::Inactive),
+        _ => ("✗", MessageTone::Error),
+    }
 }
 
 fn render_program_intent_preview(args: Option<&serde_json::Value>, width: usize) -> String {
@@ -548,10 +779,12 @@ fn render_program_preview_row(
     width: usize,
     failed: bool,
 ) -> String {
-    let label = Style::new().fg(TN_YELLOW).render(&format!("{label:<7}"));
-    let value = Style::new()
-        .fg(if failed { TN_RED } else { TN_GREEN })
-        .render(value);
+    let label = Style::new().fg(TN_SUBTLE).render(&format!("{label:<7}"));
+    let value = if failed {
+        message_status("✗", value, MessageTone::Error, false)
+    } else {
+        Style::new().fg(TN_FG).render(value)
+    };
     render_prefixed_row(prefix, &format!("{label}{value}"), width, failed)
 }
 
@@ -575,7 +808,7 @@ fn render_program_summary(
         if ok { "Ran program" } else { "Program failed" },
         detail,
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
@@ -596,6 +829,129 @@ fn render_program_summary(
         digest.has_failure,
     );
     Some(join_cell_parts(header, body))
+}
+
+fn render_batch_summary(
+    meta: Option<&serde_json::Value>,
+    args: Option<&serde_json::Value>,
+    top_level_ok: bool,
+    width: usize,
+) -> Option<String> {
+    let summary = BatchSummary::from_metadata(meta, args, top_level_ok)?;
+    let (action, tone) = match summary.outcome {
+        BatchOutcome::Complete => ("Ran batch", MessageTone::Success),
+        BatchOutcome::Partial => ("Batch partially completed", MessageTone::Warning),
+        BatchOutcome::Failed => ("Batch failed", MessageTone::Error),
+    };
+    let mut detail = format!("{} tools", summary.total_count);
+    if summary.execution_mode == "parallel" {
+        detail.push_str(&format!(
+            " · parallel ×{}",
+            summary.applied_concurrency.max(1)
+        ));
+    } else {
+        detail.push_str(" · serial");
+    }
+    if summary.failure_count > 0 {
+        detail.push_str(&format!(
+            " · {}/{} succeeded",
+            summary.success_count, summary.total_count
+        ));
+    }
+    let header = render_action_header(action, Some(&detail), width, tone, "  ", false);
+
+    let visible = visible_batch_items(&summary);
+    let omitted = summary.items.len().saturating_sub(visible.len());
+    let mut rows = visible
+        .iter()
+        .enumerate()
+        .map(|(row_index, item)| {
+            let terminal_row = row_index + 1 == visible.len() && omitted == 0;
+            render_batch_item(item, if terminal_row { "  └ " } else { "  ├ " }, width)
+        })
+        .collect::<Vec<_>>();
+    if omitted > 0 {
+        let hint = Style::new()
+            .fg(TN_SUBTLE)
+            .render(&format!("… +{omitted} tools · Ctrl+T"));
+        rows.push(render_styled_prefixed_row("  └ ", &hint, width));
+    }
+
+    Some(join_cell_parts(header, rows.join("\n")))
+}
+
+fn visible_batch_items(summary: &BatchSummary) -> Vec<&BatchItem> {
+    if summary.items.len() <= MAX_BATCH_ITEM_ROWS {
+        return summary.items.iter().collect();
+    }
+
+    let visible_limit = MAX_BATCH_ITEM_ROWS.saturating_sub(1);
+    let mut selected = Vec::with_capacity(visible_limit);
+    if summary.failure_count > 0 {
+        selected.extend(
+            summary
+                .items
+                .iter()
+                .enumerate()
+                .filter_map(|(index, item)| (!item.success).then_some(index))
+                .take(visible_limit),
+        );
+    }
+    for index in 0..summary.items.len() {
+        if selected.len() >= visible_limit {
+            break;
+        }
+        if !selected.contains(&index) {
+            selected.push(index);
+        }
+    }
+    if summary.failure_count == 0 && selected.len() == visible_limit {
+        selected[visible_limit - 1] = summary.items.len() - 1;
+    }
+    selected.sort_unstable();
+    selected
+        .into_iter()
+        .filter_map(|index| summary.items.get(index))
+        .collect()
+}
+
+fn render_batch_item(item: &BatchItem, prefix: &str, width: usize) -> String {
+    let tool = tool_label(&item.tool, item.args.as_ref());
+    // Keep the diagnostic before a potentially long invocation so narrow
+    // terminals never truncate the only explanation of a failed batch item.
+    let label = if !item.success && item.exit_code != 0 {
+        format!("exit {} · {tool}", item.exit_code)
+    } else {
+        tool
+    };
+    render_lifecycle_row(
+        prefix,
+        &label,
+        if item.success { "succeeded" } else { "failed" },
+        item.success,
+        width,
+    )
+}
+
+fn render_batch_transcript_status(
+    summary: &BatchSummary,
+    duration: Option<std::time::Duration>,
+    width: usize,
+) -> String {
+    let (glyph, label, tone) = match summary.outcome {
+        BatchOutcome::Complete => ("✓", String::new(), MessageTone::Success),
+        BatchOutcome::Partial => (
+            "!",
+            format!("partial · {} failed", summary.failure_count),
+            MessageTone::Warning,
+        ),
+        BatchOutcome::Failed => (
+            "✗",
+            format!("{} failed", summary.failure_count.max(1)),
+            MessageTone::Error,
+        ),
+    };
+    render_wrapped_transcript_status(glyph, &label, tone, duration, width)
 }
 
 fn is_exec_tool(name: &str) -> bool {
@@ -664,12 +1020,14 @@ fn render_completed_mcp(invocation: &str, output: &str, ok: bool, width: usize) 
         "Called",
         Some(invocation),
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
     let output = completed_structured_output(output);
-    join_cell_parts(header, render_output_branch(&output, width, !ok, false))
+    let body = render_json_output_branch(&output, width, false)
+        .unwrap_or_else(|| render_output_branch(&output, width, !ok, false));
+    join_cell_parts(header, body)
 }
 
 fn render_exec_cell(
@@ -684,7 +1042,7 @@ fn render_exec_cell(
         action,
         command,
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  │ ",
         true,
     );
@@ -724,7 +1082,7 @@ fn render_web_cell(
         action,
         detail.as_deref(),
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
@@ -767,11 +1125,18 @@ fn render_explore_cell(
     width: usize,
     live: bool,
 ) -> String {
+    let tone = if !ok {
+        MessageTone::Error
+    } else if live {
+        MessageTone::Active
+    } else {
+        MessageTone::Inactive
+    };
     let header = render_action_header(
         if live { "Exploring" } else { "Explored" },
         None,
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        tone,
         "  ",
         false,
     );
@@ -805,13 +1170,8 @@ fn render_successful_file_change(
         _ => return None,
     };
 
-    Some(render_diff_action(
-        action,
-        path,
-        before,
-        after,
-        width,
-        MAX_DIFF_ROWS,
+    Some(render_compact_file_change(
+        action, path, before, after, width,
     ))
 }
 
@@ -830,14 +1190,7 @@ fn render_successful_file_change_transcript(
         (_, Some(before), Some(after)) => ("Edited", before, after),
         _ => return None,
     };
-    Some(render_diff_action(
-        action,
-        path,
-        before,
-        after,
-        width,
-        u16::MAX as usize,
-    ))
+    Some(render_full_file_change(action, path, before, after, width))
 }
 
 fn render_failed_file_change(
@@ -857,7 +1210,7 @@ fn render_failed_file_change(
         .and_then(|meta| meta.get("file_path"))
         .or_else(|| args.and_then(|args| args.get("file_path").or_else(|| args.get("path"))))
         .and_then(|value| value.as_str());
-    let header = render_action_header(action, path, width, TN_RED, "  ", false);
+    let header = render_action_header(action, path, width, MessageTone::Error, "  ", false);
     join_cell_parts(header, render_output_branch(output, width, true, false))
 }
 
@@ -865,7 +1218,7 @@ fn render_action_header(
     action: &str,
     detail: Option<&str>,
     width: usize,
-    marker_color: Color,
+    tone: MessageTone,
     continuation_prefix: &str,
     shell_detail: bool,
 ) -> String {
@@ -876,6 +1229,15 @@ fn render_action_header(
     let detail = detail
         .map(sanitize_terminal_text)
         .filter(|detail| !detail.trim().is_empty());
+    if shell_detail {
+        return render_shell_action_header(
+            action,
+            detail.as_deref(),
+            width,
+            tone,
+            continuation_prefix,
+        );
+    }
     let plain = match detail.as_deref() {
         Some(detail) => format!("{action} {detail}"),
         None => action.to_string(),
@@ -902,9 +1264,9 @@ fn render_action_header(
         .enumerate()
         .map(|(index, row)| {
             let line = if index == 0 {
-                render_first_header_row(action, &row, marker_color, shell_detail)
+                render_first_header_row(action, &row, tone, shell_detail)
             } else {
-                let prefix = Style::new().fg(TN_GRAY).render(continuation_prefix);
+                let prefix = Style::new().fg(TN_SUBTLE).render(continuation_prefix);
                 let text = if shell_detail {
                     highlight_shell(&row)
                 } else {
@@ -916,6 +1278,43 @@ fn render_action_header(
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_shell_action_header(
+    action: &str,
+    detail: Option<&str>,
+    width: usize,
+    tone: MessageTone,
+    continuation_prefix: &str,
+) -> String {
+    let marker = message_marker(tone);
+    let action = Style::new()
+        .fg(header_action_color(action))
+        .bold()
+        .render(action);
+    let header = format!("{marker} {action}");
+    let Some(detail) = detail else {
+        return truncate_visible(&header, width);
+    };
+
+    let continuation_width = width
+        .saturating_sub(visible_len(continuation_prefix))
+        .max(1);
+    let first_width = width
+        .saturating_sub(visible_len(&header).saturating_add(1))
+        .max(1);
+    let command_rows = highlight_shell_wrapped(detail, first_width, continuation_width);
+    let mut lines = Vec::with_capacity(command_rows.len());
+    for (index, row) in command_rows.into_iter().enumerate() {
+        let row = row.trim_end();
+        if index == 0 {
+            lines.push(truncate_visible(&format!("{header} {row}"), width));
+        } else {
+            let prefix = Style::new().fg(TN_SUBTLE).render(continuation_prefix);
+            lines.push(truncate_visible(&format!("{prefix}{row}"), width));
+        }
+    }
+    limit_rows_from_start(lines, MAX_EXEC_COMMAND_ROWS).join("\n")
 }
 
 fn wrap_preserving_text(value: &str, width: usize) -> Vec<String> {
@@ -947,9 +1346,11 @@ fn pack_detail_onto_first_header_row(action: &str, rows: &mut Vec<String>, width
     if rows.len() < 2 || rows[0] != action {
         return;
     }
-    let available = width
-        .saturating_sub(visible_len(action).saturating_add(1))
-        .max(1);
+    let occupied = visible_len(action).saturating_add(1);
+    if occupied >= width {
+        return;
+    }
+    let available = width - occupied;
     let next_width = visible_len(&rows[1]);
     let head = slice_visible_cols(&rows[1], 0, available);
     if head.is_empty() {
@@ -967,12 +1368,15 @@ fn pack_detail_onto_first_header_row(action: &str, rows: &mut Vec<String>, width
 fn render_first_header_row(
     action: &str,
     row: &str,
-    marker_color: Color,
+    tone: MessageTone,
     shell_detail: bool,
 ) -> String {
-    let marker = Style::new().fg(marker_color).bold().render("•");
+    let marker = message_marker(tone);
     if let Some(detail) = row.strip_prefix(action) {
-        let action = Style::new().fg(TN_FG).bold().render(action);
+        let action = Style::new()
+            .fg(header_action_color(action))
+            .bold()
+            .render(action);
         let detail = detail.strip_prefix(' ').unwrap_or(detail);
         if detail.is_empty() {
             format!("{marker} {action}")
@@ -989,21 +1393,32 @@ fn render_first_header_row(
     }
 }
 
-fn render_detail_branch(detail: &str, width: usize, error: bool) -> String {
+fn render_detail_branch(detail: &str, width: usize, _error: bool) -> String {
     if width == 0 {
         return String::new();
     }
     let detail = sanitize_terminal_text(detail);
     let body_width = width.saturating_sub(4).max(1);
+    let detail = highlight_explore_detail(&detail);
     let rows = limit_rows_from_start(wrap_words(&detail, body_width), MAX_COMMAND_ROWS);
     rows.into_iter()
         .enumerate()
         .map(|(index, row)| {
             let prefix = if index == 0 { "  └ " } else { "    " };
-            render_prefixed_row(prefix, &row, width, error)
+            render_styled_prefixed_row(prefix, &row, width)
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_styled_prefixed_row(prefix: &str, row: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let prefix = Style::new().fg(TN_SUBTLE).render(prefix);
+    let available = width.saturating_sub(visible_len(&prefix)).max(1);
+    let row = truncate_visible(row, available);
+    truncate_visible(&format!("{prefix}{row}"), width)
 }
 
 fn render_output_branch(output: &str, width: usize, error: bool, transcript_hint: bool) -> String {
@@ -1021,6 +1436,54 @@ fn render_output_branch(output: &str, width: usize, error: bool, transcript_hint
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn render_json_output_branch(output: &str, width: usize, transcript_hint: bool) -> Option<String> {
+    let body_width = width.saturating_sub(4).max(1);
+    let rows = bounded_json_rows(output, body_width, transcript_hint)?;
+    Some(
+        rows.into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let prefix = if index == 0 { "  └ " } else { "    " };
+                render_styled_prefixed_row(prefix, &row, width)
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn bounded_json_rows(output: &str, row_width: usize, transcript_hint: bool) -> Option<Vec<String>> {
+    let pretty = pretty_json(output)?;
+    let mut logical_lines = pretty.split('\n').map(str::to_string).collect::<Vec<_>>();
+    let mut omitted_before_wrap = 0usize;
+    if logical_lines.len() > MAX_LOGICAL_OUTPUT_LINES {
+        omitted_before_wrap = logical_lines.len() - MAX_LOGICAL_OUTPUT_LINES;
+        let tail = logical_lines.split_off(logical_lines.len() - 5);
+        logical_lines.truncate(5);
+        logical_lines.extend(tail);
+    }
+
+    let rows = logical_lines
+        .into_iter()
+        .flat_map(|line| highlight_json_wrapped(&line, row_width))
+        .collect::<Vec<_>>();
+    if rows.len() <= MAX_OUTPUT_ROWS && omitted_before_wrap == 0 {
+        return Some(rows);
+    }
+
+    let head_count = rows.len().min(2);
+    let tail_count = rows.len().saturating_sub(head_count).min(2);
+    let omitted = omitted_before_wrap + rows.len().saturating_sub(head_count + tail_count);
+    let mut bounded = rows[..head_count].to_vec();
+    let hint = if transcript_hint {
+        format!("… +{omitted} lines · Ctrl+T")
+    } else {
+        format!("… +{omitted} lines")
+    };
+    bounded.push(Style::new().fg(TN_SUBTLE).render(&hint));
+    bounded.extend_from_slice(&rows[rows.len().saturating_sub(tail_count)..]);
+    Some(bounded)
 }
 
 fn render_indented_output(output: &str, width: usize, error: bool, prefix: &str) -> String {
@@ -1066,7 +1529,7 @@ fn bounded_output_rows(output: &str, row_width: usize, transcript_hint: bool) ->
     let omitted = omitted_before_wrap + rows.len().saturating_sub(head_count + tail_count);
     let mut bounded = rows[..head_count].to_vec();
     bounded.push(if transcript_hint {
-        format!("… +{omitted} lines (ctrl + t to view transcript)")
+        format!("… +{omitted} lines · Ctrl+T")
     } else {
         format!("… +{omitted} lines")
     });
@@ -1078,7 +1541,7 @@ fn render_prefixed_row(prefix: &str, row: &str, width: usize, _error: bool) -> S
     if width == 0 {
         return String::new();
     }
-    let prefix = Style::new().fg(TN_GRAY).render(prefix);
+    let prefix = Style::new().fg(TN_SUBTLE).render(prefix);
     let available = width.saturating_sub(visible_len(prefix.as_str())).max(1);
     let row = truncate_visible(row, available);
     let row = Style::new().fg(TN_GRAY).render(&row);
@@ -1173,7 +1636,7 @@ fn render_runtime_summary(
         if ok { "Used Runtime" } else { "Runtime failed" },
         Some(&header_detail),
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     );
@@ -1196,14 +1659,7 @@ fn render_runtime_summary(
                 .and_then(serde_json::Value::as_str)
                 .map(|id| format!(" · {}", truncate(id, 18)))
                 .unwrap_or_default();
-            (
-                format!(
-                    "{} task {}{id} · {state}",
-                    if success { "✓" } else { "✗" },
-                    index + 1
-                ),
-                !success,
-            )
+            (format!("task {}{id} · {state}", index + 1), state, success)
         })
         .collect::<Vec<_>>();
     if object
@@ -1211,18 +1667,23 @@ fn render_runtime_summary(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        rows.push(("○ partial results returned after timeout".to_string(), true));
+        rows.push((
+            "partial results returned after timeout".to_string(),
+            "timed out",
+            false,
+        ));
     }
     let body = rows
         .into_iter()
         .take(MAX_OUTPUT_ROWS)
         .enumerate()
-        .map(|(index, (row, failed))| {
-            render_prefixed_row(
+        .map(|(index, (row, status, success))| {
+            render_lifecycle_row(
                 if index == 0 { "  └ " } else { "    " },
                 &row,
+                status,
+                success,
                 width,
-                failed,
             )
         })
         .collect::<Vec<_>>()
@@ -1250,27 +1711,21 @@ fn render_single_task_summary(
         success,
     )];
     if let Some(excerpt) = task_child_excerpt(output) {
-        rows.extend(
-            excerpt
-                .lines()
-                .map(|line| TaskSummaryRow::child(line, success)),
-        );
+        rows.extend(excerpt.lines().map(TaskSummaryRow::child));
     } else if output_bytes == Some(0) {
         rows.push(TaskSummaryRow::child(
             "no child text output; using plan/status for synthesis",
-            success,
         ));
     } else {
         rows.push(TaskSummaryRow::child(
             "child output stored in task artifact",
-            success,
         ));
     }
     if let Some(uri) = artifact {
-        rows.push(TaskSummaryRow::child(
-            format!("artifact: {}", truncate(uri, 96)),
-            success,
-        ));
+        rows.push(TaskSummaryRow::child(format!(
+            "artifact: {}",
+            truncate(uri, 96)
+        )));
     }
     Some(render_task_rows(&rows, width))
 }
@@ -1288,8 +1743,17 @@ fn render_parallel_task_summary(
         .iter()
         .filter(|r| r.get("success").and_then(|v| v.as_bool()).unwrap_or(ok))
         .count();
+    let recovered = meta
+        .get("recovered_task_count")
+        .and_then(|value| value.as_u64())
+        .unwrap_or_default();
+    let recovery = if recovered > 0 {
+        format!(" · {recovered} recovered")
+    } else {
+        String::new()
+    };
     let mut rows = vec![TaskSummaryRow::header(
-        format!("{done}/{} agents succeeded", results.len()),
+        format!("{done}/{} agents succeeded{recovery}", results.len()),
         ok,
     )];
     for result in results.iter().take(4) {
@@ -1303,7 +1767,16 @@ fn render_parallel_task_summary(
             .unwrap_or("agent");
         let task_id = result.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
         let output_bytes = result.get("output_bytes").and_then(|v| v.as_u64());
-        let formatted = result.get("output").and_then(|v| v.as_str()).unwrap_or("");
+        let formatted = result
+            .get("output_excerpt")
+            .or_else(|| result.get("output"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let retries = result
+            .get("retry_attempts")
+            .and_then(|value| value.as_u64())
+            .unwrap_or_default();
+        let retry = if retries > 0 { " · retried" } else { "" };
         let detail = if let Some(excerpt) = task_child_excerpt(formatted) {
             truncate(&excerpt.replace('\n', " "), 120)
         } else if output_bytes == Some(0) {
@@ -1312,16 +1785,15 @@ fn render_parallel_task_summary(
             "output stored in artifact".to_string()
         };
         rows.push(TaskSummaryRow::result(
-            format!("{agent}{} · {detail}", task_id_suffix(task_id)),
+            format!("{agent}{}{retry} · {detail}", task_id_suffix(task_id)),
             success,
         ));
     }
     let more = results.len().saturating_sub(4);
     if more > 0 {
-        rows.push(TaskSummaryRow::child(
-            format!("+{more} more agent result(s)"),
-            ok,
-        ));
+        rows.push(TaskSummaryRow::child(format!(
+            "+{more} more agent result(s)"
+        )));
     }
     Some(render_task_rows(&rows, width))
 }
@@ -1336,28 +1808,28 @@ struct TaskSummaryRow {
 
 impl TaskSummaryRow {
     fn header(text: impl Into<String>, ok: bool) -> Self {
-        Self::status(text, ok)
+        Self::status(text, ok, TN_FG)
     }
 
     fn result(text: impl Into<String>, ok: bool) -> Self {
-        Self::status(text, ok)
+        Self::status(text, ok, TN_GRAY)
     }
 
-    fn child(text: impl Into<String>, ok: bool) -> Self {
+    fn child(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
             glyph: '·',
-            glyph_color: TN_GRAY,
-            text_color: if ok { TN_GRAY } else { TN_RED },
+            glyph_color: TN_SUBTLE,
+            text_color: TN_GRAY,
         }
     }
 
-    fn status(text: impl Into<String>, ok: bool) -> Self {
+    fn status(text: impl Into<String>, ok: bool, text_color: Color) -> Self {
         Self {
             text: text.into(),
             glyph: if ok { '✓' } else { '✗' },
             glyph_color: if ok { TN_GREEN } else { TN_RED },
-            text_color: if ok { TN_GRAY } else { TN_RED },
+            text_color,
         }
     }
 }
@@ -1391,7 +1863,8 @@ fn task_child_excerpt(formatted: &str) -> Option<String> {
             formatted
                 .split_once("Output excerpt:")
                 .map(|(_, tail)| tail)
-        })?;
+        })
+        .unwrap_or(formatted);
     let lines = tail
         .lines()
         .map(str::trim)
@@ -1560,134 +2033,6 @@ fn compact_generic_arg_value(value: &serde_json::Value) -> String {
     }
 }
 
-/// Claude-Code-style tool label: `Tool(arg)`, e.g. "Bash(npm test)",
-/// "Read(src/main.rs)", "Update(lib.rs)". Used for the live-running indicator
-/// and the approval prompt.
-/// Codex-style coloring for a shell command in a tool header: the program name
-/// stands out (bold cyan), flags are distinct (yellow), and positional args are
-/// muted (gray) so the line is scannable at a glance.
-pub(crate) fn highlight_shell(cmd: &str) -> String {
-    let mut out = String::new();
-    let mut command_position = true;
-    let mut cursor = 0usize;
-    while cursor < cmd.len() {
-        let ch = cmd[cursor..].chars().next().unwrap_or_default();
-        if ch.is_whitespace() {
-            out.push(ch);
-            cursor += ch.len_utf8();
-            continue;
-        }
-
-        let start = cursor;
-        while cursor < cmd.len() {
-            let ch = cmd[cursor..].chars().next().unwrap_or_default();
-            if ch.is_whitespace() {
-                break;
-            }
-            cursor += ch.len_utf8();
-        }
-        let token = &cmd[start..cursor];
-        let styled = if matches!(token, "|" | "||" | "&&" | ";") {
-            command_position = true;
-            Style::new().fg(TN_FG).bold().render(token)
-        } else if command_position {
-            command_position = false;
-            Style::new().fg(TN_CYAN).bold().render(token)
-        } else if token.starts_with('-') {
-            if let Some((flag, value)) = token.split_once('=') {
-                format!(
-                    "{}={}",
-                    Style::new().fg(TN_YELLOW).render(flag),
-                    Style::new().fg(TN_GREEN).render(value)
-                )
-            } else {
-                Style::new().fg(TN_YELLOW).render(token)
-            }
-        } else if token.starts_with('"') || token.starts_with('\'') || token.parse::<f64>().is_ok()
-        {
-            Style::new().fg(TN_GREEN).render(token)
-        } else if token.contains("//")
-            || token.starts_with('/')
-            || token.starts_with("./")
-            || token.starts_with("../")
-            || token.contains('/')
-        {
-            Style::new().fg(TN_CYAN).render(token)
-        } else if let Some((name, value)) = token.split_once('=') {
-            format!(
-                "{}={}",
-                Style::new().fg(TN_YELLOW).render(name),
-                Style::new().fg(TN_GREEN).render(value)
-            )
-        } else {
-            Style::new().fg(TN_GRAY).render(token)
-        };
-        out.push_str(&styled);
-    }
-    out
-}
-
-fn highlight_tool_detail(detail: &str) -> String {
-    detail
-        .split_inclusive(char::is_whitespace)
-        .map(|part| {
-            let token = part.trim_end_matches(char::is_whitespace);
-            let whitespace = &part[token.len()..];
-            format!("{}{whitespace}", highlight_tool_detail_token(token))
-        })
-        .collect()
-}
-
-fn highlight_tool_detail_token(token: &str) -> String {
-    let mut rendered = String::new();
-    let call = token.split_once('(').filter(|(call, _)| {
-        !call.is_empty()
-            && call
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
-    });
-    let token = if let Some((call, rest)) = call {
-        rendered.push_str(&Style::new().fg(TN_CYAN).render(call));
-        rendered.push_str(&Style::new().fg(TN_FG).render("("));
-        rest
-    } else {
-        token
-    };
-    let core = token.trim_end_matches([',', ')']);
-    let suffix = &token[core.len()..];
-
-    if let Some((key, value)) = core.split_once('=') {
-        rendered.push_str(&Style::new().fg(TN_YELLOW).render(key));
-        rendered.push('=');
-        rendered.push_str(&tool_value_style(value).render(value));
-    } else {
-        rendered.push_str(&tool_value_style(core).render(core));
-    }
-    rendered.push_str(&Style::new().fg(TN_FG).render(suffix));
-    rendered
-}
-
-fn tool_value_style(value: &str) -> Style {
-    if value.starts_with('-') {
-        Style::new().fg(TN_YELLOW)
-    } else if value.contains("//")
-        || value.starts_with('/')
-        || value.starts_with("./")
-        || value.starts_with("../")
-        || value.contains('/')
-    {
-        Style::new().fg(TN_CYAN)
-    } else if value.starts_with('"')
-        || value.starts_with('\'')
-        || value.parse::<f64>().is_ok()
-        || matches!(value, "true" | "false" | "null")
-    {
-        Style::new().fg(TN_GREEN)
-    } else {
-        Style::new().fg(TN_GRAY)
-    }
-}
-
 pub(crate) fn tool_label(name: &str, args: Option<&serde_json::Value>) -> String {
     if let Some(invocation) = mcp_invocation(name, args) {
         return invocation;
@@ -1834,7 +2179,7 @@ fn tool_approval_preview(name: &str, args: Option<&serde_json::Value>, width: us
             } else {
                 TN_GRAY
             };
-            let prefix = Style::new().fg(TN_GRAY).render("  │ ");
+            let prefix = Style::new().fg(TN_SUBTLE).render("  │ ");
             let available = width.saturating_sub(4).max(1);
             let text = Style::new()
                 .fg(color)
@@ -1858,7 +2203,7 @@ fn render_tool_header(
         tool_verb(name),
         (!arg.is_empty()).then_some(arg.as_str()),
         width,
-        if ok { TN_GREEN } else { TN_RED },
+        result_message_tone(ok),
         "  ",
         false,
     )
@@ -1879,17 +2224,7 @@ pub(crate) fn render_live_tool_activity(
             | ToolCallState::TimedOut
             | ToolCallState::Interrupted
     );
-    let marker = if failed {
-        TN_RED
-    } else if state == ToolCallState::AwaitingApproval {
-        TN_YELLOW
-    } else if state == ToolCallState::Succeeded {
-        TN_GREEN
-    } else if active {
-        ACCENT
-    } else {
-        TN_GRAY
-    };
+    let tone = tool_message_tone(state, active);
 
     if let Some(invocation) = mcp_display_name(name) {
         let action = match state {
@@ -1900,7 +2235,7 @@ pub(crate) fn render_live_tool_activity(
             ToolCallState::Succeeded | ToolCallState::Failed => "Called",
             ToolCallState::Preparing | ToolCallState::Running => "Calling",
         };
-        let header = render_action_header(action, Some(&invocation), width, marker, "  ", false);
+        let header = render_action_header(action, Some(&invocation), width, tone, "  ", false);
         return join_cell_parts(header, render_output_branch(output, width, failed, false));
     }
 
@@ -1916,7 +2251,7 @@ pub(crate) fn render_live_tool_activity(
             ToolCallState::Interrupted => "Interrupted workflow",
         };
         let run_id = args.and_then(|args| full_arg_from_keys(args, &["run_id"]));
-        let header = render_action_header(action, run_id.as_deref(), width, marker, "  ", false);
+        let header = render_action_header(action, run_id.as_deref(), width, tone, "  ", false);
         // Workflow output is a structured host artifact. While the call is
         // active it may contain partial JSON snapshots that are noisy and can
         // expose implementation details; the terminal renderer replaces this
@@ -1946,7 +2281,7 @@ pub(crate) fn render_live_tool_activity(
             output,
             failed,
             width,
-            marker,
+            tone,
         );
     }
 
@@ -1957,14 +2292,14 @@ pub(crate) fn render_live_tool_activity(
                 "Awaiting approval for",
                 Some(&detail),
                 width,
-                marker,
+                tone,
                 "  ",
                 false,
             );
         }
         let mut cell = render_explore_cell(name, args, output, !failed, width, true);
-        if marker != TN_GREEN {
-            cell = recolor_first_marker(&cell, marker);
+        if tone != MessageTone::Success {
+            cell = recolor_first_marker(&cell, tone);
         }
         return cell;
     }
@@ -1978,14 +2313,14 @@ pub(crate) fn render_live_tool_activity(
                 "Awaiting approval for",
                 Some(&detail),
                 width,
-                marker,
+                tone,
                 "  ",
                 false,
             );
         }
         let mut cell = render_web_cell(name, args, output, !failed, width, true);
-        if marker != TN_GREEN {
-            cell = recolor_first_marker(&cell, marker);
+        if tone != MessageTone::Success {
+            cell = recolor_first_marker(&cell, tone);
         }
         return cell;
     }
@@ -2000,7 +2335,7 @@ pub(crate) fn render_live_tool_activity(
                 "Awaiting approval for",
                 Some(&detail),
                 width,
-                marker,
+                tone,
                 "  ",
                 false,
             );
@@ -2036,7 +2371,7 @@ pub(crate) fn render_live_tool_activity(
         )
         .then_some(name)
     });
-    let header = render_action_header(action, detail, width, marker, "  ", false);
+    let header = render_action_header(action, detail, width, tone, "  ", false);
     let header = if name == "program" {
         join_cell_parts(header, render_program_intent_preview(args, width))
     } else {
@@ -2051,15 +2386,15 @@ fn render_exec_cell_with_marker(
     output: &str,
     failed: bool,
     width: usize,
-    marker: Color,
+    tone: MessageTone,
 ) -> String {
-    let header = render_action_header(action, command, width, marker, "  │ ", true);
+    let header = render_action_header(action, command, width, tone, "  │ ", true);
     join_cell_parts(header, render_output_branch(output, width, failed, false))
 }
 
-fn recolor_first_marker(rendered: &str, color: Color) -> String {
-    let from = Style::new().fg(TN_GREEN).bold().render("•");
-    let to = Style::new().fg(color).bold().render("•");
+fn recolor_first_marker(rendered: &str, tone: MessageTone) -> String {
+    let from = message_marker(MessageTone::Success);
+    let to = message_marker(tone);
     rendered.replacen(&from, &to, 1)
 }
 
@@ -2214,60 +2549,7 @@ fn summarize_tasks(tasks: &[serde_json::Value], worker: Option<&str>) -> Option<
 /// wrapped with the code indented under a blank gutter.
 #[cfg(test)]
 fn render_diff(path: &str, before: &str, after: &str, width: usize) -> String {
-    render_diff_action("Edited", path, before, after, width, MAX_DIFF_ROWS)
-}
-
-fn render_diff_action(
-    action: &str,
-    path: &str,
-    before: &str,
-    after: &str,
-    width: usize,
-    max_rows: usize,
-) -> String {
-    let theme = agent_chrome_theme();
-    let chrome = agent_chrome(&theme);
-    let lang = lang_of(std::path::Path::new(path));
-    chrome
-        .diff_texts(path, before, after)
-        .action(action)
-        .header_colors(DIFF_HEADER_BULLET, DIFF_HEADER_ACTION, DIFF_HEADER_DETAIL)
-        .context_color(DIFF_CODE_FG)
-        .separator_color(DIFF_CONTEXT_GUTTER)
-        .gutter_colors(DIFF_CONTEXT_GUTTER, DIFF_INSERT_GUTTER, DIFF_DELETE_GUTTER)
-        .marker_colors(DIFF_INSERT_MARKER, DIFF_DELETE_MARKER)
-        .changed_content_colors(DIFF_CODE_FG, mix_diff_color(DIFF_CODE_FG, DIFF_DELETE_BG))
-        .changed_backgrounds(Some(DIFF_INSERT_BG), Some(DIFF_DELETE_BG))
-        .highlight_content(|kind, content| {
-            highlight_diff_spans(content, lang)
-                .into_iter()
-                .map(|span| {
-                    let color = span.color.unwrap_or(DIFF_CODE_FG);
-                    let color = if kind == DiffLineKind::Delete {
-                        mix_diff_color(color, DIFF_DELETE_BG)
-                    } else {
-                        color
-                    };
-                    DiffSpan::new(span.content).color(color)
-                })
-                .collect()
-        })
-        .max_lines(max_rows)
-        .view(
-            width.min(u16::MAX as usize) as u16,
-            max_rows.saturating_add(2),
-        )
-}
-
-fn mix_diff_color(foreground: Color, background: Color) -> Color {
-    match (foreground, background) {
-        (Color::Rgb(fr, fg, fb), Color::Rgb(br, bg, bb)) => Color::Rgb(
-            ((u16::from(fr) + u16::from(br)) / 2) as u8,
-            ((u16::from(fg) + u16::from(bg)) / 2) as u8,
-            ((u16::from(fb) + u16::from(bb)) / 2) as u8,
-        ),
-        (color, _) => color,
-    }
+    render_compact_file_change("Edited", path, before, after, width)
 }
 
 #[cfg(test)]
@@ -2290,9 +2572,9 @@ mod tests {
         let s = highlight_shell(command);
         // Styling was applied (escape sequences present)...
         assert!(s.contains('\u{1b}'));
-        assert!(s.contains(&TN_CYAN.fg_ansi()));
-        assert!(s.contains(&TN_YELLOW.fg_ansi()));
-        assert!(s.contains(&TN_GREEN.fg_ansi()));
+        assert!(s.contains(&tool_style::TOOL_PROGRAM_COLOR.fg_ansi()));
+        assert!(s.contains(&tool_style::TOOL_FLAG_COLOR.fg_ansi()));
+        assert!(s.contains(&tool_style::TOOL_STRING_COLOR.fg_ansi()));
         // ...but the visible text is unchanged (single-spaced tokens).
         assert_eq!(a3s_tui::style::strip_ansi(&s), command);
         assert_eq!(highlight_shell(""), "");
@@ -2303,9 +2585,222 @@ mod tests {
         let detail = "Read ./src/main.rs --limit '20 lines' 20";
         let rendered = highlight_tool_detail(detail);
         assert_eq!(a3s_tui::style::strip_ansi(&rendered), detail);
-        assert!(rendered.contains(&TN_CYAN.fg_ansi()));
-        assert!(rendered.contains(&TN_YELLOW.fg_ansi()));
-        assert!(rendered.contains(&TN_GREEN.fg_ansi()));
+        assert!(rendered.contains(&tool_style::TOOL_ACTION_COLOR.fg_ansi()));
+        assert!(rendered.contains(&tool_style::TOOL_FLAG_COLOR.fg_ansi()));
+        assert!(rendered.contains(&tool_style::TOOL_STRING_COLOR.fg_ansi()));
+    }
+
+    #[test]
+    fn terminal_states_have_distinct_glyphs_and_neutral_labels() {
+        for (state, exit_code, glyph, label, tone) in [
+            (
+                ToolCallState::Succeeded,
+                Some(0),
+                "✓",
+                "",
+                MessageTone::Success,
+            ),
+            (
+                ToolCallState::Failed,
+                Some(7),
+                "✗",
+                "(7)",
+                MessageTone::Error,
+            ),
+            (
+                ToolCallState::Denied,
+                Some(1),
+                "⊘",
+                "denied",
+                MessageTone::Warning,
+            ),
+            (
+                ToolCallState::TimedOut,
+                Some(124),
+                "◷",
+                "timed out",
+                MessageTone::Error,
+            ),
+            (
+                ToolCallState::Interrupted,
+                Some(130),
+                "■",
+                "interrupted",
+                MessageTone::Warning,
+            ),
+        ] {
+            let rendered = render_transcript_terminal_status(state, exit_code, None, 32);
+            let expected = if label.is_empty() {
+                glyph.to_string()
+            } else {
+                format!("{glyph} {label}")
+            };
+            assert_eq!(strip_ansi(&rendered), expected, "state={state:?}");
+            assert!(
+                rendered.contains(&Style::new().fg(tone.color()).bold().render(glyph)),
+                "state={state:?}: {rendered:?}"
+            );
+            if !label.is_empty() {
+                assert!(
+                    rendered.contains(&Style::new().fg(TN_GRAY).render(label)),
+                    "state={state:?}: {rendered:?}"
+                );
+                assert!(
+                    !rendered.contains(&Style::new().fg(tone.color()).render(label)),
+                    "semantic color should stay on the glyph for {state:?}: {rendered:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lifecycle_rows_share_subtle_connectors_and_status_semantics() {
+        for (status, success, glyph, tone) in [
+            ("completed", true, "✓", MessageTone::Success),
+            ("running", false, "●", MessageTone::Active),
+            ("cancelled", false, "⊘", MessageTone::Warning),
+            ("interrupted", false, "■", MessageTone::Warning),
+            ("timed out", false, "◷", MessageTone::Error),
+            ("failed", false, "✗", MessageTone::Error),
+            ("pending", false, "○", MessageTone::Inactive),
+        ] {
+            let rendered =
+                render_lifecycle_row("  └ ", &format!("verify · {status}"), status, success, 48);
+            assert!(
+                rendered.contains(&Style::new().fg(TN_SUBTLE).render("  └ ")),
+                "{rendered:?}"
+            );
+            assert!(
+                rendered.contains(&Style::new().fg(tone.color()).bold().render(glyph)),
+                "status={status}: {rendered:?}"
+            );
+            assert!(
+                rendered.contains(
+                    &Style::new()
+                        .fg(TN_GRAY)
+                        .render(&format!("verify · {status}"))
+                ),
+                "status={status}: {rendered:?}"
+            );
+            assert_visible_lines_bounded(&rendered, 48);
+        }
+    }
+
+    #[test]
+    fn program_preview_uses_neutral_hierarchy_until_a_real_failure() {
+        let args = serde_json::json!({
+            "intent": "verify the message hierarchy",
+            "language": "javascript"
+        });
+        let preview = render_program_intent_preview(Some(&args), 72);
+
+        assert!(preview.contains(&TN_SUBTLE.fg_ansi()), "{preview:?}");
+        assert!(preview.contains(&TN_FG.fg_ansi()), "{preview:?}");
+        assert!(!preview.contains(&TN_YELLOW.fg_ansi()), "{preview:?}");
+        assert!(!preview.contains(&TN_GREEN.fg_ansi()), "{preview:?}");
+
+        let failed = render_program_preview_row("  └ ", "actual", "tool call failed", 72, true);
+        assert!(
+            failed.contains(&Style::new().fg(TN_RED).bold().render("✗")),
+            "{failed:?}"
+        );
+        assert!(
+            failed.contains(&Style::new().fg(TN_FG).render("tool call failed")),
+            "{failed:?}"
+        );
+        assert!(
+            !failed.contains(&Style::new().fg(TN_RED).render("tool call failed")),
+            "{failed:?}"
+        );
+    }
+
+    #[test]
+    fn explored_group_distinguishes_heading_action_pattern_and_path() {
+        let args = serde_json::json!({
+            "pattern": "ToolStatusLine",
+            "path": "src/tui/ui/render.rs"
+        });
+        let rendered = render_tool_end("grep", 0, "1 match", None, Some(&args), 80);
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain,
+            "• Explored\n  └ Search ToolStatusLine in src/tui/ui/render.rs"
+        );
+        assert!(rendered.contains(&Style::new().fg(TN_GRAY).render("•")));
+        assert!(!rendered.contains(&Style::new().fg(TN_GREEN).bold().render("•")));
+        assert!(rendered.contains(&Style::new().fg(TN_FG).bold().render("Explored")));
+        assert!(rendered.contains(&Style::new().fg(TN_CYAN).render("Search")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_ARGUMENT_COLOR)
+                .render("ToolStatusLine")
+        ));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_PATH_COLOR)
+                .render("src/tui/ui/render.rs")
+        ));
+        assert_visible_lines_bounded(&rendered, 80);
+    }
+
+    #[test]
+    fn completed_exec_matches_codex_status_syntax_and_output_hierarchy() {
+        let args = serde_json::json!({
+            "command": "git diff --name-only && git diff --cached --name-only"
+        });
+        let rendered = render_tool_end(
+            "bash",
+            0,
+            "README.md\nsrc/lib.rs\ntests/cli.rs",
+            None,
+            Some(&args),
+            88,
+        );
+        let plain = strip_ansi(&rendered);
+
+        assert!(
+            plain.starts_with("• Ran git diff --name-only && git diff"),
+            "{plain}"
+        );
+        assert!(rendered.contains(&Style::new().fg(TN_GREEN).bold().render("•")));
+        assert!(rendered.contains(&Style::new().fg(TN_FG).bold().render("Ran")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_PROGRAM_COLOR)
+                .render("git")
+        ));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_FLAG_COLOR)
+                .render("--name-only")
+        ));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_OPERATOR_COLOR)
+                .render("&&")
+        ));
+        assert!(rendered.contains(&Style::new().fg(TN_GRAY).render("README.md")));
+        assert_visible_lines_bounded(&rendered, 88);
+    }
+
+    #[test]
+    fn full_width_action_never_consumes_or_drops_the_first_detail_character() {
+        let rendered = render_action_header(
+            "Awaiting approval for",
+            Some("src/tui/ui/message_chrome.rs"),
+            23,
+            MessageTone::Warning,
+            "  ",
+            false,
+        );
+        let plain = strip_ansi(&rendered);
+        let rows = plain.lines().collect::<Vec<_>>();
+
+        assert_eq!(rows[0], "• Awaiting approval for", "{plain}");
+        assert!(rows[1].starts_with("  src/"), "{plain}");
+        assert!(!plain.contains('…'), "{plain}");
+        assert_visible_lines_bounded(&rendered, 23);
     }
 
     #[test]
@@ -2370,6 +2865,22 @@ mod tests {
                 "width {width}:\n{generic_plain}"
             );
             assert!(!generic_plain.contains("{\"nested\":"), "{generic_plain}");
+            assert!(
+                generic.contains(
+                    &Style::new()
+                        .fg(tool_style::TOOL_KEY_COLOR)
+                        .render("\"nested\"")
+                ),
+                "JSON keys should remain scannable at width {width}: {generic:?}"
+            );
+            assert!(
+                generic.contains(
+                    &Style::new()
+                        .fg(tool_style::TOOL_KEYWORD_COLOR)
+                        .render("true")
+                ),
+                "JSON literals should use the structured-output palette: {generic:?}"
+            );
             assert_visible_lines_bounded(&generic, width);
 
             let mcp = render_tool_end(
@@ -2384,7 +2895,101 @@ mod tests {
             assert!(mcp_plain.contains("  └ ["), "width {width}:\n{mcp_plain}");
             assert!(mcp_plain.contains("\"研究报告\""), "{mcp_plain}");
             assert!(mcp_plain.contains("… +"), "width {width}:\n{mcp_plain}");
+            assert!(
+                mcp.contains(
+                    &Style::new()
+                        .fg(tool_style::TOOL_STRING_COLOR)
+                        .render("\"研究报告\"")
+                ),
+                "MCP string values should retain semantic JSON styling: {mcp:?}"
+            );
             assert_visible_lines_bounded(&mcp, width);
+        }
+    }
+
+    #[test]
+    fn full_mcp_transcript_keeps_complete_syntax_highlighted_json() {
+        let output = serde_json::json!({
+            "items": (0..18).map(|index| serde_json::json!({
+                "id": index,
+                "title": format!("result-{index}"),
+                "ready": true
+            })).collect::<Vec<_>>()
+        })
+        .to_string();
+        let args = serde_json::json!({"query": "terminal UX"});
+        let rendered = render_tool_transcript(ToolTranscriptInput {
+            name: "mcp__docs__search",
+            state: ToolCallState::Succeeded,
+            exit_code: Some(0),
+            output: &output,
+            metadata: None,
+            args: Some(&args),
+            duration: None,
+            width: 72,
+        });
+        let plain = strip_ansi(&rendered);
+
+        assert!(
+            plain.contains("result-0") && plain.contains("result-17"),
+            "{plain}"
+        );
+        assert!(!plain.contains("… +"), "{plain}");
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_KEY_COLOR)
+                .render("\"items\"")
+        ));
+        assert!(rendered.contains(&Style::new().fg(tool_style::TOOL_NUMBER_COLOR).render("17")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(tool_style::TOOL_KEYWORD_COLOR)
+                .render("true")
+        ));
+        assert_visible_lines_bounded(&rendered, 72);
+    }
+
+    #[test]
+    fn full_generic_transcript_keeps_one_complete_tree_at_product_widths() {
+        let args = serde_json::json!({
+            "query": "terminal message hierarchy",
+            "options": {
+                "limit": 12,
+                "include_archived": false
+            }
+        });
+        let output = serde_json::json!({
+            "items": (0..12)
+                .map(|index| serde_json::json!({"id": index, "title": format!("result-{index}")}))
+                .collect::<Vec<_>>()
+        })
+        .to_string();
+
+        for width in [24, 48, 80] {
+            let rendered = render_tool_transcript(ToolTranscriptInput {
+                name: "custom_lookup",
+                state: ToolCallState::Succeeded,
+                exit_code: Some(0),
+                output: &output,
+                metadata: None,
+                args: Some(&args),
+                duration: None,
+                width,
+            });
+            let plain = strip_ansi(&rendered);
+            let first = plain.lines().next().unwrap_or_default();
+
+            assert_eq!(first, "• Called custom_lookup", "width {width}:\n{plain}");
+            assert!(plain.contains("  ├ Input"), "width {width}:\n{plain}");
+            assert!(plain.contains("  └ Result"), "width {width}:\n{plain}");
+            assert_eq!(plain.matches("\"query\"").count(), 1, "{plain}");
+            assert_eq!(plain.matches("\"options\"").count(), 1, "{plain}");
+            assert!(
+                plain.contains("result-0") && plain.contains("result-11"),
+                "{plain}"
+            );
+            assert!(!plain.lines().any(|row| row.trim() == "✓"), "{plain}");
+            assert_visible_lines_bounded(&rendered, width);
         }
     }
 
@@ -2443,18 +3048,36 @@ mod tests {
             assert!(!plain.contains("{\"count\":"), "width {width}:\n{plain}");
             assert_visible_lines_bounded(&rendered, width);
             if width == 80 {
-                assert!(rendered.contains(&TN_YELLOW.fg_ansi()), "{rendered:?}");
-                assert!(rendered.contains(&TN_CYAN.fg_ansi()), "{rendered:?}");
-                assert!(rendered.contains(&TN_GREEN.fg_ansi()), "{rendered:?}");
+                assert!(
+                    rendered.contains(&tool_style::TOOL_NUMBER_COLOR.fg_ansi()),
+                    "{rendered:?}"
+                );
+                assert!(
+                    rendered.contains(&tool_style::TOOL_KEY_COLOR.fg_ansi()),
+                    "{rendered:?}"
+                );
+                assert!(
+                    rendered.contains(&tool_style::TOOL_KEYWORD_COLOR.fg_ansi()),
+                    "{rendered:?}"
+                );
             }
         }
 
         let colored = highlight_tool_detail(
             "custom_lookup path=./src/main.rs flag=--all count=2 enabled=true",
         );
-        assert!(colored.contains(&TN_YELLOW.fg_ansi()), "{colored:?}");
-        assert!(colored.contains(&TN_CYAN.fg_ansi()), "{colored:?}");
-        assert!(colored.contains(&TN_GREEN.fg_ansi()), "{colored:?}");
+        assert!(
+            colored.contains(&tool_style::TOOL_NUMBER_COLOR.fg_ansi()),
+            "{colored:?}"
+        );
+        assert!(
+            colored.contains(&tool_style::TOOL_KEY_COLOR.fg_ansi()),
+            "{colored:?}"
+        );
+        assert!(
+            colored.contains(&tool_style::TOOL_KEYWORD_COLOR.fg_ansi()),
+            "{colored:?}"
+        );
 
         let transcript = strip_ansi(&render_tool_transcript(ToolTranscriptInput {
             name: "custom_lookup",
@@ -2466,7 +3089,7 @@ mod tests {
             duration: None,
             width: 80,
         }));
-        assert!(transcript.contains("Arguments:"), "{transcript}");
+        assert!(transcript.contains("Input"), "{transcript}");
         assert!(transcript.contains("\"nested\": {"), "{transcript}");
         assert!(transcript.contains("\"depth\": 3"), "{transcript}");
     }
@@ -2779,9 +3402,12 @@ mod tests {
             width: 80,
         });
         let transcript = strip_ansi(&transcript);
-        assert!(transcript.contains("Arguments:"), "{transcript}");
-        assert!(transcript.contains("\"title\": \"Bug\""), "{transcript}");
-        assert!(transcript.contains("\"dry_run\": false"), "{transcript}");
+        assert!(transcript.contains("Input"), "{transcript}");
+        assert!(transcript.contains("title=\"Bug\""), "{transcript}");
+        assert!(transcript.contains("dry_run=false"), "{transcript}");
+        assert!(transcript.contains("Result  created"), "{transcript}");
+        assert_eq!(transcript.matches("title=").count(), 1, "{transcript}");
+        assert_eq!(transcript.lines().count(), 3, "{transcript}");
     }
 
     #[test]
@@ -2800,7 +3426,7 @@ mod tests {
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("Ran npm run"));
-        assert!(plain.contains("… +9 lines (ctrl + t to view transcript)"));
+        assert!(plain.contains("… +9 lines · Ctrl+T"));
         assert!(plain.contains("first"));
         assert!(!plain.contains("sixth"));
         assert!(plain.contains("twelfth"));
@@ -2823,9 +3449,7 @@ mod tests {
         assert_eq!(lines[0], "• Ran npm test");
         assert_eq!(lines[1], "  └ first");
         assert!(
-            lines
-                .iter()
-                .any(|line| line == &"    … +9 lines (ctrl + t to view transcript)"),
+            lines.iter().any(|line| line == &"    … +9 lines · Ctrl+T"),
             "{plain}"
         );
         assert!(
@@ -2947,12 +3571,16 @@ mod tests {
             completed.ends_with("\n  └ Found styling guidance"),
             "{completed}"
         );
-        assert!(transcript.contains("Arguments:"), "{transcript}");
+        assert!(transcript.contains("Input"), "{transcript}");
         assert!(
-            transcript.contains("\"query\": \"ratatui styling\""),
+            transcript.contains("query=\"ratatui styling\""),
             "{transcript}"
         );
-        assert!(transcript.contains("\"limit\": 3"), "{transcript}");
+        assert!(transcript.contains("limit=3"), "{transcript}");
+        assert!(
+            transcript.contains("Result  Found styling guidance"),
+            "{transcript}"
+        );
         assert!(!transcript.contains("unknown"), "{transcript}");
     }
 
@@ -3038,6 +3666,10 @@ mod tests {
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
         assert!(plain.contains("└ red"), "{plain}");
+        assert!(
+            rendered.contains(&Style::new().fg(TN_SUBTLE).render("  └ ")),
+            "tool output should share the subtle message connector: {rendered:?}"
+        );
         assert!(!plain.contains('\x1b'));
         assert_visible_lines_bounded(&rendered, 32);
         for line in rendered.lines().filter(|line| line.contains("\x1b[")) {
@@ -3077,8 +3709,12 @@ mod tests {
             "failed task summary should use checklist error glyph color: {rendered:?}"
         );
         assert!(
-            rendered.contains(&format!("\x1b[{}mTask failed", TN_RED.fg_ansi())),
-            "failed task summary should use checklist error text color: {rendered:?}"
+            rendered.contains(&format!("\x1b[{}mTask failed", TN_FG.fg_ansi())),
+            "failed task summary should keep readable neutral text: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(&format!("\x1b[{}mTask failed", TN_RED.fg_ansi())),
+            "failed task summary should reserve red for the glyph: {rendered:?}"
         );
         assert_visible_lines_bounded(&rendered, 44);
     }
@@ -3086,13 +3722,15 @@ mod tests {
     #[test]
     fn parallel_task_summary_marks_each_result_with_checklist_status() {
         let meta = serde_json::json!({
+            "recovered_task_count": 1,
             "results": [
                 {
                     "agent": "plan",
                     "task_id": "task-ok",
                     "success": true,
                     "output_bytes": 42,
-                    "output": "Task completed\nOutput:\nready"
+                    "output_excerpt": "ready",
+                    "retry_attempts": 1
                 },
                 {
                     "agent": "review",
@@ -3106,8 +3744,14 @@ mod tests {
         let rendered = render_tool_end("parallel_task", 0, "", Some(&meta), None, 58);
         let plain = a3s_tui::style::strip_ansi(&rendered);
 
-        assert!(plain.contains("  └ ✓ 1/2 agents succeeded"), "{plain}");
-        assert!(plain.contains("    ✓ plan · task-ok · ready"), "{plain}");
+        assert!(
+            plain.contains("  └ ✓ 1/2 agents succeeded · 1 recovered"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains("    ✓ plan · task-ok · retried · ready"),
+            "{plain}"
+        );
         assert!(
             plain.contains("    ✗ review · task-fail · no child text output"),
             "{plain}"
@@ -3445,6 +4089,137 @@ mod tests {
     }
 
     #[test]
+    fn partial_batch_renders_semantic_items_instead_of_raw_combined_output() {
+        let args = serde_json::json!({
+            "invocations": [
+                {"tool": "read", "args": {"file_path": "README.md"}},
+                {"tool": "bash", "args": {"command": "cargo test"}}
+            ]
+        });
+        let meta = serde_json::json!({
+            "status": "partial_failure",
+            "execution_mode": "parallel",
+            "applied_concurrency": 2,
+            "total_count": 2,
+            "success_count": 1,
+            "failure_count": 1,
+            "results": [
+                {"index": 0, "tool": "read", "success": true, "exit_code": 0},
+                {"index": 1, "tool": "bash", "success": false, "exit_code": 101}
+            ]
+        });
+
+        for width in [24, 48, 80] {
+            let rendered = render_tool_end(
+                "batch",
+                0,
+                "--- [1: read] ---\ncontents\n--- [2: bash] ---\nERROR: failed",
+                Some(&meta),
+                Some(&args),
+                width,
+            );
+            let plain = strip_ansi(&rendered);
+
+            assert!(plain.contains("Batch partially"), "{plain}");
+            assert!(plain.contains("✓ Read"), "{plain}");
+            assert!(plain.contains("✗ exit 101"), "{plain}");
+            assert!(plain.contains("exit 101"), "{plain}");
+            assert!(!plain.contains("contents"), "{plain}");
+            assert_visible_lines_bounded(&rendered, width);
+            assert!(rendered.contains(&Style::new().fg(TN_GREEN).bold().render("✓")));
+            assert!(rendered.contains(&Style::new().fg(TN_RED).bold().render("✗")));
+            assert!(
+                !rendered.contains(&Style::new().fg(TN_RED).render("Bash")),
+                "failed item labels should remain neutral: {rendered:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_transcript_reports_partial_outcome_after_complete_output() {
+        let args = serde_json::json!({
+            "invocations": [
+                {"tool": "read", "args": {"file_path": "README.md"}},
+                {"tool": "bash", "args": {"command": "cargo test"}}
+            ]
+        });
+        let meta = serde_json::json!({
+            "execution_mode": "parallel",
+            "applied_concurrency": 2,
+            "success_count": 1,
+            "failure_count": 1,
+            "results": [
+                {"index": 0, "tool": "read", "success": true, "exit_code": 0},
+                {"index": 1, "tool": "bash", "success": false, "exit_code": 101}
+            ]
+        });
+        let output = "--- [1: read] ---\ncontents\n--- [2: bash] ---\nERROR: failed";
+        let rendered = render_tool_transcript(ToolTranscriptInput {
+            name: "batch",
+            state: ToolCallState::Succeeded,
+            exit_code: Some(0),
+            output,
+            metadata: Some(&meta),
+            args: Some(&args),
+            duration: Some(std::time::Duration::from_secs(2)),
+            width: 80,
+        });
+        let plain = strip_ansi(&rendered);
+
+        assert!(plain.contains("--- [1: read] ---"), "{plain}");
+        assert!(plain.contains("contents"), "{plain}");
+        assert!(plain.contains("--- [2: bash] ---"), "{plain}");
+        assert!(plain.contains("ERROR: failed"), "{plain}");
+        assert!(
+            plain.ends_with("  └ ! partial · 1 failed • 2.0s"),
+            "{plain}"
+        );
+        assert!(!plain.ends_with("  └ ✓ • 2.0s"), "{plain}");
+        assert!(rendered.contains(&Style::new().fg(TN_YELLOW).bold().render("!")));
+        assert_visible_lines_bounded(&rendered, 80);
+    }
+
+    #[test]
+    fn large_batch_keeps_failures_visible_and_collapses_secondary_successes() {
+        let invocations = (0..12)
+            .map(|index| {
+                serde_json::json!({
+                    "tool": "read",
+                    "args": {"file_path": format!("file-{index}.rs")}
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = (0..12)
+            .map(|index| {
+                serde_json::json!({
+                    "index": index,
+                    "tool": "read",
+                    "success": index != 9,
+                    "exit_code": if index == 9 { 1 } else { 0 }
+                })
+            })
+            .collect::<Vec<_>>();
+        let args = serde_json::json!({"invocations": invocations});
+        let meta = serde_json::json!({
+            "execution_mode": "parallel",
+            "applied_concurrency": 8,
+            "success_count": 11,
+            "failure_count": 1,
+            "results": results
+        });
+        let rendered = render_tool_end("batch", 0, "", Some(&meta), Some(&args), 72);
+        let plain = strip_ansi(&rendered);
+
+        assert!(
+            plain.contains("file-9.rs"),
+            "failed item must stay visible: {plain}"
+        );
+        assert!(plain.contains("… +7 tools · Ctrl+T"), "{plain}");
+        assert!(plain.lines().count() <= 7, "{plain}");
+        assert_visible_lines_bounded(&rendered, 72);
+    }
+
+    #[test]
     fn exec_transcript_keeps_complete_command_output_and_terminal_status() {
         let output = (0..24)
             .map(|index| format!("output-line-{index}"))
@@ -3464,6 +4239,18 @@ mod tests {
         let plain = strip_ansi(&rendered);
 
         assert!(plain.starts_with("$ cargo test --all-targets\n"), "{plain}");
+        assert!(
+            rendered.contains(&Style::new().fg(TN_SUBTLE).render("$ ")),
+            "full transcript prompt should use the shared subtle chrome: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(
+                &Style::new()
+                    .fg(tool_style::TOOL_PROGRAM_COLOR)
+                    .render("cargo")
+            ),
+            "full transcript command should retain semantic shell highlighting: {rendered:?}"
+        );
         for index in 0..24 {
             assert!(plain.contains(&format!("output-line-{index}")), "{plain}");
         }
@@ -3497,7 +4284,19 @@ mod tests {
             "{plain}"
         );
         assert!(!plain.contains("… +"), "{plain}");
-        assert!(plain.ends_with("✗ denied"), "{plain}");
+        assert!(plain.ends_with("  └ ⊘ denied"), "{plain}");
+        assert!(
+            rendered.contains(&Style::new().fg(TN_YELLOW).bold().render("⊘")),
+            "denial should use a warning glyph: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(&Style::new().fg(TN_GRAY).render("denied")),
+            "denial label should remain neutral: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains(&Style::new().fg(TN_RED).render("denied")),
+            "denial is a policy outcome, not an execution failure: {rendered:?}"
+        );
         assert_visible_lines_bounded(&rendered, 72);
     }
 
@@ -3533,7 +4332,7 @@ mod tests {
         assert!(plain.contains("new-239"), "{plain}");
         assert!(plain.contains("Applied 1 hunk."), "{plain}");
         assert!(!plain.contains("diff truncated"), "{plain}");
-        assert!(plain.ends_with("✓ • 25ms"), "{plain}");
+        assert!(plain.ends_with("  └ ✓ • 25ms"), "{plain}");
         assert_visible_lines_bounded(&rendered, 96);
     }
 
@@ -3558,6 +4357,10 @@ mod tests {
             80,
             true,
             ToolCallState::AwaitingApproval,
+        );
+        assert!(
+            patch.contains(&Style::new().fg(TN_SUBTLE).render("  │ ")),
+            "approval preview should share the subtle message connector: {patch:?}"
         );
         let patch = strip_ansi(&patch);
         assert!(

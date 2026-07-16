@@ -175,7 +175,7 @@ fn resumed_history_reconstructs_tool_cells_in_message_order() {
             TranscriptEntry::Reasoning { .. } => "reasoning",
             TranscriptEntry::Tool(_) => "tool",
             TranscriptEntry::Subagent(_) => "subagent",
-            TranscriptEntry::Preformatted(_) => "notice",
+            TranscriptEntry::Preformatted(_) | TranscriptEntry::Notice { .. } => "notice",
         })
         .collect::<Vec<_>>();
     assert_eq!(kinds, ["user", "assistant", "tool", "assistant"]);
@@ -589,6 +589,18 @@ fn deep_research_smoke_remaining_budget_is_absolute() {
 }
 
 #[test]
+fn deep_research_hard_fuse_does_not_shorten_independent_phase_clocks() {
+    let required = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS
+        + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
+        + DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS
+        + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+        + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
+        + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
+
+    assert_eq!(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS, required);
+}
+
+#[test]
 fn deep_research_smoke_phase_deadlines_reserve_finalization_budget() {
     let started_at = Instant::now();
     let run_deadline = deep_research_smoke_run_deadline(started_at);
@@ -895,6 +907,14 @@ fn tui_palette_tracks_design_tokens() {
     assert_eq!(rgb(SURFACE_SOFT), (27, 31, 37));
     assert_eq!(rgb(SURFACE_USER), (49, 53, 58));
     assert_eq!(rgb(SURFACE_SELECTED), (42, 46, 52));
+    assert_eq!(rgb(COMPOSER_CHROME.primary), (210, 214, 220));
+    assert_eq!(rgb(COMPOSER_CHROME.secondary), (139, 147, 158));
+    assert_eq!(rgb(COMPOSER_CHROME.faint), (94, 103, 114));
+    assert_eq!(rgb(COMPOSER_CHROME.active), (137, 161, 199));
+    assert_eq!(rgb(COMPOSER_CHROME.success), (126, 164, 143));
+    assert_eq!(rgb(COMPOSER_CHROME.warning), (188, 157, 105));
+    assert_eq!(rgb(COMPOSER_CHROME.error), (197, 120, 128));
+    assert_ne!(COMPOSER_CHROME.active, ACCENT);
 }
 
 #[test]
@@ -1047,6 +1067,43 @@ async fn graceful_quit_settles_a_completed_stream() {
 }
 
 #[tokio::test]
+async fn graceful_quit_settles_a_completed_session_close() {
+    assert!(
+        settle_session_close_for_quit(async {}, Duration::from_secs(1)).await,
+        "an already-completed session close should settle without forced abort"
+    );
+}
+
+#[tokio::test]
+async fn graceful_quit_aborts_a_session_close_after_its_deadline() {
+    struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let close = {
+        let dropped = Arc::clone(&dropped);
+        async move {
+            let _drop_flag = DropFlag(dropped);
+            std::future::pending::<()>().await;
+        }
+    };
+
+    assert!(
+        !settle_session_close_for_quit(close, Duration::from_millis(10)).await,
+        "a stuck session close must be force-aborted after the host deadline"
+    );
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "the aborted close task must run its cancellation destructors"
+    );
+}
+
+#[tokio::test]
 async fn graceful_quit_aborts_a_stream_after_its_own_deadline() {
     struct DropFlag(Arc<std::sync::atomic::AtomicBool>);
 
@@ -1085,7 +1142,7 @@ fn footer_for_width(width: usize) -> String {
         0,
         [
             mode_status_chip(Mode::Auto),
-            SessionStatusChip::new("🎯", "Pursuing goal").color(TN_CYAN),
+            SessionStatusChip::new("◎", "goal · 1m 05s").color(COMPOSER_CHROME.active),
         ],
         width,
     )
@@ -1113,7 +1170,7 @@ fn footer_wide_width_keeps_all_optional_detail_after_mode_and_context() {
     assert!(plain.contains("a3s"), "{plain}");
     assert!(plain.contains("git:(main)"), "{plain}");
     assert!(plain.contains("gpt-5 (128k context)"), "{plain}");
-    assert!(plain.contains("🎯 Pursuing goal"), "{plain}");
+    assert!(plain.contains("◎ goal · 1m 05s"), "{plain}");
     assert!(
         plain.find("⏵⏵ auto mode") < plain.find("git:(main)"),
         "mandatory permission mode must precede optional detail: {plain}"
@@ -1125,16 +1182,14 @@ fn footer_wide_width_keeps_all_optional_detail_after_mode_and_context() {
 }
 
 #[test]
-fn footer_medium_width_drops_model_and_goal_before_core_status() {
+fn footer_medium_width_keeps_live_goal_before_optional_identity() {
     let status = footer_for_width(64);
     let plain = assert_fixed_width_footer(&status, 64);
 
     assert!(plain.contains("⏵⏵ auto mode"), "{plain}");
     assert!(plain.contains("ctx:70%"), "{plain}");
-    assert!(plain.contains("a3s"), "{plain}");
-    assert!(plain.contains("git:(main)"), "{plain}");
+    assert!(plain.contains("◎ goal · 1m 05s"), "{plain}");
     assert!(!plain.contains("gpt-5"), "{plain}");
-    assert!(!plain.contains("Pursuing goal"), "{plain}");
 }
 
 #[test]
@@ -1152,7 +1207,79 @@ fn footer_narrow_width_uses_compact_mode_and_context_fallback() {
     assert!(!plain.contains("a3s"), "{plain}");
     assert!(!plain.contains("git:("), "{plain}");
     assert!(!plain.contains("gpt-5"), "{plain}");
-    assert!(!plain.contains("Pursuing goal"), "{plain}");
+    assert!(!plain.contains("goal · 1m 05s"), "{plain}");
+}
+
+#[test]
+fn footer_uses_low_chroma_color_anchors_with_neutral_detail() {
+    let status = render_session_status_line(
+        "/Users/roylin/code/a3s",
+        Some("main"),
+        Some("openai/gpt-5"),
+        128_000,
+        40_000,
+        0,
+        [
+            mode_status_chip(Mode::Plan),
+            SessionStatusChip::new("◎", "goal · 1m 05s").color(COMPOSER_CHROME.active),
+        ],
+        128,
+    );
+
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).bold().render("a3s")),
+        "workspace should be a visible blue identity anchor: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.success).render("main")),
+        "git branch should use a quiet green identity anchor: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("ctx:31%")),
+        "healthy context should keep a visible blue meter: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.secondary).render("gpt-5")),
+        "model should be secondary text: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("✎"))
+            && status.contains(&Style::new().fg(COMPOSER_CHROME.primary).render("plan mode")),
+        "permission mode should separate its glyph from its label: {status:?}"
+    );
+    assert!(
+        status.contains(&Style::new().fg(COMPOSER_CHROME.active).render("◎"))
+            && status.contains(
+                &Style::new()
+                    .fg(COMPOSER_CHROME.secondary)
+                    .render("goal · 1m 05s")
+            ),
+        "live chips should separate semantic glyphs from muted labels: {status:?}"
+    );
+    assert!(
+        !status.contains(&COMPOSER_CHROME.warning.fg_ansi())
+            && !status.contains(&COMPOSER_CHROME.error.fg_ansi())
+            && !status.contains(&ACCENT.fg_ansi()),
+        "ordinary footer state should avoid alert and global-accent colors: {status:?}"
+    );
+}
+
+#[test]
+fn auto_mode_reserves_warning_color_for_the_permission_glyph() {
+    let segment = footer_mode_segment(&mode_status_chip(Mode::Auto));
+
+    assert!(
+        segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("⏵⏵")),
+        "auto-approval should remain visibly elevated: {segment:?}"
+    );
+    assert!(
+        segment.contains(&Style::new().fg(COMPOSER_CHROME.primary).render("auto mode")),
+        "warning color should not tint the full mode label: {segment:?}"
+    );
+    assert!(
+        !segment.contains(&Style::new().fg(COMPOSER_CHROME.warning).render("auto mode")),
+        "warning color should stay on the glyph only: {segment:?}"
+    );
 }
 
 #[test]
@@ -1294,7 +1421,7 @@ fn tui_session_options_sets_separate_tool_timeout() {
 }
 
 #[test]
-fn approval_menu_uses_shared_choice_prompt() {
+fn approval_menu_uses_decision_focused_semantic_surface() {
     let lines = approval_menu_lines(
         "Bash(cargo test very-long-filter-name-that-should-not-overflow)",
         1,
@@ -1305,19 +1432,26 @@ fn approval_menu_uses_shared_choice_prompt() {
         .map(|line| a3s_tui::style::strip_ansi(line))
         .collect::<Vec<_>>();
 
-    assert_eq!(plain.len(), 5);
-    assert!(plain[0].contains("Run"), "{plain:?}");
-    assert!(plain[1].contains("1. Allow once"), "{plain:?}");
-    assert!(plain[2].contains("2. Allow all tools"), "{plain:?}");
-    assert!(plain[3].contains("3. Deny"), "{plain:?}");
-    assert!(plain[4].contains("Enter select"), "{plain:?}");
+    assert_eq!(plain.len(), 7);
+    assert!(plain[0].contains("◆ Permission required"), "{plain:?}");
+    assert!(plain[1].contains("Run"), "{plain:?}");
+    assert!(plain[3].contains("1  ↵ Allow once"), "{plain:?}");
+    assert!(
+        plain[4].contains("2  ∞ Enable streamlined auto mode"),
+        "{plain:?}"
+    );
+    assert!(plain[5].contains("3  ⊘ Deny"), "{plain:?}");
+    assert!(plain[6].contains("Enter select"), "{plain:?}");
     assert!(
         lines
             .iter()
             .all(|line| a3s_tui::style::visible_len(line) <= 42),
         "{plain:?}"
     );
-    assert!(lines[2].contains("\x1b["), "selected row is styled");
+    assert!(
+        lines[4].contains(SURFACE_SELECTED.bg_ansi().as_str()),
+        "selected row is styled"
+    );
 }
 
 #[test]
@@ -1330,12 +1464,15 @@ fn approval_prompt_mouse_wheel_moves_selection_at_overlay_offset() {
     let mut prompt = approval_prompt("Bash(cargo test)", 0);
     prompt.set_y_offset(y_offset);
 
-    let msg = prompt.handle_mouse(&MouseEvent {
-        kind: MouseEventKind::ScrollDown,
-        column: 0,
-        row: y_offset + 1,
-        modifiers: KeyModifiers::NONE,
-    });
+    let msg = prompt.handle_mouse(
+        &MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 0,
+            row: y_offset + 1,
+            modifiers: KeyModifiers::NONE,
+        },
+        width,
+    );
 
     assert_eq!(msg, None);
     assert_eq!(prompt.selected_index(), 1);
@@ -1351,20 +1488,24 @@ fn approval_prompt_click_selects_choice_at_overlay_offset() {
     let mut prompt = approval_prompt("Bash(cargo test)", 0);
     prompt.set_y_offset(y_offset);
 
-    let msg = prompt.handle_mouse(&MouseEvent {
-        kind: MouseEventKind::Down(MouseButton::Left),
-        column: 2,
-        row: y_offset + 2,
-        modifiers: KeyModifiers::NONE,
-    });
+    let choice_row = prompt.choice_start_row(width) + 1;
+    let msg = prompt.handle_mouse(
+        &MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row: y_offset + choice_row as u16,
+            modifiers: KeyModifiers::NONE,
+        },
+        width,
+    );
 
-    assert_eq!(msg, Some(ChoicePromptMsg::Selected(1)));
+    assert_eq!(msg, Some(ApprovalPromptMsg::Selected(1)));
 }
 
 #[test]
 fn approval_overlay_moves_above_multiline_and_dynamic_bottom_rows() {
-    assert_eq!(approval_overlay_y_offset(24, 5, 5), 14);
-    assert_eq!(approval_overlay_y_offset(24, 5, 11), 8);
+    assert_eq!(approval_overlay_y_offset(24, 6, 5), 13);
+    assert_eq!(approval_overlay_y_offset(24, 6, 11), 7);
     assert_eq!(approval_rows_below_for(false, 11), 11);
     assert_eq!(approval_rows_below_for(true, 11), 1);
 }
@@ -1723,7 +1864,7 @@ fn deep_research_prompt_directs_research_and_keeps_query() {
         p.contains("step_name: \"parallel_task\"") || p.contains("parallel_task"),
         "{p}"
     );
-    assert!(p.contains("host validates the response"), "{p}");
+    assert!(p.contains("host validates the object"), "{p}");
     assert!(p.contains("standalone `index.html`"), "{p}");
     assert!(p.contains("original source URLs or paths"), "{p}");
     assert!(p.contains("content principles of `report-master`"), "{p}");
@@ -2912,10 +3053,68 @@ fn deep_research_tui_does_not_replace_normal_synthesis_with_mechanical_rendering
         })
         .to_string();
 
-    let _ = workflow_output;
-    assert!(!root
-        .join(".a3s/research/pre-synthesis-fast-path/report.md")
-        .exists());
+    assert!(
+        materialize_deep_research_timeout_completed_report(
+            &root,
+            "Pre-synthesis fast path",
+            "DeepResearch synthesis model call timed out after 180000 ms.",
+            None,
+            &workflow_output,
+            None,
+        )
+        .is_none(),
+        "structured evidence must not be promoted into a completed report after a model timeout"
+    );
+
+    let mut loop_remaining = 0;
+    let mut repair_used = false;
+    let first = recover_missing_deep_research_report(
+        &root,
+        Some("Pre-synthesis fast path"),
+        "Synthesis timed out before producing a report.",
+        &workflow_output,
+        None,
+        &mut loop_remaining,
+        &mut repair_used,
+    );
+    assert!(matches!(first, DeepResearchReportRecovery::RepairPassArmed));
+    assert_eq!(loop_remaining, 1);
+    assert!(repair_used);
+    assert!(
+        !root
+            .join(".a3s/research/pre-synthesis-fast-path/report.md")
+            .exists(),
+        "the first synthesis failure must arm repair without writing a mechanical report"
+    );
+
+    let second = recover_missing_deep_research_report(
+        &root,
+        Some("Pre-synthesis fast path"),
+        "Repair also failed to produce a report.",
+        &workflow_output,
+        None,
+        &mut loop_remaining,
+        &mut repair_used,
+    );
+    let artifacts = match second {
+        DeepResearchReportRecovery::RecoveryMaterialized { artifacts } => artifacts,
+        other => panic!("expected an explicit degraded recovery artifact, got {other:?}"),
+    };
+    assert_eq!(loop_remaining, 0);
+    let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+    assert!(markdown.contains("# DeepResearch Recovery Report"));
+    assert!(artifacts.html.is_file());
+    assert!(
+        deep_research_report_artifacts_from_output_for_query(
+            "A3S_RESEARCH_VIEW: .a3s/research/pre-synthesis-fast-path/index.html",
+            &root,
+            "Pre-synthesis fast path",
+            &workflow_output,
+            None,
+        )
+        .is_none(),
+        "a degraded recovery artifact must not validate as a completed report"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -3319,7 +3518,7 @@ fn deep_research_workflow_timeout_recovers_completed_flow_evidence() {
 }
 
 #[test]
-fn deep_research_synthesis_timeout_recovers_flow_evidence_when_memory_state_is_empty() {
+fn deep_research_synthesis_timeout_arms_repair_with_recovered_flow_evidence() {
     let root = std::env::temp_dir().join(format!(
         "a3s-research-tui-synthesis-timeout-flow-evidence-{}-{}",
         std::process::id(),
@@ -3443,23 +3642,41 @@ fn deep_research_synthesis_timeout_recovers_flow_evidence_when_memory_state_is_e
         "durable Flow metadata should provide structured evidence"
     );
 
-    let artifacts = materialize_deep_research_timeout_completed_report(
+    assert!(
+        materialize_deep_research_timeout_completed_report(
+            &root,
+            query,
+            "DeepResearch synthesis model call timed out after 180000 ms.",
+            None,
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        )
+        .is_none(),
+        "durable evidence must remain synthesis input instead of becoming a mechanical success report"
+    );
+
+    let mut loop_remaining = 0;
+    let mut repair_used = false;
+    let recovery = recover_missing_deep_research_report(
         &root,
-        query,
-        "DeepResearch synthesis model call timed out after 480000 ms.",
-        None,
+        Some(query),
+        "DeepResearch synthesis model call timed out after 180000 ms.",
         &workflow_output,
         workflow_metadata.as_ref(),
-    )
-    .expect("synthesis timeout should recover completed report from Flow evidence");
-    let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-    assert!(
-        markdown.contains("https://example.com/synthesis-timeout-source"),
-        "{markdown}"
+        &mut loop_remaining,
+        &mut repair_used,
     );
+    assert!(matches!(
+        recovery,
+        DeepResearchReportRecovery::RepairPassArmed
+    ));
+    assert_eq!(loop_remaining, 1);
+    assert!(repair_used);
     assert!(
-        !markdown.contains("DeepResearch Recovery Report"),
-        "{markdown}"
+        !root
+            .join(".a3s/research/synthesis-timeout-recovered-evidence/report.md")
+            .exists(),
+        "the first synthesis timeout must not create a host-authored success report"
     );
 
     let _ = std::fs::remove_dir_all(&root);
@@ -4851,9 +5068,11 @@ fn deep_research_synthesis_prompt_uses_host_workflow_evidence() {
     assert!(prompt.contains("original source URLs or paths"), "{prompt}");
     assert!(prompt.contains("Do not call tools"), "{prompt}");
     assert!(
-        prompt.contains("Return one finished Markdown report"),
+        prompt.contains("Complete the host's one structured report object"),
         "{prompt}"
     );
+    assert!(prompt.contains("report_context.plan.tracks"), "{prompt}");
+    assert!(prompt.contains("presentation"), "{prompt}");
     assert!(prompt.contains("Do not write either path"), "{prompt}");
     assert!(prompt.contains("add the trusted view marker"), "{prompt}");
     assert!(!prompt.contains(RESEARCH_VIEW_MARKER), "{prompt}");
@@ -5140,6 +5359,9 @@ fn deep_research_synthesis_prompt_sanitizes_parallel_task_metadata() {
                                     "failed_count": 1,
                                     "partial_failure": true,
                                     "allow_partial_failure": true,
+                                    "retry_attempt_count": 1,
+                                    "retried_task_count": 1,
+                                    "recovered_task_count": 1,
                                     "results": [
                                         {
                                             "task_id": "ok",
@@ -5163,7 +5385,9 @@ fn deep_research_synthesis_prompt_sanitizes_parallel_task_metadata() {
                                             "task_id": "bad",
                                             "agent": "deep-research",
                                             "success": false,
-                                            "output": verbose_failure
+                                            "error_message": verbose_failure,
+                                            "output_excerpt": "failed child output",
+                                            "retry_attempts": 1
                                         }
                                     ]
                                 }
@@ -5177,6 +5401,8 @@ fn deep_research_synthesis_prompt_sanitizes_parallel_task_metadata() {
 
     assert!(prompt.contains("source-backed evidence"), "{prompt}");
     assert!(prompt.contains("failed_tasks"), "{prompt}");
+    assert!(prompt.contains("\"recovered_task_count\": 1"), "{prompt}");
+    assert!(prompt.contains("\"retry_attempts\": 1"), "{prompt}");
     assert!(
         prompt.contains("Delegated task exhausted its tool-round budget"),
         "{prompt}"
@@ -5276,7 +5502,7 @@ fn deep_research_repair_prompt_is_self_contained_and_artifact_focused() {
     );
     assert!(prompt.contains("Never invent claims, sources"), "{prompt}");
     assert!(
-        prompt.contains("Return only the corrected Markdown report"),
+        prompt.contains("Return only the corrected structured report object"),
         "{prompt}"
     );
     assert!(prompt.contains("host persists and validates"), "{prompt}");
@@ -5673,6 +5899,68 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
         ),
         PermissionDecision::Allow
     );
+    for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": command})),
+            PermissionDecision::Allow,
+            "dangerous command names used as data must not be overblocked: {command}"
+        );
+    }
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "mkfs /dev/disk9"})),
+        PermissionDecision::Deny
+    );
+    for command in [
+        "sort -o output.txt input.txt",
+        "sort -o/tmp/a3s-hitl-bypass input.txt",
+        "sort --compress-program=touch input.txt",
+        "uniq input.txt output.txt",
+        "cat ../outside-workspace-secret",
+        "cat *",
+        "git -C .. status",
+        "git log --output=history.txt",
+        "find . -type f -fprint output.txt",
+        "find . -fls output.txt",
+        "find .\t-delete",
+        "sed -i.bak s/old/new/ README.md",
+        "sed w output.txt README.md",
+        "sed e commands.txt",
+        "rg --pre=touch pattern .",
+        "grep -R pattern .",
+        "du -L .",
+        "date --set=2026-01-01",
+        "git diff --ext-diff",
+    ] {
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": command})),
+            PermissionDecision::Ask,
+            "shell commands that can write or cross the workspace boundary must not auto-run: {command}"
+        );
+    }
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({"command": "find . -type f -fprint output.txt"})
+        ),
+        PermissionDecision::Ask,
+        "find write actions must not be classified as read-only"
+    );
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({"command": "sed -i.bak s/old/new/ README.md"})
+        ),
+        PermissionDecision::Ask,
+        "in-place sed must not be classified as read-only"
+    );
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({"command": "git diff --ext-diff"})
+        ),
+        PermissionDecision::Ask,
+        "Git options that may execute helpers must not be classified as read-only"
+    );
     assert_eq!(
         checker.check(
             "bash",
@@ -5773,6 +6061,132 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
         ),
         PermissionDecision::Deny
     );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), workspace.path().join("escape")).unwrap();
+        let gate = DeepResearchReportToolGate::default();
+        gate.set_workspace(workspace.path());
+        let checker = TuiHitlPermissionChecker::new(tui_permission_policy(), gate);
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "cat escape/secret"})),
+            PermissionDecision::Deny
+        );
+    }
+}
+
+#[test]
+fn tui_auto_uses_shared_selective_guardrail_routing() {
+    use a3s_code_core::permissions::{
+        InteractiveToolGuardrail, PermissionChecker, PermissionDecision, ToolRiskAction,
+        ToolRiskLevel,
+    };
+
+    let checker = InteractiveToolGuardrail::for_mode("auto").with_workspace(Path::new("."));
+    for (tool, args, level, action, permission, auto_approved) in [
+        (
+            "read",
+            serde_json::json!({"file_path": "README.md"}),
+            ToolRiskLevel::Routine,
+            ToolRiskAction::Allow,
+            PermissionDecision::Allow,
+            true,
+        ),
+        (
+            "write",
+            serde_json::json!({"file_path": "README.md"}),
+            ToolRiskLevel::Bounded,
+            ToolRiskAction::Allow,
+            PermissionDecision::Allow,
+            true,
+        ),
+        (
+            "bash",
+            serde_json::json!({"command": "cargo test"}),
+            ToolRiskLevel::High,
+            ToolRiskAction::ReviewByLlm,
+            PermissionDecision::Ask,
+            false,
+        ),
+        (
+            "bash",
+            serde_json::json!({"command": "rm -rf /"}),
+            ToolRiskLevel::Critical,
+            ToolRiskAction::RuleDeny,
+            PermissionDecision::Deny,
+            false,
+        ),
+    ] {
+        assert_eq!(checker.assess(tool, &args).level, level);
+        assert_eq!(checker.risk_action(tool, &args), action);
+        assert_eq!(checker.check(tool, &args), permission);
+        assert_eq!(
+            Mode::Auto.auto_approves(tool, &args, Path::new(".")),
+            auto_approved,
+            "TUI auto routing drifted from the shared guardrail for {tool}"
+        );
+    }
+}
+
+#[test]
+fn auto_mode_retains_hitl_for_unbounded_tools() {
+    let mode = Mode::Auto;
+
+    for (tool, args) in [
+        ("write", serde_json::json!({"file_path": "README.md"})),
+        (
+            "git",
+            serde_json::json!({"command": "checkout", "ref": "feature"}),
+        ),
+        (
+            "batch",
+            serde_json::json!({"invocations": [
+                {"tool": "write", "args": {"file_path": "README.md"}}
+            ]}),
+        ),
+    ] {
+        assert!(
+            mode.auto_approves(tool, &args, Path::new(".")),
+            "{tool} should stay streamlined"
+        );
+    }
+    for (tool, args) in [
+        ("bash", serde_json::json!({"command": "cargo test"})),
+        ("runtime", serde_json::json!({"tasks": ["external work"]})),
+        ("program", serde_json::json!({"source": "return 1"})),
+        ("task", serde_json::json!({"prompt": "inspect"})),
+        (
+            "parallel_task",
+            serde_json::json!({"tasks": [{"prompt": "inspect"}]}),
+        ),
+        (
+            "dynamic_workflow",
+            serde_json::json!({"source": "async function run() {}"}),
+        ),
+        ("Skill", serde_json::json!({"skill_name": "review"})),
+        (
+            "mcp__github__create_issue",
+            serde_json::json!({"title": "side effect"}),
+        ),
+        (
+            "git",
+            serde_json::json!({"command": "checkout", "ref": "feature", "force": true}),
+        ),
+        (
+            "batch",
+            serde_json::json!({"invocations": [
+                {"tool": "bash", "args": {"command": "cargo test"}}
+            ]}),
+        ),
+    ] {
+        assert!(
+            !mode.auto_approves(tool, &args, Path::new(".")),
+            "{tool} must retain an explicit HITL boundary in auto mode"
+        );
+    }
 }
 
 #[test]
@@ -7447,6 +7861,7 @@ fn synthesis_requires_activity_without_followup_text() {
 async fn automatic_continuation_waits_for_previous_stream_join() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    let (session, dir) = deep_research_settlement_test_session("join-barrier").await;
     let worker_finished = Arc::new(AtomicBool::new(false));
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let worker_finished_for_join = Arc::clone(&worker_finished);
@@ -7455,7 +7870,12 @@ async fn automatic_continuation_waits_for_previous_stream_join() {
         worker_finished_for_join.store(true, Ordering::Release);
     });
     let synthesis = Some(("synthesis prompt".to_string(), "task".to_string()));
-    let wait = tokio::spawn(wait_for_stream_join(stream_join, 41, synthesis.clone()));
+    let wait = tokio::spawn(wait_for_stream_join(
+        session,
+        stream_join,
+        41,
+        synthesis.clone(),
+    ));
 
     tokio::task::yield_now().await;
     assert!(
@@ -7474,6 +7894,84 @@ async fn automatic_continuation_waits_for_previous_stream_join() {
     assert_eq!(token, 41);
     assert_eq!(settled_synthesis, synthesis);
     assert!(worker_finished.load(Ordering::Acquire));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn escape_abort_releases_terminal_stream_wait_immediately() {
+    let (session, dir) = deep_research_settlement_test_session("escape-join").await;
+    let stream_join = tokio::spawn(std::future::pending::<()>());
+    let abort = stream_join.abort_handle();
+    let wait = tokio::spawn(wait_for_stream_join(session, stream_join, 42, None));
+
+    tokio::task::yield_now().await;
+    assert!(
+        !wait.is_finished(),
+        "the stale worker should still hold the barrier"
+    );
+
+    // This is the same abort handle used by the Esc path while a terminal
+    // stream worker is still persisting or releasing the single-flight lease.
+    abort.abort();
+    let result = tokio::time::timeout(Duration::from_secs(1), wait)
+        .await
+        .expect("Esc should not wait for the normal two-second settle grace")
+        .expect("stream-settle command");
+    assert!(matches!(
+        result,
+        a3s_tui::cmd::CmdResult::Msg(Msg::StreamJoinSettled {
+            token: 42,
+            synthesis: None
+        })
+    ));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn queued_user_turns_are_fifo_within_priority() {
+    fn queued(text: &str) -> Queued {
+        Queued {
+            text: text.to_string(),
+            display: text.to_string(),
+            images: Vec::new(),
+            runtime_expectation: None,
+            deep_research: None,
+        }
+    }
+
+    let mut queue = PriorityQueue::new();
+    queue.push(SYNTHETIC_TURN_PRIORITY, queued("autonomous continuation"));
+    queue.push(USER_TURN_PRIORITY, queued("first"));
+    queue.push(USER_TURN_PRIORITY, queued("second"));
+    queue.push(USER_TURN_PRIORITY, queued("third"));
+    let drained = std::iter::from_fn(|| {
+        queue
+            .pop()
+            .map(PriorityItem::into_value)
+            .map(|turn| turn.text)
+    })
+    .collect::<Vec<_>>();
+
+    assert_eq!(
+        drained,
+        ["first", "second", "third", "autonomous continuation"]
+    );
+}
+
+#[test]
+fn interrupted_continuation_prioritizes_deep_research_then_goal_then_queue() {
+    assert_eq!(
+        App::interrupted_continuation(false, true),
+        InterruptedContinuation::SettleDeepResearch
+    );
+    assert_eq!(
+        App::interrupted_continuation(true, false),
+        InterruptedContinuation::RestoreGoalMode
+    );
+    assert_eq!(
+        App::interrupted_continuation(false, false),
+        InterruptedContinuation::DrainQueue
+    );
 }
 
 #[tokio::test]
@@ -7510,13 +8008,13 @@ async fn discarded_stream_start_releases_session_before_reuse() {
     drop(rx);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
-        discard_started_stream(Arc::clone(&session), join),
+        discard_started_stream(Arc::clone(&session), join, 17),
     )
     .await
     .expect("discard timeout");
     assert!(matches!(
         result,
-        a3s_tui::cmd::CmdResult::Msg(Msg::DiscardedStreamSettled)
+        a3s_tui::cmd::CmdResult::Msg(Msg::DiscardedStreamSettled { token: 17 })
     ));
 
     let (mut rx, join) = session
@@ -8663,16 +9161,19 @@ fn half_block_render_fits_within_bounds() {
 }
 
 #[test]
-fn clipboard_helper_cleans_up_on_no_image() {
-    // No way to guarantee an empty clipboard, but the helper must never
-    // leave a stray empty file behind when it fails.
-    let dest = std::env::temp_dir().join("a3s-test-noimg.png");
-    let _ = std::fs::remove_file(&dest);
+fn clipboard_helper_never_leaves_stale_or_empty_bytes() {
+    // Clipboard contents are host-dependent. Regardless of success, an old
+    // destination must never survive as if it were the newly pasted image.
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("clipboard.png");
+    std::fs::write(&dest, b"stale image bytes").unwrap();
     let ok = clipboard_image_to(&dest);
     if !ok {
         assert!(!dest.exists(), "failed paste leaves no file");
     } else {
-        let _ = std::fs::remove_file(&dest);
+        let bytes = std::fs::read(&dest).unwrap();
+        assert!(!bytes.is_empty());
+        assert_ne!(bytes, b"stale image bytes");
     }
 }
 

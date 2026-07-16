@@ -98,17 +98,19 @@ impl ComponentPaths {
     pub fn configured_binary(&self, release: ReleaseSpec) -> Option<PathBuf> {
         self.install_overrides
             .get(release.install_dir_env)
-            .map(|directory| directory.join(release.binary))
+            .map(|directory| directory.join(host_binary_name(release.binary)))
     }
 
     pub fn sibling_binary(&self, binary: &str) -> Option<PathBuf> {
-        self.current_exe.parent().map(|parent| parent.join(binary))
+        self.current_exe
+            .parent()
+            .map(|parent| parent.join(host_binary_name(binary)))
     }
 
     pub fn fallback_binary(&self, binary: &str) -> Option<PathBuf> {
         self.home
             .as_deref()
-            .map(|home| home.join(".local/bin").join(binary))
+            .map(|home| home.join(".local/bin").join(host_binary_name(binary)))
     }
 
     #[cfg(test)]
@@ -128,6 +130,14 @@ impl ComponentPaths {
     pub fn set_install_override(&mut self, variable: &str, directory: PathBuf) {
         self.install_overrides
             .insert(variable.to_string(), directory);
+    }
+}
+
+fn host_binary_name(binary: &str) -> String {
+    if cfg!(windows) && !binary.ends_with(".exe") {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
     }
 }
 
@@ -260,7 +270,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             paths.configured_binary(use_spec),
-            Some(temp.path().join("use-bin/a3s-use"))
+            Some(
+                temp.path()
+                    .join("use-bin")
+                    .join(host_binary_name("a3s-use"))
+            )
         );
     }
 }

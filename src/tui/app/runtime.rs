@@ -2,6 +2,18 @@
 
 use super::*;
 
+fn take_matching_queue_claim<T>(
+    active: &mut Option<PriorityItem<T>>,
+    active_token: &mut Option<u64>,
+    token: u64,
+) -> Option<PriorityItem<T>> {
+    if *active_token != Some(token) {
+        return None;
+    }
+    *active_token = None;
+    active.take()
+}
+
 impl App {
     pub(super) fn start_stream_inner(
         &mut self,
@@ -30,11 +42,52 @@ impl App {
         synthesis: bool,
         runtime_expectation: Option<RuntimeExpectation>,
     ) -> Option<Cmd<Msg>> {
+        let submitted_images = if include_attachments {
+            std::mem::take(&mut self.pending_images)
+        } else {
+            Vec::new()
+        };
+        self.start_stream_inner_with_runtime_and_images(
+            prompt,
+            display_task,
+            clear_turn_artifacts,
+            synthesis,
+            runtime_expectation,
+            submitted_images,
+        )
+    }
+
+    fn start_stream_inner_with_runtime_and_images(
+        &mut self,
+        prompt: String,
+        display_task: String,
+        clear_turn_artifacts: bool,
+        synthesis: bool,
+        runtime_expectation: Option<RuntimeExpectation>,
+        submitted_images: Vec<PendingImage>,
+    ) -> Option<Cmd<Msg>> {
+        let attachments = match submitted_images
+            .iter()
+            .map(PendingImage::attachment)
+            .collect::<std::io::Result<Vec<_>>>()
+        {
+            Ok(attachments) => attachments,
+            Err(error) => {
+                restore_submitted_images(&mut self.pending_images, submitted_images);
+                self.push_notice(
+                    NoticeKind::Error,
+                    format!("Image attachment could not be read: {error}"),
+                );
+                self.relayout();
+                return None;
+            }
+        };
         if clear_turn_artifacts && !synthesis {
             self.auto_review.on_user_turn();
             self.last_activity = Instant::now();
         }
         self.streaming.clear();
+        self.llm_turn_checkpoint = None;
         self.got_delta = false; // track if this turn streamed any text deltas
         self.turn_text.clear();
         self.turn_had_agent_activity = false;
@@ -43,6 +96,7 @@ impl App {
             self.runtime_expectation = Some(expectation);
         }
         self.stream_join_settling = false;
+        self.stream_settle_abort = None;
         self.ultracode_synthesis_inflight = synthesis;
         if !synthesis {
             self.ultracode_synthesis_used = false;
@@ -51,8 +105,9 @@ impl App {
         self.viewport.set_auto_scroll(true); // sending a message jumps to latest
         if clear_turn_artifacts {
             self.plan.clear(); // fresh plan per user turn; planning events refill it
-                               // Keep completed agents visible until the next user turn; a fresh
-                               // user turn starts a fresh runtime-entity projection.
+
+            // Keep completed agents visible until the next user turn; a fresh
+            // user turn starts a fresh runtime-entity projection.
             self.runtime.clear_turn_entities();
             self.runtime.set_subagent_task(display_task.clone());
         } else {
@@ -65,11 +120,6 @@ impl App {
         self.spinner.start();
         self.rebuild_viewport();
         let session = self.session.clone();
-        let atts = if include_attachments {
-            std::mem::take(&mut self.pending_images)
-        } else {
-            Vec::new()
-        };
         // Keep the agent aligned with the standing goal (display stays clean).
         // Internal synthesis keeps its marker first so Core can reliably
         // suppress runtime auto-delegation for that final-answer-only turn.
@@ -121,23 +171,41 @@ impl App {
         // and workspace exploration.
         let mut commands = vec![
             cmd::cmd(move || async move {
-                let res = if atts.is_empty() {
-                    session.stream(prompt.as_str(), None).await
-                } else {
-                    session
-                        .stream_with_attachments(prompt.as_str(), &atts, None)
-                        .await
-                };
+                let res =
+                    tokio::time::timeout(Duration::from_millis(STREAM_START_TIMEOUT_MS), async {
+                        if attachments.is_empty() {
+                            session.stream(prompt.as_str(), None).await
+                        } else {
+                            session
+                                .stream_with_attachments(prompt.as_str(), &attachments, None)
+                                .await
+                        }
+                    })
+                    .await;
                 match res {
-                    Ok((rx, join)) => Msg::StreamStarted {
+                    Ok(Ok((rx, join))) => Msg::StreamStarted {
                         token: stream_start_token,
                         session: Arc::clone(&session),
                         rx: Arc::new(Mutex::new(rx)),
                         join,
+                        submitted_images,
                     },
-                    Err(e) => Msg::StreamError {
+                    Ok(Err(error)) => {
+                        let retryable_admission = matches!(&error, CodeError::SessionBusy { .. });
+                        Msg::StreamError {
+                            token: stream_start_token,
+                            error: error.to_string(),
+                            retryable_admission,
+                            submitted_images,
+                        }
+                    }
+                    Err(_) => Msg::StreamError {
                         token: stream_start_token,
-                        error: e.to_string(),
+                        error: format!(
+                            "model stream admission timed out after {STREAM_START_TIMEOUT_MS} ms"
+                        ),
+                        retryable_admission: true,
+                        submitted_images,
                     },
                 }
             }),
@@ -153,29 +221,203 @@ impl App {
         Some(cmd::batch(commands))
     }
 
-    /// Pop the next queued message and start streaming it, if any.
+    /// Pop exactly one queued user turn. Once user input is exhausted, resume
+    /// a DeepResearch synthesis that was deliberately deferred behind it.
     pub(super) fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
-        let next = self.queue.pop()?;
-        if let Some((query, os_runtime, evidence_scope)) = next.deep_research {
-            return self.start_deep_research_workflow(
-                query,
-                os_runtime,
-                evidence_scope,
-                next.runtime_expectation,
-            );
+        // A queued successor must not race a session rebuild or an interrupted
+        // stream admission that still has a chance to acquire the core's
+        // single-flight lease. The corresponding completion handler calls this
+        // method again as soon as the barrier clears.
+        if self.state != State::Idle
+            || self.session_rebuild_pending.is_some()
+            || self.interrupted_stream_start_token.is_some()
+            || self.active_queued_turn.is_some()
+        {
+            return None;
         }
-        self.start_stream_inner_with_runtime(
-            next.text,
-            next.display,
-            true,
-            true,
-            false,
-            next.runtime_expectation,
+        if let Some(next) = self.queue.pop() {
+            let queued = next.value().clone();
+            if let Some((query, os_runtime, evidence_scope)) = queued.deep_research {
+                let command = self.start_deep_research_workflow(
+                    query,
+                    os_runtime,
+                    evidence_scope,
+                    queued.runtime_expectation,
+                );
+                if command.is_none() {
+                    self.queue.restore(next);
+                    self.relayout();
+                }
+                return command;
+            }
+            let command = self.start_stream_inner_with_runtime_and_images(
+                queued.text,
+                queued.display,
+                true,
+                false,
+                queued.runtime_expectation,
+                queued.images,
+            );
+            if command.is_some() {
+                self.active_queued_turn_token = Some(self.stream_start_token);
+                self.active_queued_turn = Some(next);
+            } else {
+                self.queue.restore(next);
+                self.relayout();
+            }
+            return command;
+        }
+
+        let (prompt, display) = self.pending_deep_research_synthesis.take()?;
+        self.start_deep_research_report_generation(
+            prompt,
+            display,
+            DeepResearchReportGenerationPhase::Synthesis,
+        )
+    }
+
+    /// Commit the queue claim once Core has admitted its stream. Before this
+    /// point the exact a3s-lane entry remains restorable on `SessionBusy` or an
+    /// admission timeout.
+    pub(super) fn commit_active_queued_turn(&mut self, token: u64) -> bool {
+        if take_matching_queue_claim(
+            &mut self.active_queued_turn,
+            &mut self.active_queued_turn_token,
+            token,
+        )
+        .is_none()
+        {
+            return false;
+        }
+        self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
+        self.queue_retry_attempt = 0;
+        true
+    }
+
+    /// Return a turn whose stream was never admitted to its original priority
+    /// and FIFO position. Its images are Arc-backed, so dropping the attempted
+    /// admission copy cannot invalidate the retained queue payload.
+    pub(super) fn restore_active_queued_turn(&mut self, token: u64) -> bool {
+        if let Some(item) = take_matching_queue_claim(
+            &mut self.active_queued_turn,
+            &mut self.active_queued_turn_token,
+            token,
+        ) {
+            self.queue.restore(item);
+            self.relayout();
+            return true;
+        }
+        false
+    }
+
+    pub(super) fn discard_active_queued_turn(&mut self, token: u64) {
+        let _ = take_matching_queue_claim(
+            &mut self.active_queued_turn,
+            &mut self.active_queued_turn_token,
+            token,
+        );
+    }
+
+    pub(super) fn retry_queued_turn_after_admission_failure(&mut self) -> Cmd<Msg> {
+        self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
+        self.queue_retry_attempt = self.queue_retry_attempt.saturating_add(1);
+        let generation = self.queue_retry_generation;
+        let shift = u32::from(self.queue_retry_attempt.saturating_sub(1).min(4));
+        let delay_ms = QUEUE_ADMISSION_RETRY_BASE_MS
+            .saturating_mul(1_u64 << shift)
+            .min(QUEUE_ADMISSION_RETRY_MAX_MS);
+        cmd::cmd(move || async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            Msg::QueueRetry { generation }
+        })
+    }
+
+    pub(super) fn interrupted_continuation(
+        goal_cancelled: bool,
+        deep_research_interrupted: bool,
+    ) -> InterruptedContinuation {
+        if deep_research_interrupted {
+            InterruptedContinuation::SettleDeepResearch
+        } else if goal_cancelled {
+            InterruptedContinuation::RestoreGoalMode
+        } else {
+            InterruptedContinuation::DrainQueue
+        }
+    }
+
+    pub(super) fn defer_or_continue_after_interrupt(
+        &mut self,
+        continuation: InterruptedContinuation,
+    ) -> Option<Cmd<Msg>> {
+        if self.interrupted_stream_start_token.is_some() {
+            self.pending_interrupted_continuation = Some(continuation);
+            // Keep submissions queue-only until the stale admission has been
+            // cancelled. This closes the race where its cleanup could cancel a
+            // newly started queue head on the same session.
+            self.state = State::Streaming;
+            self.relayout();
+            return None;
+        }
+        self.continue_after_interrupt(continuation)
+    }
+
+    pub(super) fn on_interrupted_stream_start_settled(&mut self, token: u64) -> Option<Cmd<Msg>> {
+        if self.interrupted_stream_start_token != Some(token) {
+            return None;
+        }
+        self.interrupted_stream_start_token = None;
+        let Some(continuation) = self.pending_interrupted_continuation.take() else {
+            // The cancellation command has not produced `Msg::Interrupted`
+            // yet. That handler will observe the cleared barrier and continue.
+            return None;
+        };
+        self.state = State::Idle;
+        self.relayout();
+        self.continue_after_interrupt(continuation)
+    }
+
+    fn continue_after_interrupt(
+        &mut self,
+        continuation: InterruptedContinuation,
+    ) -> Option<Cmd<Msg>> {
+        match continuation {
+            InterruptedContinuation::SettleDeepResearch => {
+                self.settle_or_finalize_deep_research(DeepResearchSettlementExit::Interrupted)
+            }
+            InterruptedContinuation::RestoreGoalMode => {
+                self.restore_autonomy();
+                self.restore_goal_planning_mode()
+            }
+            InterruptedContinuation::DrainQueue => {
+                self.restore_autonomy();
+                self.drain_queue()
+            }
+        }
+    }
+
+    pub(super) fn has_queued_turn(&self) -> bool {
+        !self.queue.is_empty() || self.pending_deep_research_synthesis.is_some()
+    }
+
+    pub(super) fn wait_for_completed_stream_join(
+        &mut self,
+        stream_join: StreamJoin,
+        synthesis: Option<(String, String)>,
+    ) -> Cmd<Msg> {
+        self.stream_settle_abort = Some(stream_join.abort_handle());
+        self.stream_join_settling = true;
+        self.state = State::Streaming;
+        self.relayout();
+        wait_for_stream_join(
+            Arc::clone(&self.session),
+            stream_join,
+            self.stream_start_token,
+            synthesis,
         )
     }
 
     /// Shared turn-completion: count the turn, wait for the stream lifecycle to
-    /// settle, run any synthesis, then continue a `/loop` or drain the queue.
+    /// settle, consume queued user input, then continue autonomous work.
     /// Called from BOTH the normal `AgentEvent::End` arm (the happy path, which
     /// returns without re-pumping so `StreamEnded` never fires) and the
     /// `StreamEnded` channel-closed arm — previously this lived only in
@@ -210,14 +452,7 @@ impl App {
         if let Some(completed_stream_join) = completed_stream_join {
             // Keep input queue-only until the worker has completed persistence,
             // cleanup, and release of core's single-flight admission lease.
-            self.stream_join_settling = true;
-            self.state = State::Streaming;
-            self.relayout();
-            return Some(wait_for_stream_join(
-                completed_stream_join,
-                self.stream_start_token,
-                synthesis,
-            ));
+            return Some(self.wait_for_completed_stream_join(completed_stream_join, synthesis));
         }
         self.continue_after_stream_settled(synthesis)
     }
@@ -241,6 +476,12 @@ impl App {
             return self.continue_goal_run(failure);
         }
         self.pending_goal_failure = None;
+        // A real user follow-up supersedes the hidden answer-only synthesis for
+        // the previous turn. It must become the next model turn, not sit behind
+        // another autonomous request.
+        if self.has_queued_turn() {
+            return self.drain_queue();
+        }
         if let Some((prompt, display_task)) = synthesis {
             return self.start_ultracode_synthesis(prompt, display_task);
         }
@@ -252,9 +493,13 @@ impl App {
     /// DeepResearch starts `tool_with_events` synchronously, while normal model
     /// streams start when their returned command is polled.
     pub(super) fn continue_completed_turn(&mut self) -> Option<Cmd<Msg>> {
-        let queued_message_blocks_loop =
-            !self.queue.is_empty() && self.deep_research_loop.is_none();
-        if self.loop_remaining > 0 && !queued_message_blocks_loop {
+        // Codex-style follow-ups consume one turn at a time before any hidden
+        // synthesis or autonomous loop continuation. The same rule applies to
+        // DeepResearch so a user steer cannot wait for the whole research run.
+        if self.has_queued_turn() {
+            return self.drain_queue();
+        }
+        if self.loop_remaining > 0 {
             if let Some(prompt) = self.pending_deep_research_report_repair_prompt.take() {
                 self.loop_remaining -= 1;
                 let n = self.loop_remaining;
@@ -262,13 +507,22 @@ impl App {
                     "  ↻ deep research report repair ({n} left · Esc to stop)"
                 )));
                 self.loop_continuation = true;
-                return Some(cmd::msg(Msg::Submit(prompt)));
+                let query = self
+                    .deep_research_loop
+                    .as_ref()
+                    .map(|state| state.query.clone())
+                    .unwrap_or_else(|| "report".to_string());
+                return self.start_deep_research_report_generation(
+                    prompt,
+                    format!("✦\u{200A}repair report {query}"),
+                    DeepResearchReportGenerationPhase::Repair,
+                );
             }
         }
         // Required runtime evidence is a deliverable, not just a warning. In
         // autonomous runs, spend the next loop turn on a targeted correction
         // before falling back to the generic "Continue" prompt.
-        if self.loop_remaining > 0 && !queued_message_blocks_loop {
+        if self.loop_remaining > 0 {
             if let Some(prompt) = self
                 .runtime_expectation
                 .as_ref()
@@ -285,7 +539,7 @@ impl App {
         }
         // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
         // Queued user messages take priority.
-        if self.loop_remaining > 0 && !queued_message_blocks_loop {
+        if self.loop_remaining > 0 {
             self.loop_remaining -= 1;
             let n = self.loop_remaining;
             let (label, prompt) = if let Some(deep_research) = &self.deep_research_loop {
@@ -494,6 +748,7 @@ impl App {
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
         self.pending_deep_research_report_repair_prompt = None;
+        self.pending_deep_research_synthesis = None;
         self.pending_deep_research_report_view = None;
         self.deep_research_report_tools.clear();
         self.deep_research_report_tool_gate.set_report_only(false);
@@ -540,5 +795,60 @@ impl App {
             .map_err(|error| error.to_string());
             Msg::DeepResearchJournalEventRecorded { run_id, result }
         }))
+    }
+}
+
+#[cfg(test)]
+mod queue_claim_tests {
+    use super::*;
+
+    #[test]
+    fn admission_failure_restores_the_original_lane_position() {
+        let mut queue = PriorityQueue::new();
+        queue.push(USER_TURN_PRIORITY, "first");
+        queue.push(USER_TURN_PRIORITY, "second");
+        queue.push(SYNTHETIC_TURN_PRIORITY, "continuation");
+
+        let mut active = queue.pop();
+        let mut active_token = Some(9);
+        let claimed = take_matching_queue_claim(&mut active, &mut active_token, 9)
+            .expect("matching admission claim");
+        queue.restore(claimed);
+
+        let ordered = queue
+            .ordered()
+            .into_iter()
+            .map(|item| *item.value())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, ["first", "second", "continuation"]);
+    }
+
+    #[test]
+    fn stale_stream_token_cannot_consume_the_current_lane_claim() {
+        let mut queue = PriorityQueue::new();
+        queue.push(USER_TURN_PRIORITY, "current");
+        let mut active = queue.pop();
+        let original_sequence = active.as_ref().expect("active claim").sequence();
+        let mut active_token = Some(12);
+
+        assert!(take_matching_queue_claim(&mut active, &mut active_token, 11).is_none());
+        assert_eq!(active_token, Some(12));
+        assert_eq!(
+            active.as_ref().expect("claim must remain").sequence(),
+            original_sequence
+        );
+    }
+
+    #[test]
+    fn matching_lane_claim_is_consumed_at_most_once() {
+        let mut queue = PriorityQueue::new();
+        queue.push(USER_TURN_PRIORITY, "once");
+        let mut active = queue.pop();
+        let mut active_token = Some(21);
+
+        assert!(take_matching_queue_claim(&mut active, &mut active_token, 21).is_some());
+        assert!(take_matching_queue_claim(&mut active, &mut active_token, 21).is_none());
+        assert!(active.is_none());
+        assert_eq!(active_token, None);
     }
 }

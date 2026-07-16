@@ -161,21 +161,22 @@ async fn stream_smoke_prompt(session: &AgentSession, prompt: &str) -> anyhow::Re
     stream_smoke_prompt_inner(session, prompt, None, None).await
 }
 
-async fn stream_smoke_prompt_until_report(
+async fn generate_smoke_report(
     session: &AgentSession,
     prompt: &str,
-    workspace: &Path,
-    query: &str,
-    report_baseline: &DeepResearchReportArtifactBaseline,
     deadline: SmokePhaseDeadline,
-) -> anyhow::Result<String> {
-    stream_smoke_prompt_inner(
-        session,
-        prompt,
-        Some((workspace, query, report_baseline)),
-        Some(deadline),
-    )
-    .await
+) -> Result<GeneratedDeepResearchReport, String> {
+    let remaining = deadline.phase_remaining(Instant::now());
+    if remaining.is_zero() {
+        return Err(deadline.timeout_message());
+    }
+    let timeout_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64;
+    let args = deep_research_report_generation_args(prompt, timeout_ms);
+    let result = tokio::time::timeout(remaining, session.tool("generate_object", args))
+        .await
+        .map_err(|_| deadline.timeout_message())?
+        .map_err(|error| error.to_string())?;
+    deep_research_report_from_generation(&result.output, result.exit_code)
 }
 
 async fn stream_smoke_prompt_inner(
@@ -202,7 +203,11 @@ async fn stream_smoke_prompt_inner(
                 ) {
                     let cancel_budget = abort_deadline.phase_remaining(Instant::now());
                     if !cancel_budget.is_zero() {
-                        let _ = tokio::time::timeout(cancel_budget, session.cancel()).await;
+                        let _ = tokio::time::timeout(
+                            cancel_budget,
+                            session.cancel_and_settle(Duration::ZERO, cancel_budget),
+                        )
+                        .await;
                     }
                 }
                 let message = deadline.timeout_message();
@@ -234,7 +239,11 @@ async fn stream_smoke_prompt_inner(
                     if let Some(abort_deadline) = abort_deadline {
                         let cancel_budget = abort_deadline.phase_remaining(Instant::now());
                         if !cancel_budget.is_zero() {
-                            let _ = tokio::time::timeout(cancel_budget, session.cancel()).await;
+                            let _ = tokio::time::timeout(
+                                cancel_budget,
+                                session.cancel_and_settle(Duration::ZERO, cancel_budget),
+                            )
+                            .await;
                         }
                         let join_budget = abort_deadline.phase_remaining(Instant::now());
                         if join_budget.is_zero()
@@ -542,49 +551,78 @@ async fn run_smoke_deep_research(
     };
     eprintln!("[smoke] deepresearch synthesis");
     deep_research_report_tool_gate.set_synthesis_only();
+    let synthesis_timeout_ms = deep_research_planned_synthesis_timeout_ms(Some(&workflow_output))
+        .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS);
+    let mut generated_report = None;
     let mut final_text = if let Some(synthesis_deadline) = deep_research_smoke_phase_deadline(
         run_deadline,
         Instant::now(),
-        Duration::from_millis(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS),
+        Duration::from_millis(synthesis_timeout_ms),
         "synthesis",
     ) {
-        stream_smoke_prompt_until_report(
-            session.as_ref(),
-            prompt.as_str(),
-            workspace,
-            &query,
-            &report_baseline,
-            synthesis_deadline,
-        )
-        .await?
+        match generate_smoke_report(session.as_ref(), prompt.as_str(), synthesis_deadline).await {
+            Ok(report) => {
+                let markdown = report.markdown.clone();
+                generated_report = Some(report);
+                markdown
+            }
+            Err(error) => {
+                eprintln!("[smoke] DeepResearch structured synthesis failed: {error}");
+                error
+            }
+        }
     } else {
         let status = deep_research_smoke_exhausted_phase_message("synthesis");
         eprintln!("[smoke] {status}");
         status
     };
-    let mut artifacts = run_deep_research_smoke_artifact_step(
-        run_deadline,
-        "synthesis artifact discovery",
-        || {
-            deep_research_report_artifacts_from_output_for_current_run(
-                &final_text,
-                workspace,
-                &query,
-                &workflow_output,
-                metadata.as_ref(),
-                &report_baseline,
-            )
-        },
-    )?;
-
-    if deep_research_output_has_internal_leak(&final_text) {
-        if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-        }) {
-            final_text = clean_text;
+    let mut artifacts = None;
+    if let Some(report) = generated_report.as_ref() {
+        match run_deep_research_smoke_artifact_step(
+            run_deadline,
+            "structured synthesis materialization",
+            || {
+                materialize_deep_research_completed_report_from_generation(
+                    workspace,
+                    &query,
+                    report,
+                    &workflow_output,
+                    metadata.as_ref(),
+                )
+            },
+        )? {
+            Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
+            Err(error) => {
+                eprintln!("[smoke] DeepResearch structured synthesis rejected: {error}")
+            }
         }
+    } else {
+        artifacts = run_deep_research_smoke_artifact_step(
+            run_deadline,
+            "synthesis artifact discovery",
+            || {
+                deep_research_report_artifacts_from_output_for_current_run(
+                    &final_text,
+                    workspace,
+                    &query,
+                    &workflow_output,
+                    metadata.as_ref(),
+                    &report_baseline,
+                )
+            },
+        )?;
     }
-    if artifacts.is_none() && !deep_research_output_has_internal_leak(&final_text) {
+
+    if let Some(clean_text) = artifacts
+        .as_ref()
+        .and_then(|artifacts| clean_deep_research_final_text_from_artifacts(artifacts, workspace))
+    {
+        final_text = clean_text;
+    }
+    if artifacts.is_none()
+        && generated_report.is_none()
+        && !deep_research_output_has_internal_leak(&final_text)
+    {
         artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
             "answer-text artifact fallback",
@@ -604,7 +642,7 @@ async fn run_smoke_deep_research(
             final_text = clean_text;
         }
     }
-    if artifacts.is_none() {
+    if artifacts.is_none() && generated_report.is_none() {
         artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
             "markdown artifact fallback",
@@ -623,29 +661,18 @@ async fn run_smoke_deep_research(
             final_text = clean_text;
         }
     }
-
-    if artifacts.is_none()
-        && final_text.contains("DeepResearch synthesis model call timed out after")
-    {
-        artifacts = run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "synthesis-timeout artifact fallback",
-            || {
-                materialize_deep_research_timeout_completed_report(
-                    workspace,
-                    &query,
-                    &final_text,
-                    None,
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )?;
-        if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-        }) {
-            final_text = clean_text;
-        }
+    if artifacts.is_none() {
+        let diagnostic = deep_research_report_rejection_diagnostic_from_answer_text(
+            &query,
+            &final_text,
+            &workflow_output,
+            metadata.as_ref(),
+        )
+        .unwrap_or_else(|| "report artifacts were not accepted for an unknown reason".to_string());
+        eprintln!(
+            "[smoke] DeepResearch synthesis report rejected ({} chars): {diagnostic}",
+            final_text.chars().count()
+        );
     }
 
     if artifacts.is_none() || deep_research_output_has_internal_leak(&final_text) {
@@ -669,37 +696,63 @@ async fn run_smoke_deep_research(
             Duration::from_millis(DEEP_RESEARCH_REPAIR_TIMEOUT_MS),
             "repair",
         ) {
-            final_text = stream_smoke_prompt_until_report(
-                session.as_ref(),
-                repair.as_str(),
-                workspace,
-                &query,
-                &report_baseline,
-                repair_deadline,
-            )
-            .await?;
-            artifacts = run_deep_research_smoke_artifact_step(
-                run_deadline,
-                "repair artifact discovery",
-                || {
-                    deep_research_report_artifacts_from_output_for_current_run(
-                        &final_text,
-                        workspace,
-                        &query,
-                        &workflow_output,
-                        metadata.as_ref(),
-                        &report_baseline,
-                    )
-                },
-            )?;
-            if deep_research_output_has_internal_leak(&final_text) {
-                if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-                    clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-                }) {
-                    final_text = clean_text;
+            generated_report = None;
+            final_text =
+                match generate_smoke_report(session.as_ref(), repair.as_str(), repair_deadline)
+                    .await
+                {
+                    Ok(report) => {
+                        let markdown = report.markdown.clone();
+                        generated_report = Some(report);
+                        markdown
+                    }
+                    Err(error) => {
+                        eprintln!("[smoke] DeepResearch structured repair failed: {error}");
+                        error
+                    }
+                };
+            artifacts = None;
+            if let Some(report) = generated_report.as_ref() {
+                match run_deep_research_smoke_artifact_step(
+                    run_deadline,
+                    "structured repair materialization",
+                    || {
+                        materialize_deep_research_completed_report_from_generation(
+                            workspace,
+                            &query,
+                            report,
+                            &workflow_output,
+                            metadata.as_ref(),
+                        )
+                    },
+                )? {
+                    Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
+                    Err(error) => {
+                        eprintln!("[smoke] DeepResearch structured repair rejected: {error}")
+                    }
                 }
+            } else {
+                artifacts = run_deep_research_smoke_artifact_step(
+                    run_deadline,
+                    "repair artifact discovery",
+                    || {
+                        deep_research_report_artifacts_from_output_for_current_run(
+                            &final_text,
+                            workspace,
+                            &query,
+                            &workflow_output,
+                            metadata.as_ref(),
+                            &report_baseline,
+                        )
+                    },
+                )?;
             }
-            if artifacts.is_none() {
+            if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
+                clean_deep_research_final_text_from_artifacts(artifacts, workspace)
+            }) {
+                final_text = clean_text;
+            }
+            if artifacts.is_none() && generated_report.is_none() {
                 artifacts = run_deep_research_smoke_artifact_step(
                     run_deadline,
                     "repair markdown artifact fallback",
@@ -718,6 +771,21 @@ async fn run_smoke_deep_research(
                     final_text = clean_text;
                 }
             }
+            if artifacts.is_none() {
+                let diagnostic = deep_research_report_rejection_diagnostic_from_answer_text(
+                    &query,
+                    &final_text,
+                    &workflow_output,
+                    metadata.as_ref(),
+                )
+                .unwrap_or_else(|| {
+                    "report artifacts were not accepted for an unknown reason".to_string()
+                });
+                eprintln!(
+                    "[smoke] DeepResearch repair report rejected ({} chars): {diagnostic}",
+                    final_text.chars().count()
+                );
+            }
         } else {
             let status = deep_research_smoke_exhausted_phase_message("repair");
             eprintln!("[smoke] {status}");
@@ -725,7 +793,10 @@ async fn run_smoke_deep_research(
         }
     }
 
-    if artifacts.is_none() && !deep_research_output_has_internal_leak(&final_text) {
+    if artifacts.is_none()
+        && generated_report.is_none()
+        && !deep_research_output_has_internal_leak(&final_text)
+    {
         artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
             "post-repair answer-text artifact fallback",
@@ -734,26 +805,6 @@ async fn run_smoke_deep_research(
                     workspace,
                     &query,
                     &final_text,
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )?;
-        if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
-            clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-        }) {
-            final_text = clean_text;
-        }
-    }
-
-    if artifacts.is_none() {
-        artifacts = run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "workflow-evidence artifact fallback",
-            || {
-                materialize_deep_research_completed_report_from_workflow_evidence(
-                    workspace,
-                    &query,
                     &workflow_output,
                     metadata.as_ref(),
                 )

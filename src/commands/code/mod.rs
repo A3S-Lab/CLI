@@ -35,7 +35,7 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
             launch_tui(argv, context).await
         }
         Some(CodeCommand::Research(args)) => run_research(args, context).await,
-        Some(CodeCommand::Session(args)) => session::run(args, context),
+        Some(CodeCommand::Session(args)) => session::run(args, context).await,
         Some(CodeCommand::Agent(args)) => assets::run_agent(args, context).await,
         Some(CodeCommand::Mcp(args)) => assets::run_mcp(args, context).await,
         Some(CodeCommand::Skill(args)) => assets::run_skill(args, context).await,

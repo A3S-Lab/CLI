@@ -1,4 +1,5 @@
 use super::{html_escape, markdown_backslash_unescape, markdown_plain_text};
+use crate::tui::deep_research_report_generation::ReportPresentation;
 use comrak::{markdown_to_html, Options};
 use std::collections::HashSet;
 
@@ -11,6 +12,15 @@ use composition::compose_report_fragment;
 use style::REPORT_CSS;
 
 pub(super) fn deep_research_completed_report_html(query: &str, markdown: &str) -> String {
+    deep_research_completed_report_html_with_presentation(query, markdown, None, None)
+}
+
+pub(super) fn deep_research_completed_report_html_with_presentation(
+    query: &str,
+    markdown: &str,
+    presentation: Option<&ReportPresentation>,
+    authored_thesis: Option<&str>,
+) -> String {
     let lower_markdown = markdown.to_ascii_lowercase();
     let recovery = lower_markdown.contains("# deepresearch recovery report");
     let qualified = lower_markdown.contains("evidence grade: official-source snapshot")
@@ -36,7 +46,9 @@ pub(super) fn deep_research_completed_report_html(query: &str, markdown: &str) -
             .count(),
     );
     let reading_minutes = estimated_reading_minutes(markdown, language);
-    let theme = report_theme(query, markdown);
+    let theme = presentation
+        .map(ReportPresentation::body_classes)
+        .unwrap_or_else(|| report_theme(query, markdown).to_string());
     let body_class = if recovery {
         format!("{theme} report-degraded")
     } else if qualified {
@@ -119,7 +131,7 @@ pub(super) fn deep_research_completed_report_html(query: &str, markdown: &str) -
     } else {
         "Min read"
     };
-    let thesis = if recovery && language == "zh-CN" {
+    let fallback_thesis = if recovery && language == "zh-CN" {
         "本次证据链未达到完成门槛；页面仅保留可核验来源、失败边界与下一步。"
     } else if recovery {
         "This run did not meet the evidence gate; the page preserves only traceable sources, failure limits, and next actions."
@@ -132,6 +144,10 @@ pub(super) fn deep_research_completed_report_html(query: &str, markdown: &str) -
     } else {
         "A source-backed reading experience separating conclusions, evidence strength, and unresolved limits."
     };
+    let thesis = authored_thesis
+        .map(str::trim)
+        .filter(|thesis| (12..=1_200).contains(&thesis.chars().count()))
+        .unwrap_or(fallback_thesis);
     format!(
         r#"<!doctype html>
 <html lang="{language}">
@@ -147,7 +163,7 @@ pub(super) fn deep_research_completed_report_html(query: &str, markdown: &str) -
         css = REPORT_CSS,
         theme = body_class,
         brief_label = brief_label,
-        thesis = thesis,
+        thesis = html_escape(thesis),
         evidence_label = evidence_label,
         confidence_label = confidence_label,
         profile_label = profile_label,
@@ -281,7 +297,11 @@ fn concise_report_title(value: &str) -> String {
             }
         }
     }
-    let limit = if contains_cjk(&clean) { 40 } else { 92 };
+    // Preserve a model-authored report title when it still fits comfortably
+    // in the responsive hero. The previous 40-character CJK cap clipped
+    // ordinary descriptive titles (and the document title) by only a few
+    // characters, which made a completed report look unfinished.
+    let limit = if contains_cjk(&clean) { 56 } else { 110 };
     if clean.chars().count() <= limit {
         return clean;
     }

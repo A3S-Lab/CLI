@@ -20,13 +20,7 @@ impl App {
         let mut chips = vec![mode_status_chip(self.mode)];
 
         if self.goal.is_some() {
-            let elapsed = self
-                .goal_since
-                .map(|t| format!(" ({})", fmt_elapsed(t.elapsed())))
-                .unwrap_or_default();
-            chips.push(
-                SessionStatusChip::new("◎", format!("Pursuing goal{elapsed}")).color(TN_CYAN),
-            );
+            chips.push(goal_status_chip(self.goal_since));
         }
         if let Some(dev) = &self.agent_dev {
             chips.push(
@@ -34,7 +28,7 @@ impl App {
                     "◇",
                     format!("agent:{} · Esc /agent off", truncate(&dev.name, 24)),
                 )
-                .color(TN_GREEN),
+                .color(COMPOSER_CHROME.active),
             );
         }
         if let Some(dev) = &self.mcp_dev {
@@ -43,7 +37,7 @@ impl App {
                     "◆",
                     format!("mcp:{} · Esc /mcp off", truncate(&dev.name, 24)),
                 )
-                .color(TN_CYAN),
+                .color(COMPOSER_CHROME.active),
             );
         }
         if let Some(dev) = &self.skill_dev {
@@ -52,7 +46,7 @@ impl App {
                     "✦",
                     format!("skill:{} · Esc /skill off", truncate(&dev.name, 24)),
                 )
-                .color(TN_CYAN),
+                .color(COMPOSER_CHROME.active),
             );
         }
         if let Some(dev) = &self.okf_dev {
@@ -61,14 +55,17 @@ impl App {
                     "⌁",
                     format!("okf:{} · Esc /okf off", truncate(&dev.name, 24)),
                 )
-                .color(TN_CYAN),
+                .color(COMPOSER_CHROME.active),
             );
         }
         if self.loop_remaining > 0 {
-            chips.push(SessionStatusChip::new("↻", self.loop_remaining.to_string()).color(TN_GRAY));
+            chips.push(
+                SessionStatusChip::new("↻", self.loop_remaining.to_string())
+                    .color(COMPOSER_CHROME.secondary),
+            );
         }
         if let Some(version) = self.update_available.as_deref() {
-            chips.push(SessionStatusChip::new("⬆", version).color(TN_YELLOW));
+            chips.push(SessionStatusChip::new("⬆", version).color(COMPOSER_CHROME.warning));
         }
 
         chips
@@ -491,4 +488,11 @@ impl App {
             }
         }))
     }
+}
+
+pub(super) fn goal_status_chip(since: Option<Instant>) -> SessionStatusChip {
+    let label = since
+        .map(|started| format!("goal · {}", fmt_elapsed(started.elapsed())))
+        .unwrap_or_else(|| "goal".to_string());
+    SessionStatusChip::new("◎", label).color(COMPOSER_CHROME.active)
 }

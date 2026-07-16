@@ -76,7 +76,12 @@ fn preparse_output_mode(args: &[OsString]) -> OutputMode {
             index += 1;
             continue;
         };
-        if argument == "--" || matches!(argument, "box" | "bench" | "search" | "use") {
+        if argument == "--"
+            || matches!(
+                argument,
+                "box" | "compose" | "up" | "down" | "ps" | "logs" | "bench" | "search" | "use"
+            )
+        {
             break;
         }
         match argument {
@@ -218,6 +223,11 @@ fn root_command_name(command: &RootCommand) -> &'static str {
         },
         RootCommand::Top(_) => "top",
         RootCommand::Box(_) => "box",
+        RootCommand::Compose(_) => "compose",
+        RootCommand::Up(_) => "compose.up",
+        RootCommand::Down(_) => "compose.down",
+        RootCommand::Ps(_) => "compose.ps",
+        RootCommand::Logs(_) => "compose.logs",
         RootCommand::Bench(_) => "bench",
         RootCommand::Search(_) => "search",
         RootCommand::Use(_) => "use",
@@ -284,6 +294,11 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::Box(args) => run_proxy("box", args.args, context).await,
+        RootCommand::Compose(args) => run_box_compose(None, args.args, context).await,
+        RootCommand::Up(args) => run_box_compose(Some("up"), args.args, context).await,
+        RootCommand::Down(args) => run_box_compose(Some("down"), args.args, context).await,
+        RootCommand::Ps(args) => run_box_compose(Some("ps"), args.args, context).await,
+        RootCommand::Logs(args) => run_box_compose(Some("logs"), args.args, context).await,
         RootCommand::Bench(args) => run_proxy("bench", args.args, context).await,
         RootCommand::Search(args) => run_proxy("search", args.args, context).await,
         RootCommand::Use(args) => run_use_proxy(args.args, context).await,
@@ -365,6 +380,69 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
         RootCommand::Help(args) => print_command_help(args, output),
         RootCommand::LegacyUpdate(args) => run_legacy_update(args.args, context).await,
     }
+}
+
+async fn run_box_compose(
+    shortcut: Option<&str>,
+    args: Vec<OsString>,
+    context: &InvocationContext,
+) -> anyhow::Result<ExitCode> {
+    let mut forwarded = Vec::with_capacity(args.len() + 2);
+    forwarded.push(OsString::from("compose"));
+    if let Some(command) = shortcut {
+        let (global_args, command_args) = partition_compose_shortcut_args(command, args)?;
+        forwarded.extend(global_args);
+        forwarded.push(OsString::from(command));
+        forwarded.extend(command_args);
+    } else {
+        forwarded.extend(args);
+    }
+    run_proxy("box", forwarded, context).await
+}
+
+fn partition_compose_shortcut_args(
+    command: &str,
+    args: Vec<OsString>,
+) -> anyhow::Result<(Vec<OsString>, Vec<OsString>)> {
+    let mut global = Vec::new();
+    let mut local = Vec::new();
+    let mut args = args.into_iter();
+    let mut positional_only = false;
+
+    while let Some(argument) = args.next() {
+        if positional_only {
+            local.push(argument);
+            continue;
+        }
+        if argument == "--" {
+            positional_only = true;
+            local.push(argument);
+            continue;
+        }
+
+        let is_file = argument == "--file" || (argument == "-f" && command != "logs");
+        let is_project = argument == "--project-name" || argument == "-p";
+        if is_file || is_project {
+            let option = argument.to_string_lossy().into_owned();
+            let value = args.next().ok_or_else(|| {
+                output::usage_error(format!("{option} requires a value for `a3s {command}`"))
+            })?;
+            global.push(argument);
+            global.push(value);
+            continue;
+        }
+
+        let long_value = argument.to_str().is_some_and(|value| {
+            value.starts_with("--file=") || value.starts_with("--project-name=")
+        });
+        if long_value {
+            global.push(argument);
+        } else {
+            local.push(argument);
+        }
+    }
+
+    Ok((global, local))
 }
 
 async fn run_proxy(
@@ -451,19 +529,22 @@ fn canonical_component_executable(
 ) -> anyhow::Result<std::path::PathBuf> {
     let canonical = std::fs::canonicalize(path).with_context(|| {
         format!(
-            "failed to resolve the '{component}' component executable at {}",
+            "failed to resolve the '{}' component executable at {}",
+            component,
             path.display()
         )
     })?;
     let metadata = std::fs::metadata(&canonical).with_context(|| {
         format!(
-            "failed to inspect the '{component}' component executable at {}",
+            "failed to inspect the '{}' component executable at {}",
+            component,
             canonical.display()
         )
     })?;
     if !metadata.is_file() {
         bail!(
-            "the '{component}' component executable is not a regular file: {}",
+            "the '{}' component executable is not a regular file: {}",
+            component,
             canonical.display()
         );
     }

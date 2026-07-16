@@ -60,8 +60,7 @@
     if (count === 0 || charBudget <= 0) {
       return [];
     }
-    // Leave room for JSON quotes, separators, and occasional escaped
-    // characters so each field remains independently bounded.
+    // Reserve space for JSON framing and escaping.
     const perItemChars = Math.max(48, Math.floor((charBudget * 0.8) / count));
     return candidates.slice(0, count).map((item) => compactText(item, perItemChars));
   };
@@ -91,8 +90,9 @@
         }
         seenSources.add(key);
         const title = compactText(source.title, 140);
+        const reliability = compactText(source.reliability, 120);
         const fact = compactText(source.quote_or_fact, 320);
-        sources.push(`${url}${title ? ` — ${title}` : ""}${fact ? `: ${fact}` : ""}`);
+        sources.push(`${url}${title ? ` — ${title}` : ""}${reliability ? ` [${reliability}]` : ""}${fact ? `: ${fact}` : ""}`);
       }
     }
     const keyEvidence = structured.flatMap((item) =>
@@ -122,7 +122,10 @@
         results: Number(metadata.result_count) || results.length,
         validated: structured.length,
         succeeded: Number(metadata.success_count) || 0,
-        failed: Number(metadata.failed_count) || 0
+        failed: Number(metadata.failed_count) || 0,
+        sources: Number(metadata.source_count) || 0,
+        fetched: Number(metadata.fetched_count) || 0,
+        hosts: Number(metadata.host_count) || 0
       },
       summaries: boundedDigestStrings(summaries, Math.floor(contentBudget * 0.16), 6),
       sources: boundedDigestStrings(sources, Math.floor(contentBudget * 0.34), 8),
@@ -147,9 +150,6 @@
     const hasDirect = direct && typeof direct === "object";
     const makerBudget = hasMaker && hasDirect ? 2600 : 3600;
     const directBudget = hasMaker && hasDirect ? 1800 : 3600;
-    // Keep maker first because it contains schema-validated, task-specific
-    // analysis. Each evidence class is digested independently so a verbose
-    // direct collection can never truncate maker evidence out of the prompt.
     return JSON.stringify({
       digest_version: 1,
       maker: checkerEvidenceClassDigest(maker, makerBudget),
@@ -221,12 +221,9 @@
       schema: checker.output_schema,
       schema_name: "deep_research_check",
       schema_description: "Independent DeepResearch evidence coverage decision",
-      prompt: `Check evidence against the semantic plan; do not call tools. Finalize a useful sourced answer with explicit limits. Continue one gap only: direct_retrieval for public evidence or maker for distinct evidence production/non-web work. Never repeat failed work or request unplanned local evidence. Degrade only if the core answer misleads. Finalize/degrade require next_action=none; empty routing arrays may be omitted.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Return only concise schema fields. report_summary answers the request from supported evidence; recommendations are conditional and unsupported conditions stay in unresolved_gaps. verified_findings has up to five sourced facts. Findings state facts, never that sources, articles, comparisons, discussions, or collection exist. Titles/snippets are leads unless retained quotes support them. Put uncertainty only in gaps or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
+      prompt: `Check evidence against the semantic plan; do not call tools. Judge every planned track and stop condition. A URL or search snippet alone is not evidence; titles and snippets are leads unless retained page text supports the claim. Consequential status, quantitative, governance, and recommendation claims need primary or authoritative evidence plus independent corroboration when available. If a track has only snippets, generic/SEO comparisons, failed primary fetches, or unsupported inference and one follow-up fits, continue that gap with direct_retrieval; maker is only for distinct evidence production or non-web work. Never repeat failed work. Finalize only a useful source-backed answer; degrade only if the core answer would mislead. Finalize/degrade require next_action=none.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Return concise schema fields in the query's language. report_summary directly answers the request; unsupported conditions stay in unresolved_gaps. Each verified finding states a fact present in retained evidence and includes its exact supporting source URL(s). Findings state facts, never that sources, articles, comparisons, discussions, or collection exist. Put uncertainty only in gaps or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
       mode: "auto",
-      // Empty routing arrays are optional in the schema, so a valid semantic
-      // decision should never spend another slow model call repairing omitted
-      // boilerplate. Invalid output fails transparently and remains replayable.
-      max_repair_attempts: 0,
+      max_repair_attempts: 1,
       timeout_ms: Math.min(configuredCheckerTimeoutMs, availableCheckerMs),
     };
   };
@@ -404,15 +401,28 @@
     const remainingMs = workflowRemainingMs();
     return remainingMs === null || remainingMs >= checkerReserveMs;
   };
-  const budgetFinalizedChecker = (decision, reason) => Object.assign({}, decision || {}, {
+  const budgetFinalizedChecker = (decision, reason, limitation) => Object.assign({}, decision || {}, {
     decision: "finalize",
     next_action: "none",
     coverage_summary: compactText(
-      `${decision && decision.coverage_summary ? decision.coverage_summary : "Useful traceable evidence was collected."} Remaining checked gaps must be stated as report limitations because another full checked iteration cannot finish inside the workflow budget.`,
+      `${decision && decision.coverage_summary ? decision.coverage_summary : "Useful traceable evidence was collected."} ${limitation || "Remaining checked gaps must be stated as report limitations because another full checked iteration cannot finish inside the workflow budget."}`,
       800
     ),
     reason: reason || "The evidence package is reportable with explicit limitations; no further maker pass fits the remaining workflow budget."
   });
+  const failedRecheckFinalizedChecker = (decision) => {
+    const gap = "Follow-up evidence was not independently rechecked; conclusions relying on it remain provisional.";
+    const checker = budgetFinalizedChecker(
+      decision,
+      "Previously checked findings remain reportable, but the follow-up recheck did not complete.",
+      gap
+    );
+    checker.unresolved_gaps = uniqueStrings([
+      gap,
+      ...((decision && decision.unresolved_gaps) || [])
+    ]).slice(0, 4);
+    return checker;
+  };
   const checkerContinuationTracks = (decision) => {
     if (!decision || typeof decision !== "object") {
       return [];
@@ -582,15 +592,6 @@
         );
       }
       const directIteration = directFollowUps.length;
-      // The semantic planner owns the initial route. A legacy direct_then_maker plan
-      // deliberately skips the expensive pre-maker checker: direct retrieval
-      // seeds the planned tracks, makers perform the requested investigation,
-      // and the checker reviews their cumulative evidence afterward. No answer
-      // shape, query text, track count, or topic classifier overrides this
-      // explicit route. New direct_then_review plans intentionally bypass this
-      // branch and combine synthesis with their first coverage review, removing
-      // one redundant structured model turn. A failed-maker direct recovery
-      // must not reschedule the legacy route.
       if (
         directThenMaker &&
         directIteration === 0 &&
@@ -627,11 +628,6 @@
           }
         };
       }
-      // Every new evidence attempt must be reviewed against the cumulative
-      // package. A partial direct follow-up is still new evidence; reusing the
-      // prior checker gaps here launches stale maker work and bypasses the
-      // maker/checker loop. The checker can explicitly route any remaining
-      // gap to one bounded maker step below.
       if (
         !checkerDecision &&
         !checkerFailure &&
@@ -695,6 +691,24 @@
         };
       }
       if (checkerFailure) {
+        if (directIteration > 0 && priorDirectChecker) {
+          return {
+            type: "complete",
+            output: {
+              query,
+              mode: "direct_web",
+              plan: researchPlan,
+              checker: failedRecheckFinalizedChecker(priorDirectChecker),
+              research: directEvidence,
+              verification: {
+                status: "degraded",
+                checker_completed: false,
+                prior_checker_retained: true,
+                error: checkerFailure.error || "Evidence follow-up checker failed."
+              }
+            }
+          };
+        }
         return {
           type: "complete",
           output: {
@@ -730,10 +744,6 @@
         ? checkerDecision.seed_urls
             .filter((item) => isNonEmptyString(item) && /^https?:\/\//i.test(item.trim()))
         : [];
-      // A source-observed link is safest when the checker asks only for that
-      // linked detail. When the checker also provides focused search queries,
-      // its matching stable seeds belong to the same retrieval objective and
-      // must not be displaced by incidental links from a broad source page.
       const observedFollowUpUrls = linkedDirectUrls(directEvidence);
       const followUpUrls = uniqueStrings(followUpQueries.length > 0
         ? [...checkerFollowUpUrls, ...observedFollowUpUrls]

@@ -43,12 +43,6 @@ fn ready_capability_ids(desired: &DesiredCapabilities) -> Vec<String> {
         .mcp
         .values()
         .map(|capability| capability.capability_id.clone())
-        .chain(
-            desired
-                .skills
-                .values()
-                .map(|capability| capability.package_id.clone()),
-        )
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -82,9 +76,9 @@ fn use_worker_spec(desired: &DesiredCapabilities) -> WorkerAgentSpec {
 
     let ready = ready_capability_ids(desired);
     let readiness = if ready.is_empty() {
-        "No application capability is currently ready".to_string()
+        "No callable application capability is currently ready".to_string()
     } else {
-        format!("Ready capabilities: {}", ready.join(", "))
+        format!("Ready callable capabilities: {}", ready.join(", "))
     };
     WorkerAgentSpec::custom(
         "use",
@@ -157,6 +151,8 @@ enum ProjectedMcpTransport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ProjectedSkillSurface {
     path: PathBuf,
+    #[serde(default)]
+    sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -326,7 +322,7 @@ impl UseRegistryClient {
             match mcp.transport {
                 ProjectedMcpTransport::Stdio => {
                     let server_name = format!("use_{}", binding.route);
-                    let fingerprint = serde_json::to_string(&(binding, mcp))?;
+                    let fingerprint = mcp_fingerprint(binding, mcp)?;
                     let replaced = desired.mcp.insert(
                         server_name.clone(),
                         DesiredMcp {
@@ -350,9 +346,13 @@ impl UseRegistryClient {
         }
 
         for skill_surface in &binding.skills {
-            let skill = load_managed_skill(&binding.package_root, &skill_surface.path).await?;
+            let expected_sha256 =
+                (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
+            let skill =
+                load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256)
+                    .await?;
             let name = skill.name.clone();
-            let fingerprint = serde_json::to_string(&(binding, skill_surface))?;
+            let fingerprint = skill_fingerprint(binding, skill_surface)?;
             let candidate = DesiredSkill {
                 package_id: binding.id.clone(),
                 fingerprint,
@@ -453,6 +453,35 @@ impl UseRegistryClient {
             .context("A3S Use JSON response has no data object")?;
         serde_json::from_value(data).context("A3S Use registry data does not match schema v1")
     }
+}
+
+fn mcp_fingerprint(
+    binding: &CapabilityBinding,
+    mcp: &ProjectedMcpSurface,
+) -> anyhow::Result<String> {
+    serde_json::to_string(&(
+        &binding.id,
+        &binding.route,
+        &binding.version,
+        binding.origin,
+        &binding.package_root,
+        mcp,
+    ))
+    .context("failed to fingerprint an A3S Use MCP surface")
+}
+
+fn skill_fingerprint(
+    binding: &CapabilityBinding,
+    skill: &ProjectedSkillSurface,
+) -> anyhow::Result<String> {
+    serde_json::to_string(&(
+        &binding.id,
+        &binding.version,
+        binding.origin,
+        &binding.package_root,
+        skill,
+    ))
+    .context("failed to fingerprint an A3S Use Skill surface")
 }
 
 struct LimitedOutput {
@@ -574,11 +603,12 @@ impl UseRegistryHandle {
         }
         let desired = self.inner.desired_tx.borrow().clone();
         let mut applied = AppliedCapabilities::new(Arc::clone(&session));
-        if let Err(error) = register_use_worker(&session, desired.as_ref()) {
-            tracing::warn!(error = %error, "Failed to register the A3S Use worker in an attached session");
-        }
         if let Err(error) = reconcile_skills(&mut applied, desired.as_ref()) {
             tracing::warn!(error = %error, "Failed to replay A3S Use skills into an attached session");
+        }
+        let advertised = worker_capabilities_for_applied(&applied, desired.as_ref());
+        if let Err(error) = register_use_worker(&session, &advertised) {
+            tracing::warn!(error = %error, "Failed to register the A3S Use worker in an attached session");
         }
 
         let cancellation = self.inner.cancellation.child_token();
@@ -815,7 +845,11 @@ async fn reconcile(
     applied: &mut AppliedCapabilities,
     desired: &DesiredCapabilities,
 ) -> anyhow::Result<()> {
-    register_use_worker(&applied.session, desired)?;
+    // Withdraw removed or replaced routes before touching their live MCP
+    // managers. Newly discovered routes are advertised only after their tools
+    // have connected successfully below.
+    let advertised = worker_capabilities_for_applied(applied, desired);
+    register_use_worker(&applied.session, &advertised)?;
     let removed_mcp = applied
         .mcp
         .iter()
@@ -876,9 +910,33 @@ async fn reconcile(
             .insert(name.clone(), desired_mcp.fingerprint.clone());
     }
 
+    register_use_worker(&applied.session, desired)?;
     applied.generation = desired.generation;
     applied.revision.clone_from(&desired.revision);
     Ok(())
+}
+
+fn worker_capabilities_for_applied(
+    applied: &AppliedCapabilities,
+    desired: &DesiredCapabilities,
+) -> DesiredCapabilities {
+    DesiredCapabilities {
+        generation: applied.generation,
+        revision: applied.revision.clone(),
+        mcp: desired
+            .mcp
+            .iter()
+            .filter(|(name, capability)| applied.mcp.get(*name) == Some(&capability.fingerprint))
+            .map(|(name, capability)| (name.clone(), capability.clone()))
+            .collect(),
+        skills: desired
+            .skills
+            .iter()
+            .filter(|(name, skill)| applied.skills.get(*name) == Some(&skill.fingerprint))
+            .map(|(name, skill)| (name.clone(), skill.clone()))
+            .collect(),
+        warnings: desired.warnings.clone(),
+    }
 }
 
 fn reconcile_skills(

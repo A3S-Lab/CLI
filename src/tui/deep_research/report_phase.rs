@@ -16,7 +16,7 @@ impl DelayedDeepResearchReportTool {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct ReportPhaseToolBuffer {
     tools: HashMap<String, DelayedDeepResearchReportTool>,
     latest_tool_id: Option<String>,

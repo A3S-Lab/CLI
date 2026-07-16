@@ -45,6 +45,9 @@ impl AssetFamily {
             (Self::PortableBinary | Self::BenchPackage, "macos", "x86_64") => Some("darwin-x86_64"),
             (Self::PortableBinary | Self::BenchPackage, "linux", "aarch64") => Some("linux-arm64"),
             (Self::PortableBinary | Self::BenchPackage, "linux", "x86_64") => Some("linux-x86_64"),
+            (Self::PortableBinary | Self::BenchPackage, "windows", "x86_64") => {
+                Some("windows-x86_64")
+            }
             _ => None,
         }
     }
@@ -55,8 +58,23 @@ impl AssetFamily {
                 format!("{binary}-v{version}-{target}.tar.gz")
             }
             Self::PortableBinary | Self::BenchPackage => {
-                format!("{binary}-{version}-{target}.tar.gz")
+                let extension = if target.starts_with("windows-") {
+                    "zip"
+                } else {
+                    "tar.gz"
+                };
+                format!("{binary}-{version}-{target}.{extension}")
             }
+        }
+    }
+
+    pub fn executable_name(self, binary: &str, target: &str) -> String {
+        if matches!(self, Self::PortableBinary | Self::BenchPackage)
+            && target.starts_with("windows-")
+        {
+            format!("{binary}.exe")
+        } else {
+            binary.to_string()
         }
     }
 }
@@ -206,6 +224,14 @@ mod tests {
         assert_eq!(
             AssetFamily::PortableBinary.archive_name("a3s-search", "1.4.1", "darwin-arm64"),
             "a3s-search-1.4.1-darwin-arm64.tar.gz"
+        );
+        assert_eq!(
+            AssetFamily::PortableBinary.archive_name("a3s-use", "0.1.0", "windows-x86_64"),
+            "a3s-use-0.1.0-windows-x86_64.zip"
+        );
+        assert_eq!(
+            AssetFamily::PortableBinary.executable_name("a3s-use", "windows-x86_64"),
+            "a3s-use.exe"
         );
     }
 }

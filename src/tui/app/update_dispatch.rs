@@ -2,14 +2,49 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposerAttachmentKeyAction {
+    StageClipboardImage,
+    RemoveLastImage,
+    SubmitImageOnly,
+}
+
+fn composer_attachment_key_action(
+    key: &KeyEvent,
+    draft: &str,
+    image_count: usize,
+) -> Option<ComposerAttachmentKeyAction> {
+    if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return Some(ComposerAttachmentKeyAction::StageClipboardImage);
+    }
+    if key.code == KeyCode::Backspace
+        && key.modifiers == KeyModifiers::NONE
+        && draft.is_empty()
+        && image_count > 0
+    {
+        return Some(ComposerAttachmentKeyAction::RemoveLastImage);
+    }
+    if key.code == KeyCode::Enter
+        && key.modifiers == KeyModifiers::NONE
+        && draft.trim().is_empty()
+        && image_count > 0
+    {
+        return Some(ComposerAttachmentKeyAction::SubmitImageOnly);
+    }
+    None
+}
+
 impl App {
     pub(super) fn update_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         if self.quitting {
             return match msg {
-                Msg::QuitReady => Some(cmd::quit()),
-                Msg::StreamStarted { session, join, .. } => {
-                    Some(discard_started_stream(session, join))
-                }
+                Msg::QuitReady => self.finish_graceful_quit(),
+                Msg::StreamStarted {
+                    token,
+                    session,
+                    join,
+                    ..
+                } => Some(discard_started_stream(session, join, token)),
                 _ => None,
             };
         }
@@ -87,6 +122,12 @@ impl App {
                     );
                     return None;
                 }
+                // The startup paused-goal picker is a true modal. It owns all
+                // non-quit keys so execution-mode shortcuts, panels, and the
+                // composer cannot change behind it.
+                if self.goal_resume_prompt.is_some() {
+                    return self.handle_goal_resume_key(&key);
+                }
                 // Esc is the goal kill switch even while a tool confirmation
                 // overlay owns the keyboard. Rejecting one tool is not enough:
                 // it would let the next unbounded goal iteration restart.
@@ -105,9 +146,18 @@ impl App {
                         if let Some(host_abort) = host_abort {
                             host_abort.abort();
                         }
-                        session.cancel().await;
+                        let _ = session
+                            .cancel_and_settle(
+                                Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                            )
+                            .await;
                         if let Some(join) = join {
-                            let _ = join.await;
+                            let _ = settle_stream_join_for_quit(
+                                join,
+                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                            )
+                            .await;
                         }
                         Msg::Interrupted {
                             goal_cancelled: true,
@@ -150,6 +200,16 @@ impl App {
                 }
                 // /ide panel takes all keys while open.
                 if self.ide.is_some() {
+                    if self
+                        .ide
+                        .as_ref()
+                        .is_some_and(|ide| ide.intelligence.is_some())
+                    {
+                        return self.handle_ide_intelligence_key(&key);
+                    }
+                    if let Some(command) = self.try_submit_ide_intelligence_prompt(&key) {
+                        return command;
+                    }
                     self.ide_key(&key);
                     return None;
                 }
@@ -284,12 +344,34 @@ impl App {
                 }
                 // Esc interrupts the in-progress run (input stays usable otherwise).
                 if self.state == State::Streaming && key.code == KeyCode::Esc {
-                    if self.stream_join_settling || self.deep_research_subagent_settlement_inflight
-                    {
-                        // The parent already emitted its terminal result; only
-                        // persistence/lease release or child settlement remains.
-                        // Interrupting here would detach cleanup and resurrect
-                        // stale footer state.
+                    if self.stream_join_settling {
+                        // The model turn is already terminal. Esc means “consume
+                        // my queued follow-up now”: abort only the stale cleanup
+                        // worker, then let StreamJoinSettled start the queue head.
+                        if !self.queue.is_empty() {
+                            if let Some(abort) = self.stream_settle_abort.take() {
+                                abort.abort();
+                            }
+                        }
+                        return None;
+                    }
+                    if self.deep_research_subagent_settlement_inflight {
+                        if !self.queue.is_empty() {
+                            // The parent stream is already terminal and no
+                            // single-flight lease remains. Keep the bounded
+                            // child cleanup command running in the background,
+                            // invalidate its UI generation, and let the queued
+                            // user steer run now just like Codex's Esc path.
+                            self.deep_research_subagent_settlement_inflight = false;
+                            self.invalidate_subagent_snapshots();
+                            self.state = State::Idle;
+                            self.running_task = None;
+                            self.spinner.stop();
+                            self.restore_autonomy();
+                            self.relayout();
+                            self.rebuild_viewport();
+                            return self.drain_queue();
+                        }
                         return None;
                     }
                     if self.interrupting {
@@ -297,6 +379,12 @@ impl App {
                     }
                     let goal_cancelled = self.cancel_goal_state("interrupted by Esc");
                     self.interrupting = true;
+                    if self.stream_join.is_none()
+                        && self.rx.is_none()
+                        && !self.host_progress_inflight
+                    {
+                        self.interrupted_stream_start_token = Some(self.stream_start_token);
+                    }
                     self.stream_start_token = self.stream_start_token.wrapping_add(1);
                     self.deep_research_stream_timeout_token =
                         self.deep_research_stream_timeout_token.wrapping_add(1);
@@ -309,18 +397,18 @@ impl App {
                         if let Some(host_abort) = host_abort {
                             host_abort.abort();
                         }
-                        session.cancel().await;
-                        if let Some(join) = join {
-                            let abort = join.abort_handle();
-                            if tokio::time::timeout(
+                        let _ = session
+                            .cancel_and_settle(
                                 Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                                join,
+                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
                             )
-                            .await
-                            .is_err()
-                            {
-                                abort.abort();
-                            }
+                            .await;
+                        if let Some(join) = join {
+                            let _ = settle_stream_join_for_quit(
+                                join,
+                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                            )
+                            .await;
                         }
                         Msg::Interrupted {
                             goal_cancelled,
@@ -388,11 +476,29 @@ impl App {
                     self.history_recall(key.code == KeyCode::Up);
                     return None;
                 }
-                // Ctrl+V pastes a clipboard image (macOS Cmd+V is swallowed by the
-                // terminal, so the app can't see it) to attach to the next message.
-                if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.paste_clipboard_image();
-                    return None;
+                match composer_attachment_key_action(
+                    &key,
+                    &self.textarea.value(),
+                    self.pending_images.len(),
+                ) {
+                    // Staging only: paste must never emit Submit or start a turn.
+                    Some(ComposerAttachmentKeyAction::StageClipboardImage) => {
+                        self.paste_clipboard_image();
+                        return None;
+                    }
+                    // With an empty draft, Backspace removes the most recently
+                    // pasted chip without stealing Backspace from ordinary text.
+                    Some(ComposerAttachmentKeyAction::RemoveLastImage) => {
+                        self.pending_images.pop();
+                        self.relayout();
+                        return None;
+                    }
+                    // Textarea intentionally ignores an empty submit, so the
+                    // composer owns the image-only message case.
+                    Some(ComposerAttachmentKeyAction::SubmitImageOnly) => {
+                        return Some(cmd::msg(Msg::Submit(String::new())));
+                    }
+                    None => {}
                 }
                 // Input is always live (you can keep typing while the agent works);
                 // a submit while busy is queued and run when the current turn ends.
@@ -415,6 +521,9 @@ impl App {
 
             Msg::Term(Event::Mouse(m)) => {
                 use a3s_tui::event::{MouseButton, MouseEventKind};
+                if self.goal_resume_prompt.is_some() {
+                    return self.handle_goal_resume_mouse(&m);
+                }
                 if self.state == State::Awaiting {
                     return self.handle_approval_mouse(&m);
                 }
@@ -475,6 +584,34 @@ impl App {
                     || self.asset_list.is_some()
                     || self.runtime_activity.is_some()
                 {
+                    return None;
+                }
+                if let Some(action) = self.attachment_action_at(m.row, m.column) {
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => match action {
+                            AttachmentAction::Preview(index) => {
+                                let preview =
+                                    self.pending_images.get(index).map(PendingImage::preview);
+                                match preview {
+                                    Some(Ok(spec)) => self.open_remote_view(&spec),
+                                    Some(Err(error)) => self.push_notice(
+                                        NoticeKind::Warning,
+                                        format!("Image preview unavailable: {error}"),
+                                    ),
+                                    None => {}
+                                }
+                            }
+                            AttachmentAction::Remove(index) => {
+                                if index < self.pending_images.len() {
+                                    self.pending_images.remove(index);
+                                    self.relayout();
+                                }
+                            }
+                        },
+                        MouseEventKind::Drag(MouseButton::Left)
+                        | MouseEventKind::Up(MouseButton::Left) => {}
+                        _ => {}
+                    }
                     return None;
                 }
                 let vp_rows = self.viewport_rows();
@@ -562,13 +699,20 @@ impl App {
                 session,
                 rx,
                 join,
+                submitted_images: _submitted_images,
             } => {
+                if self.interrupted_stream_start_token == Some(token) {
+                    self.discard_active_queued_turn(token);
+                    return Some(discard_started_stream(session, join, token));
+                }
                 if token != self.stream_start_token
                     || self.state != State::Streaming
                     || self.interrupting
                 {
-                    return Some(discard_started_stream(session, join));
+                    self.discard_active_queued_turn(token);
+                    return Some(discard_started_stream(session, join, token));
                 }
+                self.commit_active_queued_turn(token);
                 self.stream_join_settling = false;
                 self.rx = Some(rx.clone());
                 self.stream_join = Some(join);
@@ -583,20 +727,50 @@ impl App {
                     return None;
                 }
                 self.stream_join_settling = false;
+                self.stream_settle_abort = None;
                 self.state = State::Idle;
                 self.relayout();
                 return self.continue_after_stream_settled(synthesis);
             }
 
-            Msg::DiscardedStreamSettled => return None,
+            Msg::DiscardedStreamSettled { token } => {
+                return self.on_interrupted_stream_start_settled(token);
+            }
 
-            Msg::QuitReady => return Some(cmd::quit()),
+            Msg::QuitReady => return self.finish_graceful_quit(),
 
-            Msg::StreamError { token, error: e } => {
+            Msg::StreamError {
+                token,
+                error: e,
+                retryable_admission,
+                submitted_images,
+            } => {
+                if self.interrupted_stream_start_token == Some(token) {
+                    // The user explicitly interrupted this not-yet-admitted
+                    // turn. Its attachments belong to the already-rendered
+                    // cancelled message and must not leak into the successor.
+                    self.discard_active_queued_turn(token);
+                    return self.on_interrupted_stream_start_settled(token);
+                }
                 if token != self.stream_start_token || self.interrupting {
+                    self.discard_active_queued_turn(token);
                     return None;
                 }
-                self.push_line(&Style::new().fg(TN_RED).render(&format!("  error: {e}")));
+                let was_queued = self.active_queued_turn_token == Some(token);
+                let queued_turn_restored = if was_queued && retryable_admission {
+                    self.restore_active_queued_turn(token)
+                } else {
+                    self.discard_active_queued_turn(token);
+                    false
+                };
+                // A direct composer submission still owns its previews. A
+                // queued turn retains Arc-backed images in the lane payload,
+                // so its attempted copy must not be moved into the composer.
+                if !was_queued {
+                    restore_submitted_images(&mut self.pending_images, submitted_images);
+                }
+                self.relayout();
+                self.push_notice(NoticeKind::Error, &e);
                 if self.recover_deep_research_report_after_model_error(&e) {
                     return self.complete_turn();
                 }
@@ -604,11 +778,26 @@ impl App {
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
                 self.finish();
+                if queued_turn_restored {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("    ⋯ queued turn retained · retrying after session settles"),
+                    );
+                    return Some(self.retry_queued_turn_after_admission_failure());
+                }
                 if self.goal_run.is_some() {
                     return self.continue_goal_run(Some(e));
                 }
                 self.restore_autonomy();
                 // Don't strand messages queued while this turn was starting.
+                return self.drain_queue();
+            }
+
+            Msg::QueueRetry { generation } => {
+                if generation != self.queue_retry_generation {
+                    return None;
+                }
                 return self.drain_queue();
             }
 
@@ -622,6 +811,18 @@ impl App {
                 let snapshot = self.workspace_manifest.snapshot();
                 self.files = snapshot.file_paths();
                 self.file_sel = self.file_sel.min(self.files.len().saturating_sub(1));
+            }
+
+            Msg::IdeIntelligenceCompleted { request_id, result } => {
+                self.apply_ide_intelligence_result(request_id, result);
+            }
+
+            Msg::IdeIntelligenceJumpCompleted {
+                request_id,
+                jump_request_id,
+                result,
+            } => {
+                self.apply_ide_intelligence_jump(request_id, jump_request_id, result);
             }
 
             Msg::Interrupted {
@@ -645,15 +846,9 @@ impl App {
                     self.invalidate_subagent_snapshots();
                 }
                 self.finish();
-                if deep_research_interrupted {
-                    return self
-                        .settle_or_finalize_deep_research(DeepResearchSettlementExit::Interrupted);
-                }
-                self.restore_autonomy();
-                if goal_cancelled {
-                    return self.restore_goal_planning_mode();
-                }
-                return self.drain_queue();
+                let continuation =
+                    Self::interrupted_continuation(goal_cancelled, deep_research_interrupted);
+                return self.defer_or_continue_after_interrupt(continuation);
             }
 
             Msg::Agent { source, event } => {
@@ -952,5 +1147,40 @@ impl App {
             other => return self.handle_async_message(other),
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent { code, modifiers }
+    }
+
+    #[test]
+    fn clipboard_image_paste_is_staged_and_never_classified_as_submit() {
+        let paste = key(KeyCode::Char('v'), KeyModifiers::CONTROL);
+
+        assert_eq!(
+            composer_attachment_key_action(&paste, "draft", 0),
+            Some(ComposerAttachmentKeyAction::StageClipboardImage)
+        );
+        assert_ne!(
+            composer_attachment_key_action(&paste, "", 1),
+            Some(ComposerAttachmentKeyAction::SubmitImageOnly)
+        );
+    }
+
+    #[test]
+    fn staged_image_requires_an_explicit_enter_to_submit() {
+        assert_eq!(
+            composer_attachment_key_action(&key(KeyCode::Enter, KeyModifiers::NONE), "", 1,),
+            Some(ComposerAttachmentKeyAction::SubmitImageOnly)
+        );
+        assert_eq!(
+            composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1,),
+            Some(ComposerAttachmentKeyAction::RemoveLastImage)
+        );
     }
 }

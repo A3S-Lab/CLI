@@ -18,10 +18,11 @@ struct PlannedLoopTaskTool {
     maker_then_direct: bool,
     first_checker_delay_ms: u64,
     retrieval_timeout_override_ms: u64,
-    checker_failure: bool,
+    checker_failure_at: Option<usize>,
 }
 
 struct PlannedLoopSearchTool;
+struct NoisyPlannedLoopSearchTool;
 struct OversizedPlannedLoopSearchTool;
 struct PlannedLoopFetchTool;
 struct MetadataOnlyPlannedLoopFetchTool;
@@ -100,6 +101,15 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
     assert!(contract["planner"]["prompt"]
         .as_str()
         .is_some_and(|prompt| prompt.contains("direct_then_review")));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("same language as the query")));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("primary or authoritative evidence")));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("directly fetchable")));
     assert!(contract["planner"]["output_schema"]["properties"]["search_queries"].is_object());
     assert_eq!(
         contract["planner"]["output_schema"]["properties"]["search_queries"]["maxItems"],
@@ -115,6 +125,17 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         .is_none());
     assert!(contract["planner"]["output_schema"]["properties"]["seed_urls"].is_object());
     assert!(contract["planner"]["output_schema"]["properties"]["budget"].is_object());
+    assert_eq!(
+        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
+            ["synthesis_timeout_secs"]["minimum"],
+        120
+    );
+    assert_eq!(
+        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
+            ["synthesis_timeout_secs"]["maximum"],
+        180
+    );
+    assert_eq!(contract["hard_caps"]["synthesis_timeout_ms"], 180_000);
     assert_eq!(
         contract["checker"]["output_schema"]["properties"]["next_action"]["enum"],
         serde_json::json!(["none", "direct_retrieval", "maker"])
@@ -157,11 +178,13 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
             && source.contains("hasReusableEvidencePackage")
             && source.contains("Public web gaps use direct_retrieval")
             && source.contains("Findings state facts")
+            && source.contains("A URL or search snippet alone is not evidence")
+            && source.contains("exact supporting source URL")
             && !source.contains("researchPlan.answer_shape ===")
     }));
     assert_eq!(
         contract["checker"]["output_schema"]["properties"]["report_summary"]["maxLength"],
-        1200
+        4800
     );
 }
 
@@ -187,6 +210,18 @@ fn llm_plan_controls_synthesis_timeout_and_visible_status() {
     assert!(status.contains("briefing"), "{status}");
     assert!(status.contains("≤2 iterations"), "{status}");
     assert!(status.contains("75s retrieval"), "{status}");
+
+    for (planned, expected) in [(5_000, 10_000), (180_000, 180_000), (250_000, 180_000)] {
+        let output = serde_json::json!({
+            "plan": { "budget": { "synthesis_timeout_ms": planned } }
+        })
+        .to_string();
+        assert_eq!(
+            super::deep_research_planned_synthesis_timeout_ms(Some(&output)),
+            Some(expected),
+            "the host must preserve the planner clock up to the shared synthesis ceiling"
+        );
+    }
 }
 
 fn parallel_output(structured: serde_json::Value) -> ToolOutput {
@@ -373,6 +408,13 @@ impl Tool for PlannedLoopTaskTool {
             })));
         }
         if schema_name == "deep_research_check" || description.starts_with("Check evidence") {
+            anyhow::ensure!(
+                args.get("max_repair_attempts")
+                    .or_else(|| args.pointer("/tasks/0/max_repair_attempts"))
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(1),
+                "checker must receive one bounded structured-output repair attempt"
+            );
             let checker_index = self.checker_calls.fetch_add(1, Ordering::SeqCst);
             let prompt = args
                 .get("prompt")
@@ -383,7 +425,12 @@ impl Tool for PlannedLoopTaskTool {
                 prompt.contains("Workflow budget:"),
                 "checker prompt must expose the remaining workflow budget"
             );
-            if self.checker_failure {
+            anyhow::ensure!(
+                prompt.contains("A URL or search snippet alone is not evidence")
+                    && prompt.contains("exact supporting source URL"),
+                "checker prompt must enforce source quality and claim traceability"
+            );
+            if self.checker_failure_at == Some(checker_index) {
                 return Ok(ToolOutput::error("simulated checker timeout"));
             }
             if checker_index == 0 && self.first_checker_delay_ms > 0 {
@@ -721,6 +768,67 @@ impl Tool for PlannedLoopSearchTool {
                     "published_date": "2026-07-12",
                     "engines": ["fixture"]
                 }
+            ])
+            .to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for NoisyPlannedLoopSearchTool {
+    fn name(&self) -> &str {
+        "noisy_planned_web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Returns useful pages mixed with non-document web assets."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let result = |title: &str, url: &str| {
+            serde_json::json!({
+                "title": title,
+                "url": url,
+                "content": "Adaptive loop current status is operational.",
+                "published_date": "2026-07-12",
+                "engines": ["fixture"]
+            })
+        };
+        Ok(ToolOutput::success(
+            serde_json::json!([
+                result(
+                    "Adaptive loop status avatar",
+                    "https://avatars.githubusercontent.com/u/42"
+                ),
+                result(
+                    "Adaptive loop status avatar",
+                    "https://secure.gravatar.com/avatar/abc"
+                ),
+                result(
+                    "Adaptive loop status profile",
+                    "https://api.github.com/users/example"
+                ),
+                result(
+                    "Adaptive loop status archive",
+                    "https://downloads.example/adaptive-loop-current-status.zip"
+                ),
+                result(
+                    "Adaptive loop status font",
+                    "https://cdn.example/adaptive-loop-current-status.woff2"
+                ),
+                result("Official current status", "https://official.example/status"),
+                result(
+                    "Independent current status",
+                    "https://independent.example/status"
+                )
             ])
             .to_string(),
         ))

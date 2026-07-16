@@ -20,7 +20,7 @@ static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
 static LOCAL_FILE_SERVER: OnceLock<std::io::Result<LocalFileServer>> = OnceLock::new();
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_REGISTERED_LOCAL_FILES: usize = 128;
-const MAX_LOCAL_VIEW_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_LOCAL_VIEW_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Default)]
 struct LocalFileRegistry {
@@ -56,6 +56,42 @@ pub(crate) fn local_file_view(path: &Path) -> std::io::Result<ViewSpec> {
         height: Some(820),
         embeddable: true,
     })
+}
+
+/// Build a no-auth RemoteUI popup for a validated local image attachment.
+pub(crate) fn local_image_view(
+    path: &Path,
+    pixel_width: u32,
+    pixel_height: u32,
+) -> std::io::Result<ViewSpec> {
+    let path = path.canonicalize()?;
+    let url = local_file_server()?.register(path)?;
+    let (width, height) = image_window_size(pixel_width, pixel_height);
+    Ok(ViewSpec {
+        url,
+        width: Some(width),
+        height: Some(height),
+        embeddable: true,
+    })
+}
+
+fn image_window_size(pixel_width: u32, pixel_height: u32) -> (u32, u32) {
+    const MIN_WIDTH: u32 = 360;
+    const MIN_HEIGHT: u32 = 240;
+    const MAX_WIDTH: u32 = 1200;
+    const MAX_HEIGHT: u32 = 820;
+
+    let pixel_width = pixel_width.max(1);
+    let pixel_height = pixel_height.max(1);
+    let scale = (MAX_WIDTH as f64 / pixel_width as f64)
+        .min(MAX_HEIGHT as f64 / pixel_height as f64)
+        .min(1.0);
+    let width = (pixel_width as f64 * scale).round() as u32;
+    let height = (pixel_height as f64 * scale).round() as u32;
+    (
+        width.clamp(MIN_WIDTH, MAX_WIDTH),
+        height.clamp(MIN_HEIGHT, MAX_HEIGHT),
+    )
 }
 
 #[derive(Debug)]
@@ -264,6 +300,7 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
         Some("webp") => "image/webp",
         _ => "application/octet-stream",
     }
@@ -484,22 +521,23 @@ pub(crate) fn prime_webview_lookup() {
 /// Build the `a3s-webview` argv for a view (url + optional size). Split out from
 /// spawning so the spec→argv mapping is unit-testable.
 fn webview_args(spec: &ViewSpec) -> Vec<String> {
-    let local_report = is_local_report_view(spec);
+    let local_view = is_local_file_view(spec);
+    let title = if is_local_image_view(spec) {
+        "A3S Code · Image preview"
+    } else if is_local_report_view(spec) {
+        "A3S Research Report"
+    } else {
+        "A3S RemoteUI"
+    };
     let mut args = vec![
         "--url".to_string(),
         spec.url.clone(),
         "--title".to_string(),
-        if local_report {
-            "A3S Research Report"
-        } else {
-            "A3S RemoteUI"
-        }
-        .to_string(),
+        title.to_string(),
     ];
-    if local_report {
-        // Local report HTML is model-generated content. Never seed OS access or
-        // refresh tokens into its localStorage, even though it is served over a
-        // loopback HTTP origin for the native webview.
+    if local_view {
+        // Local content must never receive OS access or refresh tokens, even
+        // though it is served over a loopback HTTP origin for the native view.
         args.push("--no-auth".to_string());
     }
     if let Some(w) = spec.width {
@@ -513,8 +551,23 @@ fn webview_args(spec: &ViewSpec) -> Vec<String> {
     args
 }
 
-pub(crate) fn is_local_report_view(spec: &ViewSpec) -> bool {
+pub(crate) fn is_local_file_view(spec: &ViewSpec) -> bool {
     local_view_requires_no_auth(&spec.url)
+}
+
+pub(crate) fn is_local_image_view(spec: &ViewSpec) -> bool {
+    is_local_file_view(spec) && url_has_image_extension(&spec.url)
+}
+
+pub(crate) fn is_local_report_view(spec: &ViewSpec) -> bool {
+    is_local_file_view(spec) && !is_local_image_view(spec)
+}
+
+fn url_has_image_extension(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|extension| path.to_ascii_lowercase().ends_with(extension))
 }
 
 fn local_view_requires_no_auth(url: &str) -> bool {
@@ -530,7 +583,7 @@ fn local_view_requires_no_auth(url: &str) -> bool {
 /// Open a view's url in the native `a3s-webview` window (detached), falling back
 /// to the system browser when the helper is not installed or cannot launch.
 /// The webview inherits the process env so OS views can read `A3S_OS_TOKEN` for
-/// auth; registered local reports receive `--no-auth` and ignore it.
+/// auth; registered local files receive `--no-auth` and ignore it.
 pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<OpenedWith> {
     Command::new(webview_bin())
         .args(webview_args(spec))
@@ -702,6 +755,46 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--no-auth"), "{args:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_image_view_uses_preview_title_mime_and_bounded_size() {
+        let dir = std::env::temp_dir().join(format!(
+            "a3s-local-image-view-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("clipboard image.png");
+        std::fs::write(&path, b"png-test-body").unwrap();
+
+        let spec = local_image_view(&path, 2400, 1600).unwrap();
+        assert!(is_local_file_view(&spec));
+        assert!(is_local_image_view(&spec));
+        assert!(!is_local_report_view(&spec));
+        assert_eq!((spec.width, spec.height), (Some(1200), Some(800)));
+
+        let response = fetch_local_test_url(&spec.url);
+        assert!(response.contains("Content-Type: image/png"), "{response}");
+        assert!(response.contains("png-test-body"), "{response}");
+
+        let args = webview_args(&spec);
+        assert!(args.iter().any(|arg| arg == "--no-auth"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "A3S Code · Image preview"),
+            "{args:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_preview_window_keeps_small_images_clickable() {
+        assert_eq!(image_window_size(32, 16), (360, 240));
+        assert_eq!(image_window_size(800, 600), (800, 600));
     }
 
     fn fetch_local_test_url(url: &str) -> String {

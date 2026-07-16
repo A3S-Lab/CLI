@@ -63,14 +63,16 @@ impl App {
     pub(crate) fn overlay_rows_below(&self) -> usize {
         overlay_rows_below_for(
             self.input_height(),
+            self.composer_attachment_rows(),
             self.bottom_pane_projection().dynamic_rows(),
         )
     }
 }
 
-fn overlay_rows_below_for(input_height: u16, dynamic_rows: usize) -> usize {
+fn overlay_rows_below_for(input_height: u16, attachment_rows: usize, dynamic_rows: usize) -> usize {
     usize::from(FIXED_ROWS_EXCLUDING_INPUT.saturating_sub(1))
         .saturating_add(usize::from(input_height))
+        .saturating_add(attachment_rows)
         .saturating_add(dynamic_rows)
 }
 
@@ -117,12 +119,13 @@ mod tests {
 
     #[test]
     fn overlay_rows_preserve_the_default_composer_position() {
-        assert_eq!(overlay_rows_below_for(1, 0), 5);
+        assert_eq!(overlay_rows_below_for(1, 0, 0), 5);
     }
 
     #[test]
     fn overlay_rows_follow_multiline_input_and_dynamic_bottom_surfaces() {
-        assert_eq!(overlay_rows_below_for(3, 0), 7);
-        assert_eq!(overlay_rows_below_for(3, 4), 11);
+        assert_eq!(overlay_rows_below_for(3, 0, 0), 7);
+        assert_eq!(overlay_rows_below_for(3, 0, 4), 11);
+        assert_eq!(overlay_rows_below_for(3, 2, 4), 13);
     }
 }

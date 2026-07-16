@@ -86,7 +86,7 @@ async fn empty_default_search_uses_one_bounded_brave_fallback_per_planned_query(
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     let default_calls = Arc::new(AtomicUsize::new(0));

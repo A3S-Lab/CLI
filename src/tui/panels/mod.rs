@@ -26,6 +26,8 @@ pub(crate) mod kb;
 pub(crate) mod okf;
 
 // Local workspace.
+#[path = "workspace/code_intelligence.rs"]
+pub(crate) mod code_intelligence;
 #[path = "workspace/files.rs"]
 mod files;
 #[path = "workspace/goal_engineering.rs"]

@@ -62,6 +62,7 @@ fn osc8_open(target: &str) -> String {
     format!("\x1b]8;;{target}\x1b\\")
 }
 
+#[derive(Clone)]
 pub(crate) struct Markdown {
     width: usize,
 }
@@ -381,6 +382,7 @@ impl Default for Markdown {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct StreamingMarkdown {
     /// Every delta exactly as received. This is the source of truth for final
     /// rendering and width changes; rendered terminal rows never feed back
@@ -415,7 +417,7 @@ pub(crate) struct StreamingMarkdown {
     rerender_count: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct QueuedStableLine {
     line: String,
     enqueued_at: Instant,
@@ -660,7 +662,7 @@ enum StreamChunkingMode {
     CatchUp,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct AdaptiveStreamChunking {
     mode: StreamChunkingMode,
     below_exit_threshold_since: Option<Instant>,
@@ -1580,6 +1582,10 @@ fn design_fg_for_ansi(code: u16) -> Color {
         _ => TN_FG,
     }
 }
+
+#[cfg(test)]
+#[path = "streaming_markdown_baseline.rs"]
+mod streaming_markdown_baseline;
 
 #[cfg(test)]
 mod tests {

@@ -1,3 +1,5 @@
+const SYNTHESIS_CONTINUATION_MARKER: &str = "[synthesis]";
+
 #[cfg(test)]
 pub(crate) struct InitialPrompt<'a> {
     pub(crate) query: &'a str,
@@ -41,14 +43,25 @@ pub(crate) struct RepairPrompt<'a> {
 
 pub(crate) fn report_contract() -> String {
     "Report delivery contract:\n\
-     - Return one finished Markdown report directly in the final response. Do not call tools, \
-       write files, emit JSON, wrap the report in a code fence, or print an `A3S_RESEARCH_VIEW` \
-       marker. The host validates the response, writes `report.md`, renders the standalone \
-       `index.html`, and appends the trusted view marker atomically after the model turn.\n\
+     - Complete the host's one structured report object: `markdown` is the finished human-facing \
+       report, `editorial` is its private semantic coverage map, and `presentation` is its private \
+       report-master design lock. Do not call tools, write files, wrap Markdown in a code fence, \
+       emit JSON outside the requested object, or print an `A3S_RESEARCH_VIEW` marker. The host \
+       validates the object, writes `report.md`, safely renders the standalone `index.html`, and \
+       appends the trusted view marker atomically after the model turn.\n\
      - Apply the content principles of `report-master`: lead with a one-sentence answer, choose a \
        coherent pyramid, narrative, instructional, or briefing structure, and make every section \
        advance the thesis. Depth means explaining why, how, comparisons, change, implications, \
        and remaining uncertainty—not recounting the research workflow.\n\
+     - Treat every `report_context.plan.tracks` entry as a semantic coverage obligation. For each \
+       track, either answer it or explicitly bound it. Material findings must connect claim, \
+       evidence, interpretation, consequence, and a real counterpoint or uncertainty where \
+       applicable. Keep each private coverage field to one or two precise sentences and spend the \
+       writing budget on `markdown`; the map is not a second report. Reuse the full plan-track \
+       name when practical, or an unambiguous semantic label. Do not replace analysis with source \
+       counts, evidence-track counts, or process commentary.\n\
+     - Match the query's language in the title, headings, prose, tables, limitations, confidence, \
+       and source annotations. Keep proper names and source quotations in their original language.\n\
      - Write for a human reader. Use specific subject-matter headings, edited prose, and only the \
        smallest useful tables, timelines, or mappings. Avoid generic audit headings, repetitive \
        card-like lists, raw evidence ledgers, source-count boasting, and boilerplate.\n\
@@ -56,9 +69,16 @@ pub(crate) fn report_contract() -> String {
        Sources section. Separate supported findings, contradictions, limitations, and confidence \
        without letting methodology dominate the answer. Never invent a claim, quote, date, URL, \
        or citation.\n\
-     - The host-owned renderer applies the report-master visual system, responsive composition, \
-       accessibility, print styles, and deterministic artifact writes. Concentrate this turn on \
-       accurate, substantive content and stop after the Markdown report."
+     - Citation targets may be copied only from `evidence_items[].sources[].url_or_path`. A URL \
+       that appears only inside a summary, quotation, key-evidence string, title, limitation, or \
+       prior report is not an accepted source anchor; keep its readable label if useful, but do \
+       not emit that URL as a link, citation, or Sources entry.\n\
+     - Choose `presentation` only after understanding the argument, audience, evidence shape, and \
+       reading occasion. Communication mode and visual archetype are independent decisions. Give \
+       a content-specific rationale; do not select a style from subject keywords, reuse a default \
+       look, or generate arbitrary HTML/CSS. The host-owned renderer applies only approved \
+       report-master layouts, palettes, responsive behavior, accessibility, print styles, and \
+       deterministic artifact writes."
         .to_string()
 }
 
@@ -73,9 +93,10 @@ fn closed_evidence_contract() -> &'static str {
        operations. This includes `web_search`, `web_fetch`, `batch`, `bash`, `git`, `task`, \
        `parallel_task`, `program`, `dynamic_workflow`, and `runtime`. Do not use a skill or another \
        agent to bypass this boundary.\n\
-     - No tools are available in this phase. Return the complete report as Markdown in the model \
-       response; the host owns artifact persistence and rendering. Do not inspect workspace files \
-       or retry evidence collection.\n\
+     - No tools are available in this phase. Return the complete report as Markdown in the \
+       structured object's `markdown` field and complete its editorial and presentation fields; \
+       the host owns artifact persistence and rendering. Do not inspect workspace files or retry \
+       evidence collection.\n\
      - Use only claims and original source URLs or paths present in the supplied evidence package. \
        Never invent claims, sources, URLs, quotations, or citations.\n\
      - If evidence is incomplete, promptly return a finished, polished degraded report that \
@@ -110,7 +131,8 @@ pub(crate) fn verification_prompt(params: VerificationPrompt<'_>) -> String {
     let query = params.query;
     let report_target = params.report_target;
     format!(
-        "DeepResearch verification layer {next_layer}/{total_layers} for:\n{query}\n\n\
+        "{SYNTHESIS_CONTINUATION_MARKER}\n\
+         DeepResearch verification layer {next_layer}/{total_layers} for:\n{query}\n\n\
          Check only the existing answer and target below. Evidence collection is closed; do not \
          retrieve or delegate new evidence. If the answer, citations, and source traceability are \
          already complete, reply exactly DONE. Otherwise return the corrected Markdown report; \
@@ -176,7 +198,8 @@ pub(crate) fn synthesis_prompt(params: SynthesisPrompt<'_>) -> String {
     let metadata = params.metadata;
     let report_target = params.report_target;
     format!(
-        "Synthesize the deep-research answer for the query below.\n\n\
+        "{SYNTHESIS_CONTINUATION_MARKER}\n\
+         Synthesize the deep-research answer for the query below.\n\n\
          Start the report immediately: do not narrate, expose a draft, or spend a turn \
          explaining the plan. Build a concise evidence-backed structure, return the complete \
          Markdown report in this response, then stop. \
@@ -237,7 +260,8 @@ pub(crate) fn recovery_prompt(params: RecoveryPrompt<'_>) -> String {
     let report_target = params.report_target;
     let evidence_scope = params.evidence_scope;
     format!(
-        "Recover the report deliverable for the deep-research task below; do not recover evidence.\n\n\
+        "{SYNTHESIS_CONTINUATION_MARKER}\n\
+         Recover the report deliverable for the deep-research task below; do not recover evidence.\n\n\
          The host evidence preflight failed before usable synthesis evidence was \
          gathered. Evidence collection is closed. Use only the error, diagnostics, and any partial \
          evidence supplied here. {recovery_path}\n\n\
@@ -261,7 +285,7 @@ pub(crate) fn repair_prompt(params: RepairPrompt<'_>) -> String {
     let closed_evidence_contract = closed_evidence_contract();
     let runtime_note = if params.os_runtime {
         "OS Runtime was selected for the evidence-gathering phase. Preserve any \
-         useful OS Runtime evidence; return the corrected Markdown report for host rendering."
+         useful OS Runtime evidence in the corrected structured report object."
     } else {
         "OS Runtime was not selected. Use the local evidence already gathered by \
          the host."
@@ -273,7 +297,8 @@ pub(crate) fn repair_prompt(params: RepairPrompt<'_>) -> String {
     let report_target = params.report_target;
     let evidence_scope = params.evidence_scope;
     format!(
-        "Repair the DeepResearch report content for the query below.\n\n\
+        "{SYNTHESIS_CONTINUATION_MARKER}\n\
+         Repair the DeepResearch report content for the query below.\n\n\
          The previous synthesis did not produce valid completed report content. Evidence \
          collection is closed. Return a corrected complete Markdown report \
          using only the gathered evidence, diagnostics, and prior synthesis supplied below. Keep \
@@ -283,7 +308,9 @@ pub(crate) fn repair_prompt(params: RepairPrompt<'_>) -> String {
          or lines such as `● Searched ...` / `● Ran ...`; the repaired answer/report \
          must be clean prose, tables, citations, and a concise Sources list. Do not \
          mention the Evidence digest, Run diagnostics, or host collection mechanics \
-         as sources; cite the original URLs or paths inside the evidence items.\n\n\
+         as sources. Treat the validation feedback in Previous synthesis text as mandatory: \
+         remove every rejected citation or other named defect instead of repeating it. Cite only \
+         `evidence_items[].sources[].url_or_path` values.\n\n\
          {runtime_note}\n\n\
          {evidence_scope}\n\n\
          {closed_evidence_contract}\n\n\
@@ -293,8 +320,10 @@ pub(crate) fn repair_prompt(params: RepairPrompt<'_>) -> String {
          Run diagnostics:\n```json\n{metadata}\n```\n\n\
          {report_contract}\n\n\
          {report_target}\n\n\
-         Return only the corrected Markdown report. Do not call tools and do not print an \
-         `A3S_RESEARCH_VIEW` marker; the host persists and validates the final content."
+         Return only the corrected structured report object: replace `markdown` with the complete \
+         corrected report and rebuild `editorial` and `presentation` so they agree with it. Do not \
+         call tools or print an `A3S_RESEARCH_VIEW` marker; the host persists and validates the \
+         final content."
     )
 }
 
@@ -307,7 +336,15 @@ mod tests {
     const REPORT_TARGET: &str = "The host will persist `.a3s/research/test/report.md` and \
         render `.a3s/research/test/index.html`; do not write files or print a marker.";
 
+    fn assert_synthesis_continuation(prompt: &str) {
+        assert!(
+            prompt.starts_with("[synthesis]\n"),
+            "closed-evidence report prompts must disable framework auto-delegation: {prompt}"
+        );
+    }
+
     fn assert_closed_report_phase(prompt: &str) {
+        assert_synthesis_continuation(prompt);
         assert!(
             prompt.contains("Evidence collection is closed."),
             "{prompt}"
@@ -354,6 +391,15 @@ mod tests {
         );
         assert!(prompt.contains("fail or degrade explicitly"), "{prompt}");
         assert!(prompt.contains("report-master"), "{prompt}");
+        assert!(prompt.contains("query's language"), "{prompt}");
+        assert!(
+            prompt.contains("`evidence_items[].sources[].url_or_path`"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("is not an accepted source anchor"),
+            "{prompt}"
+        );
         assert!(
             prompt.contains("lead with a one-sentence answer"),
             "{prompt}"
@@ -386,6 +432,20 @@ mod tests {
     }
 
     #[test]
+    fn verification_is_a_synthesis_continuation() {
+        let prompt = verification_prompt(VerificationPrompt {
+            next_layer: 2,
+            total_layers: 3,
+            query: "test query",
+            report_target: REPORT_TARGET,
+        });
+
+        assert_synthesis_continuation(&prompt);
+        assert!(prompt.contains("Evidence collection is closed"), "{prompt}");
+        assert!(prompt.contains("do not call tools"), "{prompt}");
+    }
+
+    #[test]
     fn synthesis_is_a_closed_evidence_report_phase() {
         let prompt = synthesis_prompt(SynthesisPrompt {
             query: "test query",
@@ -404,6 +464,26 @@ mod tests {
         );
         assert!(!prompt.contains("use targeted recovery tools"), "{prompt}");
         assert!(!prompt.contains("Tool-loop guard"), "{prompt}");
+    }
+
+    #[test]
+    fn repair_makes_validation_feedback_and_source_anchor_boundary_mandatory() {
+        let prompt = repair_prompt(RepairPrompt {
+            query: "test query",
+            os_runtime: false,
+            workflow_digest: r#"{"evidence_items":[]}"#,
+            metadata: "{}",
+            prior: "Validation feedback (must be corrected): remove https://unseen.example/source",
+            report_target: REPORT_TARGET,
+            evidence_scope: CONFLICTING_SCOPE,
+        });
+
+        assert_closed_report_phase(&prompt);
+        assert!(
+            prompt.contains("remove every rejected citation"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("https://unseen.example/source"), "{prompt}");
     }
 
     #[test]

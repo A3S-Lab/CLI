@@ -4,9 +4,7 @@ async function run(ctx, inputs) {
   const loopContract = input.loop_contract && typeof input.loop_contract === "object"
     ? input.loop_contract
     : {};
-  // Scheduled JavaScript steps receive their own input rather than the root
-  // workflow input. Carry an explicit marker across that boundary so a
-  // production engineered loop can never fall back to a legacy collector.
+  // Preserve the engineered-loop marker across scheduled-step inputs.
   const engineeredLoopEnabled = input.engineered_loop_enabled === true ||
     Boolean(loopContract.planner && loopContract.checker);
   const stepOutputs = inputs.step_outputs && typeof inputs.step_outputs === "object"
@@ -95,13 +93,6 @@ async function run(ctx, inputs) {
       : 0,
     observedCheckerLatencyMs
   );
-  // The planner owns the semantic synthesis clock. Runtime event timing adds
-  // provider-specific evidence about how long one structured model turn takes.
-  // Preserve the larger signal so a slow model cannot spend the entire
-  // workflow window on makers and strand the independent checker at the hard
-  // deadline. The observed structured turn already includes provider latency;
-  // adding another fixed margin here can incorrectly veto an LLM-planned
-  // direct_then_maker route before any maker runs.
   const checkerReserveMs = Math.min(
     configuredCheckerTimeoutMs,
     Math.max(5000, checkerLatencyBaseMs)
@@ -121,12 +112,6 @@ async function run(ctx, inputs) {
     }
     return 0;
   };
-  // The direct-retrieval budget is an active web-search/fetch clock. Maker
-  // children already own a separate per-task timeout, so charging their wall
-  // time here would exhaust two independent clocks at once and prevent the
-  // checker from routing one bounded direct recovery after a slow maker pass.
-  // Planner, maker, checker, orchestration, and synthesis waits do not consume
-  // this clock; the workflow and run fuses still bound total wall time.
   const retrievalBudgetUsedMs = Object.entries(stepOutputs).reduce(
     (total, [stepId, output]) => total + retrievalStepElapsedMs(stepId, output),
     0
@@ -167,11 +152,6 @@ async function run(ctx, inputs) {
     ? Math.floor(requestedLocalMaxSteps)
     : 2;
   const localTaskMaxSteps = Math.max(1, Math.min(2, localMaxSteps));
-  // `parallel_task.max_steps` limits provider turns, while the planner's
-  // maker budget limits evidence-tool rounds. Reserve one additional provider
-  // turn for schema finalization so a child that used its last evidence call
-  // is not cancelled before v5.2.2 can validate or repair its structured
-  // result.
   const localAgentTurnBudget = Math.max(2, localTaskMaxSteps + 1);
   const localEvidenceToolBudget = localTaskMaxSteps;
   const requestedLocalParallelTaskTimeoutMs = Number(
@@ -180,12 +160,6 @@ async function run(ctx, inputs) {
   const localParallelTaskTimeoutMs = Number.isFinite(requestedLocalParallelTaskTimeoutMs) && requestedLocalParallelTaskTimeoutMs > 0
     ? Math.max(1000, Math.floor(requestedLocalParallelTaskTimeoutMs))
     : 90 * 1000;
-  // Prompt-based structured output packs planned tracks into one bounded
-  // maker request. When direct evidence already exists, that maker performs
-  // one source-grounded structured turn without another tool call. Use the
-  // v5.2.2 planner event's observed structured-turn latency as its reserve,
-  // bounded by the independent child timeout. Native structured/tool modes
-  // keep the conservative child timeout because they may perform tool rounds.
   const promptMakerReserveMs = Math.min(
     localParallelTaskTimeoutMs,
     checkerReserveMs
@@ -230,10 +204,6 @@ async function run(ctx, inputs) {
     ? researchPlan.execution_route
     : "direct_only";
   const directWebFirst = executionRoute !== "maker_first";
-  // New plans use direct_then_review so public-source investigations need only
-  // one post-retrieval structured turn. Keep direct_then_maker executable for
-  // event-sourced runs created by older releases, but never synthesize it into
-  // a new plan here.
   const directThenMaker = Boolean(
     researchPlan && researchPlan.execution_route === "direct_then_maker"
   );
@@ -508,6 +478,13 @@ async function run(ctx, inputs) {
     isStringArray(value.contradictions, true) &&
     isNonEmptyString(value.confidence) &&
     isStringArray(value.gaps, true);
+  const isLowValueSourceUrl = (url) => {
+    const lower = String(url || "").toLowerCase();
+    return /\.(?:7z|aac|apk|avi|avif|bin|bmp|bz2|deb|dmg|eot|exe|flac|gif|gz|ico|iso|jpe?g|m4a|mov|mp3|mp4|mpeg|msi|ogg|opus|otf|pkg|png|rar|rpm|svg|tar|tiff?|tgz|ttf|wasm|wav|webm|webp|woff2?|xz|zip)\/?$/.test(lower) ||
+      /^https?:\/\/(?:[^/]+\.)?gravatar\.com(?:\/|$)/.test(lower) ||
+      /^https?:\/\/avatars\.githubusercontent\.com(?:\/|$)/.test(lower) ||
+      /^https?:\/\/api\.github\.com\/users\/[^/]+\/?$/.test(lower);
+  };
   const normalizeObservedSource = (value) => {
     let text = String(value || "").trim();
     if (!text) {
@@ -522,9 +499,10 @@ async function run(ctx, inputs) {
           (scheme === "http" && authority.endsWith(":80"))) {
         authority = authority.replace(/:\d+$/, "");
       }
-      return match
+      const normalized = match
         ? `${scheme}://${authority}${match[3] || "/"}`
         : "";
+      return isLowValueSourceUrl(normalized) ? "" : normalized;
     }
     return text.replace(/\\/g, "/").replace(/^\.\//, "");
   };
@@ -752,6 +730,13 @@ async function run(ctx, inputs) {
       .join(compoundParts.length > 1 ? "(?:[-_.]|\\s)+" : "");
     return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, "i").test(haystack);
   };
+  const isPrimarySourceUrl = (value) => {
+    const url = String(value || "").toLowerCase();
+    return /https?:\/\/(?:api\.)?github\.com\//.test(url) ||
+      /https?:\/\/(?:www\.)?(?:crates\.io|docs\.rs|rustsec\.org)\//.test(url) ||
+      /https?:\/\/[^/]+\.(?:gov|edu)(?:[/:]|$)/.test(url) ||
+      /\/(?:releases?|changelog|advisories|security|documentation|docs)(?:[/?#]|$)/.test(url);
+  };
   const sourceRelevanceScore = (item) => {
     const terms = queryTerms();
     if (terms.length === 0) {
@@ -786,6 +771,11 @@ async function run(ctx, inputs) {
     }
     if (/(^|[./_-])(docs?|blog|download|developer|github|official)([./_-]|$)/.test(url)) {
       score += 3;
+    }
+    if (isPrimarySourceUrl(url)) {
+      score += wantsPrimarySource ? 10 : 5;
+    } else if (wantsPrimarySource && /\/(?:articles?|blog|comparisons?|tutorials?|guides?)(?:[/?#]|$)/.test(url)) {
+      score -= 4;
     }
     if (/wikipedia\.org/.test(url) && !/wiki|wikipedia/.test(String(query || "").toLowerCase())) {
       score -= wantsPrimarySource ? 12 : 2;

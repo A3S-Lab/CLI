@@ -117,6 +117,13 @@ pub(crate) struct RuntimeProjection {
     subagent_task: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RuntimeToolCheckpoint {
+    tools: BTreeMap<String, ToolRun>,
+    tool_order: Vec<String>,
+    latest_input_tool_id: Option<String>,
+}
+
 impl RuntimeProjection {
     pub(crate) fn clear_turn_entities(&mut self) {
         self.tools.clear();
@@ -153,6 +160,20 @@ impl RuntimeProjection {
         self.tools.clear();
         self.tool_order.clear();
         self.latest_input_tool_id = None;
+    }
+
+    pub(crate) fn checkpoint_tools(&self) -> RuntimeToolCheckpoint {
+        RuntimeToolCheckpoint {
+            tools: self.tools.clone(),
+            tool_order: self.tool_order.clone(),
+            latest_input_tool_id: self.latest_input_tool_id.clone(),
+        }
+    }
+
+    pub(crate) fn restore_tools(&mut self, checkpoint: RuntimeToolCheckpoint) {
+        self.tools = checkpoint.tools;
+        self.tool_order = checkpoint.tool_order;
+        self.latest_input_tool_id = checkpoint.latest_input_tool_id;
     }
 
     pub(crate) fn clear_subagent_entities(&mut self) {
@@ -916,6 +937,28 @@ mod tests {
         projection.set_subagent_task("DeepResearch market map");
         projection.clear_turn_entities();
         assert_eq!(projection.subagent_task(), None);
+    }
+
+    #[test]
+    fn tool_checkpoint_removes_only_the_retried_attempt_draft() {
+        let mut projection = RuntimeProjection::default();
+        projection.prepare_tool("completed".into(), "read".into());
+        projection.end_tool(
+            "completed",
+            "read".into(),
+            Some(serde_json::json!({"file_path": "src/lib.rs"})),
+            "done".into(),
+            0,
+        );
+        let checkpoint = projection.checkpoint_tools();
+
+        projection.prepare_tool("partial".into(), "bash".into());
+        projection.push_tool_input(Some("partial"), r#"{"command":"car"#);
+        projection.restore_tools(checkpoint);
+
+        assert!(projection.tool("completed").is_some());
+        assert!(projection.tool("partial").is_none());
+        assert_eq!(projection.active_tool_count(), 0);
     }
 
     #[test]

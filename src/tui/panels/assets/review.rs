@@ -311,20 +311,19 @@ impl App {
                     TN_PURPLE,
                     &Style::new().bold().render(&label),
                 )));
+                self.queue.push(
+                    SYNTHETIC_TURN_PRIORITY,
+                    Queued {
+                        text: prompt,
+                        display: label,
+                        images: Vec::new(),
+                        runtime_expectation: None,
+                        deep_research: None,
+                    },
+                );
                 if self.state == State::Idle {
-                    // No attachments: pending pasted images belong to the
-                    // user's next chat message, not this synthetic fix prompt.
-                    return self.start_stream_inner(prompt, label, true, false, false);
+                    return self.drain_queue();
                 }
-                self.seq += 1;
-                self.queue.push(Queued {
-                    prio: 1,
-                    seq: self.seq,
-                    text: prompt,
-                    display: label,
-                    runtime_expectation: None,
-                    deep_research: None,
-                });
                 self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
             }
             _ => {}

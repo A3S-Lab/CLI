@@ -21,13 +21,26 @@ pub fn discover(paths: &ComponentPaths) -> anyhow::Result<ComponentReport> {
         .map(|receipt| (receipt.component_id.as_str(), receipt))
         .collect::<BTreeMap<_, _>>();
 
-    let mut components = Vec::new();
+    let mut components: Vec<ComponentState> = Vec::new();
     for spec in catalog::all() {
-        components.push(discover_registered(
-            spec,
-            by_id.get(spec.id).copied(),
-            paths,
-        )?);
+        let component = match spec.distribution {
+            Distribution::Delegated { parent } => {
+                let id = ComponentId::parse(spec.id)?;
+                let parent_id = ComponentId::parse(parent)?;
+                if let Some(parent_state) = components
+                    .iter()
+                    .find(|component| component.id == parent_id)
+                {
+                    discover_delegated_from_parent(spec, id, &parent_id, parent, Some(parent_state))
+                } else {
+                    discover_delegated(spec, id, parent, paths)
+                }
+            }
+            Distribution::Bundled | Distribution::Release(_) => {
+                discover_registered(spec, by_id.get(spec.id).copied(), paths)?
+            }
+        };
+        components.push(component);
     }
 
     if let Some(use_binary) = components
@@ -222,7 +235,16 @@ fn discover_product(
         if !is_executable(&candidate) {
             continue;
         }
-        let version = probe_version(&candidate).ok();
+        let version_probe = probe_version(&candidate);
+        let (version, message) = match version_probe {
+            Ok(version) => (Some(version), None),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "The discovered executable failed the version probe: {error}"
+                )),
+            ),
+        };
         let system = is_system_path(&candidate);
         return ComponentState {
             id,
@@ -247,7 +269,7 @@ fn discover_product(
             }),
             version,
             path: Some(candidate),
-            message: None,
+            message,
         };
     }
 
@@ -291,9 +313,19 @@ fn discover_delegated(
     let parent_state = catalog::find(&parent_id).and_then(|parent_spec| {
         discover_registered(parent_spec, parent_receipt.as_ref(), paths).ok()
     });
+    discover_delegated_from_parent(spec, id, &parent_id, parent, parent_state.as_ref())
+}
+
+fn discover_delegated_from_parent(
+    spec: &ComponentSpec,
+    id: ComponentId,
+    parent_id: &ComponentId,
+    parent: &str,
+    parent_state: Option<&ComponentState>,
+) -> ComponentState {
     let Some(parent_binary) = parent_state
-        .filter(ComponentState::is_ready)
-        .and_then(|state| state.path)
+        .filter(|state| state.is_ready())
+        .and_then(|state| state.path.as_deref())
     else {
         return ComponentState {
             id,
@@ -310,8 +342,8 @@ fn discover_delegated(
         };
     };
 
-    let relative = id.relative_to(&parent_id).unwrap_or(id.as_str());
-    match delegated_status(&parent_binary, relative, &id) {
+    let relative = id.relative_to(parent_id).unwrap_or(id.as_str());
+    match delegated_status(parent_binary, relative, &id) {
         Ok(state) => state,
         Err(error) => ComponentState {
             id,
@@ -520,7 +552,7 @@ mod tests {
             .find(|component| component.id.as_str() == "use")
             .unwrap();
         assert_eq!(use_state.presence, Presence::External);
-        assert_eq!(use_state.health, Health::Ready);
+        assert_eq!(use_state.health, Health::Ready, "{use_state:#?}");
         assert_eq!(use_state.version.as_deref(), Some("0.1.0"));
         assert_eq!(report.external_tools.len(), 1);
         assert_eq!(report.external_tools[0].command, "unknown");
@@ -532,19 +564,20 @@ mod tests {
     fn trusted_use_parent_reports_dynamic_extension_children() {
         let temp = tempfile::tempdir().unwrap();
         let bin = temp.path().join("bin");
+        let probe_log = temp.path().join("probe.log");
         std::fs::create_dir_all(&bin).unwrap();
-        write_executable(
-            &bin.join("a3s-use"),
-            r#"#!/bin/sh
+        let use_script = r#"#!/bin/sh
 if [ "$1" = "--version" ]; then
+  printf 'probe\n' >> '__PROBE_LOG__'
   printf 'a3s-use 0.1.0\n'
 elif [ "$1" = "component" ] && [ "$2" = "list" ]; then
   printf '%s\n' '{"schemaVersion":1,"ok":true,"data":{"components":[{"id":"browser"},{"id":"acme/slack","description":"Slack domain","presence":"managed","health":"ready","trust":"local-explicit","version":"1.2.0","path":"/tmp/slack"}]}}'
 else
   exit 1
 fi
-"#,
-        );
+"#
+        .replace("__PROBE_LOG__", probe_log.to_string_lossy().as_ref());
+        write_executable(&bin.join("a3s-use"), &use_script);
         let mut paths = ComponentPaths::for_test(temp.path());
         paths.path_env = Some(std::env::join_paths([&bin]).unwrap());
         std::fs::create_dir_all(paths.current_exe.parent().unwrap()).unwrap();
@@ -555,12 +588,17 @@ fi
             .components
             .iter()
             .find(|component| component.id.as_str() == "use/acme/slack")
-            .unwrap();
+            .unwrap_or_else(|| panic!("dynamic extension missing from {report:#?}"));
         assert_eq!(extension.kind, ComponentKind::Extension);
         assert_eq!(extension.presence, Presence::Managed);
         assert_eq!(extension.health, Health::Ready);
         assert_eq!(extension.trust, Trust::LocalExplicit);
         assert_eq!(extension.version.as_deref(), Some("1.2.0"));
+        assert_eq!(
+            std::fs::read_to_string(probe_log).unwrap(),
+            "probe\n",
+            "one report must reuse the authoritative parent probe"
+        );
     }
 
     #[test]

@@ -1,7 +1,158 @@
 //! TUI session construction, resume, and terminal launch flow.
 
 use super::*;
+use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
+
+const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
+
+pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
+    let tui_dir = workspace.join(".a3s/tui");
+    let canonical = tui_dir.join("sessions");
+    let legacy = workspace.join(".a3s/tui-sessions");
+    if !canonical.exists() && legacy.exists() {
+        // Same-filesystem rename preserves all session IDs atomically. If it
+        // fails, keep using the legacy store so existing history remains visible.
+        let _ = std::fs::create_dir_all(&tui_dir);
+        if std::fs::rename(&legacy, &canonical).is_err() {
+            return legacy;
+        }
+    }
+    canonical
+}
+
+fn sort_saved_sessions_by_recency(saved: &mut [(String, i64)]) {
+    saved.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| right.0.cmp(&left.0)));
+}
+
+async fn saved_sessions_by_recency(
+    store: &dyn a3s_code_core::store::SessionStore,
+) -> anyhow::Result<Vec<(String, i64)>> {
+    let mut saved = Vec::new();
+    for id in store
+        .list()
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to list saved sessions: {error}"))?
+    {
+        match store.load(&id).await {
+            Ok(Some(session)) => saved.push((id, session.updated_at)),
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, %id, "skipping unreadable saved session"),
+        }
+    }
+    sort_saved_sessions_by_recency(&mut saved);
+    Ok(saved)
+}
+
+fn configured_model_preference_from_session(
+    session: &a3s_code_core::store::SessionData,
+    configured_models: &[String],
+) -> Option<ModelSelectionPreference> {
+    configured_model_preference(persisted_model_from_session(session), configured_models)
+}
+
+fn persisted_model_from_session(session: &a3s_code_core::store::SessionData) -> Option<String> {
+    session
+        .llm_config
+        .as_ref()
+        .map(|config| format!("{}/{}", config.provider, config.model))
+        .or_else(|| session.model_name.clone())
+}
+
+fn configured_model_preference(
+    model: Option<String>,
+    configured_models: &[String],
+) -> Option<ModelSelectionPreference> {
+    let model = model?;
+    configured_models
+        .iter()
+        .any(|configured| configured == &model)
+        .then_some(ModelSelectionPreference {
+            source: ModelSelectionSource::Config,
+            model,
+        })
+}
+
+fn preference_matches_persisted_model(
+    preference: &ModelSelectionPreference,
+    persisted_model: &str,
+) -> bool {
+    let selected_model = preference
+        .source
+        .account_provider()
+        .map(|provider| provider.canonical_model(&preference.model))
+        .unwrap_or_else(|| preference.model.clone());
+    selected_model == persisted_model
+}
+
+fn render_resume_command(session_id: &str, color: bool) -> String {
+    let command = format!("a3s code resume {session_id}");
+    if color {
+        Style::new().fg(ACCENT).bold().render(&command)
+    } else {
+        command
+    }
+}
+
+fn render_resume_hint(session_id: &str, color: bool) -> String {
+    let command = render_resume_command(session_id, color);
+    format!("\n  session saved · resume it with:  {command}\n")
+}
+
+fn stdout_color_enabled(context: &InvocationContext) -> bool {
+    match context.output.color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => context.terminal.stdout,
+    }
+}
+
+fn stderr_color_enabled(context: &InvocationContext) -> bool {
+    match context.output.color {
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+        ColorMode::Auto => context.terminal.stderr,
+    }
+}
+
+async fn shutdown_code_intelligence(provider: Arc<LocalCodeIntelligence>) -> bool {
+    // Keep polling one owned shutdown future across both bounds. Recreating the
+    // future after a timeout is not cancellation-safe because shutdown may
+    // already have taken registry entries or marked a runtime as stopping.
+    let mut shutdown = tokio::spawn(async move {
+        provider.shutdown().await;
+    });
+    match tokio::time::timeout(CODE_INTELLIGENCE_SHUTDOWN_GRACE, &mut shutdown).await {
+        Ok(Ok(())) => return true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Code Intelligence shutdown task failed");
+            return false;
+        }
+        Err(_) => {}
+    }
+
+    tracing::warn!(
+        timeout = ?CODE_INTELLIGENCE_SHUTDOWN_GRACE,
+        "Code Intelligence graceful shutdown timed out; waiting for cleanup to settle"
+    );
+    match tokio::time::timeout(CODE_INTELLIGENCE_SHUTDOWN_SETTLE, &mut shutdown).await {
+        Ok(Ok(())) => return true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Code Intelligence shutdown task failed while settling");
+            return false;
+        }
+        Err(_) => {}
+    }
+
+    tracing::warn!(
+        timeout = ?CODE_INTELLIGENCE_SHUTDOWN_SETTLE,
+        "Code Intelligence cleanup did not settle before host exit; aborting the shutdown task"
+    );
+    shutdown.abort();
+    let _ = shutdown.await;
+    false
+}
 
 fn push_resumed_text_entry(transcript: &mut Transcript, role: &str, pending: &mut String) {
     if pending.trim().is_empty() {
@@ -151,39 +302,22 @@ pub(crate) async fn run_in(
     let default_model = code_config.default_model.clone();
     let os_config = code_config.os.clone();
 
-    // Persistent, resumable session: stored under <cwd>/.a3s/tui/sessions and
-    let tui_dir = std::path::Path::new(&workspace).join(".a3s/tui");
-    let mut store_dir = tui_dir.join("sessions");
-    let legacy_store_dir = std::path::Path::new(&workspace).join(".a3s/tui-sessions");
-    if !store_dir.exists() && legacy_store_dir.exists() {
-        // Same-filesystem rename preserves all session IDs atomically. If it
-        // fails, keep using the legacy store so existing history remains visible.
-        let _ = std::fs::create_dir_all(&tui_dir);
-        if std::fs::rename(&legacy_store_dir, &store_dir).is_err() {
-            store_dir = legacy_store_dir;
-        }
-    }
+    // Persistent, resumable session: stored under <cwd>/.a3s/tui/sessions.
+    let store_dir = resolve_tui_session_store_dir(std::path::Path::new(&workspace));
     // keyed by a fixed id, so relaunching in the same directory continues the
     // conversation. Falls back to a fresh session when none exists yet.
 
     // Resolve `resume`: verify the id exists (else show what's available), or
     // pick the most recent session when no id was given.
+    let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
+        a3s_code_core::store::FileSessionStore::new(&store_dir)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("failed to open session store {store_dir:?}: {error}")
+            })?,
+    );
     if resuming {
-        let mut saved: Vec<(String, std::time::SystemTime)> = std::fs::read_dir(&store_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter_map(|e| {
-                let p = e.path();
-                if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                    return None;
-                }
-                let id = p.file_stem()?.to_str()?.to_string();
-                let mtime = e.metadata().ok()?.modified().ok()?;
-                Some((id, mtime))
-            })
-            .collect();
-        saved.sort_by_key(|e| std::cmp::Reverse(e.1)); // newest first
+        let saved = saved_sessions_by_recency(store.as_ref()).await?;
         match &explicit_id {
             Some(id) if !saved.iter().any(|(s, _)| s == id) => {
                 eprintln!("a3s: session '{id}' not found in {}", store_dir.display());
@@ -211,11 +345,24 @@ pub(crate) async fn run_in(
         }
     }
 
-    let store: Arc<dyn a3s_code_core::store::SessionStore> = Arc::new(
-        a3s_code_core::store::FileSessionStore::new(&store_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to open session store {store_dir:?}: {e}"))?,
-    );
+    let tui_session_state = match load_tui_session_state(Path::new(&workspace), &session_id) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                %session_id,
+                "ignoring unreadable per-session TUI state"
+            );
+            None
+        }
+    };
+    if let Some(theme) = tui_session_state
+        .as_ref()
+        .and_then(TuiSessionState::theme_index)
+    {
+        SYNTAX_THEME.store(theme, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // Enable HITL confirmation so file-modifying tools (write/edit/patch) can
     // run — they require a confirmation manager, otherwise they fail with
     // "requires confirmation but no HITL confirmation manager is configured".
@@ -242,8 +389,60 @@ pub(crate) async fn run_in(
             claude_dirs.push(dir);
         }
     }
-    let restored_model_selection =
-        restore_model_selection(&models, os_session.as_ref(), session_id.as_str());
+    let initial_effort = tui_session_state
+        .as_ref()
+        .and_then(TuiSessionState::effort_index)
+        .or_else(load_tui_effort_preference)
+        .unwrap_or(DEFAULT_TUI_EFFORT_INDEX);
+    let sidecar_model_preference = tui_session_state
+        .as_ref()
+        .and_then(|state| state.model.clone());
+    // Legacy sessions predate the TUI sidecar. Their Core snapshot can still
+    // identify a config.acl model, or guard an account-backed global fallback
+    // by requiring the model identity to match this exact session.
+    let persisted_session = if resuming && sidecar_model_preference.is_none() {
+        match store.load(&session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    %session_id,
+                    "could not inspect the persisted model while restoring TUI settings"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let persisted_model = persisted_session
+        .as_ref()
+        .and_then(persisted_model_from_session);
+    let persisted_config_model_preference = persisted_session
+        .as_ref()
+        .and_then(|session| configured_model_preference_from_session(session, &models));
+    let global_model_preference = load_model_selection_preference().filter(|preference| {
+        persisted_model.as_deref().is_none_or(|persisted_model| {
+            preference_matches_persisted_model(preference, persisted_model)
+        })
+    });
+    let model_preference = sidecar_model_preference
+        .or(persisted_config_model_preference)
+        .or(global_model_preference);
+    let restored_model_selection = model_preference.as_ref().and_then(|preference| {
+        restore_model_selection(
+            preference,
+            &models,
+            os_session.as_ref(),
+            session_id.as_str(),
+            initial_effort,
+        )
+    });
+    let launch_model_source = restored_model_selection
+        .as_ref()
+        .and(model_preference.as_ref())
+        .map(|preference| preference.source)
+        .unwrap_or(ModelSelectionSource::Config);
     let launch_model = restored_model_selection
         .as_ref()
         .map(|(model, _)| model.clone())
@@ -255,7 +454,6 @@ pub(crate) async fn run_in(
         .as_ref()
         .map(|m| ctx_limit_for_model(&model_ctx, m))
         .unwrap_or_else(|| resolve_ctx_limit(None));
-    let initial_effort = load_tui_effort_preference().unwrap_or(DEFAULT_TUI_EFFORT_INDEX);
     let initial_budget = budget_plan_for_effort_index(
         initial_effort,
         Some(context_limit),
@@ -263,6 +461,7 @@ pub(crate) async fn run_in(
     );
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
+    deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -295,7 +494,18 @@ pub(crate) async fn run_in(
     let initial_manifest = workspace_manifest.snapshot();
     let initial_files = initial_manifest.file_paths();
     let workspace_manifest_rx = Arc::new(Mutex::new(workspace_manifest.subscribe()));
-    let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend);
+    let code_intelligence_file_system: Arc<dyn a3s_code_core::workspace::WorkspaceFileSystem> =
+        manifest_backend.clone();
+    let code_intelligence = LocalCodeIntelligence::start(
+        "a3s-code-tui",
+        Arc::clone(&workspace_manifest),
+        code_intelligence_file_system,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("failed to start Code Intelligence: {error}"))?;
+    let provider: Arc<dyn WorkspaceCodeIntelligence> = code_intelligence.clone();
+    let workspace_services = WorkspaceServices::local_with_manifest_backend(manifest_backend)
+        .with_code_intelligence(provider);
     let auto_compact_threshold = auto_compact_threshold_for_path(&config_path);
     let session = match agent
         .resume_session_async(
@@ -510,6 +720,15 @@ pub(crate) async fn run_in(
 
     remote_ui::prime_webview_lookup();
 
+    let initial_mode = tui_session_state
+        .as_ref()
+        .map(TuiSessionState::mode)
+        .unwrap_or(Mode::Default);
+    let initial_paused_goal = tui_session_state
+        .as_ref()
+        .and_then(|state| state.paused_goal.clone());
+    let initial_goal_resume_prompt = initial_paused_goal.as_ref().map(|_| 0);
+
     let mut app = App {
         session,
         active_session: Arc::clone(&active_session),
@@ -519,6 +738,7 @@ pub(crate) async fn run_in(
         confirmation,
         deep_research_report_tool_gate,
         session_id: session_id.clone(),
+        model_source: launch_model_source,
         session_rebuild_seq: 0,
         session_rebuild_pending: None,
         models,
@@ -554,8 +774,11 @@ pub(crate) async fn run_in(
         deep_research_workflow: DeepResearchWorkflowSnapshot::default(),
         deep_research_outcome: DeepResearchRunOutcome::Active,
         pending_deep_research_report_repair_prompt: None,
+        pending_deep_research_synthesis: None,
         deep_research_stream_timeout_token: 0,
         stream_start_token: 0,
+        interrupted_stream_start_token: None,
+        pending_interrupted_continuation: None,
         runtime_expectation: None,
         effort: initial_effort,
         effort_panel: None,
@@ -590,12 +813,15 @@ pub(crate) async fn run_in(
         pending_ctx: None,
         loop_continuation: false,
         turn_text: String::new(),
+        llm_turn_checkpoint: None,
         selection: None,
         last_workflow: None,
         pending_images: Vec::new(),
         goal: None,
         goal_since: None,
         goal_run: None,
+        paused_goal: initial_paused_goal,
+        goal_resume_prompt: initial_goal_resume_prompt,
         goal_generation: 0,
         pending_goal_failure: None,
         deep_research_goal_restore: None,
@@ -613,7 +839,7 @@ pub(crate) async fn run_in(
         ultracode_synthesis_inflight: false,
         ultracode_synthesis_used: false,
         instructions,
-        workspace_manifest,
+        workspace_manifest: Arc::clone(&workspace_manifest),
         workspace_manifest_rx,
         workspace_services,
         gradient_until: None,
@@ -640,6 +866,7 @@ pub(crate) async fn run_in(
         rx: None,
         stream_join: None,
         stream_join_settling: false,
+        stream_settle_abort: None,
         host_tool_abort: None,
         host_progress_inflight: false,
         host_tool_call_id: None,
@@ -654,9 +881,12 @@ pub(crate) async fn run_in(
         stream_started: None,
         blink_tick: 0,
         anim: 0,
-        mode: Mode::Default,
-        queue: BinaryHeap::new(),
-        seq: 0,
+        mode: initial_mode,
+        queue: PriorityQueue::new(),
+        active_queued_turn: None,
+        active_queued_turn_token: None,
+        queue_retry_generation: 0,
+        queue_retry_attempt: 0,
         running_task: None,
         plan: PlanProjection::default(),
         ide: None,
@@ -742,7 +972,7 @@ pub(crate) async fn run_in(
         app.replace_session(s);
     }
 
-    ProgramBuilder::new(app)
+    let program_result = ProgramBuilder::new(app)
         .with_alt_screen()
         // Capture mouse input so wheel/trackpad scrolling works in the alternate
         // screen. Drag-copy is app-owned: on release we write the selected text to
@@ -750,7 +980,15 @@ pub(crate) async fn run_in(
         .with_mouse_support()
         .with_fps(120)
         .run()
-        .await?;
+        .await;
+
+    // A synchronous manifest scan cannot be cancelled by aborting only its
+    // async owner. Stop discovery while this host still has an explicit
+    // manifest handle, before the rest of the workspace services are dropped.
+    workspace_manifest.shutdown();
+    let code_intelligence_shutdown_complete =
+        shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
+    program_result?;
 
     let final_session = active_session
         .lock()
@@ -766,6 +1004,7 @@ pub(crate) async fn run_in(
     // freshly-installed binary. Use PATH `a3s` (brew repointed its symlink to
     // the new version); current_exe() is the OLD version's path.
     if UPGRADE_ON_EXIT.load(std::sync::atomic::Ordering::Relaxed) {
+        let resume_command = render_resume_command(&session_id, stderr_color_enabled(context));
         let latest = LATEST
             .lock()
             .ok()
@@ -774,6 +1013,13 @@ pub(crate) async fn run_in(
         match crate::update::perform_upgrade(&latest) {
             Ok(bin) => {
                 let restart_args = ["code", "resume", session_id.as_str()];
+                if !code_intelligence_shutdown_complete {
+                    eprintln!(
+                        "\n✓ updated to a3s {latest}; automatic restart was skipped because \
+                         background cleanup did not settle. Resume manually with: {resume_command}\n"
+                    );
+                    return Ok(());
+                }
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
@@ -788,7 +1034,7 @@ pub(crate) async fn run_in(
                         eprintln!("⚠  fallback restart via {} failed: {err}", exe.display());
                     }
                     eprintln!(
-                        "✓ updated to a3s {latest}; resume manually with: a3s code resume {session_id}\n"
+                        "✓ updated to a3s {latest}; resume manually with: {resume_command}\n"
                     );
                 }
                 #[cfg(not(unix))]
@@ -796,10 +1042,10 @@ pub(crate) async fn run_in(
                     match std::process::Command::new(&bin).args(restart_args).status() {
                         Ok(status) if status.success() => {}
                         Ok(status) => eprintln!(
-                            "\n⚠  updated, but restart exited with status {status}; resume manually with: a3s code resume {session_id}\n"
+                            "\n⚠  updated, but restart exited with status {status}; resume manually with: {resume_command}\n"
                         ),
                         Err(err) => eprintln!(
-                            "\n⚠  updated, but restart failed: {err}; resume manually with: a3s code resume {session_id}\n"
+                            "\n⚠  updated, but restart failed: {err}; resume manually with: {resume_command}\n"
                         ),
                     }
                 }
@@ -813,6 +1059,79 @@ pub(crate) async fn run_in(
     }
 
     // Session is auto-saved under this directory; show how to come back.
-    println!("\n  session saved · resume it with:  a3s code resume {session_id}\n");
+    print!(
+        "{}",
+        render_resume_hint(&session_id, stdout_color_enabled(context))
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use a3s_tui::style::strip_ansi;
+
+    #[test]
+    fn resume_hint_highlights_the_complete_command_when_color_is_enabled() {
+        let rendered = render_resume_hint("session-42", true);
+
+        assert!(rendered.contains("\x1b["));
+        assert!(strip_ansi(&rendered).contains("a3s code resume session-42"));
+    }
+
+    #[test]
+    fn resume_hint_is_plain_when_color_is_disabled() {
+        let rendered = render_resume_hint("session-42", false);
+
+        assert!(!rendered.contains("\x1b["));
+        assert!(rendered.contains("a3s code resume session-42"));
+    }
+
+    #[test]
+    fn saved_sessions_are_sorted_newest_first_with_a_stable_tie_breaker() {
+        let mut saved = vec![
+            ("older".to_string(), 10),
+            ("same-a".to_string(), 20),
+            ("newest".to_string(), 30),
+            ("same-b".to_string(), 20),
+        ];
+
+        sort_saved_sessions_by_recency(&mut saved);
+
+        assert_eq!(
+            saved.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+            ["newest", "same-b", "same-a", "older"]
+        );
+    }
+
+    #[test]
+    fn legacy_session_config_model_beats_an_unrelated_global_choice() {
+        let configured = vec!["openai/session-model".to_string()];
+        let preference =
+            configured_model_preference(Some("openai/session-model".to_string()), &configured)
+                .expect("configured session model");
+
+        assert_eq!(preference.source, ModelSelectionSource::Config);
+        assert_eq!(preference.model, "openai/session-model");
+        assert!(
+            configured_model_preference(Some("codex/other".to_string()), &configured).is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_account_preference_must_match_the_sessions_persisted_model() {
+        let preference = ModelSelectionPreference {
+            source: ModelSelectionSource::Codex,
+            model: "gpt-session".to_string(),
+        };
+
+        assert!(preference_matches_persisted_model(
+            &preference,
+            "gpt-session"
+        ));
+        assert!(!preference_matches_persisted_model(
+            &preference,
+            "gpt-another-session"
+        ));
+    }
 }

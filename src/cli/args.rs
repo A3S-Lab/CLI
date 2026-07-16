@@ -98,6 +98,16 @@ pub(crate) enum RootCommand {
     Top(TopArgs),
     /// Run the registered A3S Box product.
     Box(ProxyArgs),
+    /// Manage a multi-service application with A3S Box.
+    Compose(ProxyArgs),
+    /// Create and start the current Compose application.
+    Up(ProxyArgs),
+    /// Stop and remove the current Compose application.
+    Down(ProxyArgs),
+    /// List services in the current Compose application.
+    Ps(ProxyArgs),
+    /// View logs from the current Compose application.
+    Logs(ProxyArgs),
     /// Run the registered A3S Bench product.
     Bench(ProxyArgs),
     /// Run the registered A3S Search product.

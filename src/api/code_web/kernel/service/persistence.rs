@@ -2,12 +2,13 @@ use super::maintenance::message_text;
 use super::text::truncate_chars;
 use super::*;
 
-struct RestoredSessionState {
+struct RestoredSessionInstall {
     messages: Vec<Value>,
     metadata: CodeWebSessionMetadata,
     controls: CodeWebSessionControls,
     context: CodeWebSessionContext,
     settings: CodeWebSessionSettings,
+    llm_client: Arc<dyn a3s_code_core::LlmClient>,
 }
 
 impl KernelService {
@@ -166,7 +167,7 @@ impl KernelService {
         metadata.workspace = session.workspace().display().to_string();
         self.install_restored_session(
             Arc::clone(&session),
-            RestoredSessionState {
+            RestoredSessionInstall {
                 messages: messages.clone(),
                 metadata: metadata.clone(),
                 controls: controls.clone(),
@@ -175,8 +176,8 @@ impl KernelService {
                     ..CodeWebSessionContext::default()
                 },
                 settings: settings.clone(),
+                llm_client,
             },
-            llm_client,
         )
         .await;
         if created_fresh {
@@ -296,14 +297,14 @@ impl KernelService {
             activate_session_runtime(session.as_ref(), &runtime);
             self.install_restored_session(
                 Arc::clone(&session),
-                RestoredSessionState {
+                RestoredSessionInstall {
                     messages,
                     metadata,
                     controls,
                     context: CodeWebSessionContext::default(),
                     settings,
+                    llm_client,
                 },
-                llm_client,
             )
             .await;
             if let Err(error) = session.save().await {
@@ -326,12 +327,18 @@ impl KernelService {
     async fn install_restored_session(
         &self,
         session: Arc<AgentSession>,
-        mut restored: RestoredSessionState,
-        llm_client: Arc<dyn a3s_code_core::LlmClient>,
+        restored: RestoredSessionInstall,
     ) {
+        let RestoredSessionInstall {
+            messages,
+            metadata,
+            controls,
+            mut context,
+            settings,
+            llm_client,
+        } = restored;
         let session_id = session.session_id().to_string();
-        restored.context.set_llm_client(llm_client);
-        self.state.attach_use_session(Arc::clone(&session));
+        context.set_llm_client(llm_client);
         self.state
             .sessions
             .lock()
@@ -341,27 +348,27 @@ impl KernelService {
             .messages
             .lock()
             .await
-            .insert(session_id.clone(), restored.messages);
+            .insert(session_id.clone(), messages);
         self.state
             .session_metadata
             .lock()
             .await
-            .insert(session_id.clone(), restored.metadata);
+            .insert(session_id.clone(), metadata);
         self.state
             .session_controls
             .lock()
             .await
-            .insert(session_id.clone(), restored.controls);
+            .insert(session_id.clone(), controls);
         self.state
             .session_contexts
             .lock()
             .await
-            .insert(session_id.clone(), restored.context);
+            .insert(session_id.clone(), context);
         self.state
             .session_settings
             .lock()
             .await
-            .insert(session_id, restored.settings);
+            .insert(session_id, settings);
     }
 
     pub(super) async fn persist_session_state(&self, session_id: &str) -> BootResult<()> {
@@ -578,10 +585,18 @@ fn settings_from_core_session(session: Option<&SessionData>) -> CodeWebSessionSe
         .or_else(|| session.model_name.clone());
     let permission_mode = if session
         .config
-        .confirmation_policy
+        .permission_policy
         .as_ref()
         .is_some_and(|policy| !policy.enabled)
+        || session
+            .config
+            .confirmation_policy
+            .as_ref()
+            .is_some_and(|policy| !policy.enabled)
     {
+        // Compatibility for legacy sessions that encoded auto mode by disabling
+        // one or both safety layers. New sessions keep both layers enabled and
+        // persist the explicit web setting separately.
         "auto"
     } else {
         "default"

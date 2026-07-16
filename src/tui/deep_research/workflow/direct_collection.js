@@ -10,13 +10,14 @@
     const visible = visibleEvidenceText(text);
     if (
       /search code,\s*repositories,\s*users,\s*issues,\s*pull requests/i.test(text) ||
-      /(?:data-color-mode|:focus-visible|--color-|headermenu|github copilot|write better code with ai)/i.test(text) ||
+      /(?:data-color-mode|:focus-visible|--color-|headermenu|github copilot|write better code with ai|__next_f\.push|__next_data__|webpack|datalayer|adsbygoogle|google_ad_client)/i.test(text) ||
       /^(?:provide feedback|sign in|sign up|navigation menu|appearance settings|search or jump to)$/i.test(visible)
     ) {
       return true;
     }
     const markdownLinks = text.match(/\[[^\]]+\]\([^)]+\)/g) || [];
-    return markdownLinks.length >= 2 && visibleEvidenceText(text).length < 80;
+    return (markdownLinks.length >= 2 && visible.length < 80) ||
+      (markdownLinks.length >= 3 && visible.length < 240 && !/[.!?。！？]/.test(visible));
   };
   const evidenceFocusTerms = (value) => {
     const stopwords = new Set([
@@ -40,7 +41,6 @@
       .map((line) => line.replace(/\s+/g, " ").trim())
       .filter((line) =>
         line.length >= 30 &&
-        !/^[\\]*[\[{]/.test(line) &&
         !/"@context"\s*:\s*"https?:\\?\/\\?\/schema\.org|"@type"\s*:\s*"(?:BlogPosting|Article|WebPage)"/i.test(line) &&
         !/function\s*\(|var\s+className=|document\.cookie|mw\.config|client-js|<script/i.test(line) &&
         !isPageChromeLine(line)
@@ -85,6 +85,23 @@
       url = url.slice(0, -1);
     }
     return url;
+  };
+  const evidenceFetchUrl = (value) => {
+    const url = String(value || "").trim();
+    let match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/blob\/([^/?#]+)\/(.+?)(?:[?#].*)?$/i);
+    if (match) {
+      return `https://raw.githubusercontent.com/${match[1]}/${match[2]}/${match[3]}/${match[4]}`;
+    }
+    match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/releases\/?(?:[?#].*)?$/i);
+    if (match) {
+      return `https://api.github.com/repos/${match[1]}/${match[2]}/releases?per_page=10`;
+    }
+    match = url.match(/^https:\/\/github\.com\/([^/?#]+)\/([^/?#]+)\/?(?:[?#].*)?$/i);
+    if (match) {
+      return `https://api.github.com/repos/${match[1]}/${match[2]}`;
+    }
+    match = url.match(/^https:\/\/(?:www\.)?crates\.io\/crates\/([^/?#]+)\/?(?:[?#].*)?$/i);
+    return match ? `https://crates.io/api/v1/crates/${match[1]}` : url;
   };
   const parseSearchResults = (output) => {
     const text = typeof output === "string" ? output : "";
@@ -358,9 +375,6 @@
         candidates.push({
           title,
           index,
-          // Every candidate comes from the same URL. Including that URL made
-          // all headings tie and selected the first GitHub chrome heading
-          // (for example "Provide feedback") instead of the page title.
           score: sourceRelevanceScore({ title, url: "", content: "" })
         });
       }
@@ -413,16 +427,16 @@
     if (!quote) {
       return null;
     }
+    const provenance = item.engines.length > 0 ? ` via ${item.engines.join(", ")}` : "";
+    const authority = isPrimarySourceUrl(safeUrl) ? "Primary or authoritative source" : "Independent web source";
     return {
       title: title || item.url,
       url_or_path: safeUrl,
       quote_or_fact: quote,
       date: normalizedSourceDate(item.date) || undefined,
       reliability: fetched
-        ? (item.engines.length > 0
-          ? `Found via ${item.engines.join(", ")}; page text fetched.`
-          : "Page text fetched.")
-        : (item.engines.length > 0 ? `Found via ${item.engines.join(", ")}.` : "Search result only.")
+        ? `${authority}; page text fetched${provenance}.`
+        : `${authority}; search result only${provenance}.`
     };
   };
   const directWebResearchFromSources = (searches, fetches, collectionErrors) => {

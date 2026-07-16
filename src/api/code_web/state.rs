@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use a3s_code_core::{Agent, AgentSession, CodeConfig, LlmClient};
+use a3s_code_core::{Agent, AgentSession, CodeConfig, LlmClient, WorkspaceServices};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::session_store::{CodeWebSessionMetadata, CodeWebSessionRepository};
+use super::workspace_backend_cache::WorkspaceBackendCache;
 use crate::budget::DEFAULT_CODE_WEB_EFFORT_ID;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +81,7 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) session_contexts: Mutex<HashMap<String, CodeWebSessionContext>>,
     pub(in crate::api::code_web) session_settings: Mutex<HashMap<String, CodeWebSessionSettings>>,
     use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
+    workspace_backends: WorkspaceBackendCache,
 }
 
 impl CodeWebState {
@@ -106,6 +108,7 @@ impl CodeWebState {
             session_contexts: Mutex::new(HashMap::new()),
             session_settings: Mutex::new(HashMap::new()),
             use_registry: RwLock::new(None),
+            workspace_backends: WorkspaceBackendCache::default(),
         }
     }
 
@@ -139,6 +142,13 @@ impl CodeWebState {
         if let Some(registry) = registry {
             registry.detach_session(session_id).await;
         }
+    }
+
+    pub(in crate::api::code_web) async fn workspace_services_for(
+        &self,
+        workspace: &std::path::Path,
+    ) -> anyhow::Result<Arc<WorkspaceServices>> {
+        self.workspace_backends.services_for(workspace).await
     }
 
     pub(in crate::api::code_web) fn code_config_snapshot(&self) -> CodeConfig {
@@ -176,6 +186,7 @@ impl CodeWebState {
                 );
             }
         }
+        self.workspace_backends.close().await;
         self.agent.close().await;
     }
 }

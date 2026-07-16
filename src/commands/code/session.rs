@@ -2,54 +2,65 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
+use a3s_code_core::store::{FileSessionStore, SessionData, SessionStore};
 use anyhow::{bail, Context};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::json;
 
 use crate::cli::args::{CodeSessionArgs, CodeSessionCommand, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::render_value;
+use crate::tui::{resolve_tui_session_store_dir, tui_session_state_path};
 
-pub(super) fn run(args: CodeSessionArgs, context: &InvocationContext) -> anyhow::Result<()> {
+pub(super) async fn run(args: CodeSessionArgs, context: &InvocationContext) -> anyhow::Result<()> {
     match args.command {
-        CodeSessionCommand::List => list(context),
-        CodeSessionCommand::Show(args) => show(&args.session_id, context),
-        CodeSessionCommand::Export(args) => export(&args.session_id, args.output_file, context),
-        CodeSessionCommand::Delete(args) => delete(&args.session_id, args.yes, context),
+        CodeSessionCommand::List => list(context).await,
+        CodeSessionCommand::Show(args) => show(&args.session_id, context).await,
+        CodeSessionCommand::Export(args) => {
+            export(&args.session_id, args.output_file, context).await
+        }
+        CodeSessionCommand::Delete(args) => delete(&args.session_id, args.yes, context).await,
     }
 }
 
-fn list(context: &InvocationContext) -> anyhow::Result<()> {
+async fn list(context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
-    let root = session_root(context);
-    let mut sessions = Vec::new();
-    if root.is_dir() {
-        for entry in std::fs::read_dir(&root)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+    let (root, store) = open_session_store(context).await?;
+    let mut saved = Vec::new();
+    for id in store
+        .list()
+        .await
+        .context("could not list saved sessions")?
+    {
+        let session = match store.load(&id).await {
+            Ok(Some(session)) => session,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(%error, %id, "skipping unreadable saved session");
                 continue;
             }
-            let metadata = entry.metadata()?;
-            let Some(id) = path.file_stem().and_then(|value| value.to_str()) else {
-                continue;
-            };
-            let modified_at_ms = metadata
-                .modified()
-                .ok()
-                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-                .map(|value| value.as_millis());
-            sessions.push(json!({
-                "id": id,
-                "bytes": metadata.len(),
-                "modifiedAtMs": modified_at_ms,
-            }));
-        }
+        };
+        let path = stored_session_path(&root, &id);
+        let metadata = std::fs::metadata(&path).with_context(|| {
+            format!(
+                "could not inspect session `{id}` stored at {}",
+                path.display()
+            )
+        })?;
+        let modified_at_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+            .map(|value| value.as_millis());
+        let value = json!({
+            "id": id,
+            "bytes": metadata.len(),
+            "modifiedAtMs": modified_at_ms,
+        });
+        saved.push((session.updated_at, id, value));
     }
-    sessions.sort_by(|left, right| {
-        right["modifiedAtMs"]
-            .as_u64()
-            .cmp(&left["modifiedAtMs"].as_u64())
-    });
+    saved.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    let sessions: Vec<_> = saved.into_iter().map(|(_, _, value)| value).collect();
     render_value(
         output,
         "code.session.list",
@@ -71,10 +82,12 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
     )
 }
 
-fn show(id: &str, context: &InvocationContext) -> anyhow::Result<()> {
+async fn show(id: &str, context: &InvocationContext) -> anyhow::Result<()> {
+    validate_id(id)?;
     let output = context.output_mode();
-    let path = session_path(id, context)?;
-    let document = read_document(&path)?;
+    let (root, store) = open_session_store(context).await?;
+    let document = load_document(&store, id).await?;
+    let path = stored_session_path(&root, id);
     render_value(
         output,
         "code.session.show",
@@ -88,19 +101,20 @@ fn show(id: &str, context: &InvocationContext) -> anyhow::Result<()> {
     )
 }
 
-fn export(
+async fn export(
     id: &str,
     output_file: Option<PathBuf>,
     context: &InvocationContext,
 ) -> anyhow::Result<()> {
+    validate_id(id)?;
     let output = context.output_mode();
-    let path = session_path(id, context)?;
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("could not read session `{id}` from {}", path.display()))?;
+    let (_, store) = open_session_store(context).await?;
+    let document = load_document(&store, id).await?;
     if let Some(destination) = output_file.map(|path| context.resolve_path(path)) {
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let bytes = serde_json::to_vec_pretty(&document)?;
         std::fs::write(&destination, &bytes)?;
         return render_value(
             output,
@@ -109,8 +123,6 @@ fn export(
             || println!("exported session `{id}` to {}", destination.display()),
         );
     }
-    let document: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("session `{id}` is not valid JSON"))?;
     if output == OutputMode::Human {
         println!("{}", serde_json::to_string_pretty(&document)?);
         Ok(())
@@ -124,10 +136,15 @@ fn export(
     }
 }
 
-fn delete(id: &str, yes: bool, context: &InvocationContext) -> anyhow::Result<()> {
+async fn delete(id: &str, yes: bool, context: &InvocationContext) -> anyhow::Result<()> {
+    validate_id(id)?;
     let output = context.output_mode();
-    let path = session_path(id, context)?;
-    if !path.is_file() {
+    let (_, store) = open_session_store(context).await?;
+    if !store
+        .exists(id)
+        .await
+        .with_context(|| format!("could not inspect session `{id}`"))?
+    {
         bail!("session `{id}` does not exist in this workspace");
     }
     if !yes {
@@ -146,7 +163,11 @@ fn delete(id: &str, yes: bool, context: &InvocationContext) -> anyhow::Result<()
             bail!("session deletion cancelled");
         }
     }
-    std::fs::remove_file(&path).with_context(|| format!("could not delete session `{id}`"))?;
+    store
+        .delete(id)
+        .await
+        .with_context(|| format!("could not delete session `{id}`"))?;
+    remove_tui_session_state(&context.directory, id)?;
     render_value(
         output,
         "code.session.delete",
@@ -155,13 +176,48 @@ fn delete(id: &str, yes: bool, context: &InvocationContext) -> anyhow::Result<()
     )
 }
 
-fn session_root(context: &InvocationContext) -> PathBuf {
-    context.directory.join(".a3s/tui-sessions")
+async fn open_session_store(
+    context: &InvocationContext,
+) -> anyhow::Result<(PathBuf, FileSessionStore)> {
+    let root = resolve_session_root(context);
+    let store = FileSessionStore::new(&root)
+        .await
+        .with_context(|| format!("could not open session store {}", root.display()))?;
+    Ok((root, store))
 }
 
-fn session_path(id: &str, context: &InvocationContext) -> anyhow::Result<PathBuf> {
-    validate_id(id)?;
-    Ok(session_root(context).join(format!("{id}.json")))
+/// Keep command-side discovery identical to the TUI launch path: prefer the
+/// canonical store, migrate the legacy directory when it is the only one, and
+/// keep using the legacy directory if the same-filesystem rename fails.
+fn resolve_session_root(context: &InvocationContext) -> PathBuf {
+    resolve_tui_session_store_dir(&context.directory)
+}
+
+fn stored_session_path(root: &Path, id: &str) -> PathBuf {
+    let key = URL_SAFE_NO_PAD.encode(id.as_bytes());
+    let current = root
+        .join("v1")
+        .join("sessions")
+        .join(format!("id_{key}.json"));
+    if current.is_file() {
+        current
+    } else {
+        root.join(format!("{}.json", legacy_safe_id(id)))
+    }
+}
+
+fn legacy_safe_id(id: &str) -> String {
+    id.replace(['/', '\\'], "_").replace("..", "_")
+}
+
+fn remove_tui_session_state(workspace: &Path, id: &str) -> anyhow::Result<()> {
+    let path = tui_session_state_path(workspace, id);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("could not delete TUI session state {}", path.display())),
+    }
 }
 
 fn validate_id(id: &str) -> anyhow::Result<()> {
@@ -175,9 +231,11 @@ fn validate_id(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_document(path: &Path) -> anyhow::Result<serde_json::Value> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("could not read session {}", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("session {} is not valid JSON", path.display()))
+async fn load_document(store: &FileSessionStore, id: &str) -> anyhow::Result<serde_json::Value> {
+    let session: SessionData = store
+        .load(id)
+        .await
+        .with_context(|| format!("could not load session `{id}`"))?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` does not exist in this workspace"))?;
+    serde_json::to_value(session).with_context(|| format!("could not serialize session `{id}`"))
 }

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{
-    download_asset, extract_tar_gz_archive, fetch_release, parse_version, uninstall_owned_files,
+    download_asset, extract_release_archive, fetch_release, parse_version, uninstall_owned_files,
     verify_sha256, ComponentReceipt, DirectoryActivation, InstallProvenance,
     RECEIPT_SCHEMA_VERSION,
 };
@@ -68,8 +68,11 @@ pub async fn install_release(
         .prefix(".staging-")
         .tempdir_in(&component_root)?;
     let unpacked = staging.path().join("unpacked");
-    extract_tar_gz_archive(&archive, &unpacked)?;
-    let staged_executable = find_unique_file(&unpacked, release_spec.binary)?;
+    extract_release_archive(&archive, &unpacked, &archive_name)?;
+    let executable_name = release_spec
+        .asset_family
+        .executable_name(release_spec.binary, target);
+    let staged_executable = find_unique_file(&unpacked, &executable_name)?;
     let actual_version = probe_version(&staged_executable)?;
     if parse_version(&actual_version)? != parse_version(&version)? {
         bail!(

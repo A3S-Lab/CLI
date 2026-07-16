@@ -12,8 +12,12 @@ pub(crate) fn pad_to(s: &str, width: usize) -> String {
     }
 }
 
-/// A user-input message rendered with a subtle background "bubble" so it stands
-/// out from agent output in the transcript.
+/// Render a user-authored turn with the same cell geometry as Codex CLI.
+///
+/// The user surface owns one blank row above and below its content, uses `› `
+/// only on the first content row, aligns continuations under the text, and
+/// reserves one right-hand wrapping column. The low-contrast surface already
+/// matches Codex's 12% white blend over the dark terminal canvas.
 pub(crate) fn user_bubble(content: &str, width: usize) -> String {
     if content.is_empty() || width == 0 {
         return String::new();
@@ -28,56 +32,97 @@ pub(crate) fn user_bubble(content: &str, width: usize) -> String {
         ""
     };
     let gap = usize::from(!marker.is_empty());
+    let prefix_width = a3s_tui::style::visible_len(marker) + gap;
+    let right_margin = usize::from(width.saturating_sub(prefix_width) > 1);
     let body_width = width
         .saturating_sub(margin)
-        .saturating_sub(a3s_tui::style::visible_len(marker) + gap)
+        .saturating_sub(prefix_width)
+        .saturating_sub(right_margin)
         .max(1);
     let lines = content
         .split('\n')
         .flat_map(|line| wrap_user_line(line, body_width))
         .collect::<Vec<_>>();
-    let theme = agent_chrome_theme();
-    let chrome = agent_chrome(&theme);
-    let body = chrome
-        .gutter(lines.join("\n"))
-        .margin(margin)
-        .marker(marker)
-        .marker_color(TN_GRAY)
-        .gap(" ".repeat(gap))
-        .width(width)
-        .content_color(TN_FG)
-        .background_color(SURFACE_USER)
-        .view();
-    let padding = format!(
-        "{}{}",
-        " ".repeat(margin),
-        Style::new()
-            .bg(SURFACE_USER)
-            .render(&" ".repeat(width.saturating_sub(margin)))
-    );
-    format!("{padding}\n{body}\n{padding}")
+    let padding = Style::new()
+        .bg(SURFACE_USER)
+        .render(&" ".repeat(width.saturating_sub(margin)));
+    let mut rows = Vec::with_capacity(lines.len().saturating_add(2));
+    rows.push(format!("{}{padding}", " ".repeat(margin)));
+    for (index, line) in lines.into_iter().enumerate() {
+        let prefix = if index == 0 && !marker.is_empty() {
+            format!(
+                "{}{}",
+                Style::new()
+                    .fg(TN_FG)
+                    .bg(SURFACE_USER)
+                    .bold()
+                    .dim()
+                    .render(marker),
+                Style::new().bg(SURFACE_USER).render(&" ".repeat(gap))
+            )
+        } else {
+            Style::new()
+                .bg(SURFACE_USER)
+                .render(&" ".repeat(prefix_width))
+        };
+        let content = a3s_tui::style::fit_visible(&line, body_width);
+        let content = format!("{content}{}", " ".repeat(right_margin));
+        rows.push(format!(
+            "{}{prefix}{}",
+            " ".repeat(margin),
+            Style::new().fg(TN_FG).bg(SURFACE_USER).render(&content)
+        ));
+    }
+    rows.push(format!("{}{padding}", " ".repeat(margin)));
+    rows.join("\n")
 }
 
 fn wrap_user_line(line: &str, width: usize) -> Vec<String> {
     if line.is_empty() {
         return vec![String::new()];
     }
-    let total = a3s_tui::style::visible_len(line);
     let mut rows = Vec::new();
-    let mut from = 0usize;
-    while from < total {
-        let to = from.saturating_add(width).min(total);
-        let row = a3s_tui::style::slice_visible_cols(line, from, to);
-        if row.is_empty() {
-            break;
-        }
-        from = from.saturating_add(a3s_tui::style::visible_len(&row));
-        rows.push(row);
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        let end = visible_prefix_byte_end(remaining, width);
+        let end = if end == 0 {
+            remaining
+                .char_indices()
+                .nth(1)
+                .map(|(offset, _)| offset)
+                .unwrap_or(remaining.len())
+        } else {
+            end
+        };
+        rows.push(remaining[..end].to_string());
+        remaining = &remaining[end..];
     }
     if rows.is_empty() {
         rows.push(String::new());
     }
     rows
+}
+
+/// Return a source byte boundary that fits whole display cells in `width`.
+///
+/// Advancing by source bytes prevents a wide glyph that crosses a display
+/// column boundary from being omitted from the next row. Zero-width combining
+/// marks remain attached to the preceding display cell.
+fn visible_prefix_byte_end(value: &str, width: usize) -> usize {
+    if width == 0 {
+        return 0;
+    }
+    let mut used = 0usize;
+    let mut end = 0usize;
+    for (offset, ch) in value.char_indices() {
+        let char_width = a3s_tui::style::visible_len(&ch.to_string());
+        if char_width > 0 && used.saturating_add(char_width) > width {
+            break;
+        }
+        used = used.saturating_add(char_width);
+        end = offset + ch.len_utf8();
+    }
+    end
 }
 
 /// Prefix a message block with a Codex-style colored • gutter on its first line
@@ -387,15 +432,24 @@ mod tests {
             ]
         );
         assert!(rendered.lines().all(|row| visible_len(row) == 20));
-        assert!(rendered.contains(&Style::new().fg(TN_GRAY).bg(SURFACE_USER).bold().render("›")));
+        assert!(rendered.contains(
+            &Style::new()
+                .fg(TN_FG)
+                .bg(SURFACE_USER)
+                .bold()
+                .dim()
+                .render("›")
+        ));
         assert!(rendered.contains(
             &Style::new()
                 .fg(TN_FG)
                 .bg(SURFACE_USER)
                 .render("hello             ")
         ));
-        assert_eq!(rows.first().unwrap().trim(), "");
-        assert_eq!(rows.last().unwrap().trim(), "");
+        assert!(rows[0].trim().is_empty() && rows[3].trim().is_empty());
+        assert!(rendered
+            .lines()
+            .all(|row| row.contains(&format!("\x1b[{}m", SURFACE_USER.bg_ansi()))));
     }
 
     #[test]
@@ -440,10 +494,10 @@ mod tests {
             rows,
             vec![
                 "        ",
-                "› abcdef",
-                "  ghij  ",
-                "  中文测",
-                "  试    ",
+                "› abcde ",
+                "  fghij ",
+                "  中文  ",
+                "  测试  ",
                 "        ",
             ]
         );

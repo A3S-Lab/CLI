@@ -126,6 +126,7 @@ impl App {
 
     pub(super) fn finish(&mut self) {
         self.preserve_interrupted_tools();
+        self.llm_turn_checkpoint = None;
         self.state = State::Idle;
         self.running_task = None;
         self.plan.clear();
@@ -137,6 +138,7 @@ impl App {
         self.rx = None;
         self.stream_join = None;
         self.stream_join_settling = false;
+        self.stream_settle_abort = None;
         self.host_tool_abort = None;
         self.host_progress_inflight = false;
         self.host_tool_call_id = None;
@@ -150,6 +152,11 @@ impl App {
     pub(super) fn push_line(&mut self, line: &str) {
         self.messages
             .push(TranscriptEntry::preformatted(line.to_string()));
+        self.rebuild_viewport();
+    }
+
+    pub(super) fn push_notice(&mut self, kind: NoticeKind, message: impl Into<String>) {
+        self.messages.push(TranscriptEntry::notice(kind, message));
         self.rebuild_viewport();
     }
 
@@ -302,7 +309,9 @@ impl App {
                     .unwrap_or_else(|| {
                         "missing; install a3s-webview or set A3S_WEBVIEW_BIN".to_string()
                     });
-                let view_kind = if remote_ui::is_local_report_view(spec) {
+                let view_kind = if remote_ui::is_local_image_view(spec) {
+                    "no-auth local image preview helper"
+                } else if remote_ui::is_local_report_view(spec) {
                     "no-auth local report popup helper"
                 } else {
                     "authenticated RemoteUI popup helper"
@@ -483,7 +492,7 @@ impl App {
         if !subagents.is_empty() {
             blocks.push(subagents.join("\n"));
         }
-        (!blocks.is_empty()).then(|| blocks.join("\n\n"))
+        (!blocks.is_empty()).then(|| join_transcript_blocks(&blocks))
     }
 
     pub(super) fn transcript_view_is_open(&self) -> bool {
@@ -562,19 +571,16 @@ impl App {
         let tail = self.streaming.tail_view();
         let mut prefix = String::from("\n");
         if !blocks.is_empty() {
-            prefix.push_str(&blocks.join("\n\n"));
+            prefix.push_str(&join_transcript_blocks(&blocks));
         }
         if !stable.is_empty() {
             if !blocks.is_empty() {
-                prefix.push_str("\n\n");
+                prefix.push('\n');
             }
             prefix.push_str(&gutter(TN_GRAY, &stable));
             prefix.push('\n');
         } else {
             prefix.push('\n');
-            if !blocks.is_empty() && !tail.is_empty() {
-                prefix.push('\n');
-            }
         }
         let suffix = if tail.is_empty() {
             String::new()
@@ -598,10 +604,10 @@ impl App {
     pub(super) fn rebuild_viewport_from(&mut self, anchor: ViewportAnchor) {
         self.selection = None; // content changed → screen-coord selection is stale
         let content_width = self.viewport_content_width();
-        let full = self
-            .messages
-            .render_with_activity(self.width, content_width, self.blink_tick % 8 < 4)
-            .join("\n\n");
+        let blocks =
+            self.messages
+                .render_with_activity(self.width, content_width, self.blink_tick % 8 < 4);
+        let full = join_transcript_blocks(&blocks);
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
         self.restore_viewport_anchor(anchor);
         self.refresh_transcript_view();
@@ -678,7 +684,7 @@ impl App {
             return None;
         }
         let mut prompt = approval_prompt(label, self.approval_sel);
-        let row_count = prompt.lines(width as u16, APPROVAL_PANEL_HEIGHT).len();
+        let row_count = prompt.lines(width).len();
         if row_count == 0 {
             return None;
         }
@@ -692,9 +698,8 @@ impl App {
         prompt.set_y_offset(y_offset);
         let before = prompt.selected_index();
 
-        match prompt.handle_mouse(mouse) {
-            Some(ChoicePromptMsg::Selected(index)) => self.apply_approval(index).map(cmd::msg),
-            Some(ChoicePromptMsg::Cancelled) => self.apply_approval(2).map(cmd::msg),
+        match prompt.handle_mouse(mouse, width) {
+            Some(ApprovalPromptMsg::Selected(index)) => self.apply_approval(index).map(cmd::msg),
             None => {
                 let after = prompt.selected_index().min(2);
                 if after != before {

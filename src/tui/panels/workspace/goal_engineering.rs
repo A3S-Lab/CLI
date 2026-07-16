@@ -12,6 +12,7 @@ use std::path::Path;
 const GOAL_RUNTIME_START: &str = "<!-- a3s-goal-runtime:start -->";
 const GOAL_RUNTIME_END: &str = "<!-- a3s-goal-runtime:end -->";
 const GOAL_BUDGET_TOKENS_PER_DAY: u64 = 500_000;
+const GOAL_PROGRESS_PERSIST_STEP_PERCENT: u8 = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) struct GoalRunState {
@@ -41,6 +42,43 @@ impl GoalRunState {
 
     pub(crate) fn is_generation(&self, generation: u64) -> bool {
         self.generation == generation
+    }
+
+    pub(crate) fn paused_state(&self) -> PausedGoalState {
+        PausedGoalState {
+            loop_id: self.spec.id.clone(),
+            goal: self.spec.goal.clone(),
+            iteration: self.iteration,
+            progress: self.progress,
+            failures: self.failures,
+        }
+    }
+
+    pub(crate) fn from_paused(
+        cwd: &str,
+        generation: u64,
+        paused: &PausedGoalState,
+    ) -> Result<Self, String> {
+        if !paused.progress.is_finite() {
+            return Err("saved goal progress is not finite".to_string());
+        }
+        let spec = init_goal_loop(cwd, &paused.goal)?;
+        if spec.id != paused.loop_id {
+            return Err(format!(
+                "saved loop id `{}` does not match goal loop `{}`",
+                paused.loop_id, spec.id
+            ));
+        }
+        Ok(Self {
+            generation,
+            spec,
+            iteration: paused.iteration.max(1),
+            progress: paused.progress.clamp(0.0, 1.0),
+            achieved: false,
+            failures: paused.failures,
+            accepting_achievement: false,
+            extracted_goal: None,
+        })
     }
 
     fn record_extracted_goal(&mut self, goal: &AgentGoal) {
@@ -75,6 +113,7 @@ impl GoalRunState {
 
     fn begin_next_iteration(&mut self, failed: bool) {
         self.iteration = self.iteration.saturating_add(1);
+        self.progress = 0.0;
         self.accepting_achievement = true;
         self.extracted_goal = None;
         if failed {
@@ -84,10 +123,32 @@ impl GoalRunState {
         }
     }
 
+    fn begin_resumed_iteration(&mut self) {
+        self.iteration = self.iteration.saturating_add(1);
+        self.progress = 0.0;
+        self.accepting_achievement = true;
+        self.extracted_goal = None;
+    }
+
     pub(crate) fn pause_achievement_for_user_turn(&mut self) {
         self.accepting_achievement = false;
         self.extracted_goal = None;
     }
+
+    pub(crate) fn pause_for_exit(&mut self) {
+        self.accepting_achievement = false;
+        self.extracted_goal = None;
+        let _ = persist_runtime_state(self, "paused", "TUI exited; waiting for session resume");
+        let _ = append_goal_log(self, "paused", "TUI exited; waiting for session resume");
+    }
+}
+
+pub(crate) fn mark_paused_goal_cancelled(cwd: &str, paused: &PausedGoalState, reason: &str) {
+    let Ok(run) = GoalRunState::from_paused(cwd, 0, paused) else {
+        return;
+    };
+    let _ = persist_runtime_state(&run, "cancelled", reason);
+    let _ = append_goal_log(&run, "cancelled", reason);
 }
 
 fn normalize_goal(goal: &str) -> String {
@@ -254,22 +315,40 @@ fn runtime_section(run: &GoalRunState, status: &str, event: &str) -> String {
     )
 }
 
-fn persist_runtime_state(run: &GoalRunState, status: &str, event: &str) -> Result<(), String> {
-    let path = run.spec.dir.join(STATE_FILE);
-    let mut current = std::fs::read_to_string(&path).unwrap_or_default();
-    let replacement = runtime_section(run, status, event);
-    if let (Some(start), Some(end_start)) = (
-        current.find(GOAL_RUNTIME_START),
-        current.find(GOAL_RUNTIME_END),
-    ) {
-        let end = end_start + GOAL_RUNTIME_END.len();
-        current.replace_range(start..end, &replacement);
+fn goal_progress_checkpoint(progress: f32) -> u8 {
+    let percent = (progress.clamp(0.0, 1.0) * 100.0).floor() as u8;
+    if percent == 100 {
+        return 100;
+    }
+    (percent / GOAL_PROGRESS_PERSIST_STEP_PERCENT) * GOAL_PROGRESS_PERSIST_STEP_PERCENT
+}
+
+fn runtime_document_with_section(mut current: String, loop_id: &str, replacement: &str) -> String {
+    let runtime_range = current.find(GOAL_RUNTIME_START).and_then(|start| {
+        current[start..].find(GOAL_RUNTIME_END).map(|relative_end| {
+            let end = start + relative_end + GOAL_RUNTIME_END.len();
+            start..end
+        })
+    });
+    if let Some(range) = runtime_range {
+        current.replace_range(range, replacement);
     } else if current.trim().is_empty() {
-        current = format!("# Goal Loop State: {}\n\n{replacement}\n", run.spec.id);
+        current = format!("# Goal Loop State: {loop_id}\n\n{replacement}\n");
     } else {
         current.push_str("\n\n");
-        current.push_str(&replacement);
+        current.push_str(replacement);
         current.push('\n');
+    }
+    current
+}
+
+fn persist_runtime_state(run: &GoalRunState, status: &str, event: &str) -> Result<(), String> {
+    let path = run.spec.dir.join(STATE_FILE);
+    let previous = std::fs::read_to_string(&path).unwrap_or_default();
+    let replacement = runtime_section(run, status, event);
+    let current = runtime_document_with_section(previous.clone(), &run.spec.id, &replacement);
+    if current == previous {
+        return Ok(());
     }
     std::fs::write(path, current).map_err(|error| error.to_string())
 }
@@ -306,11 +385,13 @@ pub(crate) fn goal_run_prompt(run: &GoalRunState) -> String {
          - {verifier}\n\n\
          Completion contract:\n\
          1. Work on the exact goal, not a smaller substitute. Inspect the current workspace first and preserve unrelated user changes.\n\
-         2. Use the maker/verifier split. The maker may implement; the verifier must independently inspect and run fresh checks.\n\
+         2. Use the maker/verifier split as a dependency-ordered maker -> verifier plan. The maker may implement; the verifier must run only after the maker phase and independently inspect and run fresh checks. Parallelize only genuinely independent work inside a phase; never run overlapping writes or maker and verifier concurrently.\n\
          3. Update STATE.md with concrete evidence, commands, outcomes, remaining gaps, and any genuine blocker. Append this iteration to RUN_LOG.md.\n\
          4. Do not treat a normal answer, the word DONE, a plan ending, or an iteration limit as goal completion. The host derives its GoalAchieved event from fresh evidence; never fabricate that event, but never list the host event itself as a success criterion or remaining user work.\n\
          5. If the goal is not yet fully verified, make the maximum safe progress and report exact remaining work; the host will start another iteration automatically.\n\
-         6. Never fabricate test results or completion evidence. When the underlying goal is proven, report the concrete evidence and say that no underlying work remains; the host owns the completion signal.\n\n\
+         6. Never fabricate test results or completion evidence. When the underlying goal is proven, report the concrete evidence and say that no underlying work remains; the host owns the completion signal.\n\
+         7. Treat parallelism as a bounded admission window, not a target. Prefer 2-4 focused read-only branches per wave. For evidence fan-out use allow_partial_failure=true, retain successful results, and retry only failed branches; never replay a completed or potentially mutating branch.\n\
+         8. Reuse still-valid evidence already recorded in STATE.md instead of rescanning unchanged areas. Spend this iteration on the highest-value unresolved gap.\n\n\
          Begin iteration {iteration} now.",
         goal = run.spec.goal,
         id = run.spec.id,
@@ -341,7 +422,7 @@ fn goal_continuation_prompt(run: &GoalRunState, failure: Option<&str>) -> String
         "Continue durable `/goal` loop `{}` at iteration {}.\n\n\
          Exact goal: {}\n\
          {reason}\n\
-         Re-read {} and {}. Preserve verified work, identify the highest-value remaining gap, run a maker pass followed by independent verification, update the loop artifacts, and continue until the exact goal is proven. Do not use DONE as a completion signal. GoalAchieved is derived by the host after evaluating evidence: never fabricate it and never list that host event as a success criterion or remaining user work. If the underlying goal is proven, report the concrete evidence and state that no underlying work remains.",
+         Re-read {} and {}. Preserve verified work instead of repeating it, identify the highest-value remaining gap, and use a dependency-ordered maker pass followed by independent verification. Keep read-only fan-out to 2-4 focused branches with allow_partial_failure=true; retain successful branches and never replay completed or potentially mutating work. Update the loop artifacts and continue until the exact goal is proven. Do not use DONE as a completion signal. GoalAchieved is derived by the host after evaluating evidence: never fabricate it and never list that host event as a success criterion or remaining user work. If the underlying goal is proven, report the concrete evidence and state that no underlying work remains.",
         run.spec.id,
         run.iteration,
         run.spec.goal,
@@ -365,6 +446,7 @@ impl App {
             );
             return None;
         }
+        self.clear_paused_goal("replaced by a new /goal");
         let requested = normalize_goal(raw_goal);
         let effective_goal = self
             .agent_dev
@@ -433,6 +515,30 @@ impl App {
         self.start_stream_inner(prompt, display, true, true, false)
     }
 
+    pub(crate) fn finish_goal_resume(&mut self) -> Option<Cmd<Msg>> {
+        self.autonomy_restore = None;
+        self.loop_remaining = 0;
+        self.gradient_until = Some(Instant::now());
+        self.gradient_frame = 0;
+
+        let run = self.goal_run.as_mut().expect("goal run restored");
+        run.begin_resumed_iteration();
+        let _ = persist_runtime_state(run, "running", "paused goal resumed by user");
+        let _ = append_goal_log(run, "running", "paused goal resumed by user");
+        let prompt = goal_continuation_prompt(run, None);
+        let display = format!(
+            "◎ resumed goal iteration {}: {}",
+            run.iteration,
+            truncate(&run.spec.goal, 48)
+        );
+        let id = run.spec.id.clone();
+        self.push_line(&gutter(
+            ACCENT,
+            &format!("◎\u{200A}resumed goal loop `{id}` · continues until verified"),
+        ));
+        self.start_stream_inner(prompt, display, true, true, false)
+    }
+
     pub(crate) fn record_goal_extracted(&mut self, goal: &AgentGoal) {
         if let Some(run) = self.goal_run.as_mut() {
             run.record_extracted_goal(goal);
@@ -442,8 +548,11 @@ impl App {
 
     pub(crate) fn record_goal_progress(&mut self, progress: f32) {
         if let Some(run) = self.goal_run.as_mut() {
+            let previous_checkpoint = goal_progress_checkpoint(run.progress);
             run.record_progress(progress);
-            let _ = persist_runtime_state(run, "running", "plan progress updated");
+            if goal_progress_checkpoint(run.progress) != previous_checkpoint {
+                let _ = persist_runtime_state(run, "running", "plan progress updated");
+            }
         }
     }
 
@@ -560,10 +669,15 @@ impl App {
     pub(crate) fn clear_goal_command(&mut self) -> Option<Cmd<Msg>> {
         self.textarea.clear();
         let active = self.cancel_goal_state("cleared by user");
+        let paused = self.clear_paused_goal("cleared by user");
         if !active {
             self.goal = None;
             self.goal_since = None;
-            self.push_line(&Style::new().fg(TN_GRAY).render("  goal cleared"));
+            self.push_line(&Style::new().fg(TN_GRAY).render(if paused {
+                "  paused goal cleared"
+            } else {
+                "  goal cleared"
+            }));
             return None;
         }
         self.push_line(&Style::new().fg(TN_GRAY).render("  goal loop cleared"));
@@ -586,9 +700,18 @@ impl App {
             if let Some(host_abort) = host_abort {
                 host_abort.abort();
             }
-            session.cancel().await;
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             if let Some(join) = join {
-                let _ = join.await;
+                let _ = settle_stream_join_for_quit(
+                    join,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             }
             Msg::GoalCleared
         }))
@@ -654,6 +777,34 @@ mod tests {
         assert!(std::fs::read_to_string(state)
             .unwrap()
             .contains("Preserve this evidence"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn paused_goal_restores_state_and_resumes_at_the_next_iteration() {
+        let root = temp_root("paused-resume");
+        let cwd = root.to_string_lossy();
+        let spec = init_goal_loop(&cwd, "Keep this resumable goal active").unwrap();
+        let mut original = GoalRunState::new(7, spec);
+        original.iteration = 4;
+        original.progress = 0.65;
+        original.failures = 2;
+        let paused = original.paused_state();
+
+        let mut restored = GoalRunState::from_paused(&cwd, 8, &paused).unwrap();
+
+        assert_eq!(restored.generation, 8);
+        assert_eq!(restored.spec.id, paused.loop_id);
+        assert_eq!(restored.spec.goal, paused.goal);
+        assert_eq!(restored.iteration, 4);
+        assert_eq!(restored.progress, 0.65);
+        assert_eq!(restored.failures, 2);
+        assert!(!restored.accepting_achievement);
+
+        restored.begin_resumed_iteration();
+        assert_eq!(restored.iteration, 5);
+        assert_eq!(restored.progress, 0.0);
+        assert!(restored.accepting_achievement);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -741,9 +892,51 @@ mod tests {
         assert!(prompt.contains("never list the host event itself as a success criterion"));
         assert!(prompt.contains("maker/verifier split"));
         assert!(prompt.contains("word DONE"));
+        assert!(prompt.contains("maker -> verifier"));
+        assert!(prompt.contains("2-4 focused read-only branches"));
+        assert!(prompt.contains("allow_partial_failure=true"));
         let continuation = goal_continuation_prompt(&run, None);
         assert!(continuation.contains("GoalAchieved is derived by the host"));
         assert!(continuation.contains("never list that host event as a success criterion"));
+        assert!(continuation.contains("Preserve verified work instead of repeating it"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn goal_progress_persistence_is_bounded_to_five_percent_checkpoints() {
+        assert_eq!(goal_progress_checkpoint(0.0), 0);
+        assert_eq!(goal_progress_checkpoint(0.049), 0);
+        assert_eq!(goal_progress_checkpoint(0.051), 5);
+        assert_eq!(goal_progress_checkpoint(0.10), 10);
+        assert_eq!(goal_progress_checkpoint(0.994), 95);
+        assert_eq!(goal_progress_checkpoint(1.0), 100);
+    }
+
+    #[test]
+    fn unchanged_runtime_document_does_not_require_another_write() {
+        let root = temp_root("runtime-dedup");
+        let spec = init_goal_loop(&root.to_string_lossy(), "Keep runtime writes bounded").unwrap();
+        let run = GoalRunState::new(31, spec);
+        let replacement = runtime_section(&run, "running", "plan progress updated");
+        let initial = runtime_document_with_section(String::new(), &run.spec.id, &replacement);
+        let repeated = runtime_document_with_section(initial.clone(), &run.spec.id, &replacement);
+
+        assert_eq!(repeated, initial);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn next_goal_iteration_resets_plan_progress_without_losing_failure_history() {
+        let root = temp_root("progress-reset");
+        let spec = init_goal_loop(&root.to_string_lossy(), "Reset each plan wave").unwrap();
+        let mut run = GoalRunState::new(41, spec);
+        run.record_progress(0.85);
+
+        run.begin_next_iteration(true);
+
+        assert_eq!(run.iteration, 2);
+        assert_eq!(run.progress, 0.0);
+        assert_eq!(run.failures, 1);
         let _ = std::fs::remove_dir_all(root);
     }
 

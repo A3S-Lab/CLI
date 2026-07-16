@@ -11,6 +11,56 @@ pub(super) struct IdeEntry {
     pub(super) expanded: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IdeIntelligenceTarget {
+    pub(super) path: String,
+    pub(super) position: CodePosition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct IdeIntelligenceRow {
+    pub(super) text: String,
+    pub(super) target: Option<IdeIntelligenceTarget>,
+}
+
+pub(super) struct IdeIntelligenceView {
+    pub(super) request_id: u64,
+    pub(super) title: String,
+    pub(super) rows: Vec<IdeIntelligenceRow>,
+    pub(super) selected: usize,
+    pub(super) scroll: usize,
+    pub(super) truncated: bool,
+    pub(super) saved_version: bool,
+    pub(super) dirty_buffer: bool,
+    pub(super) stale: bool,
+    pub(super) workspace_revision: Option<u64>,
+}
+
+impl IdeIntelligenceView {
+    pub(super) fn loading(
+        request_id: u64,
+        title: impl Into<String>,
+        saved_version: bool,
+        dirty_buffer: bool,
+    ) -> Self {
+        Self {
+            request_id,
+            title: title.into(),
+            rows: vec![IdeIntelligenceRow {
+                text: "Loading Code Intelligence…".to_owned(),
+                target: None,
+            }],
+            selected: 0,
+            scroll: 0,
+            truncated: false,
+            saved_version,
+            dirty_buffer,
+            stale: false,
+            workspace_revision: None,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub(super) enum IdePrompt {
     Search { forward: bool, text: String },
@@ -357,6 +407,12 @@ pub(super) fn highlight_selection(
 /// State of the `/ide` panel: the file tree, selection, and the open file.
 /// Also backs `/config` (rooted at the config dir) and the `/kb` browser
 /// (rooted at the vault, with delete enabled) — all superfile-styled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum IdeSurface {
+    Workspace,
+    ReusedEditor,
+}
+
 pub(super) struct Ide {
     pub(super) entries: Vec<IdeEntry>,
     pub(super) sel: usize,
@@ -367,6 +423,9 @@ pub(super) struct Ide {
     pub(super) flash: Option<String>,
     /// Left-panel title ("workspace" / "config" / "knowledge base").
     pub(super) title: String,
+    /// Product surface owning this editor. Semantic workspace commands are
+    /// intentionally available only in the real `/ide` workspace surface.
+    pub(super) surface: IdeSurface,
     /// Superfile-style hover preview of the tree-selected file, keyed by path
     /// so it reloads only when the selection actually moves.
     pub(super) preview: Option<(std::path::PathBuf, Vec<String>)>,
@@ -379,6 +438,16 @@ pub(super) struct Ide {
     pub(super) armed_delete: Option<std::path::PathBuf>,
     /// Selected action in the `/kb` delete confirmation row (`true` = delete).
     pub(super) delete_confirm_yes: bool,
+    /// Active Code Intelligence result list in the right panel.
+    pub(super) intelligence: Option<IdeIntelligenceView>,
+    /// Monotonic guard that makes late asynchronous results inert.
+    pub(super) intelligence_request_id: u64,
+    /// Cancels the active semantic query when it is replaced or the panel closes.
+    pub(super) intelligence_cancellation: tokio_util::sync::CancellationToken,
+    /// Monotonic guard for asynchronous result jumps within one query view.
+    pub(super) intelligence_jump_request_id: u64,
+    /// Cancels the previous result jump when a newer selection is opened.
+    pub(super) intelligence_jump_cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl Ide {
@@ -392,12 +461,35 @@ impl Ide {
             focus_editor: false,
             flash: None,
             title: title.to_string(),
+            surface: IdeSurface::ReusedEditor,
             preview: None,
             prompt: None,
             kb_root: None,
             armed_delete: None,
             delete_confirm_yes: true,
+            intelligence: None,
+            intelligence_request_id: 0,
+            intelligence_cancellation: tokio_util::sync::CancellationToken::new(),
+            intelligence_jump_request_id: 0,
+            intelligence_jump_cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    pub(super) fn workspace(entries: Vec<IdeEntry>) -> Self {
+        let mut ide = Self::browse(entries, "workspace");
+        ide.surface = IdeSurface::Workspace;
+        ide
+    }
+
+    pub(super) fn supports_code_intelligence(&self) -> bool {
+        self.surface == IdeSurface::Workspace
+    }
+}
+
+impl Drop for Ide {
+    fn drop(&mut self) {
+        self.intelligence_cancellation.cancel();
+        self.intelligence_jump_cancellation.cancel();
     }
 }
 
@@ -467,11 +559,11 @@ pub(super) fn textarea_width_for(width: u16) -> u16 {
 /// Run mode, cycled with Shift+Tab.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Mode {
-    /// Approve every tool call.
+    /// Standard risk-aware mode: safe reads run quietly and side effects prompt.
     Default,
-    /// Read-only tools auto-approved; writes still prompt (exploration/planning).
+    /// Exploration/planning mode: safe reads run quietly and side effects prompt.
     Plan,
-    /// Auto-approve every tool call.
+    /// Streamlined mode: bounded workspace edits auto-run; unbounded operations still prompt.
     Auto,
 }
 
@@ -503,54 +595,50 @@ impl Mode {
 
     pub(super) fn color(self) -> Color {
         match self {
-            Mode::Default => TN_FG,
-            Mode::Plan => TN_CYAN,
-            Mode::Auto => TN_GREEN,
+            Mode::Default => COMPOSER_CHROME.faint,
+            Mode::Plan => COMPOSER_CHROME.active,
+            Mode::Auto => COMPOSER_CHROME.warning,
         }
     }
 
-    /// Whether a tool call is auto-approved in this mode.
-    pub(super) fn auto_approves(self, tool: &str) -> bool {
+    /// Whether a pending risk-aware confirmation is auto-approved in this mode.
+    pub(super) fn auto_approves(
+        self,
+        tool: &str,
+        args: &serde_json::Value,
+        workspace: &Path,
+    ) -> bool {
         match self {
-            Mode::Auto => true,
-            Mode::Plan => is_readonly_tool(tool),
-            Mode::Default => false,
+            Mode::Auto => {
+                let checker =
+                    a3s_code_core::permissions::InteractiveToolGuardrail::for_mode("auto")
+                        .with_workspace(workspace);
+                a3s_code_core::permissions::PermissionChecker::check(&checker, tool, args)
+                    == a3s_code_core::permissions::PermissionDecision::Allow
+            }
+            // Known-safe operations never emit a confirmation event. If one is
+            // pending, default and plan modes always leave the decision to HITL.
+            Mode::Plan | Mode::Default => false,
         }
     }
 }
 
-pub(super) fn is_readonly_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "read" | "grep" | "ls" | "glob" | "find" | "search" | "web_search" | "web_fetch"
-    )
-}
+/// Highest runnable host-turn priority. Safety decisions and stream lifecycle
+/// barriers are control-plane operations and therefore remain outside the
+/// pending-turn queue.
+pub(super) const USER_TURN_PRIORITY: a3s_lane::Priority = 0;
+/// Host-generated work that must never overtake an explicit user turn.
+pub(super) const SYNTHETIC_TURN_PRIORITY: a3s_lane::Priority = 1;
 
-/// A user message queued while the agent is busy. Priority queue: lower `prio`
-/// runs first, FIFO within a priority.
+/// A host-owned turn queued while the agent is busy. Priority and FIFO
+/// metadata are owned by `a3s_lane::PriorityQueue`, not duplicated in the UI
+/// payload.
+#[derive(Clone)]
 pub(super) struct Queued {
-    pub(super) prio: u8,
-    pub(super) seq: u64,
     pub(super) text: String,
     pub(super) display: String,
+    /// Attachments captured for this exact queued turn.
+    pub(super) images: Vec<PendingImage>,
     pub(super) runtime_expectation: Option<RuntimeExpectation>,
     pub(super) deep_research: Option<(String, bool, DeepResearchEvidenceScope)>,
-}
-
-impl PartialEq for Queued {
-    fn eq(&self, o: &Self) -> bool {
-        self.prio == o.prio && self.seq == o.seq
-    }
-}
-impl Eq for Queued {}
-impl Ord for Queued {
-    fn cmp(&self, o: &Self) -> std::cmp::Ordering {
-        // BinaryHeap is a max-heap; invert so lowest prio, then lowest seq, pops first.
-        o.prio.cmp(&self.prio).then(o.seq.cmp(&self.seq))
-    }
-}
-impl PartialOrd for Queued {
-    fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(o))
-    }
 }

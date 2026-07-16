@@ -8,7 +8,9 @@ use a3s_code_core::{
 };
 use serde_json::{json, Value};
 
-use super::permissions::{confirmation_policy_for_mode, permission_policy_for_mode};
+use super::permissions::{
+    confirmation_policy_for_mode, permission_checker_for_mode, permission_policy_for_mode,
+};
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState};
 use crate::budget::{self, BudgetWorkload};
 use crate::config;
@@ -72,8 +74,16 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     let context_limit = code_web_context_limit_for_model(state, model.as_deref());
     let budget =
         budget::budget_plan_for_effort_id(effort, Some(context_limit), BudgetWorkload::Interactive);
+    let permission_policy = permission_policy_for_mode(&settings.permission_mode);
+    let permission_checker = permission_checker_for_mode(&settings.permission_mode, workspace);
     let mut options = SessionOptions::new()
         .with_session_store(state.session_repository.core_store())
+        .with_workspace_backend(
+            state
+                .workspace_services_for(workspace)
+                .await
+                .map_err(|error| BootError::Internal(error.to_string()))?,
+        )
         .with_auto_save(true)
         .with_auto_compact(true)
         .with_max_context_tokens(context_limit as usize)
@@ -84,7 +94,8 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_max_parallel_tasks(budget.max_parallel_tasks)
         .with_max_continuation_turns(budget.max_continuation_turns)
         .with_confirmation_policy(confirmation_policy_for_mode(&settings.permission_mode))
-        .with_permission_policy(permission_policy_for_mode(&settings.permission_mode))
+        .with_permission_policy(permission_policy)
+        .with_permission_checker(Arc::new(permission_checker))
         .with_planning_mode(planning_mode(settings.planning_mode.as_deref()))
         .with_goal_tracking(settings.goal_tracking.unwrap_or(false));
 
@@ -178,7 +189,6 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
                 .map_err(|error| BootError::Internal(error.to_string()))?,
         );
         activate_session_runtime(new_session.as_ref(), &runtime);
-        state.attach_use_session(Arc::clone(&new_session));
         state
             .sessions
             .lock()

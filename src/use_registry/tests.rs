@@ -30,6 +30,12 @@ Build a concise report.
 "#
 }
 
+fn fixture_skill_digest() -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(fixture_skill().as_bytes()))
+}
+
 #[derive(Clone, Default)]
 struct UseCallingLlm {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -205,7 +211,7 @@ fn dedicated_use_worker_receives_skill_guidance_inside_fixed_security_boundaries
     assert!(prompt.contains("Use the report capability."));
     assert!(worker
         .description
-        .contains("Ready capabilities: use/acme/report"));
+        .contains("No callable application capability is currently ready"));
 }
 
 #[tokio::test]
@@ -245,11 +251,47 @@ async fn dedicated_use_worker_is_visible_in_the_live_task_catalog() {
             .contains(&serde_json::json!("use")));
         assert!(definition
             .description
-            .contains("Ready capabilities: use/browser"));
+            .contains("Ready callable capabilities: use/browser"));
         assert!(definition
             .description
             .contains("without shell or workspace fallback"));
     }
+
+    session.close().await;
+}
+
+#[tokio::test]
+async fn use_worker_advertises_a_route_only_after_its_mcp_projection_applies() {
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(agent.session_async(".", None).await.unwrap());
+    let desired = DesiredCapabilities {
+        mcp: BTreeMap::from([(
+            "use_browser".to_string(),
+            DesiredMcp {
+                server_name: "use_browser".to_string(),
+                capability_id: "use/browser".to_string(),
+                target: "browser".to_string(),
+                fingerprint: "browser-v1".to_string(),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let mut applied = AppliedCapabilities::new(Arc::clone(&session));
+
+    let before = worker_capabilities_for_applied(&applied, &desired);
+    assert!(use_worker_spec(&before)
+        .description
+        .contains("No callable application capability is currently ready"));
+
+    applied
+        .mcp
+        .insert("use_browser".to_string(), "browser-v1".to_string());
+    let after = worker_capabilities_for_applied(&applied, &desired);
+    assert!(use_worker_spec(&after)
+        .description
+        .contains("Ready callable capabilities: use/browser"));
 
     session.close().await;
 }
@@ -276,7 +318,10 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "packageRoot": package,
         "enabled": true,
         "surfaces": ["skill"],
-        "skills": [{"path": package.join("skills/fixture-report/SKILL.md")}]
+        "skills": [{
+            "path": package.join("skills/fixture-report/SKILL.md"),
+            "sha256": fixture_skill_digest()
+        }]
     });
     let snapshot = serde_json::json!({
         "schemaVersion": 1,
@@ -337,7 +382,10 @@ async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
         "enabled": true,
         "surfaces": ["mcp", "skill"],
         "mcp": {"target": "acme/report", "transport": "stdio"},
-        "skills": [{"path": package.join("skills/fixture-report/SKILL.md")}]
+        "skills": [{
+            "path": package.join("skills/fixture-report/SKILL.md"),
+            "sha256": fixture_skill_digest()
+        }]
     });
     let mut disabled_route = route.clone();
     disabled_route["enabled"] = serde_json::Value::Bool(false);
@@ -565,7 +613,7 @@ esac
         .expect("task definition after capability removal");
     assert!(task_definition
         .description
-        .contains("No application capability is currently ready"));
+        .contains("No callable application capability is currently ready"));
     assert!(!task_definition.description.contains("use/acme/report"));
 
     handle.detach_session(web_session.session_id()).await;
@@ -910,7 +958,10 @@ async fn timed_out_startup_discovery_converges_from_the_watch_generation() {
             "packageRoot": package,
             "enabled": true,
             "surfaces": ["skill"],
-            "skills": [{"path": package.join("skills/fixture-report/SKILL.md")}]
+            "skills": [{
+                "path": package.join("skills/fixture-report/SKILL.md"),
+                "sha256": fixture_skill_digest()
+            }]
         }]
     });
     let snapshot = serde_json::json!({
@@ -1147,6 +1198,81 @@ fn response_envelope_requires_the_supported_schema() {
         .unwrap_err()
         .to_string();
     assert!(missing.contains("schema version missing"), "{missing}");
+}
+
+#[test]
+fn capability_snapshot_rejects_an_invalid_skill_digest() {
+    let temp = tempfile::tempdir().unwrap();
+    let snapshot: RegistrySnapshot = serde_json::from_value(serde_json::json!({
+        "schemaVersion": 1,
+        "generation": 1,
+        "revision": "1111111111111111111111111111111111111111111111111111111111111111",
+        "capabilities": [{
+            "id": "use/acme/report",
+            "route": "report",
+            "version": "1.0.0",
+            "origin": "extension",
+            "packageRoot": temp.path(),
+            "enabled": true,
+            "surfaces": ["skill"],
+            "skills": [{
+                "path": temp.path().join("SKILL.md"),
+                "sha256": "not-a-sha256"
+            }]
+        }]
+    }))
+    .unwrap();
+
+    let error = validate_snapshot(&snapshot)
+        .expect_err("Skill content identities must be lowercase SHA-256 digests");
+    assert!(error.to_string().contains("Skill digest"), "{error:#}");
+}
+
+#[tokio::test]
+async fn managed_skill_rejects_content_that_does_not_match_its_digest() {
+    let package = tempfile::tempdir().unwrap();
+    let path = package.path().join("SKILL.md");
+    tokio::fs::write(&path, fixture_skill()).await.unwrap();
+
+    let wrong_digest = "0".repeat(64);
+    let error = load_managed_skill(package.path(), &path, Some(&wrong_digest))
+        .await
+        .expect_err("the registry digest must bind the exact Skill bytes");
+    assert!(
+        error.to_string().contains("digest does not match"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
+    let package = tempfile::tempdir().unwrap();
+    let mcp = ProjectedMcpSurface {
+        target: "acme/report".to_string(),
+        transport: ProjectedMcpTransport::Stdio,
+    };
+    let mut skill = ProjectedSkillSurface {
+        path: package.path().join("SKILL.md"),
+        sha256: "1".repeat(64),
+    };
+    let binding = CapabilityBinding {
+        id: "use/acme/report".to_string(),
+        route: "report".to_string(),
+        version: "1.0.0".to_string(),
+        origin: CapabilityOrigin::Extension,
+        enabled: true,
+        package_root: package.path().to_path_buf(),
+        surfaces: vec!["mcp".to_string(), "skill".to_string()],
+        mcp: Some(mcp.clone()),
+        skills: vec![skill.clone()],
+    };
+
+    let mcp_before = mcp_fingerprint(&binding, &mcp).unwrap();
+    let skill_before = skill_fingerprint(&binding, &skill).unwrap();
+    skill.sha256 = "2".repeat(64);
+
+    assert_eq!(mcp_fingerprint(&binding, &mcp).unwrap(), mcp_before);
+    assert_ne!(skill_fingerprint(&binding, &skill).unwrap(), skill_before);
 }
 
 #[tokio::test]

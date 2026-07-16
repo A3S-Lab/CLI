@@ -219,8 +219,8 @@ pub(crate) fn deep_research_loop_contract(
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "title": { "type": "string", "maxLength": 64 },
-            "focus": { "type": "string", "maxLength": 480 }
+            "title": { "type": "string", "maxLength": 160 },
+            "focus": { "type": "string", "maxLength": 1200 }
         },
         "required": ["title", "focus"]
     });
@@ -264,7 +264,7 @@ pub(crate) fn deep_research_loop_contract(
                 "additionalProperties": false,
                 "properties": {
                     "retrieval_timeout_secs": { "type": "integer", "minimum": 30, "maximum": 150 },
-                    "synthesis_timeout_secs": { "type": "integer", "minimum": 45, "maximum": 90 },
+                    "synthesis_timeout_secs": { "type": "integer", "minimum": 120, "maximum": 180 },
                     "max_iterations": { "type": "integer", "minimum": 1, "maximum": 4 },
                     "max_parallel_tasks": { "type": "integer", "minimum": 1, "maximum": max_parallel_tasks.max(1) },
                     "max_steps_per_task": { "type": "integer", "minimum": 1, "maximum": max_child_steps.clamp(1, 2) },
@@ -294,22 +294,22 @@ pub(crate) fn deep_research_loop_contract(
         "additionalProperties": false,
         "properties": {
             "decision": { "type": "string", "enum": ["finalize", "continue", "degrade"] },
-            "coverage_summary": { "type": "string", "maxLength": 800 },
-            "report_summary": { "type": "string", "maxLength": 1200 },
+            "coverage_summary": { "type": "string", "maxLength": 2400 },
+            "report_summary": { "type": "string", "maxLength": 4800 },
             "verified_findings": {
                 "type": "array",
                 "maxItems": 5,
-                "items": { "type": "string", "maxLength": 500 }
+                "items": { "type": "string", "maxLength": 1600 }
             },
             "unresolved_gaps": {
                 "type": "array",
                 "maxItems": 4,
-                "items": { "type": "string", "maxLength": 400 }
+                "items": { "type": "string", "maxLength": 1200 }
             },
             "contradictions": {
                 "type": "array",
                 "maxItems": 3,
-                "items": { "type": "string", "maxLength": 400 }
+                "items": { "type": "string", "maxLength": 1200 }
             },
             "next_action": {
                 "type": "string",
@@ -318,19 +318,19 @@ pub(crate) fn deep_research_loop_contract(
             "search_queries": {
                 "type": "array",
                 "maxItems": 3,
-                "items": { "type": "string", "maxLength": 300 }
+                "items": { "type": "string", "maxLength": 600 }
             },
             "seed_urls": {
                 "type": "array",
                 "maxItems": 4,
-                "items": { "type": "string", "maxLength": 1000 }
+                "items": { "type": "string", "maxLength": 2000 }
             },
             "next_tracks": {
                 "type": "array",
                 "maxItems": max_parallel_tasks.clamp(1, 4),
                 "items": track_schema
             },
-            "reason": { "type": "string", "maxLength": 500 }
+            "reason": { "type": "string", "maxLength": 1600 }
         },
         "required": [
             "decision", "coverage_summary", "report_summary", "verified_findings",
@@ -338,7 +338,7 @@ pub(crate) fn deep_research_loop_contract(
         ]
     });
     let planner_prompt = format!(
-        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather the evidence and one structured review can both synthesize it across the planned tracks and check coverage; maker_first only when useful initial evidence requires workspace inspection, evidence production, or multi-step tool work that direct retrieval cannot establish. A substantial public-source investigation normally needs direct_then_review, while a narrow lookup normally needs direct_only, but make the decision from the requested work rather than labels or surface features. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question. Include only seed URLs you confidently know. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; the execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
+        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Use the same language as the query for report_title, phases, tracks, and stop_conditions. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather the evidence and one structured review can both synthesize it across the planned tracks and check coverage; maker_first only when useful initial evidence requires workspace inspection, evidence production, or multi-step tool work that direct retrieval cannot establish. A substantial public-source investigation normally needs direct_then_review, while a narrow lookup normally needs direct_only, but make the decision from the requested work rather than labels or surface features. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question and give every consequential track a real chance to retrieve primary or authoritative evidence plus independent corroboration when available; generic comparison pages cannot substitute for official status, governance, or quantitative claims. Include seed URLs only when you confidently know a canonical, directly fetchable URL; otherwise use a targeted discovery query instead of guessing a page. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; a timeout is a hard cancellation boundary, so budget enough time for a reasoning model to return the complete report rather than merely begin it. The execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
     );
 
     serde_json::json!({
@@ -362,10 +362,10 @@ pub(crate) fn deep_research_loop_contract(
             "agent": "loop-checker",
             "description": "Check evidence",
             "max_steps": 2,
-            // Optional routing fields keep a first-pass checker decision valid
-            // across providers that omit empty arrays. The workflow normalizes
-            // those fields and never needs a second model call just to repair
-            // syntactic boilerplate.
+            // The schema uses a bounded provider-facing acceptance envelope;
+            // the host compacts accepted checker context again at the synthesis
+            // boundary. One repair remains available for structural defects
+            // rather than harmless prose-length drift.
             // Checker calls are independent from planning, retrieval, maker,
             // and report clocks. Slow reasoning providers can exceed 120s on
             // evidence review even when the 300s workflow fuse has ample room.
@@ -377,7 +377,7 @@ pub(crate) fn deep_research_loop_contract(
             "max_parallel_tasks": max_parallel_tasks.max(1),
             "max_steps_per_task": max_child_steps.clamp(1, 2),
             "retrieval_timeout_ms": 150000,
-            "synthesis_timeout_ms": 90000
+            "synthesis_timeout_ms": 180000
         }
     })
 }

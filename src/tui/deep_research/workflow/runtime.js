@@ -190,12 +190,22 @@
           "Targeted direct retrieval after a maker round failed.";
       }
       if (checkerFailure) {
-        delete completedOutput.checker;
-        completedOutput.verification = {
-          status: "degraded",
-          checker_completed: false,
-          error: checkerFailure.error || "Evidence checker failed."
-        };
+        if (roundDirectResearch && priorRoundChecker) {
+          completedOutput.checker = failedRecheckFinalizedChecker(priorRoundChecker);
+          completedOutput.verification = {
+            status: "degraded",
+            checker_completed: false,
+            prior_checker_retained: true,
+            error: checkerFailure.error || "Evidence follow-up checker failed."
+          };
+        } else {
+          delete completedOutput.checker;
+          completedOutput.verification = {
+            status: "degraded",
+            checker_completed: false,
+            error: checkerFailure.error || "Evidence checker failed."
+          };
+        }
       }
       return {
         type: "complete",
@@ -227,11 +237,7 @@
         }
         return { type: "complete", output: completedOutput };
       }
-      // A maker-first pass can fail because the delegated provider exhausted
-      // its independent wall-clock window even though cheap, source-backed
-      // direct retrieval is still available. Use that distinct evidence path
-      // once, then send the cumulative package through the checker. Never
-      // reschedule the same failed Flow step or silently declare success.
+      // Recover a failed maker once through a distinct direct-evidence path.
       if (
         directWebSeedEnabled &&
         !directWebResearch &&

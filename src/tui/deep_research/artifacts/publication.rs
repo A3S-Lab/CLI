@@ -372,27 +372,23 @@ pub(crate) fn materialize_deep_research_completed_report_from_markdown(
     let (root, report_dir) = prepare_research_report_directory(workspace, &slug).ok()?;
     let markdown_path = report_dir.join("report.md");
     let markdown = read_small_utf8_file(&markdown_path)?;
-    if looks_like_deep_research_fallback_draft(&markdown)
-        || looks_like_deep_research_recovery_report(&markdown)
-        || is_deep_research_model_failure_text(&markdown)
-        || deep_research_output_has_internal_leak(&markdown)
-        || visible_char_count(markdown.trim()) < 120
-    {
-        return None;
-    }
-
     let html = deep_research_completed_report_html(query, &markdown);
-    write_research_report_file(&report_dir.join("index.html"), html).ok()?;
-
-    let rel_html = format!(".a3s/research/{slug}/index.html");
-    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    deep_research_report_sources_trace_workflow(
-        &artifacts,
+    if validate_deep_research_completed_report_content(
+        &markdown,
+        &html,
         query,
         workflow_output,
         workflow_metadata,
     )
-    .then_some(artifacts)
+    .is_err()
+    {
+        return None;
+    }
+    write_research_report_file(&report_dir.join("index.html"), html).ok()?;
+
+    let rel_html = format!(".a3s/research/{slug}/index.html");
+    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
+    completed_research_report_artifacts(&artifacts).then_some(artifacts)
 }
 
 pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
@@ -404,7 +400,15 @@ pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
 ) -> Option<ResearchReportArtifacts> {
     let markdown = completed_report_markdown_from_answer_text(query, answer_text)?;
     let html = deep_research_completed_report_html(query, &markdown);
-    if !has_research_report_substance(&markdown, &html) {
+    if validate_deep_research_completed_report_content(
+        &markdown,
+        &html,
+        query,
+        workflow_output,
+        workflow_metadata,
+    )
+    .is_err()
+    {
         return None;
     }
 
@@ -420,15 +424,10 @@ pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
 
     let rel_html = format!(".a3s/research/{slug}/index.html");
     let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    deep_research_report_sources_trace_workflow(
-        &artifacts,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .then_some(artifacts)
+    completed_research_report_artifacts(&artifacts).then_some(artifacts)
 }
 
+#[cfg(test)]
 pub(crate) fn materialize_deep_research_completed_report_from_workflow_evidence(
     workspace: &Path,
     query: &str,
@@ -451,11 +450,9 @@ pub(crate) fn materialize_deep_research_completed_report_from_workflow_evidence(
         return None;
     }
 
-    let finalized_checker = workflow
-        .get("checker")
-        .filter(|checker| {
-            checker.get("decision").and_then(serde_json::Value::as_str) == Some("finalize")
-        });
+    let finalized_checker = workflow.get("checker").filter(|checker| {
+        checker.get("decision").and_then(serde_json::Value::as_str) == Some("finalize")
+    });
     let report_title = workflow
         .pointer("/plan/report_title")
         .and_then(serde_json::Value::as_str);
@@ -561,7 +558,10 @@ pub(crate) fn materialize_deep_research_recovery_report(
     let rel_html = format!(".a3s/research/{slug}/index.html");
     let (root, report_dir) = prepare_research_report_directory(workspace, &slug)?;
 
-    let result = deep_research_recovery_result_text(answer_text, workflow_output);
+    let result = demote_recovery_result_title(&deep_research_recovery_result_text(
+        answer_text,
+        workflow_output,
+    ));
     let evidence_status =
         deep_research_recovery_evidence_status(workflow_output, workflow_metadata);
     let sources = deep_research_recovery_sources(workflow_output, workflow_metadata, &slug);
@@ -616,6 +616,7 @@ fn completed_report_markdown_from_answer_text(query: &str, answer_text: &str) ->
     let mut body = answer_text.trim().to_string();
     if body.is_empty()
         || looks_like_deep_research_fallback_draft(&body)
+        || looks_like_deep_research_recovery_report(&body)
         || is_deep_research_model_failure_text(&body)
         || deep_research_output_has_internal_leak(&body)
         || visible_char_count(&body) < 120
@@ -641,6 +642,102 @@ fn completed_report_markdown_from_answer_text(query: &str, answer_text: &str) ->
     }
 }
 
+fn validate_deep_research_completed_report_content(
+    markdown: &str,
+    html: &str,
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Result<(), String> {
+    if looks_like_deep_research_fallback_draft(markdown) {
+        return Err("content rejected: the response is an incomplete fallback draft".to_string());
+    }
+    if looks_like_deep_research_recovery_report(markdown) {
+        return Err(
+            "content rejected: a recovery report cannot be published as a completed report"
+                .to_string(),
+        );
+    }
+    if is_deep_research_model_failure_text(markdown) {
+        return Err(
+            "content rejected: the response contains a model or tool failure message".to_string(),
+        );
+    }
+    if deep_research_output_has_internal_leak(markdown)
+        || deep_research_output_has_internal_leak(html)
+    {
+        return Err(
+            "content rejected: the report contains internal workflow or tool-status text"
+                .to_string(),
+        );
+    }
+    if visible_char_count(markdown.trim()) < 120 {
+        return Err(
+            "content rejected: the report is shorter than 120 visible characters".to_string(),
+        );
+    }
+    if !complete_html_document(html) {
+        return Err(
+            "content rejected: the rendered HTML document is incomplete or unsafe".to_string(),
+        );
+    }
+    if !has_research_report_substance(markdown, html) {
+        return Err(
+            "content rejected: the report lacks substantive findings, explicit sources, or confidence and limitations"
+                .to_string(),
+        );
+    }
+    deep_research_report_source_trace_diagnostic(
+        markdown,
+        html,
+        query,
+        workflow_output,
+        workflow_metadata,
+    )
+}
+
+pub(crate) fn deep_research_report_rejection_diagnostic_from_answer_text(
+    query: &str,
+    answer_text: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Option<String> {
+    let answer = answer_text.trim();
+    if answer.is_empty() {
+        return Some("content rejected: the model returned an empty report".to_string());
+    }
+    if looks_like_deep_research_fallback_draft(answer) {
+        return Some("content rejected: the response is an incomplete fallback draft".to_string());
+    }
+    if looks_like_deep_research_recovery_report(answer) {
+        return Some(
+            "content rejected: a recovery report cannot be published as a completed report"
+                .to_string(),
+        );
+    }
+    if is_deep_research_model_failure_text(answer) {
+        return Some(
+            "content rejected: the response contains a model or tool failure message".to_string(),
+        );
+    }
+    if deep_research_output_has_internal_leak(answer) {
+        return Some(
+            "content rejected: the report contains internal workflow or tool-status text"
+                .to_string(),
+        );
+    }
+    let markdown = completed_report_markdown_from_answer_text(query, answer)?;
+    let html = deep_research_completed_report_html(query, &markdown);
+    validate_deep_research_completed_report_content(
+        &markdown,
+        &html,
+        query,
+        workflow_output,
+        workflow_metadata,
+    )
+    .err()
+}
+
 fn deep_research_recovery_result_text(answer_text: &str, workflow_output: &str) -> String {
     let answer = answer_text.trim();
     let answer_lower = answer.to_ascii_lowercase();
@@ -659,6 +756,30 @@ fn deep_research_recovery_result_text(answer_text: &str, workflow_output: &str) 
     workflow_evidence_summary(workflow_output).unwrap_or_else(|| {
         "DeepResearch could not produce a reliable final synthesis because evidence collection ended before usable source-backed material was available. The run should be treated as incomplete for domain conclusions, but this report records the failure mode and the next recovery steps.".to_string()
     })
+}
+
+fn demote_recovery_result_title(markdown: &str) -> String {
+    let mut in_fence = false;
+    let mut output = Vec::new();
+    for line in markdown.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            output.push(line.to_string());
+            continue;
+        }
+        if !in_fence && trimmed.starts_with("# ") {
+            let indent = &line[..line.len() - trimmed.len()];
+            output.push(format!("{indent}#{trimmed}"));
+        } else {
+            output.push(line.to_string());
+        }
+    }
+    let mut demoted = output.join("\n");
+    if markdown.ends_with('\n') {
+        demoted.push('\n');
+    }
+    demoted
 }
 
 fn truncate_recovery_text(text: &str, max_chars: usize) -> String {

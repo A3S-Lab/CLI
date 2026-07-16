@@ -476,6 +476,7 @@ pub(super) fn deep_research_sanitize_parallel_result(
         "artifact_uri",
         "output_bytes",
         "truncated_for_context",
+        "retry_attempts",
         "structured_error",
     ] {
         if let Some(value) = result.get(key) {
@@ -497,7 +498,10 @@ pub(super) fn deep_research_sanitize_parallel_result(
                     ),
                 );
             }
-        } else if let Some(output) = result.get("output") {
+        } else if let Some(output) = result
+            .get("output_excerpt")
+            .or_else(|| result.get("output"))
+        {
             let parsed = output
                 .as_str()
                 .and_then(parse_embedded_structured_evidence_json)
@@ -517,7 +521,9 @@ pub(super) fn deep_research_sanitize_parallel_result(
         }
     } else {
         let summary = result
-            .get("output")
+            .get("error_message")
+            .or_else(|| result.get("output_excerpt"))
+            .or_else(|| result.get("output"))
             .or_else(|| result.get("error"))
             .map(deep_research_failure_summary)
             .unwrap_or_else(|| {

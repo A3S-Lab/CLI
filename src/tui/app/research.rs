@@ -3,6 +3,54 @@
 use super::*;
 
 impl App {
+    fn arm_deep_research_report_repair_after_model_failure(
+        &mut self,
+        workflow_output: &str,
+        workflow_metadata: Option<&serde_json::Value>,
+        prior_text: &str,
+        failure: &str,
+    ) -> bool {
+        if self.deep_research_report_repair_used
+            || deep_research_workflow_needs_recovery_report(workflow_output)
+        {
+            return false;
+        }
+        let prior_is_safe =
+            !prior_text.trim().is_empty() && !deep_research_output_has_internal_leak(prior_text);
+        if prior_is_safe {
+            self.deep_research_workflow.last_synthesis_text = Some(prior_text.to_string());
+        }
+        if !arm_deep_research_report_repair(
+            &mut self.loop_remaining,
+            &mut self.deep_research_report_repair_used,
+        ) {
+            return false;
+        }
+        let repair_context = if prior_is_safe {
+            format!(
+                "Validation feedback (must be corrected): {failure}\n\nPrevious synthesis:\n{prior_text}"
+            )
+        } else {
+            format!(
+                "Validation feedback (must be corrected): {failure}\n\nThe previous synthesis was omitted because it was empty or contained internal output."
+            )
+        };
+        self.pending_deep_research_report_repair_prompt =
+            deep_research_report_repair_prompt_from_state(
+                self.deep_research_loop.as_ref(),
+                workflow_output,
+                workflow_metadata,
+                &repair_context,
+            );
+        if self.pending_deep_research_report_repair_prompt.is_none() {
+            return false;
+        }
+        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+            "  ⚠ {failure} Running one focused, evidence-closed report repair pass…"
+        )));
+        true
+    }
+
     pub(super) fn start_ultracode_synthesis(
         &mut self,
         prompt: String,
@@ -11,6 +59,235 @@ impl App {
         self.ultracode_synthesis_used = true;
         self.push_line(&Style::new().fg(TN_GRAY).render("  ⇉ synthesizing results…"));
         self.start_stream_inner(prompt, display_task, false, false, true)
+    }
+
+    pub(super) fn start_deep_research_report_generation(
+        &mut self,
+        prompt: String,
+        display_task: String,
+        phase: DeepResearchReportGenerationPhase,
+    ) -> Option<Cmd<Msg>> {
+        let query = self.deep_research_loop.as_ref()?.query.clone();
+        self.deep_research_report_tool_gate.set_synthesis_only();
+        self.streaming.clear();
+        self.got_delta = false;
+        self.turn_text.clear();
+        self.turn_had_agent_activity = false;
+        self.turn_text_after_activity = false;
+        self.deep_research_report_tools.clear();
+        self.running_task = Some(display_task);
+        self.state = State::Streaming;
+        self.host_progress_inflight = true;
+        self.stream_started = Some(Instant::now());
+        self.spinner.start();
+        self.relayout();
+        self.rebuild_viewport();
+
+        self.deep_research_stream_timeout_token =
+            self.deep_research_stream_timeout_token.wrapping_add(1);
+        let token = self.deep_research_stream_timeout_token;
+        let timeout_ms = if phase.is_repair() {
+            DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+        } else {
+            deep_research_planned_synthesis_timeout_ms(
+                self.deep_research_workflow.output.as_deref(),
+            )
+            .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS)
+        };
+        let args = deep_research_report_generation_args(&prompt, timeout_ms);
+        let session = Arc::clone(&self.session);
+
+        Some(cmd::batch(vec![
+            cmd::cmd(move || async move {
+                let timeout = Duration::from_millis(timeout_ms);
+                let result = match tokio::time::timeout(
+                    timeout,
+                    session.tool("generate_object", args),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => Ok(result),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => {
+                        let _ = session
+                            .cancel_and_settle(
+                                Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                            )
+                            .await;
+                        Err(format!(
+                            "DeepResearch {} model call timed out after {timeout_ms} ms",
+                            if phase.is_repair() {
+                                "repair"
+                            } else {
+                                "synthesis"
+                            }
+                        ))
+                    }
+                };
+                Msg::DeepResearchReportGenerated {
+                    token,
+                    query,
+                    phase,
+                    result,
+                }
+            }),
+            spinner_tick(),
+            stream_commit_tick(),
+        ]))
+    }
+
+    pub(super) fn on_deep_research_report_generated(
+        &mut self,
+        token: u64,
+        query: String,
+        phase: DeepResearchReportGenerationPhase,
+        result: Result<ToolCallResult, String>,
+    ) -> Option<Cmd<Msg>> {
+        if token != self.deep_research_stream_timeout_token
+            || self.state != State::Streaming
+            || self.interrupting
+            || self
+                .deep_research_loop
+                .as_ref()
+                .map(|state| state.query.as_str())
+                != Some(query.as_str())
+        {
+            return None;
+        }
+        self.host_progress_inflight = false;
+
+        let generated = result.and_then(|result| {
+            deep_research_report_from_generation(&result.output, result.exit_code)
+        });
+        let (generated_report, mut generation_error) = match generated {
+            Ok(report) => (Some(report), None),
+            Err(error) => (None, Some(error)),
+        };
+        let report_text = generated_report
+            .as_ref()
+            .map(|report| report.markdown.clone())
+            .unwrap_or_default();
+        if !phase.is_repair() && !report_text.trim().is_empty() {
+            self.deep_research_workflow.last_synthesis_text = Some(report_text.clone());
+        }
+
+        let workflow_output = self
+            .deep_research_workflow
+            .output
+            .clone()
+            .unwrap_or_default();
+        let workflow_metadata = self.deep_research_workflow.metadata.clone();
+        let workspace = PathBuf::from(&self.cwd);
+        let artifacts = generated_report.as_ref().and_then(|report| {
+            match materialize_deep_research_completed_report_from_generation(
+                &workspace,
+                &query,
+                report,
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            ) {
+                Ok(artifacts) => Some(artifacts),
+                Err(error) => {
+                    generation_error = Some(error);
+                    None
+                }
+            }
+        });
+
+        if let Some(artifacts) = artifacts {
+            let final_text = clean_deep_research_final_text_from_artifacts(&artifacts, &workspace)
+                .unwrap_or(report_text);
+            self.loop_remaining = 0;
+            self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Completed);
+            self.streaming.push(&final_text);
+            self.turn_text.clear();
+            self.turn_text.push_str(&final_text);
+            self.mark_assistant_text(&final_text);
+            self.finalize_streaming();
+            self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                "  ✓ DeepResearch report validated and rendered at {}",
+                artifacts.html.display()
+            )));
+            return self.complete_turn();
+        }
+
+        let diagnostic = generation_error.unwrap_or_else(|| {
+            deep_research_report_rejection_diagnostic_from_answer_text(
+                &query,
+                &report_text,
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            )
+            .unwrap_or_else(|| {
+                "report artifacts were not accepted for an unknown reason".to_string()
+            })
+        });
+        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+            "  ⚠ DeepResearch {} report rejected: {diagnostic}",
+            if phase.is_repair() {
+                "repair"
+            } else {
+                "synthesis"
+            }
+        )));
+
+        if !phase.is_repair()
+            && self.arm_deep_research_report_repair_after_model_failure(
+                &workflow_output,
+                workflow_metadata.as_ref(),
+                &report_text,
+                &format!("The initial structured synthesis was rejected: {diagnostic}."),
+            )
+        {
+            let repair_prompt = self.pending_deep_research_report_repair_prompt.take()?;
+            self.loop_remaining = self.loop_remaining.saturating_sub(1);
+            return self.start_deep_research_report_generation(
+                repair_prompt,
+                format!("✦\u{200A}repair report {query}"),
+                DeepResearchReportGenerationPhase::Repair,
+            );
+        }
+
+        let recovery_text = if report_text.trim().is_empty() {
+            self.deep_research_workflow
+                .last_synthesis_text
+                .as_deref()
+                .unwrap_or(&diagnostic)
+        } else {
+            report_text.as_str()
+        };
+        match materialize_deep_research_recovery_report(
+            &workspace,
+            &query,
+            recovery_text,
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        ) {
+            Ok(artifacts) => {
+                let final_text =
+                    clean_deep_research_final_text_from_artifacts(&artifacts, &workspace)
+                        .unwrap_or_else(|| diagnostic.clone());
+                self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Degraded);
+                self.streaming.push(&final_text);
+                self.turn_text.clear();
+                self.turn_text.push_str(&final_text);
+                self.mark_assistant_text(&final_text);
+                self.finalize_streaming();
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  ⚠ DeepResearch could not validate a completed report; wrote a degraded recovery report at {}",
+                    artifacts.html.display()
+                )));
+            }
+            Err(error) => {
+                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                    "  error: DeepResearch report recovery failed: {error}"
+                )));
+            }
+        }
+        self.loop_remaining = 0;
+        self.deep_research_report_repair_used = true;
+        self.complete_turn()
     }
 
     pub(super) fn start_deep_research_workflow(
@@ -56,6 +333,7 @@ impl App {
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
         self.pending_deep_research_report_repair_prompt = None;
+        self.pending_deep_research_synthesis = None;
         self.pending_deep_research_report_view = None;
         self.deep_research_report_tools.clear();
         self.deep_research_report_tool_gate
@@ -380,13 +658,19 @@ impl App {
             )
         };
         self.deep_research_report_tool_gate.set_synthesis_only();
-        self.start_stream_inner_with_runtime(
+        if !self.queue.is_empty() {
+            // Treat messages submitted during evidence collection as user
+            // follow-ups. Run them before report synthesis, then resume this
+            // exact synthesis once the user queue is empty.
+            let display = format!("✦\u{200A}synthesize {query}");
+            self.pending_deep_research_synthesis = Some((prompt, display));
+            self.finish();
+            return self.drain_queue();
+        }
+        self.start_deep_research_report_generation(
             prompt,
             format!("✦\u{200A}synthesize {query}"),
-            false,
-            false,
-            false,
-            None,
+            DeepResearchReportGenerationPhase::Synthesis,
         )
     }
 
@@ -437,15 +721,18 @@ impl App {
         )));
 
         Some(cmd::cmd(move || async move {
-            session.cancel().await;
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             if let Some(join) = join {
-                let abort = join.abort_handle();
-                if tokio::time::timeout(Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS), join)
-                    .await
-                    .is_err()
-                {
-                    abort.abort();
-                }
+                let _ = settle_stream_join_for_quit(
+                    join,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             }
             Msg::DeepResearchSynthesisTimedOutAfterCancel {
                 token,
@@ -488,15 +775,18 @@ impl App {
         self.rx = None;
         self.interrupting = true;
         Some(cmd::cmd(move || async move {
-            session.cancel().await;
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             if let Some(join) = join {
-                let abort = join.abort_handle();
-                if tokio::time::timeout(Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS), join)
-                    .await
-                    .is_err()
-                {
-                    abort.abort();
-                }
+                let _ = settle_stream_join_for_quit(
+                    join,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             }
             Msg::DeepResearchSynthesisTimedOutAfterCancel {
                 token,
@@ -565,7 +855,8 @@ impl App {
         } else {
             let prior_synthesis_text = repair_phase
                 .then_some(self.deep_research_workflow.last_synthesis_text.as_deref())
-                .flatten();
+                .flatten()
+                .map(str::to_string);
             match query {
                 Some(query) => {
                     let (workflow_output, workflow_metadata) =
@@ -576,14 +867,37 @@ impl App {
                             workflow_output,
                             workflow_metadata,
                         );
-                    if let Some(artifacts) = materialize_deep_research_timeout_completed_report(
-                        &workspace,
-                        &query,
-                        &streamed_text,
-                        prior_synthesis_text,
-                        &workflow_output,
-                        workflow_metadata.as_ref(),
-                    ) {
+                    self.deep_research_workflow.output = Some(workflow_output.clone());
+                    self.deep_research_workflow.metadata = workflow_metadata.clone();
+                    let marker = format!(
+                        "{RESEARCH_VIEW_MARKER} .a3s/research/{}/index.html",
+                        deep_research_report_slug(&query)
+                    );
+                    let current_run_artifacts = self
+                        .deep_research_workflow
+                        .report_baseline
+                        .as_ref()
+                        .and_then(|baseline| {
+                            deep_research_report_artifacts_from_output_for_current_run(
+                                &marker,
+                                &workspace,
+                                &query,
+                                &workflow_output,
+                                workflow_metadata.as_ref(),
+                                baseline,
+                            )
+                        });
+                    let completed_artifacts = current_run_artifacts.or_else(|| {
+                        materialize_deep_research_timeout_completed_report(
+                            &workspace,
+                            &query,
+                            &streamed_text,
+                            prior_synthesis_text.as_deref(),
+                            &workflow_output,
+                            workflow_metadata.as_ref(),
+                        )
+                    });
+                    if let Some(artifacts) = completed_artifacts {
                         self.stage_deep_research_report(
                             &artifacts,
                             DeepResearchRunOutcome::Completed,
@@ -592,15 +906,26 @@ impl App {
                             "  ⚠ DeepResearch timed out, but a completed report was recovered into {}",
                             artifacts.html.display()
                         )));
+                    } else if !repair_phase
+                        && self.arm_deep_research_report_repair_after_model_failure(
+                            &workflow_output,
+                            workflow_metadata.as_ref(),
+                            &streamed_text,
+                            "The initial synthesis timed out before producing a valid report.",
+                        )
+                    {
+                        return self.complete_turn();
                     } else {
-                        let recovery_text = [prior_synthesis_text, Some(streamed_text.as_str())]
-                            .into_iter()
-                            .flatten()
-                            .find(|text| {
-                                !text.trim().is_empty()
-                                    && !deep_research_output_has_internal_leak(text)
-                            })
-                            .unwrap_or(status.as_str());
+                        let recovery_text = [
+                            prior_synthesis_text.as_deref(),
+                            Some(streamed_text.as_str()),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .find(|text| {
+                            !text.trim().is_empty() && !deep_research_output_has_internal_leak(text)
+                        })
+                        .unwrap_or(status.as_str());
                         match materialize_deep_research_recovery_report(
                             &workspace,
                             &query,
@@ -653,44 +978,43 @@ impl App {
             .unwrap_or_default();
         let workflow_metadata = self.deep_research_workflow.metadata.clone();
         let partial_text = self.turn_text.clone();
-        let (artifacts, explicit_recovery) =
-            match materialize_deep_research_timeout_completed_report(
-                &workspace,
-                &query,
-                &partial_text,
-                self.deep_research_workflow.last_synthesis_text.as_deref(),
-                &workflow_output,
-                workflow_metadata.as_ref(),
-            ) {
-                Some(artifacts) => (Ok(artifacts), false),
-                None => (
-                    materialize_deep_research_recovery_report(
-                        &workspace,
-                        &query,
-                        message,
-                        &workflow_output,
-                        workflow_metadata.as_ref(),
-                    ),
-                    true,
-                ),
-            };
+        if let Some(artifacts) = materialize_deep_research_timeout_completed_report(
+            &workspace,
+            &query,
+            &partial_text,
+            self.deep_research_workflow.last_synthesis_text.as_deref(),
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        ) {
+            self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Completed);
+            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                "  ⚠ DeepResearch synthesis failed; preserved a completed source-backed report at {}",
+                artifacts.html.display()
+            )));
+            self.loop_remaining = 0;
+            self.deep_research_report_repair_used = true;
+            return true;
+        }
+        if self.arm_deep_research_report_repair_after_model_failure(
+            &workflow_output,
+            workflow_metadata.as_ref(),
+            &partial_text,
+            "The report model call failed.",
+        ) {
+            return true;
+        }
+        let artifacts = materialize_deep_research_recovery_report(
+            &workspace,
+            &query,
+            message,
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        );
         match artifacts {
             Ok(artifacts) => {
-                self.stage_deep_research_report(
-                    &artifacts,
-                    if explicit_recovery {
-                        DeepResearchRunOutcome::Degraded
-                    } else {
-                        DeepResearchRunOutcome::Completed
-                    },
-                );
-                let status = if explicit_recovery {
-                    "wrote an explicit low-confidence recovery report"
-                } else {
-                    "preserved a completed source-backed report"
-                };
+                self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Degraded);
                 self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
-                    "  ⚠ DeepResearch synthesis failed; {status} at {}",
+                    "  ⚠ DeepResearch synthesis and repair failed; wrote an explicit low-confidence recovery report at {}",
                     artifacts.html.display()
                 )));
             }

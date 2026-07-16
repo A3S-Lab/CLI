@@ -9,7 +9,7 @@
 //! the update handler issues the next pump — feeding the async event stream into
 //! the synchronous TEA update loop one event at a time.
 
-use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
@@ -26,15 +26,18 @@ use a3s_code_core::workspace::{
     WorkspaceServices,
 };
 use a3s_code_core::{
-    Agent, AgentEvent, AgentSession, SessionOptions, SystemPromptSlots, ToolCallResult,
+    Agent, AgentEvent, AgentSession, CodeDiagnosticSeverity, CodeError,
+    CodeIntelligenceCapabilities, CodeIntelligenceState, CodeLocation, CodePosition,
+    CodeSymbolKind, DocumentSymbol, LocalCodeIntelligence, NavigationKind, SessionOptions,
+    SymbolInformation, SystemPromptSlots, ToolCallResult, WorkspaceCodeIntelligence,
 };
+use a3s_lane::{PriorityItem, PriorityQueue};
 use a3s_tui::cmd::{self, Cmd};
 use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
-    Alert, AlertKind, ChoicePrompt, ChoicePromptItem, ChoicePromptMsg, DiffLineKind, DiffSpan,
-    InlineAction, Meter, Scrollbar, SessionStatusChip, Spinner, Textarea, Toast, ToastKind,
-    Viewport,
+    Alert, AlertKind, DiffLineKind, DiffSpan, InlineAction, Meter, Scrollbar, SessionStatusChip,
+    Spinner, Textarea, Toast, ToastKind, Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -78,6 +81,8 @@ mod deep_research_host_workflow;
 mod deep_research_prompts;
 #[path = "deep_research/report_audit.rs"]
 mod deep_research_report_audit;
+#[path = "deep_research/report_generation.rs"]
+mod deep_research_report_generation;
 #[path = "deep_research/report_phase.rs"]
 mod deep_research_report_phase;
 #[path = "deep_research/state_journal.rs"]
@@ -87,6 +92,8 @@ mod deep_research_workflow_store;
 #[cfg(test)]
 use deep_research_artifacts::looks_like_deep_research_fallback_draft;
 #[cfg(test)]
+pub(crate) use deep_research_artifacts::materialize_deep_research_completed_report_from_workflow_evidence;
+#[cfg(test)]
 pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft;
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
@@ -94,11 +101,12 @@ pub(crate) use deep_research_artifacts::{
     clean_deep_research_final_text_from_artifacts, deep_research_contains_workflow_store_reference,
     deep_research_output_has_internal_leak,
     deep_research_report_artifacts_from_output_for_current_run,
-    deep_research_report_artifacts_from_output_for_query, deep_research_report_slug,
+    deep_research_report_artifacts_from_output_for_query,
+    deep_research_report_rejection_diagnostic_from_answer_text, deep_research_report_slug,
     deep_research_workflow_needs_recovery_report,
     materialize_deep_research_completed_report_from_answer_text,
+    materialize_deep_research_completed_report_from_generation,
     materialize_deep_research_completed_report_from_markdown,
-    materialize_deep_research_completed_report_from_workflow_evidence,
     materialize_deep_research_recovery_report, parse_embedded_structured_evidence_json,
     research_report_artifacts_from_output, research_report_artifacts_from_output_for_current_run,
     snapshot_deep_research_report_artifacts, DeepResearchReportArtifactBaseline,
@@ -116,6 +124,7 @@ use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
 use deep_research_host_report::*;
 use deep_research_host_workflow::*;
+use deep_research_report_generation::*;
 use deep_research_report_phase::{
     suppress_tool_output as suppress_deep_research_report_phase_tool_output, ReportPhaseToolBuffer,
 };
@@ -180,6 +189,8 @@ mod app_projections;
 mod app_research;
 #[path = "app/runtime.rs"]
 mod app_runtime;
+#[path = "app/session_state.rs"]
+mod app_session_state;
 #[path = "app/smoke.rs"]
 mod app_smoke;
 #[path = "app/submit.rs"]
@@ -194,20 +205,34 @@ mod app_update_dispatch;
 mod app_view;
 #[path = "app/workflow_capture.rs"]
 mod app_workflow_capture;
+#[path = "ui/approval.rs"]
+mod approval;
+#[path = "ui/attachments.rs"]
+mod attachments;
+#[path = "ui/batch_view.rs"]
+mod batch_view;
 #[path = "ui/chrome.rs"]
 mod chrome;
 #[path = "ui/design_markdown.rs"]
 mod design_markdown;
 #[path = "ui/editor_state.rs"]
 mod editor_state;
+#[path = "ui/file_change_view.rs"]
+mod file_change_view;
 #[path = "ui/image.rs"]
 mod image;
+#[path = "ui/message_chrome.rs"]
+mod message_chrome;
 #[path = "ui/program_preview.rs"]
 mod program_preview;
 #[path = "ui/render.rs"]
 mod render;
 #[path = "ui/syntax.rs"]
 mod syntax;
+#[path = "ui/tool_style.rs"]
+mod tool_style;
+#[path = "ui/tool_transcript_view.rs"]
+mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
 
@@ -223,9 +248,11 @@ use crate::config::*;
 use app_commands::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
-pub(crate) use app_launch::run_in;
+pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
 use app_permissions::*;
 use app_projections::*;
+pub(crate) use app_session_state::tui_session_state_path;
+use app_session_state::*;
 use app_smoke::run_smoke;
 #[cfg(test)]
 use app_smoke::{
@@ -237,24 +264,30 @@ use app_smoke::{
 use app_types::*;
 use app_update::*;
 use app_workflow_capture::*;
+use approval::{ApprovalPrompt, ApprovalPromptMsg};
 use asset_naming::*;
+use attachments::*;
 use chrome::*;
 use design_markdown::StreamingMarkdown;
 use editor_state::*;
 use gitutil::*;
 use image::*;
 use memutil::*;
+use message_chrome::*;
 pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
 use render::*;
 use runtime_policy::RuntimePolicy;
 use runtime_projection::{
-    CompletedSubagent, CompletedTool, RuntimeProjection, SubagentOutcome, ToolCallState,
+    CompletedSubagent, CompletedTool, RuntimeProjection, RuntimeToolCheckpoint, SubagentOutcome,
+    ToolCallState,
 };
 use skills::*;
 use syntax::*;
-use transcript::{Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryId};
+use transcript::{
+    join_transcript_blocks, Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryId,
+};
 use update::*;
 use util::*;
 
@@ -264,16 +297,27 @@ const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEEP_RESEARCH_SCRIPT_TIMEOUT_MS: u64 = 300 * 1000;
 const DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS: u64 = 30_000;
-// Planning, retrieval, checking, and synthesis keep independent active-work
-// clocks. This wall-clock fuse only prevents pathological orchestration from
-// escaping the query-agnostic safety envelope.
-const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = 6 * 60 * 1000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
-const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 90 * 1000;
-const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 90 * 1000;
+const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 180 * 1000;
+const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 120 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
+// Planning/retrieval/checking, synthesis, and the single repair pass keep
+// independent active-work clocks. The wall-clock fuse therefore covers the
+// sum of their safety ceilings plus cancellation and artifact finalization;
+// it must never silently shorten a valid phase timeout.
+const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS
+    + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
+    + DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS
+    + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+    + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
+    + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
+const STREAM_START_TIMEOUT_MS: u64 = 10_000;
+const STREAM_JOIN_SETTLE_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
+const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
+const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
+const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
 const DEEP_RESEARCH_TOOL_COMPLETION_GRACE_MS: u64 = 15_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
 #[allow(dead_code)]
@@ -293,6 +337,9 @@ struct App {
     deep_research_report_tool_gate: DeepResearchReportToolGate,
     /// This session's id (for model-switch resume + the exit hint).
     session_id: String,
+    /// Credential source paired with `model`, persisted per session so a
+    /// resumed conversation does not inherit another session's last picker tab.
+    model_source: ModelSelectionSource,
     /// Monotonic identity and active request guard for async session rebuilds.
     /// Late results must never replace a newer active session.
     session_rebuild_seq: u64,
@@ -376,6 +423,9 @@ struct App {
     /// One-shot prompt generated when the active DeepResearch synthesis missed
     /// its report artifacts. It has priority over generic verification loops.
     pending_deep_research_report_repair_prompt: Option<String>,
+    /// DeepResearch synthesis deferred behind user follow-up turns. Keeping it
+    /// outside the user queue lets a new research run invalidate stale work.
+    pending_deep_research_synthesis: Option<(String, String)>,
     /// Monotonic guard for DeepResearch stream watchdogs; stale timeout ticks
     /// must not affect later turns.
     deep_research_stream_timeout_token: u64,
@@ -383,6 +433,13 @@ struct App {
     /// StreamStarted/StreamError from a cancelled turn must never replace the
     /// receiver of a queued successor.
     stream_start_token: u64,
+    /// An interrupted turn whose async `session.stream` admission has not
+    /// returned yet. A queued successor cannot start until that stale worker is
+    /// cancelled and its single-flight lease has been released.
+    interrupted_stream_start_token: Option<u64>,
+    /// Continuation deferred behind `interrupted_stream_start_token`. This is
+    /// populated when interruption cleanup wins the race with stream admission.
+    pending_interrupted_continuation: Option<InterruptedContinuation>,
     /// Required Runtime use for the current autonomous workflow, plus observed
     /// evidence from tool/subagent/view events.
     runtime_expectation: Option<RuntimeExpectation>,
@@ -464,14 +521,17 @@ struct App {
     /// finalizes, which clear the live streaming buffer). capture_review scans
     /// this when a provider leaves `End.text` empty.
     turn_text: String,
+    /// Transaction boundary for one Core LLM turn. Repeating `TurnStart` with
+    /// the same number restores this snapshot before an in-place stream retry.
+    llm_turn_checkpoint: Option<LlmTurnUiCheckpoint>,
     /// Active transcript text-selection (mouse drag → highlight → copy on
     /// release); `None` when there's no selection.
     selection: Option<Selection>,
     /// Latest dynamic-workflow artifact (ultracode dynamic workflow or task dispatch),
     /// retained for synthesis and shown collapsed in the transcript.
     last_workflow: Option<String>,
-    /// Clipboard images pasted (Ctrl+V), sent with the next message.
-    pending_images: Vec<a3s_code_core::llm::Attachment>,
+    /// Clipboard images pasted into the composer, sent with the owning message.
+    pending_images: Vec<PendingImage>,
     /// Persistent north-star goal (`/goal`), prepended to each prompt.
     goal: Option<String>,
     /// When the current `/goal` was set — drives the "Pursuing goal (1h 32m)"
@@ -480,6 +540,11 @@ struct App {
     /// Durable `/goal` execution state. Unlike `/loop`, this has no turn cap:
     /// only a matching Core GoalAchieved event can close it.
     goal_run: Option<panels::goal_engineering::GoalRunState>,
+    /// Incomplete goal retained across TUI exits. It remains paused until the
+    /// startup picker or `/goal resume` explicitly activates it.
+    paused_goal: Option<PausedGoalState>,
+    /// Selected row in the startup "Resume paused goal?" picker.
+    goal_resume_prompt: Option<usize>,
     /// Monotonic invalidation token for delayed goal retries.
     goal_generation: u64,
     /// Retry context retained until Core's stream worker releases its
@@ -561,6 +626,10 @@ struct App {
     /// persistence and the core single-flight admission lease. Input remains
     /// queue-only until `StreamJoinSettled` arrives.
     stream_join_settling: bool,
+    /// Lets Esc release a terminal stream worker immediately when a queued
+    /// follow-up is waiting, without starting the next turn before the lease is
+    /// actually dropped.
+    stream_settle_abort: Option<tokio::task::AbortHandle>,
     /// Abort handle for host-direct tools such as the DeepResearch workflow.
     host_tool_abort: Option<HostToolAbort>,
     /// True while `rx` is carrying host-direct tool progress rather than an
@@ -594,10 +663,15 @@ struct App {
     /// The mode to restore once an autonomous directive run finishes —
     /// `Some` while such a run auto-switched to `Mode::Auto`.
     autonomy_restore: Option<Mode>,
-    /// User messages submitted while the agent is busy, run when it frees up.
-    queue: BinaryHeap<Queued>,
-    /// Monotonic counter for FIFO ordering within a queue priority.
-    seq: u64,
+    /// Host turns submitted while the agent is busy. Ordering and FIFO
+    /// semantics come directly from a3s-lane.
+    queue: PriorityQueue<Queued>,
+    /// A claimed queued turn remains here until Core admits it. Admission
+    /// failure restores this exact item, including its original FIFO sequence.
+    active_queued_turn: Option<PriorityItem<Queued>>,
+    active_queued_turn_token: Option<u64>,
+    queue_retry_generation: u64,
+    queue_retry_attempt: u8,
     /// Text of the message currently being processed (the running task).
     running_task: Option<String>,
     /// Typed live plan/TODO projection, pinned above the input and updated from
@@ -651,7 +725,8 @@ struct App {
 
 impl App {
     fn composer_input_is_hidden(&self) -> bool {
-        self.state == State::Awaiting
+        self.goal_resume_prompt.is_some()
+            || self.state == State::Awaiting
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
             || self.effort_panel.is_some()
@@ -676,8 +751,19 @@ impl App {
             return None;
         }
 
+        // Checkpoint the resumable UI state immediately. The goal's loop files
+        // are marked paused only after the stream has settled, avoiding a race
+        // with an in-flight iteration that may still be writing STATE.md.
+        if let Err(error) = self.persist_tui_session_state() {
+            tracing::warn!(%error, "failed to checkpoint TUI session settings before exit");
+        }
+
         self.quitting = true;
         self.interrupting = true;
+        if let Some(ide) = self.ide.as_mut() {
+            ide.intelligence_cancellation.cancel();
+            ide.intelligence_jump_cancellation.cancel();
+        }
         self.stream_start_token = self.stream_start_token.wrapping_add(1);
         self.deep_research_stream_timeout_token =
             self.deep_research_stream_timeout_token.wrapping_add(1);
@@ -693,20 +779,35 @@ impl App {
                 abort.abort();
             }
 
+            let close = settle_session_close_for_quit(
+                async move {
+                    session.close().await;
+                },
+                Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
+            );
             match stream_join {
                 Some(stream_join) => {
-                    let close = session.close();
                     let settle = settle_stream_join_for_quit(
                         stream_join,
                         Duration::from_millis(GRACEFUL_QUIT_STREAM_GRACE_MS),
                     );
                     let _ = tokio::join!(close, settle);
                 }
-                None => session.close().await,
+                None => {
+                    close.await;
+                }
             }
 
             Msg::QuitReady
         }))
+    }
+
+    fn finish_graceful_quit(&mut self) -> Option<Cmd<Msg>> {
+        self.pause_goal_for_exit();
+        if let Err(error) = self.persist_tui_session_state() {
+            tracing::warn!(%error, "failed to finalize TUI session settings before exit");
+        }
+        Some(cmd::quit())
     }
 
     fn request_subagent_snapshots(&mut self) -> Cmd<Msg> {
@@ -737,10 +838,9 @@ impl App {
 }
 
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
-    approval_prompt(label, selected).lines(width as u16, APPROVAL_PANEL_HEIGHT)
+    approval_prompt(label, selected).lines(width)
 }
 
-const APPROVAL_PANEL_HEIGHT: usize = 5;
 const FULLSCREEN_APPROVAL_ROWS_BELOW: usize = 1;
 
 fn approval_rows_below_for(transcript_open: bool, composer_rows_below: usize) -> usize {
@@ -751,24 +851,8 @@ fn approval_rows_below_for(transcript_open: bool, composer_rows_below: usize) ->
     }
 }
 
-fn approval_prompt(label: &str, selected: usize) -> ChoicePrompt {
-    ChoicePrompt::new(
-        format!("⏵ Run {label}?"),
-        vec![
-            ChoicePromptItem::new("Allow once").shortcut('y'),
-            ChoicePromptItem::new("Allow all tools this session").shortcut('a'),
-            ChoicePromptItem::new("Deny").shortcut('n').danger(),
-        ],
-    )
-    .selected(selected)
-    .indent(2)
-    .marker("❯")
-    .title_color(TN_YELLOW)
-    .text_color(TN_FG)
-    .muted_color(TN_GRAY)
-    .danger_color(TN_RED)
-    .selected_colors(TN_FG, SURFACE_SELECTED)
-    .hint("Enter select · ↑/↓ · 1–3 · Esc")
+fn approval_prompt(label: &str, selected: usize) -> ApprovalPrompt {
+    ApprovalPrompt::new(label, selected)
 }
 
 fn approval_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {

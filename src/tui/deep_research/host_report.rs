@@ -420,16 +420,9 @@ pub(super) fn recover_missing_deep_research_report(
         return DeepResearchReportRecovery::CompletedMaterialized { artifacts };
     }
 
-    if let Some(artifacts) = materialize_deep_research_completed_report_from_workflow_evidence(
-        workspace,
-        query,
-        workflow_output,
-        workflow_metadata,
-    ) {
-        *loop_remaining = 0;
-        return DeepResearchReportRecovery::CompletedMaterialized { artifacts };
-    }
-
+    // A schema-valid evidence package is input to report synthesis, not a
+    // reader-facing report. Give the model one bounded, evidence-closed repair
+    // pass before the host emits an explicitly degraded recovery artifact.
     if arm_deep_research_report_repair(loop_remaining, repair_used) {
         return DeepResearchReportRecovery::RepairPassArmed;
     }
@@ -471,22 +464,6 @@ pub(super) fn materialize_deep_research_timeout_completed_report(
                 workspace,
                 query,
                 text,
-                workflow_output,
-                workflow_metadata,
-            )
-        })
-        .or_else(|| {
-            materialize_deep_research_completed_report_from_workflow_evidence(
-                workspace,
-                query,
-                workflow_output,
-                workflow_metadata,
-            )
-        })
-        .or_else(|| {
-            materialize_deep_research_completed_report_from_markdown(
-                workspace,
-                query,
                 workflow_output,
                 workflow_metadata,
             )

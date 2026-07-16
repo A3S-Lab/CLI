@@ -310,6 +310,13 @@ impl App {
                 )
             }
 
+            Msg::DeepResearchReportGenerated {
+                token,
+                query,
+                phase,
+                result,
+            } => return self.on_deep_research_report_generated(token, query, phase, result),
+
             Msg::DeepResearchSynthesisTimedOut { token } => {
                 return self.on_deep_research_synthesis_timed_out(token);
             }
@@ -374,7 +381,7 @@ impl App {
                             self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                                 "  → a3s {l} available — closing to upgrade, then restarting…"
                             )));
-                            return Some(cmd::quit());
+                            return self.begin_graceful_quit();
                         }
                         self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
                             "  → a3s {l} available — download: https://github.com/A3S-Lab/Cli/releases/latest"

@@ -137,6 +137,52 @@ fn editorial_report_uses_distinct_information_shapes_instead_of_one_markdown_she
 }
 
 #[test]
+fn report_master_presentation_changes_the_site_composition_for_the_same_content() {
+    let markdown = "# Shared evidence\n\n## Executive Summary\n\nA source-backed answer.\n\n## Key Findings\n\n### Finding\n\nInterpretation and implication.\n\n## Sources\n\n- [Source](https://example.com/source)";
+    let analytical = ReportPresentation {
+        narrative_mode: crate::tui::deep_research_report_generation::ReportNarrativeMode::Pyramid,
+        archetype: crate::tui::deep_research_report_generation::ReportArchetype::Analytical,
+        palette: crate::tui::deep_research_report_generation::ReportPalette::Graphite,
+        density: crate::tui::deep_research_report_generation::ReportDensity::Compact,
+        hero: crate::tui::deep_research_report_generation::ReportHero::Metrics,
+        visual_stance: crate::tui::deep_research_report_generation::ReportVisualStance::Safe,
+        rationale: "Dense comparison for a decision reader.".to_string(),
+    };
+    let chronicle = ReportPresentation {
+        narrative_mode: crate::tui::deep_research_report_generation::ReportNarrativeMode::Narrative,
+        archetype: crate::tui::deep_research_report_generation::ReportArchetype::Chronicle,
+        palette: crate::tui::deep_research_report_generation::ReportPalette::Amber,
+        density: crate::tui::deep_research_report_generation::ReportDensity::Spacious,
+        hero: crate::tui::deep_research_report_generation::ReportHero::Statement,
+        visual_stance: crate::tui::deep_research_report_generation::ReportVisualStance::Bold,
+        rationale: "Ordered change needs a chronological reading rhythm.".to_string(),
+    };
+
+    let analytical_html = deep_research_completed_report_html_with_presentation(
+        "Shared evidence",
+        markdown,
+        Some(&analytical),
+        Some("The evidence supports an immediate bounded decision."),
+    );
+    let chronicle_html = deep_research_completed_report_html_with_presentation(
+        "Shared evidence",
+        markdown,
+        Some(&chronicle),
+        Some("The evidence explains how the situation changed over time."),
+    );
+
+    assert!(analytical_html.contains(
+        "class=\"mode-pyramid archetype-analytical palette-graphite density-compact hero-metrics stance-safe\""
+    ));
+    assert!(chronicle_html.contains(
+        "class=\"mode-narrative archetype-chronicle palette-amber density-spacious hero-statement stance-bold\""
+    ));
+    assert!(analytical_html.contains("The evidence supports an immediate bounded decision."));
+    assert!(chronicle_html.contains("The evidence explains how the situation changed over time."));
+    assert_ne!(analytical_html, chronicle_html);
+}
+
+#[test]
 fn recovery_report_is_visually_and_semantically_degraded() {
     let html = deep_research_completed_report_html(
         "Current market state",
@@ -182,6 +228,18 @@ fn editorial_report_derives_a_semantic_title_without_double_ellipsis() {
 
     assert_eq!(title, "2020年第8号台风“巴威”（Bavi）研究");
     assert!(!title.contains('…'));
+}
+
+#[test]
+fn editorial_report_preserves_an_ordinary_descriptive_cjk_title() {
+    let title = "Tokio 与 async-std：维护状态、生态采用与迁移建议（截至 2026 年 7 月）";
+    let html = deep_research_completed_report_html(
+        "Compare two Rust runtimes",
+        &format!("# {title}\n\n## 结论\n\n证据支持该结论。"),
+    );
+
+    assert!(html.contains(&format!("<title>{title}</title>")), "{html}");
+    assert!(html.contains(&format!("<h1>{title}</h1>")), "{html}");
 }
 
 #[test]

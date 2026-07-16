@@ -283,6 +283,11 @@ pub(super) fn deep_research_compact_count_metadata(
         "all_success",
         "partial_failure",
         "allow_partial_failure",
+        "retry_attempt_count",
+        "retried_task_count",
+        "recovered_task_count",
+        "timed_out",
+        "returned_early",
     ] {
         copy_json_field(&mut counts, metadata, key);
     }
@@ -338,6 +343,7 @@ pub(super) fn deep_research_compact_warnings(warnings: &serde_json::Value) -> se
                         copy_json_field(&mut task, item, "round");
                         copy_json_field(&mut task, item, "agent");
                         copy_json_field(&mut task, item, "task_id");
+                        copy_json_field(&mut task, item, "retry_attempts");
                         if let Some(summary) = item
                             .get("error_summary")
                             .or_else(|| item.get("error"))

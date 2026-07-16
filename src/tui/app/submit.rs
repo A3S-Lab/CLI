@@ -5,7 +5,7 @@ use super::*;
 impl App {
     pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && self.pending_images.is_empty() {
             return None;
         }
         // No input while compacting or upgrading.
@@ -98,24 +98,22 @@ impl App {
             // The planner chooses the work; the host only supplies finite hard
             // caps and one bounded report finalization phase.
             let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
-            if self.state == State::Idle {
-                return self.start_deep_research_workflow(
-                    query,
-                    os_runtime,
-                    evidence_scope,
+            self.queue.push(
+                USER_TURN_PRIORITY,
+                Queued {
+                    text: format!("? {query}"),
+                    display,
+                    images: Vec::new(),
                     runtime_expectation,
-                );
+                    deep_research: Some((query, os_runtime, evidence_scope)),
+                },
+            );
+            if self.state == State::Idle {
+                return self.drain_queue();
             }
-            self.seq += 1;
-            self.queue.push(Queued {
-                prio: 1,
-                seq: self.seq,
-                text: format!("? {query}"),
-                display,
-                runtime_expectation,
-                deep_research: Some((query, os_runtime, evidence_scope)),
-            });
-            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
+            // The bottom queue projection is the only owner of pending-turn
+            // status. A transcript entry would outlive the queue item after it
+            // is claimed and make an already-running turn look pending.
             self.relayout();
             return None;
         }
@@ -315,7 +313,7 @@ impl App {
         if let Some(rest) = slash_tail(trimmed, "/kb") {
             return self.handle_kb_command(rest);
         }
-        // `/goal [text|clear]` — a persistent goal prepended to every prompt.
+        // `/goal [text|resume|clear]` — a persistent goal prepended to every prompt.
         if let Some(rest) = slash_tail(trimmed, "/goal") {
             let g = rest.trim();
             self.textarea.clear();
@@ -325,14 +323,33 @@ impl App {
                         TN_CYAN,
                         &format!("◎\u{200A}goal: {cur}   (/goal clear to remove)"),
                     )),
-                    None => self.push_line(
-                        &Style::new()
-                            .fg(TN_GRAY)
-                            .render("  usage: /goal <what you're working toward>"),
-                    ),
+                    None => match &self.paused_goal {
+                        Some(paused) => self.push_line(&gutter(
+                            TN_YELLOW,
+                            &format!(
+                                "◎\u{200A}goal paused: {}   (/goal resume or /goal clear)",
+                                paused.goal
+                            ),
+                        )),
+                        None => self.push_line(
+                            &Style::new()
+                                .fg(TN_GRAY)
+                                .render("  usage: /goal <what you're working toward>"),
+                        ),
+                    },
                 }
             } else if g == "clear" {
                 return self.clear_goal_command();
+            } else if g == "resume" {
+                if self.paused_goal.is_none() {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_GRAY)
+                            .render("  no paused goal to resume"),
+                    );
+                    return None;
+                }
+                return self.resume_paused_goal();
             } else {
                 return self.start_goal_run(g);
             }
@@ -682,6 +699,7 @@ impl App {
             "/clear" => {
                 self.textarea.clear();
                 self.cancel_goal_state("cleared by /clear");
+                self.clear_paused_goal("cleared by /clear");
                 self.goal = None;
                 self.goal_since = None;
                 // Actually reset the conversation, not just the screen: swap in a
@@ -797,7 +815,7 @@ impl App {
             "/ide" => {
                 self.textarea.clear();
                 let entries = ide_children(std::path::Path::new(&self.cwd), 0);
-                self.ide = Some(Ide::browse(entries, "workspace"));
+                self.ide = Some(Ide::workspace(entries));
                 return None;
             }
             "/plugin" => {
@@ -842,10 +860,7 @@ impl App {
                     // Quick version check only; the actual upgrade runs in the
                     // shell after the TUI exits (run()), so brew's/curl's own
                     // progress shows and the restart picks up the new binary.
-                    let latest = tokio::task::spawn_blocking(crate::update::fetch_latest)
-                        .await
-                        .ok()
-                        .flatten();
+                    let latest = crate::update::fetch_latest_async().await;
                     Msg::UpdatePlan(latest)
                 }));
             }
@@ -870,12 +885,20 @@ impl App {
             _ => {}
         }
 
-        self.history.push(trimmed.to_string());
+        if !trimmed.is_empty() {
+            self.history.push(trimmed.to_string());
+        }
         self.history_pos = None;
         self.history_draft = None;
-        // Show the user message in a background bubble, then run now (if idle)
-        // or queue it (if the agent is busy).
-        self.messages.push(TranscriptEntry::user(trimmed));
+        // Composer chips disappear on submit, while compact textual references
+        // remain in the user bubble just like Codex's `[Image #n]` markers.
+        let image_references = attachment_reference_line(&self.pending_images);
+        let user_display = match (image_references.is_empty(), trimmed.is_empty()) {
+            (true, _) => trimmed.to_string(),
+            (false, true) => image_references.clone(),
+            (false, false) => format!("{image_references}\n{trimmed}"),
+        };
+        self.messages.push(TranscriptEntry::user(user_display));
         self.textarea.clear();
         // One-shot `/ctx <n>` context: attach the staged transcript to THIS
         // genuine typed message only (never a `/loop` "Continue." re-entry),
@@ -887,87 +910,83 @@ impl App {
                 run.pause_achievement_for_user_turn();
             }
         }
+        let typed_prompt = if trimmed.is_empty() {
+            "Please inspect the attached image or images.".to_string()
+        } else {
+            trimmed.to_string()
+        };
+        let task_label = if trimmed.is_empty() {
+            image_references
+        } else {
+            trimmed.to_string()
+        };
         let prompt = match (loop_cont, self.pending_ctx.take()) {
-            (false, Some(c)) => format!("{c}\n\n{trimmed}"),
-            _ => trimmed.to_string(),
+            (false, Some(c)) => format!("{c}\n\n{typed_prompt}"),
+            _ => typed_prompt,
         };
         let (prompt, display) = match &self.agent_dev {
             Some(dev) => (
                 panels::agent::agent_dev_prompt(dev, &prompt),
-                format!("◇ {}: {}", dev.name, truncate(trimmed, 60)),
+                format!("◇ {}: {}", dev.name, truncate(&task_label, 60)),
             ),
             None => match &self.mcp_dev {
                 Some(dev) => (
                     panels::mcp::mcp_dev_prompt(dev, &prompt),
-                    format!("◆ {}: {}", dev.name, truncate(trimmed, 60)),
+                    format!("◆ {}: {}", dev.name, truncate(&task_label, 60)),
                 ),
                 None => match &self.skill_dev {
                     Some(dev) => (
                         panels::skill::skill_dev_prompt(dev, &prompt),
-                        format!("✦ {}: {}", dev.name, truncate(trimmed, 60)),
+                        format!("✦ {}: {}", dev.name, truncate(&task_label, 60)),
                     ),
                     None => match &self.okf_dev {
                         Some(dev) => (
                             panels::okf::okf_dev_prompt(dev, &prompt),
-                            format!("⌁ {}: {}", dev.name, truncate(trimmed, 60)),
+                            format!("⌁ {}: {}", dev.name, truncate(&task_label, 60)),
                         ),
-                        None => (prompt, trimmed.to_string()),
+                        None => (prompt, task_label),
                     },
                 },
             },
         };
-        if self.state == State::Idle {
-            self.start_stream_inner(prompt, display, true, true, false)
+        let priority = if loop_cont {
+            SYNTHETIC_TURN_PRIORITY
         } else {
-            self.seq += 1;
-            self.queue.push(Queued {
-                prio: 1,
-                seq: self.seq,
+            USER_TURN_PRIORITY
+        };
+        self.queue.push(
+            priority,
+            Queued {
                 text: prompt,
                 display,
+                images: std::mem::take(&mut self.pending_images),
                 runtime_expectation: None,
                 deep_research: None,
-            });
-            self.push_line(&Style::new().fg(TN_GRAY).render("    ⋯ queued"));
+            },
+        );
+        if self.state == State::Idle {
+            self.drain_queue()
+        } else {
+            // Keep this transient state out of the durable transcript. The
+            // queue panel disappears as soon as drain_queue claims the turn.
             self.relayout();
             None
         }
     }
 
-    /// Begin streaming a prompt (the user message must already be on screen).
-    /// Grab a clipboard image, preview it inline, and queue it for the next send.
+    /// Grab a clipboard image and add an interactive chip to the composer.
+    /// This method only stages the image; Enter remains the sole send action.
     pub(super) fn paste_clipboard_image(&mut self) {
-        let dest =
-            std::env::temp_dir().join(format!("a3s-paste-{}.png", self.pending_images.len()));
-        if !clipboard_image_to(&dest) {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render("  no image in clipboard (Ctrl+V pastes a copied/screenshot image)"),
-            );
-            return;
-        }
-        let Ok(bytes) = std::fs::read(&dest) else {
-            return;
-        };
-        self.messages.push(TranscriptEntry::preformatted(gutter(
-            ACCENT,
-            "⊕\u{200A}pasted image (sends with your next message):",
-        )));
-        // Render narrower than the viewport so half-block rows never wrap (a
-        // wrapped row splits the picture and garbles it). Indent to align.
-        let cols = self.transcript_markdown_width().min(72);
-        if let Some(lines) = render_image_file(&dest, cols, 16) {
-            for l in lines {
-                self.messages.push(TranscriptEntry::preformatted(format!(
-                    "{}{l}",
-                    " ".repeat(PAD)
-                )));
+        match PendingImage::from_clipboard() {
+            Ok(image) => {
+                self.pending_images.push(image);
+                self.relayout();
             }
+            Err(error) => self.push_notice(
+                NoticeKind::Warning,
+                format!("Clipboard image unavailable: {error}"),
+            ),
         }
-        self.rebuild_viewport();
-        self.pending_images
-            .push(a3s_code_core::llm::Attachment::png(bytes));
     }
 
     pub(super) fn start_stream(&mut self, prompt: String) -> Option<Cmd<Msg>> {

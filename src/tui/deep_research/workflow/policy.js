@@ -39,9 +39,7 @@
           limit: directWebMaxResults,
           timeout: directWebSearchTimeoutSecs
         };
-        // Omitted means "use the healthy engines enabled by a3s-search".
-        // Passing an empty or stale hard-coded list turns configuration drift
-        // into a deterministic `No valid engines found` failure.
+        // Omitted uses the healthy engines enabled by a3s-search.
         if (directWebEngines.length > 0) {
           args.engines = directWebEngines;
         }
@@ -154,18 +152,18 @@
     for (const item of candidates) {
       const safeUrl = normalizeObservedSource(item.url);
       if (safeUrl && /^https?:\/\//i.test(safeUrl)) {
-        safeCandidates.push({ item, safeUrl });
+        safeCandidates.push({ item, safeUrl, fetchUrl: evidenceFetchUrl(safeUrl) });
       } else {
         fetches.push({ url: item.url, ok: false, output: "" });
         collectionErrors.push("web_fetch skipped an unsafe search result URL");
       }
     }
     if (safeCandidates.length > 0) {
-      const invocations = safeCandidates.map(({ safeUrl }, index) => ({
+      const invocations = safeCandidates.map(({ fetchUrl }, index) => ({
         id: `fetch-${index + 1}`,
         tool: "web_fetch",
         args: {
-          url: safeUrl,
+          url: fetchUrl,
           format: "markdown",
           timeout: directWebFetchTimeoutSecs
         }

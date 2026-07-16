@@ -125,6 +125,10 @@ fn synthesis_report_context(workflow_output: &str) -> Option<serde_json::Value> 
                 plan_context.insert(key.to_string(), serde_json::json!(values));
             }
         }
+        let tracks = bounded_plan_tracks(plan.get("tracks"), 6, 500);
+        if !tracks.is_empty() {
+            plan_context.insert("tracks".to_string(), serde_json::json!(tracks));
+        }
         if !plan_context.is_empty() {
             context.insert("plan".to_string(), serde_json::Value::Object(plan_context));
         }
@@ -174,6 +178,27 @@ fn bounded_string_array(
         .filter(|value| !value.is_empty())
         .take(item_limit)
         .map(|value| bounded_string(value, char_limit))
+        .collect()
+}
+
+fn bounded_plan_tracks(
+    value: Option<&serde_json::Value>,
+    item_limit: usize,
+    char_limit: usize,
+) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|track| {
+            track
+                .as_str()
+                .or_else(|| track.get("title").and_then(serde_json::Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|track| !track.is_empty())
+        .take(item_limit)
+        .map(|track| bounded_string(track, char_limit))
         .collect()
 }
 
@@ -354,6 +379,7 @@ mod tests {
                 "answer_shape": "investigation",
                 "execution_route": "direct_then_maker",
                 "phases": ["Collect", "Compare"],
+                "tracks": ["Mechanism", "Counterevidence"],
                 "stop_conditions": ["Evidence is corroborated"],
                 "search_queries": ["internal retrieval instruction"]
             },
@@ -378,6 +404,8 @@ mod tests {
             payload.contains("One benchmark remains unavailable"),
             "{payload}"
         );
+        assert!(payload.contains("Mechanism"), "{payload}");
+        assert!(payload.contains("Counterevidence"), "{payload}");
         assert!(
             !payload.contains("internal retrieval instruction"),
             "{payload}"

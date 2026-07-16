@@ -20,12 +20,44 @@ pub(super) fn pump(rx: SharedRx) -> Cmd<Msg> {
 /// Wait for the previous stream worker to release the session's single-flight
 /// admission lease before the update loop constructs any follow-up operation.
 pub(super) fn wait_for_stream_join(
+    session: Arc<AgentSession>,
     stream_join: StreamJoin,
     token: u64,
     synthesis: Option<(String, String)>,
 ) -> Cmd<Msg> {
     cmd::cmd(move || async move {
-        let _ = stream_join.await;
+        // A provider worker must never hold queued user input forever after it
+        // has already emitted a terminal event. Give normal persistence and
+        // lease cleanup a bounded grace period, then abort the stale worker so
+        // its cancellation destructor releases the single-flight admission.
+        let mut stream_join = stream_join;
+        let proxy_result = tokio::time::timeout(
+            Duration::from_millis(STREAM_JOIN_SETTLE_GRACE_MS),
+            &mut stream_join,
+        )
+        .await;
+        let proxy_settled = matches!(&proxy_result, Ok(Ok(())));
+        let proxy_still_pending = proxy_result.is_err();
+        if !proxy_settled {
+            // The public handle is a guardian proxy. Aborting only that proxy
+            // cannot release Core's single-flight lease, so settle the real
+            // worker through the session before allowing another turn. The
+            // normal grace period was already spent above (or Esc explicitly
+            // aborted the proxy), so do not impose the same delay twice.
+            let _ = session
+                .cancel_and_settle(
+                    Duration::ZERO,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            if proxy_still_pending {
+                let _ = settle_stream_join_for_quit(
+                    stream_join,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            }
+        }
         Msg::StreamJoinSettled { token, synthesis }
     })
 }
@@ -36,12 +68,48 @@ pub(super) fn wait_for_stream_join(
 pub(super) fn discard_started_stream(
     session: Arc<AgentSession>,
     stream_join: StreamJoin,
+    token: u64,
 ) -> Cmd<Msg> {
     cmd::cmd(move || async move {
-        session.cancel().await;
-        let _ = stream_join.await;
-        Msg::DiscardedStreamSettled
+        let _ = session
+            .cancel_and_settle(
+                Duration::from_millis(STREAM_JOIN_SETTLE_GRACE_MS),
+                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+            )
+            .await;
+        let _ = settle_stream_join_for_quit(
+            stream_join,
+            Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+        )
+        .await;
+        Msg::DiscardedStreamSettled { token }
     })
+}
+
+/// Bound host shutdown even when an extension or transport ignores session
+/// cancellation. The owned task is aborted on expiry so the runtime cannot
+/// retain a detached close future after the TUI has exited.
+pub(super) async fn settle_session_close_for_quit<F>(close: F, grace: Duration) -> bool
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut close = tokio::spawn(close);
+    match tokio::time::timeout(grace, &mut close).await {
+        Ok(Ok(())) => true,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "Session close task failed during TUI shutdown");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout = ?grace,
+                "Session close did not settle before the TUI shutdown deadline"
+            );
+            close.abort();
+            let _ = close.await;
+            false
+        }
+    }
 }
 
 /// Give an active stream a bounded opportunity to observe session cancellation.
@@ -100,7 +168,7 @@ pub(super) fn deep_research_planned_synthesis_timeout_ms(
         .ok()?
         .pointer("/plan/budget/synthesis_timeout_ms")
         .and_then(serde_json::Value::as_u64)
-        .map(|timeout_ms| timeout_ms.clamp(10_000, 90_000))
+        .map(|timeout_ms| timeout_ms.clamp(10_000, DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS))
 }
 
 pub(super) fn deep_research_plan_status(workflow_output: &str) -> Option<String> {

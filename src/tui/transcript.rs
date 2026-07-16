@@ -6,20 +6,26 @@ use std::time::{Duration, Instant};
 use a3s_tui::style::truncate_visible;
 
 use super::design_markdown::Markdown;
+use super::message_chrome::{
+    message_branch, message_marker, message_title, render_notice, sanitize_message_source,
+    subagent_message_tone, tool_message_tone, MessageBranch, MessageTone, NoticeKind,
+};
 use super::render::{
     arg_summary_for_tool, render_live_tool_activity, render_tool_terminal, render_tool_transcript,
     ToolTranscriptInput,
 };
 use super::runtime_projection::{SubagentOutcome, ToolCallState};
-use super::{
-    gutter, transcript_markdown_width_for, user_bubble, wrap_words, Style, ACCENT, TN_CYAN, TN_FG,
-    TN_GRAY, TN_GREEN, TN_RED,
-};
+use super::tool_style::highlight_explore_detail;
+#[cfg(test)]
+use super::TN_CYAN;
+use super::{gutter, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
     /// Already-rendered UI notices and non-reflowable terminal artifacts.
     Preformatted(String),
+    /// Source-backed system feedback with stable severity and responsive layout.
+    Notice { kind: NoticeKind, source: String },
     /// Raw user text, rendered into the transcript bubble at the current width.
     User { source: String },
     /// Raw assistant Markdown, rendered canonically at the current width.
@@ -134,6 +140,13 @@ impl TranscriptEntry {
         }
     }
 
+    pub(crate) fn notice(kind: NoticeKind, source: impl Into<String>) -> Self {
+        Self::Notice {
+            kind,
+            source: source.into(),
+        }
+    }
+
     pub(crate) fn assistant_markdown(source: impl Into<String>) -> Self {
         Self::AssistantMarkdown {
             source: source.into(),
@@ -180,17 +193,19 @@ impl TranscriptEntry {
 
     fn render_with_activity(
         &self,
-        screen_width: u16,
+        _screen_width: u16,
         content_width: usize,
         activity_phase: bool,
     ) -> String {
         match self {
             Self::Preformatted(value) => value.clone(),
-            Self::User { source } => user_bubble(source, content_width),
+            Self::Notice { kind, source } => render_notice(*kind, source, content_width),
+            Self::User { source } => user_bubble(&sanitize_message_source(source), content_width),
             Self::AssistantMarkdown { source } => {
+                let source = sanitize_message_source(source);
                 let rendered = Markdown::new()
-                    .with_width(transcript_markdown_width_for(screen_width))
-                    .render(source);
+                    .with_width(content_width.saturating_sub(2).max(1))
+                    .render(&source);
                 gutter(TN_GRAY, &rendered)
             }
             Self::Reasoning { .. } => String::new(),
@@ -241,20 +256,43 @@ impl TranscriptEntry {
             _ => self.render_with_activity(screen_width, content_width, activity_phase),
         }
     }
+
+    /// Tool and delegated-agent cells form one execution cluster until prose,
+    /// user input, or a notice establishes a new narrative boundary.
+    fn is_activity_cell(&self) -> bool {
+        match self {
+            Self::Tool(tool) => tool.visible,
+            Self::Subagent(subagent) => subagent.visible,
+            _ => false,
+        }
+    }
 }
 
 fn render_reasoning(source: &str, width: usize) -> String {
+    let source = sanitize_message_source(source);
     if width == 0 || source.trim().is_empty() {
         return String::new();
     }
-    let bullet = Style::new().fg(TN_GRAY).bold().render("•");
-    let title = Style::new().fg(TN_FG).bold().render("Reasoning");
+    let bullet = message_marker(MessageTone::Reasoning);
+    let title = message_title("Reasoning", false);
     let mut rows = vec![format!("{bullet} {title}")];
+    let mut first = true;
     for line in source.lines() {
         rows.extend(
             wrap_words(line, width.saturating_sub(4).max(1))
                 .into_iter()
-                .map(|line| format!("    {}", Style::new().fg(TN_GRAY).render(&line))),
+                .map(|line| {
+                    let prefix = message_branch(if first {
+                        MessageBranch::Last
+                    } else {
+                        MessageBranch::Indent
+                    });
+                    first = false;
+                    format!(
+                        "{prefix}{}",
+                        Style::new().fg(TN_GRAY).italic().render(&line)
+                    )
+                }),
         );
     }
     rows.into_iter()
@@ -271,35 +309,52 @@ fn render_subagent_result(
     if width == 0 {
         return String::new();
     }
-    let (status, status_color) = match subagent.outcome {
-        SubagentOutcome::Succeeded => ("completed", TN_GREEN),
-        SubagentOutcome::Failed => ("failed", TN_RED),
-        SubagentOutcome::Cancelled => ("cancelled", super::TN_YELLOW),
-        SubagentOutcome::TrackingLost => ("tracking lost", super::TN_YELLOW),
+    let status = match subagent.outcome {
+        SubagentOutcome::Succeeded => "completed",
+        SubagentOutcome::Failed => "failed",
+        SubagentOutcome::Cancelled => "cancelled",
+        SubagentOutcome::TrackingLost => "tracking lost",
     };
-    let status = Style::new().fg(status_color).bold().render(status);
-    let bullet = Style::new().fg(TN_GRAY).bold().render("•");
-    let agent = Style::new().fg(TN_CYAN).bold().render(&subagent.agent);
-    let id = Style::new()
-        .fg(TN_GRAY)
-        .render(&format!("({})", subagent.task_id));
-    let mut rows = vec![truncate_visible(
-        &format!("{bullet} Agent {status}: {agent} {id}"),
-        width,
-    )];
+    let title = message_title(&format!("Agent {status}"), false);
+    let bullet = message_marker(subagent_message_tone(subagent.outcome));
+    let agent_name = sanitize_message_source(&subagent.agent);
+    let agent = Style::new().fg(TN_GRAY).bold().render(&agent_name);
+    let separator = Style::new().fg(super::TN_SUBTLE).render("·");
+    let task_id = sanitize_message_source(&subagent.task_id);
+    let id = full_output.then(|| {
+        Style::new()
+            .fg(super::TN_SUBTLE)
+            .render(&format!("({task_id})"))
+    });
+    let header = match id {
+        Some(id) => format!("{bullet} {title} {separator} {agent} {id}"),
+        None => format!("{bullet} {title} {separator} {agent}"),
+    };
+    let mut rows = vec![truncate_visible(&header, width)];
 
-    let task = subagent.task.trim();
+    let task_source = sanitize_message_source(&subagent.task);
+    let output_source = sanitize_message_source(&subagent.output);
+    let task = task_source.trim();
+    let output = output_source.trim();
     if !task.is_empty() {
         for (index, line) in wrap_words(task, width.saturating_sub(4).max(1))
             .into_iter()
             .enumerate()
         {
-            let prefix = if index == 0 { "  └ " } else { "    " };
-            rows.push(format!("{prefix}{}", Style::new().fg(TN_FG).render(&line)));
+            let branch = match (index, output.is_empty()) {
+                (0, false) => MessageBranch::Fork,
+                (0, true) => MessageBranch::Last,
+                (_, false) => MessageBranch::Pipe,
+                (_, true) => MessageBranch::Indent,
+            };
+            rows.push(format!(
+                "{}{}",
+                message_branch(branch),
+                Style::new().fg(TN_FG).render(&line)
+            ));
         }
     }
 
-    let output = subagent.output.trim();
     if !output.is_empty() {
         let mut output_rows = output
             .lines()
@@ -312,17 +367,26 @@ fn render_subagent_result(
             output_rows.truncate(8);
             omitted
         };
-        rows.push(Style::new().fg(TN_GRAY).render("    Output:"));
-        rows.extend(
-            output_rows
-                .into_iter()
-                .map(|line| format!("    {}", Style::new().fg(TN_GRAY).render(&line))),
-        );
+        rows.extend(output_rows.into_iter().enumerate().map(|(index, line)| {
+            format!(
+                "{}{}",
+                message_branch(if index == 0 {
+                    MessageBranch::Last
+                } else {
+                    MessageBranch::Indent
+                }),
+                Style::new().fg(TN_GRAY).render(&line)
+            )
+        }));
         if omitted > 0 {
             rows.push(truncate_visible(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("    … +{omitted} lines (Ctrl+T for full output)")),
+                &format!(
+                    "{}{}",
+                    message_branch(MessageBranch::Indent),
+                    Style::new()
+                        .fg(TN_GRAY)
+                        .render(&format!("… +{omitted} lines · Ctrl+T"))
+                ),
                 width,
             ));
         }
@@ -346,6 +410,23 @@ impl Transcript {
 
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Drop provisional entries appended after an LLM attempt began. Tool
+    /// positions and cached layout are rebuilt so a replacement stream can
+    /// reuse the same transcript surface without leaving stale call drafts.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        if len >= self.entries.len() {
+            return;
+        }
+        self.entries.truncate(len);
+        self.rebuild_tool_positions();
+        self.latest_input_tool_id = None;
+        self.layout.clear();
     }
 
     pub(crate) fn clear(&mut self) {
@@ -698,6 +779,7 @@ impl Transcript {
         let mut blocks = Vec::new();
         let mut layout = Vec::new();
         let mut next_block_row = 0usize;
+        let mut activity_cluster = String::new();
         let mut index = 0usize;
         while index < self.entries.len() {
             if self.is_groupable_explore(index) {
@@ -716,6 +798,7 @@ impl Transcript {
                 let block = render_explore_group(&tools, content_width, activity_phase);
                 if !block.is_empty() {
                     let row_count = block.lines().count();
+                    append_activity_cell(&mut activity_cluster, &block);
                     for stored in &self.entries[start..index] {
                         layout.push(LayoutSpan {
                             entry_id: stored.id,
@@ -723,25 +806,37 @@ impl Transcript {
                             row_count,
                         });
                     }
-                    next_block_row += row_count + 1;
-                    blocks.push(block);
+                    next_block_row += row_count;
                 }
                 continue;
             }
 
+            let is_activity_cell = self.entries[index].entry.is_activity_cell();
             let block = self.render_entry(index, screen_width, content_width, activity_phase);
             if !block.is_empty() {
                 let row_count = block.lines().count();
-                layout.push(LayoutSpan {
-                    entry_id: self.entries[index].id,
-                    start_row: next_block_row,
-                    row_count,
-                });
-                next_block_row += row_count + 1;
-                blocks.push(block);
+                if is_activity_cell {
+                    append_activity_cell(&mut activity_cluster, &block);
+                    layout.push(LayoutSpan {
+                        entry_id: self.entries[index].id,
+                        start_row: next_block_row,
+                        row_count,
+                    });
+                    next_block_row += row_count;
+                } else {
+                    flush_activity_cluster(&mut blocks, &mut activity_cluster);
+                    layout.push(LayoutSpan {
+                        entry_id: self.entries[index].id,
+                        start_row: next_block_row,
+                        row_count,
+                    });
+                    next_block_row += row_count;
+                    blocks.push(block);
+                }
             }
             index += 1;
         }
+        flush_activity_cluster(&mut blocks, &mut activity_cluster);
         self.layout = layout;
         blocks
     }
@@ -882,6 +977,27 @@ impl Transcript {
     }
 }
 
+fn append_activity_cell(cluster: &mut String, cell: &str) {
+    if !cluster.is_empty() {
+        cluster.push('\n');
+    }
+    cluster.push_str(cell);
+}
+
+fn flush_activity_cluster(blocks: &mut Vec<String>, cluster: &mut String) {
+    if cluster.is_empty() {
+        return;
+    }
+    blocks.push(std::mem::take(cluster));
+}
+
+/// Codex history cells own their internal spacing. Stacking them with one row
+/// boundary keeps tool runs cohesive and lets the user-authored surface provide
+/// its own top/bottom breathing room without an extra global blank row.
+pub(crate) fn join_transcript_blocks(blocks: &[String]) -> String {
+    blocks.join("\n")
+}
+
 #[derive(Debug)]
 enum ExploreAction {
     Read(Vec<String>),
@@ -940,33 +1056,28 @@ fn render_explore_group(
     }
 
     let live = tools.iter().any(|tool| !tool.state.is_terminal());
-    let marker_color = if live && activity_phase {
-        ACCENT
+    let tone = if live {
+        tool_message_tone(ToolCallState::Running, activity_phase)
     } else {
-        TN_GRAY
+        MessageTone::Inactive
     };
-    let bullet = Style::new().fg(marker_color).bold().render("•");
-    let title = Style::new()
-        .fg(TN_FG)
-        .bold()
-        .render(if live { "Exploring" } else { "Explored" });
+    let bullet = message_marker(tone);
+    let title = message_title(if live { "Exploring" } else { "Explored" }, false);
     let mut rows = vec![format!("{bullet} {title}")];
     for (action_index, action) in actions.into_iter().enumerate() {
         let text = match action {
             ExploreAction::Read(paths) => format!("Read {}", paths.join(", ")),
             ExploreAction::Other(text) => text,
         };
-        let wrapped = wrap_words(&text, width.saturating_sub(4).max(1));
+        let styled = highlight_explore_detail(&text);
+        let wrapped = wrap_words(&styled, width.saturating_sub(4).max(1));
         for (line_index, line) in wrapped.into_iter().enumerate() {
-            let prefix = if action_index == 0 && line_index == 0 {
-                "  └ "
+            let prefix = message_branch(if action_index == 0 && line_index == 0 {
+                MessageBranch::Last
             } else {
-                "    "
-            };
-            rows.push(format!(
-                "{prefix}{}",
-                Style::new().fg(TN_CYAN).render(&line)
-            ));
+                MessageBranch::Indent
+            });
+            rows.push(format!("{prefix}{line}"));
         }
     }
     rows.join("\n")
@@ -974,6 +1085,7 @@ fn render_explore_group(
 
 #[cfg(test)]
 mod tests {
+    use super::super::tool_style::{TOOL_ARGUMENT_COLOR, TOOL_PATH_COLOR};
     use super::super::ACCENT;
     use super::*;
 
@@ -1000,6 +1112,70 @@ mod tests {
     }
 
     #[test]
+    fn user_message_owns_codex_surface_spacing_at_product_widths() {
+        for width in [24_u16, 48, 80] {
+            let mut transcript = Transcript::from_entries(vec![
+                TranscriptEntry::user("Review the message hierarchy."),
+                TranscriptEntry::assistant_markdown("The hierarchy is now calmer."),
+            ]);
+            let blocks = transcript.render(width, width as usize);
+            assert_eq!(blocks.len(), 2);
+            let joined = join_transcript_blocks(&blocks);
+            let rendered = a3s_tui::style::strip_ansi(&joined);
+            let rows = rendered.lines().collect::<Vec<_>>();
+            let assistant_row = rows
+                .iter()
+                .position(|row| row.contains("The hierarchy"))
+                .expect("assistant row");
+            assert!(
+                rendered
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("The hierarchy is now calmer."),
+                "width {width}: {rendered:?}"
+            );
+
+            assert!(rows.first().is_some_and(|row| row.trim().is_empty()));
+            assert!(rows.iter().any(|row| row.starts_with("› Review")));
+            assert!(rows[assistant_row - 1].trim().is_empty());
+            assert_eq!(
+                rows.iter().filter(|row| row.trim().is_empty()).count(),
+                2,
+                "width {width}: {rendered:?}"
+            );
+            assert!(joined.lines().take(1).all(
+                |row| row.contains(&format!("\x1b[{}m", super::super::SURFACE_USER.bg_ansi()))
+            ));
+            assert!(!rendered.contains("\n\n\n"), "width {width}: {rendered:?}");
+            assert_bounded(&blocks[0], width as usize);
+            assert_bounded(&blocks[1], width as usize);
+        }
+    }
+
+    #[test]
+    fn truncate_removes_provisional_stream_attempt_entries_and_tool_indexes() {
+        let mut transcript = Transcript::from_entries(vec![TranscriptEntry::user(
+            "Keep this user message exactly once.",
+        )]);
+        let checkpoint = transcript.len();
+        transcript.push(TranscriptEntry::assistant_markdown(
+            "discarded partial answer",
+        ));
+        transcript.start_tool("partial-tool".into(), "bash".into(), true);
+        assert!(transcript.push_tool_input(Some("partial-tool"), r#"{"command":"car"#));
+
+        transcript.truncate(checkpoint);
+
+        assert_eq!(transcript.len(), 1);
+        assert!(matches!(
+            transcript.iter().next(),
+            Some(TranscriptEntry::User { source }) if source == "Keep this user message exactly once."
+        ));
+        assert!(!transcript.push_tool_input(Some("partial-tool"), "go"));
+    }
+
+    #[test]
     fn completed_reasoning_is_hidden_from_history_but_retained_for_ctrl_t() {
         let mut transcript = Transcript::from_entries(vec![TranscriptEntry::reasoning(
             "Inspect the event ordering, then preserve the semantic boundary.",
@@ -1010,7 +1186,9 @@ mod tests {
         assert_eq!(complete.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&complete[0]);
         assert!(plain.contains("• Reasoning"), "{plain}");
+        assert!(plain.contains("  └ Inspect the event ordering"), "{plain}");
         assert!(plain.contains("Inspect the event ordering"), "{plain}");
+        assert!(complete[0].contains(&message_marker(MessageTone::Reasoning)));
         assert_bounded(&complete[0], 79);
     }
 
@@ -1030,20 +1208,84 @@ mod tests {
             true,
         );
 
-        let compact = a3s_tui::style::strip_ansi(&transcript.render(80, 79).join("\n"));
-        assert!(compact.contains("Agent completed: review"), "{compact}");
+        let compact_rendered = transcript.render(80, 79).join("\n");
+        let compact = a3s_tui::style::strip_ansi(&compact_rendered);
+        assert!(compact.contains("Agent completed · review"), "{compact}");
+        assert!(!compact.contains("(task-bg)"), "{compact}");
+        assert!(
+            compact_rendered.contains(&message_marker(MessageTone::Success)),
+            "{compact_rendered:?}"
+        );
+        assert!(
+            compact_rendered.contains(&message_title("Agent completed", false)),
+            "{compact_rendered:?}"
+        );
+        assert!(
+            compact_rendered.contains(&Style::new().fg(TN_GRAY).bold().render("review")),
+            "{compact_rendered:?}"
+        );
+        assert!(
+            !compact_rendered.contains(&Style::new().fg(TN_CYAN).bold().render("review")),
+            "agent identity should not compete with the outcome marker: {compact_rendered:?}"
+        );
         assert!(compact.contains("audit the implementation"), "{compact}");
+        assert!(
+            compact.contains("  ├ audit the implementation"),
+            "{compact}"
+        );
+        assert!(compact.contains("  └ result line 0"), "{compact}");
+        assert!(!compact.contains("Output:"), "{compact}");
         assert!(compact.contains("result line 0"), "{compact}");
         assert!(compact.contains("… +4 lines"), "{compact}");
         assert!(!compact.contains("result line 11"), "{compact}");
 
-        let complete = a3s_tui::style::strip_ansi(
-            &transcript
-                .render_transcript_with_activity(80, 79, true)
-                .join("\n"),
-        );
+        let complete_rendered = transcript
+            .render_transcript_with_activity(80, 79, true)
+            .join("\n");
+        let complete = a3s_tui::style::strip_ansi(&complete_rendered);
+        assert!(complete.contains("(task-bg)"), "{complete}");
         assert!(complete.contains("result line 11"), "{complete}");
-        assert!(!complete.contains("Ctrl+T for full output"), "{complete}");
+        assert!(!complete.contains("… +"), "{complete}");
+    }
+
+    #[test]
+    fn semantic_messages_strip_untrusted_terminal_controls_before_styling() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::user("\x1b[2Juser\0 message"),
+            TranscriptEntry::assistant_markdown("\x1b]0;title\x07assistant **message**"),
+            TranscriptEntry::reasoning("\x1b[31mreasoning\x1b[0m\0 message"),
+        ]);
+        transcript.finish_subagent(
+            "\x1b[2Jtask-id".into(),
+            "\x1b[31mreview\x1b[0m".into(),
+            "audit\0 task".into(),
+            true,
+            "safe\x1b]0;title\x07 output".into(),
+            true,
+        );
+
+        let compact = transcript.render(80, 79).join("\n");
+        let complete = transcript
+            .render_transcript_with_activity(80, 79, true)
+            .join("\n");
+        for rendered in [&compact, &complete] {
+            assert!(!rendered.contains("\x1b[2J"), "{rendered:?}");
+            assert!(!rendered.contains("\x1b]0;title"), "{rendered:?}");
+            assert!(!rendered.contains('\0'), "{rendered:?}");
+        }
+        let compact_plain = a3s_tui::style::strip_ansi(&compact);
+        let complete_plain = a3s_tui::style::strip_ansi(&complete);
+        assert!(compact_plain.contains("user message"), "{compact_plain}");
+        assert!(
+            compact_plain.contains("assistant message"),
+            "{compact_plain}"
+        );
+        assert!(compact_plain.contains("audit task"), "{compact_plain}");
+        assert!(
+            complete_plain.contains("reasoning message"),
+            "{complete_plain}"
+        );
+        assert!(complete_plain.contains("(task-id)"), "{complete_plain}");
     }
 
     #[test]
@@ -1106,7 +1348,7 @@ mod tests {
         );
 
         let plain = a3s_tui::style::strip_ansi(&transcript.render(80, 79).join("\n"));
-        assert!(plain.contains("Agent cancelled: review"), "{plain}");
+        assert!(plain.contains("Agent cancelled · review"), "{plain}");
         assert!(plain.contains("Stopped by user."), "{plain}");
         assert!(!plain.contains("Agent failed"), "{plain}");
         assert!(!plain.contains("Late watcher failure."), "{plain}");
@@ -1198,7 +1440,8 @@ mod tests {
         }
         let blocks = transcript.render(80, 79);
         assert_eq!(blocks.len(), 1);
-        let plain = a3s_tui::style::strip_ansi(&blocks[0]);
+        let rendered = &blocks[0];
+        let plain = a3s_tui::style::strip_ansi(rendered);
         assert_eq!(
             plain.lines().collect::<Vec<_>>(),
             [
@@ -1209,6 +1452,18 @@ mod tests {
             "{plain}"
         );
         assert_eq!(plain.matches("auth.rs").count(), 2, "{plain}");
+        assert!(
+            rendered.contains(&Style::new().fg(TN_CYAN).render("Read")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&Style::new().fg(TOOL_ARGUMENT_COLOR).render("TODO")),
+            "{rendered:?}"
+        );
+        assert!(
+            rendered.contains(&Style::new().fg(TOOL_PATH_COLOR).render("src")),
+            "{rendered:?}"
+        );
     }
 
     #[test]
@@ -1241,6 +1496,58 @@ mod tests {
         assert_eq!(completed.len(), 1);
         let completed = a3s_tui::style::strip_ansi(&completed[0]);
         assert!(completed.starts_with("• Explored\n"), "{completed}");
+    }
+
+    #[test]
+    fn consecutive_tool_cells_share_one_dense_activity_cluster() {
+        let mut transcript = Transcript::from_entries(vec![TranscriptEntry::assistant_markdown(
+            "I will verify both layers.",
+        )]);
+        for (id, command, output) in [
+            ("shell-1", "cargo check", "check passed"),
+            ("shell-2", "cargo test focused", "test passed"),
+        ] {
+            let args = serde_json::json!({"command": command});
+            transcript.start_tool_execution(id.into(), "bash".into(), args.clone(), true);
+            transcript.finish_tool(id, "bash".into(), Some(args), output.into(), 0, None, true);
+        }
+        transcript.push(TranscriptEntry::assistant_markdown(
+            "Both verification layers passed.",
+        ));
+
+        let blocks = transcript.render(80, 79);
+
+        assert_eq!(blocks.len(), 3, "activity cells should share one block");
+        let activity = a3s_tui::style::strip_ansi(&blocks[1]);
+        assert!(activity.contains("cargo check"), "{activity}");
+        assert!(activity.contains("cargo test focused"), "{activity}");
+        assert!(!activity.contains("\n\n"), "{activity}");
+
+        let tool_spans = transcript
+            .entries
+            .iter()
+            .filter_map(|stored| match &stored.entry {
+                TranscriptEntry::Tool(_) => transcript
+                    .layout
+                    .iter()
+                    .find(|span| span.entry_id == stored.id)
+                    .copied(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_spans.len(), 2);
+        assert_eq!(
+            tool_spans[1].start_row,
+            tool_spans[0].start_row + tool_spans[0].row_count,
+            "adjacent activity cells must not reserve a blank layout row"
+        );
+
+        let flow = a3s_tui::style::strip_ansi(&join_transcript_blocks(&blocks));
+        assert!(
+            flow.contains("both layers.\n• Ran")
+                && flow.contains("test passed\n• Both verification"),
+            "Codex-style history cells should stack without global blank rows: {flow}"
+        );
     }
 
     #[test]
@@ -1322,6 +1629,249 @@ mod tests {
     fn preformatted_entries_are_preserved_verbatim() {
         let value = format!("{}notice", ACCENT.fg_ansi());
         assert_eq!(TranscriptEntry::preformatted(&value).render(40, 39), value);
+    }
+
+    #[test]
+    fn semantic_notices_reflow_and_keep_severity_across_widths() {
+        let entry = TranscriptEntry::notice(
+            NoticeKind::Error,
+            "无法连接 provider because the configured endpoint did not respond",
+        );
+        let narrow = entry.render(28, 27);
+        let wide = entry.render(80, 79);
+
+        assert!(narrow.lines().count() > wide.lines().count());
+        assert!(narrow.contains(&message_marker(MessageTone::Error)));
+        assert!(wide.contains(&message_marker(MessageTone::Error)));
+        assert_bounded(&narrow, 27);
+        assert_bounded(&wide, 79);
+    }
+
+    #[test]
+    fn mixed_message_gallery_preserves_hierarchy_at_product_widths() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::notice(NoticeKind::Info, "Context auto-compacted at 85%"),
+            TranscriptEntry::user("请检查 src/tui/ui/render.rs and preserve the visual hierarchy"),
+            TranscriptEntry::assistant_markdown(
+                "I’ll inspect the rendering path, then verify `cargo test`.",
+            ),
+            TranscriptEntry::reasoning(
+                "Compare semantic state, message density, and responsive wrapping.",
+            ),
+        ]);
+        transcript.start_tool_execution(
+            "read-live".into(),
+            "read".into(),
+            serde_json::json!({"file_path": "src/tui/ui/render.rs"}),
+            true,
+        );
+        transcript.await_tool_approval(
+            "write-awaiting".into(),
+            "write".into(),
+            serde_json::json!({
+                "file_path": "src/tui/ui/message_chrome.rs",
+                "content": "semantic message chrome"
+            }),
+        );
+        transcript.finish_tool(
+            "exec-done",
+            "bash".into(),
+            Some(serde_json::json!({"command": "cargo test --bin a3s"})),
+            "1234 tests passed".into(),
+            0,
+            None,
+            true,
+        );
+        let diff_before = (0..60)
+            .map(|index| format!("old-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let diff_after = (0..60)
+            .map(|index| format!("new-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        transcript.finish_tool(
+            "edit-large",
+            "edit".into(),
+            Some(serde_json::json!({"file_path": "src/large.rs"})),
+            "Updated src/large.rs".into(),
+            0,
+            Some(serde_json::json!({
+                "file_path": "src/large.rs",
+                "before": diff_before,
+                "after": diff_after
+            })),
+            true,
+        );
+        transcript.finish_tool(
+            "lookup-failed",
+            "custom_lookup".into(),
+            Some(serde_json::json!({"path": "./fixtures/研究.json", "count": 2})),
+            "provider did not respond".into(),
+            1,
+            None,
+            true,
+        );
+        transcript.finish_tool(
+            "batch-partial",
+            "batch".into(),
+            Some(serde_json::json!({
+                "invocations": [
+                    {"tool": "read", "args": {"file_path": "README.md"}},
+                    {"tool": "bash", "args": {"command": "cargo test"}}
+                ]
+            })),
+            "--- [1: read] ---\ncontents\n--- [2: bash] ---\nERROR: failed".into(),
+            0,
+            Some(serde_json::json!({
+                "execution_mode": "parallel",
+                "applied_concurrency": 2,
+                "success_count": 1,
+                "failure_count": 1,
+                "results": [
+                    {"index": 0, "tool": "read", "success": true, "exit_code": 0},
+                    {"index": 1, "tool": "bash", "success": false, "exit_code": 101}
+                ]
+            })),
+            true,
+        );
+        transcript.finish_tool(
+            "mcp-json",
+            "mcp__docs__find".into(),
+            Some(serde_json::json!({"query": "terminal UX"})),
+            serde_json::json!({
+                "documents": [
+                    {"title": "Message hierarchy", "score": 0.98},
+                    {"title": "Streaming stability", "score": 0.91}
+                ]
+            })
+            .to_string(),
+            0,
+            None,
+            true,
+        );
+        transcript.finish_tool_with_state(
+            "exec-denied",
+            "bash".into(),
+            Some(serde_json::json!({"command": "rm -rf protected"})),
+            "Denied by user policy.".into(),
+            1,
+            None,
+            ToolCallState::Denied,
+            true,
+        );
+        transcript.finish_tool_with_state(
+            "fetch-timeout",
+            "web_fetch".into(),
+            Some(serde_json::json!({"url": "https://example.com/slow"})),
+            "Request exceeded the tool deadline.".into(),
+            124,
+            None,
+            ToolCallState::TimedOut,
+            true,
+        );
+        transcript.finish_tool_with_state(
+            "lookup-interrupted",
+            "custom_lookup".into(),
+            Some(serde_json::json!({"query": "cancelled lookup"})),
+            "Stopped by user.".into(),
+            130,
+            None,
+            ToolCallState::Interrupted,
+            true,
+        );
+        transcript.finish_subagent(
+            "agent-1".into(),
+            "reviewer".into(),
+            "Audit the tool state matrix".into(),
+            true,
+            "State transitions are consistent.".into(),
+            true,
+        );
+        transcript.finish_subagent_with_outcome(
+            "agent-2".into(),
+            "planner".into(),
+            "Stop a superseded planning branch".into(),
+            SubagentOutcome::Cancelled,
+            "Stopped after the primary branch completed.".into(),
+            true,
+        );
+        transcript.finish_subagent_with_outcome(
+            "agent-3".into(),
+            "auditor".into(),
+            "Verify an unavailable provider".into(),
+            SubagentOutcome::Failed,
+            "Provider authentication was unavailable.".into(),
+            true,
+        );
+
+        for width in [24_u16, 32, 48, 80, 120] {
+            let content_width = usize::from(width.saturating_sub(1));
+            let compact = transcript
+                .render_with_activity(width, content_width, true)
+                .join("\n\n");
+            let compact_plain = a3s_tui::style::strip_ansi(&compact);
+            let compact_flow = compact_plain
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            let compact_dense = compact_plain
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            assert_bounded(&compact, content_width);
+            assert!(
+                compact_flow.contains("Context auto-compacted"),
+                "{compact_plain}"
+            );
+            assert!(compact_flow.contains("Exploring"), "{compact_plain}");
+            assert!(
+                compact_flow.contains("Awaiting approval"),
+                "{compact_plain}"
+            );
+            assert!(
+                compact_flow.contains("1234 tests passed"),
+                "{compact_plain}"
+            );
+            assert!(compact_flow.contains("diff · Ctrl+T"), "{compact_plain}");
+            assert!(!compact_plain.contains("new-59"), "{compact_plain}");
+            assert!(
+                compact_flow.contains("Batch partially completed"),
+                "{compact_plain}"
+            );
+            assert!(compact_flow.contains("exit 101"), "{compact_plain}");
+            assert!(compact_flow.contains("Called docs.find"), "{compact_plain}");
+            assert!(
+                compact_dense.contains("providerdidnotrespond"),
+                "{compact_plain}"
+            );
+            assert!(compact_flow.contains("Agent completed"), "{compact_plain}");
+            assert!(compact_flow.contains("Denied"), "{compact_plain}");
+            assert!(compact_flow.contains("Timed out"), "{compact_plain}");
+            assert!(compact_flow.contains("Interrupted"), "{compact_plain}");
+            assert!(compact_flow.contains("Agent cancelled"), "{compact_plain}");
+            assert!(compact_flow.contains("Agent failed"), "{compact_plain}");
+            assert!(!compact_flow.contains("Reasoning"), "{compact_plain}");
+
+            let full = transcript
+                .render_transcript_with_activity(width, content_width, true)
+                .join("\n\n");
+            let full_plain = a3s_tui::style::strip_ansi(&full);
+            let full_flow = full_plain.split_whitespace().collect::<Vec<_>>().join(" ");
+            let full_dense = full_plain
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            assert_bounded(&full, content_width);
+            assert!(full_flow.contains("Reasoning"), "{full_plain}");
+            assert!(full_flow.contains("Input"), "{full_plain}");
+            assert!(full_flow.contains("⊘ denied"), "{full_plain}");
+            assert!(full_flow.contains("◷ timed out"), "{full_plain}");
+            assert!(full_flow.contains("■ interrupted"), "{full_plain}");
+            assert!(full_dense.contains("new-59"), "{full_plain}");
+            assert!(full_dense.contains("Streamingstability"), "{full_plain}");
+            assert!(full_flow.contains("! partial · 1 failed"), "{full_plain}");
+        }
     }
 
     #[test]

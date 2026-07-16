@@ -4,6 +4,9 @@
 //! knowledge-base browser.
 
 use super::super::*;
+use super::code_intelligence::{
+    ide_intelligence_command_hint, ide_intelligence_notice, ide_intelligence_panel,
+};
 use super::spf;
 use a3s_tui::components::{Confirm, ConfirmMsg, CursorLine};
 
@@ -52,7 +55,10 @@ impl App {
                     i.preview = None;
                 }
             } else {
-                self.ide = None;
+                if let Some(ide) = self.ide.take() {
+                    ide.intelligence_cancellation.cancel();
+                    ide.intelligence_jump_cancellation.cancel();
+                }
             }
             return true;
         }
@@ -287,7 +293,14 @@ impl App {
             Vec<String>,
             Option<std::path::PathBuf>,
             Option<usize>,
-        ) = if let Some((path, plines)) = hover {
+        ) = if let Some((title, rows)) = ide_intelligence_panel(ide, body, right_iw) {
+            (
+                title,
+                rows,
+                ide.file.as_ref().map(|file| file.path.clone()),
+                ide.file.as_ref().map(|file| file.lines.len()),
+            )
+        } else if let Some((path, plines)) = hover {
             let icon = spf::path_icon(path, false, false);
             let rows = plines
                 .iter()
@@ -396,12 +409,17 @@ impl App {
             }
         } else if let Some(flash) = ide.flash.as_deref() {
             flash.to_string()
+        } else if let Some(view) = ide.intelligence.as_ref() {
+            ide_intelligence_notice(view)
         } else if ide.focus_editor && readonly {
             "read-only · NORMAL · hjkl/↑↓ move · gg/G top/bottom · Esc back".to_string()
         } else if ide.focus_editor {
             match mode {
                 Some(EditMode::Insert) => {
                     "-- INSERT -- · paste Cmd/Ctrl+V · Ctrl+Z undo · Ctrl+S save".to_string()
+                }
+                _ if ide.supports_code_intelligence() => {
+                    format!("{} · :w/:q · / search", ide_intelligence_command_hint())
                 }
                 _ => "-- NORMAL -- · / search · V visual-line · :w/:q/:wq · . repeat".to_string(),
             }
@@ -421,6 +439,14 @@ impl App {
         let keys_inner = keys_w.saturating_sub(2);
         let keys_line = if let Some(line) = kb_delete_confirm_line(ide, keys_inner) {
             line
+        } else if ide
+            .intelligence
+            .as_ref()
+            .is_some_and(|view| view.dirty_buffer || view.stale)
+        {
+            Style::new()
+                .fg(TN_YELLOW)
+                .render(&spf::fit(&format!(" {hint}"), keys_inner))
         } else if ide.flash.is_some() {
             a3s_tui::style::fit_visible(&format!(" {hint}"), keys_inner)
         } else {

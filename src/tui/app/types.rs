@@ -12,12 +12,33 @@ pub(super) type SharedActiveSession = Arc<std::sync::Mutex<Arc<AgentSession>>>;
 pub(super) type StreamJoin = tokio::task::JoinHandle<()>;
 pub(super) type HostToolAbort = tokio::task::AbortHandle;
 
+#[derive(Clone)]
+pub(super) struct LlmTurnUiCheckpoint {
+    pub(super) turn: usize,
+    pub(super) transcript_len: usize,
+    pub(super) streaming: StreamingMarkdown,
+    pub(super) thinking: String,
+    pub(super) turn_text: String,
+    pub(super) got_delta: bool,
+    pub(super) turn_had_agent_activity: bool,
+    pub(super) turn_text_after_activity: bool,
+    pub(super) runtime_tools: RuntimeToolCheckpoint,
+    pub(super) report_tools: ReportPhaseToolBuffer,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum State {
     Idle,
     Streaming,
     Awaiting,
     Rebuilding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum InterruptedContinuation {
+    DrainQueue,
+    RestoreGoalMode,
+    SettleDeepResearch,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -152,6 +173,10 @@ pub(super) enum SessionRebuildAction {
         previous_goal: Option<String>,
         previous_goal_since: Option<Instant>,
     },
+    GoalResume {
+        generation: u64,
+        paused: PausedGoalState,
+    },
     GoalRestore,
     Compact {
         summary: String,
@@ -180,6 +205,23 @@ pub(super) struct SessionRebuildProfile {
     pub(super) compact_summary: Option<String>,
 }
 
+pub(super) struct IdeIntelligenceResult {
+    pub(super) title: String,
+    pub(super) rows: Vec<IdeIntelligenceRow>,
+    pub(super) truncated: bool,
+    pub(super) saved_version: bool,
+    pub(super) dirty_buffer: bool,
+    pub(super) stale: bool,
+    pub(super) workspace_revision: Option<u64>,
+}
+
+pub(super) struct IdeIntelligenceJump {
+    pub(super) path: PathBuf,
+    pub(super) lines: Vec<String>,
+    pub(super) row: usize,
+    pub(super) col: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SessionRebuildMode {
     /// Reconfigure an existing persisted session without ever replacing a
@@ -202,22 +244,44 @@ pub(super) enum Msg {
         session: Arc<AgentSession>,
         rx: SharedRx,
         join: StreamJoin,
+        /// Temporary previews retained until stream admission succeeds.
+        submitted_images: Vec<PendingImage>,
     },
     StreamEnded(SharedRx),
     StreamJoinSettled {
         token: u64,
         synthesis: Option<(String, String)>,
     },
-    DiscardedStreamSettled,
+    DiscardedStreamSettled {
+        token: u64,
+    },
     /// Session cancellation and the active stream worker have settled enough
     /// for the terminal program to restore the shell without detaching work.
     QuitReady,
     StreamError {
         token: u64,
         error: String,
+        /// Admission can be retried without duplicating a persisted user turn.
+        retryable_admission: bool,
+        /// Restored to the composer when stream admission fails.
+        submitted_images: Vec<PendingImage>,
+    },
+    /// Bounded backoff before retrying a queued turn that raced Core's
+    /// single-flight lease release.
+    QueueRetry {
+        generation: u64,
     },
     WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
     WorkspaceManifestStopped,
+    IdeIntelligenceCompleted {
+        request_id: u64,
+        result: Result<IdeIntelligenceResult, String>,
+    },
+    IdeIntelligenceJumpCompleted {
+        request_id: u64,
+        jump_request_id: u64,
+        result: Result<IdeIntelligenceJump, String>,
+    },
     SpinnerTick,
     /// Advance Codex-style Markdown commit animation independently from the
     /// slower status spinner.
@@ -287,6 +351,14 @@ pub(super) enum Msg {
         result: Result<ToolCallResult, String>,
         convergence: ConvergenceDecision,
         accepted_evidence: Vec<AcceptedEvidence>,
+    },
+    /// Host-owned structured report generation completed. DeepResearch uses
+    /// this closed-evidence path instead of reopening a general agent stream.
+    DeepResearchReportGenerated {
+        token: u64,
+        query: String,
+        phase: DeepResearchReportGenerationPhase,
+        result: Result<ToolCallResult, String>,
     },
     /// A DeepResearch synthesis/repair stream exceeded its host-side model budget.
     DeepResearchSynthesisTimedOut {
@@ -427,6 +499,18 @@ pub(super) struct DeepResearchSubagentSettlement {
     pub(super) output: String,
     pub(super) outcome: SubagentOutcome,
     pub(super) finished_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum DeepResearchReportGenerationPhase {
+    Synthesis,
+    Repair,
+}
+
+impl DeepResearchReportGenerationPhase {
+    pub(super) fn is_repair(self) -> bool {
+        matches!(self, Self::Repair)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

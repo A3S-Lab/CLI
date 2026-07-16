@@ -3,6 +3,7 @@ use std::sync::Arc;
 use a3s_boot::{Module, ProviderDefinition, ProviderToken, Result as BootResult};
 
 use super::capabilities::CapabilitiesModule;
+use super::code_intelligence::CodeIntelligenceModule;
 use super::config::ConfigModule;
 use super::context::ContextModule;
 use super::health::HealthModule;
@@ -36,6 +37,7 @@ impl Module for CodeWebModule {
             Arc::new(HealthModule),
             Arc::new(ConfigModule),
             Arc::new(WorkspaceModule),
+            Arc::new(CodeIntelligenceModule),
             Arc::new(CapabilitiesModule),
             Arc::new(KnowledgeModule),
             Arc::new(ContextModule),

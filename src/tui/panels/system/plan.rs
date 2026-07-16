@@ -9,15 +9,12 @@ use a3s_tui::components::{
 const MAX_PLAN_PANEL_ROWS: usize = 8;
 
 impl App {
-    /// a3s-lane task detail lines for the very bottom: the running task plus
-    /// each queued message. Empty when there's nothing in flight.
+    /// Pending a3s-lane turns for the bottom queue strip.
+    ///
+    /// A claimed turn is execution state, not pending state. It disappears
+    /// from this projection as soon as `PriorityQueue::pop` claims it; the
+    /// activity row already owns the running-state presentation.
     pub(crate) fn task_lines(&self) -> Vec<String> {
-        let running = self
-            .running_task
-            .as_ref()
-            .filter(|_| self.state != State::Idle);
-        // Only show the panel when work is actually queued — a lone running
-        // task would otherwise resize the viewport every turn (transcript jump).
         if self.queue.is_empty() {
             return Vec::new();
         }
@@ -25,20 +22,16 @@ impl App {
         let chrome = agent_chrome(&theme);
         let queued = self
             .queue
-            .iter()
+            .ordered()
+            .into_iter()
             .map(|item| {
                 chrome
-                    .queued_task(item.text.clone())
-                    .priority(i32::from(item.prio))
-                    .sequence(item.seq)
+                    .queued_task(item.value().display.clone())
+                    .priority(i32::from(item.priority()))
+                    .sequence(item.sequence())
             })
             .collect::<Vec<_>>();
-        task_queue_lines(
-            self.completed,
-            running.map(String::as_str),
-            queued,
-            self.width as usize,
-        )
+        task_queue_lines(self.completed, queued, self.width as usize)
     }
 
     /// Visible transcript rows = the viewport height, mirroring the layout chrome
@@ -47,9 +40,12 @@ impl App {
     pub(crate) fn viewport_rows(&self) -> usize {
         let bottom = self.bottom_pane_projection();
         let dynamic = bottom.dynamic_rows().min(u16::MAX as usize) as u16;
-        self.height.saturating_sub(
-            super::bottom::FIXED_ROWS_EXCLUDING_INPUT + self.input_height() + dynamic,
-        ) as usize
+        let attachments = self.composer_attachment_rows().min(u16::MAX as usize) as u16;
+        let occupied = super::bottom::FIXED_ROWS_EXCLUDING_INPUT
+            .saturating_add(self.input_height())
+            .saturating_add(attachments)
+            .saturating_add(dynamic);
+        self.height.saturating_sub(occupied) as usize
     }
 
     /// Resize the viewport so the pinned plan panel and the bottom task panel
@@ -154,51 +150,64 @@ fn subagent_tracker_lines(task: &str, rows: Vec<SubagentRow>, width: usize) -> V
         return Vec::new();
     }
 
+    // The shared tracker owns layout and truncation. Its row color is deliberately
+    // limited to the status marker; nested spans keep names and descriptions on
+    // the neutral composer palette instead of tinting every live row blue.
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            let mut styled = SubagentRow::new(
+                Style::new()
+                    .fg(COMPOSER_CHROME.primary)
+                    .render(row.agent_value()),
+                Style::new()
+                    .fg(COMPOSER_CHROME.secondary)
+                    .render(row.description_value()),
+            )
+            .status(row.status_value())
+            .tokens(row.tokens_value());
+            if let Some(elapsed) = row.elapsed_value() {
+                styled = styled.elapsed(elapsed);
+            }
+            styled
+        })
+        .collect::<Vec<_>>();
+    let title = Style::new().fg(COMPOSER_CHROME.primary).render(task);
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
     chrome
-        .subagent_tracker(task)
+        .subagent_tracker(title)
         .show_slug(false)
-        .rows(rows.clone())
+        .rows(rows)
         .max_running_rows(4)
         .margin(PAD)
         .child_indent(PAD + 3)
         .marker("•")
-        .accent_color(ACCENT)
-        .active_color(ACCENT)
-        .muted_color(TN_GRAY)
-        .error_color(TN_RED)
+        .accent_color(COMPOSER_CHROME.faint)
+        .active_color(COMPOSER_CHROME.active)
+        .muted_color(COMPOSER_CHROME.faint)
+        .error_color(COMPOSER_CHROME.error)
         .view(width.min(u16::MAX as usize) as u16)
         .lines()
         .map(str::to_string)
         .collect::<Vec<_>>()
 }
 
-fn task_queue_lines(
-    completed: usize,
-    running: Option<&str>,
-    queued: Vec<QueuedTask>,
-    width: usize,
-) -> Vec<String> {
+fn task_queue_lines(completed: usize, queued: Vec<QueuedTask>, width: usize) -> Vec<String> {
     if width == 0 || queued.is_empty() {
         return Vec::new();
     }
 
     let theme = agent_chrome_theme();
     let chrome = agent_chrome(&theme);
-    let mut queue = chrome
+    chrome
         .task_queue()
+        .title("queued")
         .completed(completed)
         .queued_tasks(queued)
         .margin(PAD)
-        .header_color(TN_GRAY)
-        .running_color(TN_YELLOW)
-        .queued_color(TN_GRAY);
-    if let Some(running) = running {
-        queue = queue.running(running);
-    }
-
-    queue
+        .header_color(COMPOSER_CHROME.faint)
+        .queued_color(COMPOSER_CHROME.secondary)
         .view(width.min(u16::MAX as usize) as u16)
         .lines()
         .map(str::to_string)
@@ -222,11 +231,14 @@ fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
         .checklist(items)
         .indent(PAD)
         .connector(true)
-        .active_color(TN_ORANGE)
-        .done_color(TN_GRAY)
-        .skipped_color(TN_GRAY)
-        .cancelled_color(TN_GRAY)
-        .strikethrough_done(false)
+        .pending_color(COMPOSER_CHROME.faint)
+        .active_color(COMPOSER_CHROME.active)
+        .done_color(COMPOSER_CHROME.faint)
+        .error_color(COMPOSER_CHROME.error)
+        .skipped_color(COMPOSER_CHROME.faint)
+        .cancelled_color(COMPOSER_CHROME.faint)
+        .text_color(COMPOSER_CHROME.secondary)
+        .strikethrough_done(true)
         .view(
             width.min(u16::MAX as usize) as u16,
             MAX_PLAN_PANEL_ROWS.saturating_sub(usize::from(hidden > 0)),
@@ -234,10 +246,17 @@ fn plan_checklist_lines(plan: &[Task], width: usize) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect::<Vec<_>>();
+    if let Some(first) = lines.first_mut() {
+        *first = first.replacen(
+            "⎿  ",
+            &Style::new().fg(COMPOSER_CHROME.faint).render("⎿  "),
+            1,
+        );
+    }
     if hidden > 0 {
         lines.push(a3s_tui::style::fit_visible(
             &Style::new()
-                .fg(TN_GRAY)
+                .fg(COMPOSER_CHROME.faint)
                 .render(&format!("{}… {hidden} more", " ".repeat(PAD + 3))),
             width,
         ));
@@ -249,28 +268,28 @@ fn plan_checklist_item(task: &Task) -> ChecklistItem {
     match task.status {
         TaskStatus::Completed => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Done)
-            .glyph_color(TN_GRAY)
-            .text_color(TN_GRAY),
+            .glyph_color(COMPOSER_CHROME.success)
+            .text_color(COMPOSER_CHROME.faint),
         TaskStatus::InProgress => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Active)
-            .glyph_color(TN_ORANGE)
-            .text_color(TN_GRAY),
+            .glyph_color(COMPOSER_CHROME.active)
+            .text_color(COMPOSER_CHROME.primary),
         TaskStatus::Failed => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Error)
-            .glyph_color(TN_RED)
-            .text_color(TN_RED),
+            .glyph_color(COMPOSER_CHROME.error)
+            .text_color(COMPOSER_CHROME.primary),
         TaskStatus::Skipped => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Skipped)
-            .glyph_color(TN_GRAY)
-            .text_color(TN_GRAY),
+            .glyph_color(COMPOSER_CHROME.faint)
+            .text_color(COMPOSER_CHROME.faint),
         TaskStatus::Cancelled => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Cancelled)
-            .glyph_color(TN_GRAY)
-            .text_color(TN_GRAY),
+            .glyph_color(COMPOSER_CHROME.faint)
+            .text_color(COMPOSER_CHROME.faint),
         TaskStatus::Pending => ChecklistItem::new(&task.content)
             .status(ChecklistStatus::Pending)
-            .glyph_color(TN_GRAY)
-            .text_color(TN_GRAY),
+            .glyph_color(COMPOSER_CHROME.faint)
+            .text_color(COMPOSER_CHROME.secondary),
     }
 }
 
@@ -405,6 +424,44 @@ mod tests {
         assert!(plain.contains("coder  build tracker"), "{plain}");
         assert!(!plain.contains("planner  map panels"), "{plain}");
         assert!(
+            lines[0].contains(&format!("\x1b[1;{}m• ", COMPOSER_CHROME.faint.fg_ansi())),
+            "summary marker should stay quiet: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains(&format!(
+                "\x1b[{}mExtract",
+                COMPOSER_CHROME.primary.fg_ansi()
+            )),
+            "summary title should use primary text: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains(&format!("\x1b[{}m   • ", COMPOSER_CHROME.active.fg_ansi())),
+            "only the active marker should use the accent: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains(&Style::new().fg(COMPOSER_CHROME.primary).render("coder")),
+            "agent name should remain neutral: {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains(
+                &Style::new()
+                    .fg(COMPOSER_CHROME.secondary)
+                    .render("build tracker")
+            ),
+            "agent description should be secondary: {:?}",
+            lines[1]
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.contains(&COMPOSER_CHROME.warning.fg_ansi())),
+            "ordinary agent progress must not look like a warning: {lines:?}"
+        );
+        assert!(
             lines
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 72),
@@ -416,7 +473,6 @@ mod tests {
     fn task_queue_lines_use_shared_component_and_sort_queue() {
         let lines = task_queue_lines(
             3,
-            Some("running a deliberately long job that must fit"),
             vec![
                 QueuedTask::new("later queued job").priority(4).sequence(2),
                 QueuedTask::new("first queued job").priority(1).sequence(9),
@@ -428,20 +484,37 @@ mod tests {
             .map(|line| a3s_tui::style::strip_ansi(line))
             .collect::<Vec<_>>();
 
-        assert_eq!(lines.len(), 4);
+        assert_eq!(lines.len(), 3);
         assert!(plain[0].starts_with('─'), "{plain:?}");
-        assert!(plain[1].starts_with("● "), "{plain:?}");
-        assert!(plain[2].starts_with("◦ "), "{plain:?}");
-        assert!(plain[0].contains("tasks · ✓ 3 done"), "{plain:?}");
-        assert!(plain[1].contains("● running"), "{plain:?}");
-        assert!(plain[2].contains("◦ first queued job"), "{plain:?}");
-        assert!(plain[3].contains("◦ later queued job"), "{plain:?}");
+        assert!(plain[1].starts_with("◦ "), "{plain:?}");
+        assert!(plain[0].contains("queued · ✓ 3 done"), "{plain:?}");
+        assert!(plain[1].contains("◦ first queued job"), "{plain:?}");
+        assert!(plain[2].contains("◦ later queued job"), "{plain:?}");
         assert!(
             lines
                 .iter()
                 .all(|line| a3s_tui::style::visible_len(line) <= 34),
             "{plain:?}"
         );
+    }
+
+    #[test]
+    fn claimed_turn_disappears_from_the_pending_queue_projection() {
+        let mut pending = PriorityQueue::new();
+        pending.push(USER_TURN_PRIORITY, "queued user turn");
+
+        let _active = pending.pop().expect("claim queued turn");
+        let queued = pending
+            .ordered()
+            .into_iter()
+            .map(|item| {
+                QueuedTask::new(*item.value())
+                    .priority(i32::from(item.priority()))
+                    .sequence(item.sequence())
+            })
+            .collect();
+
+        assert!(task_queue_lines(0, queued, 80).is_empty());
     }
 
     #[test]
@@ -478,18 +551,54 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains(&format!("\x1b[{}m◼", TN_ORANGE.fg_ansi()))),
+                .any(|line| line.contains(&format!("\x1b[{}m◼", COMPOSER_CHROME.active.fg_ansi()))),
             "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains(&format!(
+                "\x1b[{}mimplement",
+                COMPOSER_CHROME.primary.fg_ansi()
+            ))),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains(&Style::new().fg(COMPOSER_CHROME.faint).render("⎿  ")),
+            "connector should recede behind task content: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[2].contains(&format!("\x1b[{}m✔", COMPOSER_CHROME.success.fg_ansi()))
+                && lines[2].contains(&format!(
+                    "\x1b[9;{}mverify",
+                    COMPOSER_CHROME.faint.fg_ansi()
+                )),
+            "completed tasks should reserve green for the glyph: {:?}",
+            lines[2]
+        );
+        assert!(
+            lines[3].contains(&format!("\x1b[{}m✗", COMPOSER_CHROME.error.fg_ansi()))
+                && lines[3].contains(&format!(
+                    "\x1b[{}mfix failure",
+                    COMPOSER_CHROME.primary.fg_ansi()
+                ))
+                && !lines[3].contains(&format!(
+                    "\x1b[{}mfix failure",
+                    COMPOSER_CHROME.error.fg_ansi()
+                )),
+            "failed tasks should reserve red for the glyph: {:?}",
+            lines[3]
+        );
+        assert!(
+            lines[2].contains("\x1b[9;"),
+            "completed task text should be struck through: {:?}",
+            lines[2]
         );
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains(&format!("\x1b[{}mimplement", TN_GRAY.fg_ansi()))),
-            "{lines:?}"
-        );
-        assert!(
-            !lines.iter().any(|line| line.contains("\x1b[9;")),
-            "pinned plan rows should keep completed text readable: {lines:?}"
+                .enumerate()
+                .all(|(index, line)| index == 2 || !line.contains("\x1b[9;")),
+            "only completed task text should be struck through: {lines:?}"
         );
         assert!(
             lines
@@ -497,6 +606,52 @@ mod tests {
                 .all(|line| a3s_tui::style::visible_len(line) <= 30),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn composer_progress_panels_are_full_bleed_and_width_safe() {
+        let plan = vec![
+            task(1, "inspect the terminal hierarchy", TaskStatus::Completed),
+            task(
+                2,
+                "implement a deliberately long active task with 中文",
+                TaskStatus::InProgress,
+            ),
+            task(3, "verify the result", TaskStatus::Pending),
+        ];
+
+        for width in [24, 48, 80] {
+            let panels = [
+                plan_checklist_lines(&plan, width),
+                subagent_tracker_lines(
+                    "Coordinate parallel verification",
+                    vec![SubagentRow::new("reviewer", "inspect visual hierarchy")
+                        .elapsed("12s")
+                        .tokens(640)],
+                    width,
+                ),
+                task_queue_lines(
+                    2,
+                    vec![QueuedTask::new("run the focused regression")],
+                    width,
+                ),
+            ];
+
+            for lines in panels {
+                assert!(!lines.is_empty(), "width={width}");
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| a3s_tui::style::visible_len(line) <= width),
+                    "width={width}, lines={lines:?}"
+                );
+                let first = a3s_tui::style::strip_ansi(&lines[0]);
+                assert!(
+                    !first.starts_with(' '),
+                    "composer panels should be full-bleed at width {width}: {first:?}"
+                );
+            }
+        }
     }
 
     #[test]

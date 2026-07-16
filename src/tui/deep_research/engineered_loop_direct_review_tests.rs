@@ -46,7 +46,7 @@ impl Tool for DirectReviewRoleTool {
                 "seed_urls": [],
                 "budget": {
                     "retrieval_timeout_secs": 30,
-                    "synthesis_timeout_secs": 45,
+                    "synthesis_timeout_secs": 120,
                     "max_iterations": 2,
                     "max_parallel_tasks": 2,
                     "max_steps_per_task": 2,

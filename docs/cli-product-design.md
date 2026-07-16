@@ -91,6 +91,8 @@ a3s
 ├── web                          start, stop, inspect, and open A3S Web
 ├── top                          interactive monitor or structured snapshots
 ├── box                          transparent a3s-box proxy
+├── compose                      transparent a3s-box Compose namespace
+├── up / down / ps / logs        frequent Compose workflow shortcuts
 ├── bench                        transparent a3s-bench proxy
 ├── search                       transparent a3s-search proxy
 ├── use                          transparent a3s-use proxy
@@ -188,6 +190,15 @@ instead of blocking on hidden input.
 `session` group owns less frequent inspection and data lifecycle operations.
 Deleting a session never deletes workspace files or memory.
 
+The TUI `/ide` surface also exposes Code Intelligence commands for status,
+document or workspace symbols, definitions, declarations, references,
+implementations, and document or workspace diagnostics. Results are modal,
+navigable lists that open through the existing editor file-selection path.
+They always describe saved files; a dirty editor must label that fact and is
+never overwritten by a navigation result. Code Intelligence returns semantic
+metadata and locations only. Existing workspace tools remain responsible for
+source reads, text search, and all mutations.
+
 ### 6.2 Research
 
 ```text
@@ -280,6 +291,13 @@ should use the explicit verb. Foreground is the default; `--detach` creates a
 managed instance associated with the canonical workspace. Stop and status
 validate process identity and never signal an unrelated process from a stale
 PID file.
+
+Web sessions for the same canonical workspace share one Code Intelligence
+runtime. Monaco consumes typed status, outline, navigation, and diagnostics
+routes for document symbols, markers, and editor actions. Workspace symbol
+search is available through the typed API but does not replace or duplicate the
+existing text-search panel. Dirty buffers stay browser-local and semantic
+status explicitly says that results use the saved version.
 
 ### 7.2 A3S Top
 
@@ -451,6 +469,11 @@ These are explicit registered namespaces:
 
 ```text
 a3s box <args...>       -> a3s-box
+a3s compose <args...>   -> a3s-box compose
+a3s up <args...>        -> a3s-box compose up
+a3s down <args...>      -> a3s-box compose down
+a3s ps <args...>        -> a3s-box compose ps
+a3s logs <args...>      -> a3s-box compose logs
 a3s bench <args...>     -> a3s-bench
 a3s search <args...>    -> a3s-search
 a3s use <args...>       -> a3s-use
@@ -462,7 +485,9 @@ catalog-authorized first-use installation. Bench and Search require explicit
 installation unless their catalog policy changes. `--offline` always disables
 first-use network mutation.
 
-Only these registered namespaces may proxy. An unregistered `a3s-foo` on
+Compose and its shortcuts resolve the same registered Box component; they do
+not create another executable identity or orchestration implementation. Only
+these registered routes may proxy. An unregistered `a3s-foo` on
 `PATH` can appear in the external section of `a3s list`, but `a3s foo` never
 executes it.
 

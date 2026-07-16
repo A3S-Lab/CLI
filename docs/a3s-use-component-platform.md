@@ -195,7 +195,8 @@ The worker is a capability boundary, not another package manager:
 - it can see and call only `mcp__use_*` tools;
 - it cannot use workspace, shell, unrelated MCP, or recursive task tools;
 - packaged `SKILL.md` text supplies domain guidance but cannot expand those
-  permissions or authorize installation;
+  permissions or authorize installation; Code verifies its registry-projected
+  SHA-256 before loading or replacing the live Skill;
 - it returns the capability route, observable result, session/object
   references, and typed failures to the parent;
 - it never retries application mutations automatically, and
@@ -203,8 +204,10 @@ The worker is a capability boundary, not another package manager:
 
 Live MCP additions refresh delegation before the next child run. A run already
 in progress keeps its accepted execution boundary and settles through normal
-MCP and session cancellation. Starting Code does not install Use; installation
-remains an explicit umbrella component action.
+MCP and session cancellation. A newly discovered route is reported as callable
+only after its MCP projection connects; a removed or replaced route is withdrawn
+from the worker catalog before its prior connection drains. Starting Code does
+not install Use; installation remains an explicit umbrella component action.
 
 ## 6. Core Architectural Decisions
 
@@ -434,6 +437,11 @@ The first stable milestone requires all of the following:
 - Search renders through `a3s-use-browser` without requiring `a3s`,
   `a3s-use`, or an MCP service;
 - Browser CLI sessions persist across invocations when requested;
+- TUI and Web sessions discover one live `use` worker whose MCP and Skill
+  surfaces converge after install, upgrade, disable, re-enable, and session
+  replacement without exposing shell or workspace fallbacks;
+- a Skill content change updates the capability revision and is verified by
+  digest before Code replaces the live Skill;
 - an explicitly installed out-of-tree extension adds a new route without
   rebuilding Use and cannot shadow Browser or Office;
 - Office mutations never retry after an ambiguous write;

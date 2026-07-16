@@ -552,6 +552,7 @@ impl App {
             source,
             model: model.clone(),
         };
+        self.model_source = source;
         self.model = Some(model);
         // The next LLM round will report the new prompt fill for the new model.
         // Until then, do not show the previous model's prompt/token counters as
@@ -951,66 +952,85 @@ impl App {
         }
         self.session_rebuild_pending = None;
 
-        let (session, thinking_dropped) = match result {
-            SessionRebuildResult::Success(session, thinking_dropped) => (session, thinking_dropped),
-            SessionRebuildResult::Failed { error, recovered } => {
-                if let Some(session) = recovered {
-                    self.replace_session(session);
+        let (session, thinking_dropped) =
+            match result {
+                SessionRebuildResult::Success(session, thinking_dropped) => {
+                    (session, thinking_dropped)
                 }
-                match &action {
-                    SessionRebuildAction::GoalStart {
-                        generation,
-                        previous_effort,
-                        previous_goal,
-                        previous_goal_since,
-                    } => {
-                        let still_active = self
-                            .goal_run
-                            .as_ref()
-                            .is_some_and(|run| run.is_generation(*generation));
-                        self.goal_run = None;
-                        self.effort = *previous_effort;
-                        if still_active {
-                            self.goal = previous_goal.clone();
-                            self.goal_since = *previous_goal_since;
-                            self.push_line(
-                                &Style::new().fg(TN_RED).render(&format!(
+                SessionRebuildResult::Failed { error, recovered } => {
+                    if let Some(session) = recovered {
+                        self.replace_session(session);
+                    }
+                    match &action {
+                        SessionRebuildAction::GoalStart {
+                            generation,
+                            previous_effort,
+                            previous_goal,
+                            previous_goal_since,
+                        } => {
+                            let still_active = self
+                                .goal_run
+                                .as_ref()
+                                .is_some_and(|run| run.is_generation(*generation));
+                            self.goal_run = None;
+                            self.effort = *previous_effort;
+                            if still_active {
+                                self.goal = previous_goal.clone();
+                                self.goal_since = *previous_goal_since;
+                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
                                     "  /goal could not enable Ultracode: {error}"
-                                )),
-                            );
+                                )));
+                            }
+                            return self.drain_queue();
                         }
-                        return self.drain_queue();
+                        SessionRebuildAction::GoalResume { generation, paused } => {
+                            let still_active = self
+                                .goal_run
+                                .as_ref()
+                                .is_some_and(|run| run.is_generation(*generation));
+                            if still_active {
+                                self.goal_run = None;
+                                self.goal = None;
+                                self.goal_since = None;
+                                self.paused_goal = Some(paused.clone());
+                                self.goal_resume_prompt = Some(0);
+                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                                    "  paused goal could not be resumed: {error}"
+                                )));
+                            }
+                            return self.drain_queue();
+                        }
+                        SessionRebuildAction::GoalRestore => {
+                            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                                "  goal stopped, but session mode refresh failed: {error}"
+                            )));
+                            return self.drain_queue();
+                        }
+                        _ => {}
                     }
-                    SessionRebuildAction::GoalRestore => {
-                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
-                            "  goal stopped, but session mode refresh failed: {error}"
-                        )));
-                        return self.drain_queue();
+                    if matches!(action, SessionRebuildAction::Compact { .. }) {
+                        self.compacting = None;
                     }
-                    _ => {}
+                    let context = match action {
+                        SessionRebuildAction::Model { .. } => "switch model",
+                        SessionRebuildAction::Effort { .. } => "set effort",
+                        SessionRebuildAction::GoalStart { .. } => unreachable!("handled above"),
+                        SessionRebuildAction::GoalResume { .. } => unreachable!("handled above"),
+                        SessionRebuildAction::GoalRestore => unreachable!("handled above"),
+                        SessionRebuildAction::Compact { .. } => "compact context",
+                        SessionRebuildAction::Fork { .. } => "fork session",
+                        SessionRebuildAction::Clear { .. } => "clear session",
+                        SessionRebuildAction::Reload { .. } => "reload session",
+                        SessionRebuildAction::Refresh { failure_context } => failure_context?,
+                    };
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_RED)
+                            .render(&format!("  failed to {context}: {error}")),
+                    );
+                    return None;
                 }
-                if matches!(action, SessionRebuildAction::Compact { .. }) {
-                    self.compacting = None;
-                }
-                let context = match action {
-                    SessionRebuildAction::Model { .. } => "switch model",
-                    SessionRebuildAction::Effort { .. } => "set effort",
-                    SessionRebuildAction::GoalStart { .. } => unreachable!("handled above"),
-                    SessionRebuildAction::GoalRestore => unreachable!("handled above"),
-                    SessionRebuildAction::Compact { .. } => "compact context",
-                    SessionRebuildAction::Fork { .. } => "fork session",
-                    SessionRebuildAction::Clear { .. } => "clear session",
-                    SessionRebuildAction::Reload { .. } => "reload session",
-                    SessionRebuildAction::Refresh { failure_context } => failure_context?,
-                };
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  failed to {context}: {error}")),
-                );
-                return None;
-            }
-        };
+            };
 
         match action {
             SessionRebuildAction::Model {
@@ -1029,7 +1049,7 @@ impl App {
                     ModelSelectionSource::CodeBuddy => format!("WorkBuddy · {model}"),
                     ModelSelectionSource::OsGateway => format!("OS Gateway · {model}"),
                 };
-                self.push_line(&Style::new().fg(TN_GREEN).render(&format!("  ⇄ {label}")));
+                self.push_notice(NoticeKind::Success, label);
             }
             SessionRebuildAction::Effort {
                 selected,
@@ -1092,6 +1112,20 @@ impl App {
                 }
                 return self.restore_goal_planning_mode();
             }
+            SessionRebuildAction::GoalResume { generation, paused } => {
+                self.replace_session(session);
+                if self
+                    .goal_run
+                    .as_ref()
+                    .is_some_and(|run| run.is_generation(generation))
+                {
+                    self.effort = ULTRACODE;
+                    return self.finish_goal_resume();
+                }
+                self.paused_goal = Some(paused);
+                self.goal_resume_prompt = Some(0);
+                return self.restore_goal_planning_mode();
+            }
             SessionRebuildAction::GoalRestore => {
                 self.replace_session(session);
                 return self.drain_queue();
@@ -1141,6 +1175,10 @@ impl App {
                 self.runtime.clear_turn_entities();
                 self.runtime.clear_subagent_entities();
                 self.queue.clear();
+                self.active_queued_turn = None;
+                self.active_queued_turn_token = None;
+                self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
+                self.queue_retry_attempt = 0;
                 self.completed = 0;
                 self.review_pending = false;
                 self.sleep_pending = false;
@@ -1179,7 +1217,7 @@ impl App {
             }
             SessionRebuildAction::Refresh { .. } => self.replace_session(session),
         }
-        None
+        self.drain_queue()
     }
 
     pub(crate) fn switch_model(&mut self, model: &str) -> Option<Cmd<Msg>> {

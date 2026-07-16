@@ -29,7 +29,7 @@ async fn llm_plan_and_independent_checker_can_finish_a_narrow_query_without_make
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -85,6 +85,76 @@ async fn llm_plan_and_independent_checker_can_finish_a_narrow_query_without_make
 }
 
 #[tokio::test]
+async fn direct_collection_skips_non_document_url_candidates() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-low-value-source-filter-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let fetched_urls = Arc::new(Mutex::new(Vec::new()));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::new(AtomicUsize::new(0)),
+            checker_calls: Arc::new(AtomicUsize::new(0)),
+            maker_calls: Arc::new(AtomicUsize::new(0)),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    executor.register_dynamic_tool(Arc::new(NoisyPlannedLoopSearchTool));
+    executor.register_dynamic_tool(Arc::new(ObservedLinkFetchTool {
+        fetched_urls: Arc::clone(&fetched_urls),
+    }));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "adaptive loop current status",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "noisy_planned_web_search",
+        "observed_link_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(12);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("low-value source candidates should be filtered");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let fetched_urls = fetched_urls.lock().unwrap();
+    assert_eq!(fetched_urls.len(), 2, "{fetched_urls:?}");
+    assert!(
+        fetched_urls.iter().all(|url| {
+            url == "https://official.example/status"
+                || url == "https://independent.example/status"
+        }),
+        "{fetched_urls:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
 async fn direct_evidence_uses_clean_search_facts_instead_of_json_ld_page_metadata() {
     let workspace = std::env::temp_dir().join(format!(
         "a3s-direct-json-ld-filter-{}-{}",
@@ -112,7 +182,7 @@ async fn direct_evidence_uses_clean_search_facts_instead_of_json_ld_page_metadat
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -184,7 +254,7 @@ async fn checker_failure_preserves_traceable_direct_evidence_as_a_degraded_verif
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: true,
+            checker_failure_at: Some(0),
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -265,7 +335,7 @@ async fn checker_failure_preserves_traceable_maker_evidence_as_a_degraded_verifi
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: true,
+            checker_failure_at: Some(0),
         },
     );
     a3s_code_core::tools::register_dynamic_workflow(executor.registry());
@@ -335,7 +405,7 @@ async fn checker_routes_one_external_fact_gap_to_bounded_direct_retrieval() {
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -415,7 +485,7 @@ async fn partial_direct_gap_routes_to_maker_instead_of_another_search_loop() {
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -482,7 +552,7 @@ async fn llm_checker_can_request_one_targeted_follow_up_then_finalize() {
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     a3s_code_core::tools::register_dynamic_workflow(executor.registry());
@@ -545,7 +615,7 @@ async fn checker_digest_keeps_maker_evidence_after_oversized_direct_evidence() {
             // not consume the independent evidence-retrieval budget.
             first_checker_delay_ms: 600,
             retrieval_timeout_override_ms: 500,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(OversizedPlannedLoopSearchTool));
@@ -613,7 +683,7 @@ async fn failed_maker_first_pass_recovers_through_direct_evidence_and_checker() 
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -681,7 +751,7 @@ async fn maker_first_direct_follow_up_is_visible_to_the_next_checker() {
             maker_then_direct: true,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -756,7 +826,7 @@ async fn source_observed_link_precedes_checker_generated_seed_url() {
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -837,7 +907,7 @@ async fn insufficient_remaining_budget_finalizes_instead_of_starting_maker() {
             maker_then_direct: false,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -921,7 +991,7 @@ async fn prompt_fallback_uses_observed_turn_budget_to_preserve_the_planned_maker
             repeated_direct: true,
             first_checker_delay_ms: 0,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(OversizedPlannedLoopSearchTool));
@@ -1002,7 +1072,7 @@ async fn targeted_follow_up_closes_with_prior_check_when_recheck_cannot_fit() {
             maker_then_direct: false,
             first_checker_delay_ms: 2_500,
             retrieval_timeout_override_ms: 0,
-            checker_failure: false,
+            checker_failure_at: None,
         },
     );
     executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
@@ -1049,6 +1119,98 @@ async fn targeted_follow_up_closes_with_prior_check_when_recheck_cannot_fit() {
     assert_eq!(output["research"]["completed_iterations"], 1, "{output:#}");
     assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
     assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn targeted_follow_up_retains_prior_check_when_recheck_fails() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-follow-up-checker-failure-convergence-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: true,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: Some(1),
+        },
+    );
+    executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
+    executor.register_dynamic_tool(Arc::new(PlannedLoopFetchTool));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let query = "adaptive loop current status";
+    let mut args = super::deep_research_workflow_args_with_scope(
+        query,
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "planned_web_search",
+        "planned_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["limits"]["timeoutMs"] = serde_json::json!(60_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(20);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("a failed follow-up recheck should converge around the prior checked findings");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(output["mode"], "direct_web", "{output:#}");
+    assert_eq!(output["checker"]["decision"], "finalize", "{output:#}");
+    assert_eq!(output["verification"]["status"], "degraded", "{output:#}");
+    assert_eq!(output["verification"]["checker_completed"], false);
+    assert_eq!(output["verification"]["prior_checker_retained"], true);
+    assert!(output["checker"]["unresolved_gaps"]
+        .as_array()
+        .is_some_and(|gaps| gaps.iter().any(|gap| gap
+            .as_str()
+            .is_some_and(|gap| gap.contains("not independently rechecked")))));
+    assert_eq!(output["research"]["completed_iterations"], 1, "{output:#}");
+    assert_eq!(
+        super::deep_research_collection_status(&output),
+        "completed",
+        "{output:#}"
+    );
+    assert!(super::deep_research_evidence_package_is_complete_for_query(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        &result.output,
+        result.metadata.as_ref(),
+    ));
+    assert!(!super::deep_research_workflow_needs_recovery_report(
+        &result.output
+    ));
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 2);
     assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
 
     let _ = std::fs::remove_dir_all(&workspace);

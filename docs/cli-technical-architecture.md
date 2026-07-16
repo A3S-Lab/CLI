@@ -74,6 +74,11 @@ enum RootCommand {
     Web(WebArgs),
     Top(TopArgs),
     Box(ProxyArgs),
+    Compose(ProxyArgs),
+    Up(ProxyArgs),
+    Down(ProxyArgs),
+    Ps(ProxyArgs),
+    Logs(ProxyArgs),
     Bench(ProxyArgs),
     Search(ProxyArgs),
     Use(ProxyArgs),
@@ -433,6 +438,14 @@ There is no generic fallback from an unknown root word to `a3s-<word>`. Dynamic
 Use domains remain inside the trusted `use` namespace, where A3S Use validates
 their ACL package and declared CLI, MCP, and Skill surfaces.
 
+`a3s use box ...` is the one composed proxy route. The root resolves both
+registered components and remains the sole Box lifecycle owner. It passes the
+canonical Box executable to Use in the child environment; Use validates that
+explicit path and delegates to it. No PATH rediscovery, wrapper package,
+copied binary, or second receipt is allowed. Non-Box Use calls may receive an
+already-ready Box path for diagnostics, but they never trigger Box
+installation.
+
 Proxying `a3s search` is an umbrella UX boundary only. Search continues to link
 the typed `a3s-use-browser` renderer library directly; it does not call the Use
 CLI or depend on a resident Use process.
@@ -485,6 +498,26 @@ The TUI renders session events interactively. `code exec` renders the same
 events as human output or JSONL. Web adapts them to its HTTP/SSE contract.
 Research composes a bounded workflow and report artifact policy on top. The
 shared layer does not force these surfaces through JSON-RPC.
+
+Code Intelligence is a separate read-only workspace capability inside that
+shared application layer. A local host builds one `ManifestWorkspaceBackend`,
+then attaches the native provider to the resulting `WorkspaceServices`. The
+provider subscribes to the existing manifest change stream and uses the same
+workspace filesystem and path resolver; it must not start a second watcher,
+file index, text-search service, mutation path, or memory store.
+
+The Rust runtime owns framed stdio language protocol requests and child-process
+lifecycle directly. TUI and Web never spawn language processes themselves.
+They call the typed `WorkspaceCodeIntelligence` service asynchronously and
+reuse their existing file-selection flows for returned locations. Web caches
+the service bundle by canonical workspace and resolves an optional session ID
+only to an already loaded workspace. Cache and process shutdown are explicit.
+
+Semantic positions are zero-based UTF-16 throughout Core and HTTP contracts.
+All queries use saved files and include bounded result metadata; dirty editors
+must display saved-version behavior. Absolute paths, traversal, symlink
+escapes, unknown sessions, malformed protocol locations, and unsupported
+capabilities fail through typed errors before a file is exposed.
 
 Interactive launch resolves an immutable `CodeRuntimeConfiguration` before
 building a session. It contains the effective A3S ACL, primary ACL path, Code

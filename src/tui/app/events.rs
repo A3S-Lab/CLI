@@ -3,6 +3,46 @@
 use super::*;
 
 impl App {
+    fn on_llm_turn_start(&mut self, turn: usize) {
+        if let Some(checkpoint) = self
+            .llm_turn_checkpoint
+            .as_ref()
+            .filter(|checkpoint| checkpoint.turn == turn)
+            .cloned()
+        {
+            self.rollback_llm_turn_attempt(checkpoint);
+            return;
+        }
+
+        self.llm_turn_checkpoint = Some(LlmTurnUiCheckpoint {
+            turn,
+            transcript_len: self.messages.len(),
+            streaming: self.streaming.clone(),
+            thinking: self.thinking.clone(),
+            turn_text: self.turn_text.clone(),
+            got_delta: self.got_delta,
+            turn_had_agent_activity: self.turn_had_agent_activity,
+            turn_text_after_activity: self.turn_text_after_activity,
+            runtime_tools: self.runtime.checkpoint_tools(),
+            report_tools: self.deep_research_report_tools.clone(),
+        });
+    }
+
+    fn rollback_llm_turn_attempt(&mut self, checkpoint: LlmTurnUiCheckpoint) {
+        self.messages.truncate(checkpoint.transcript_len);
+        self.streaming = checkpoint.streaming;
+        self.thinking = checkpoint.thinking;
+        self.turn_text = checkpoint.turn_text;
+        self.got_delta = checkpoint.got_delta;
+        self.turn_had_agent_activity = checkpoint.turn_had_agent_activity;
+        self.turn_text_after_activity = checkpoint.turn_text_after_activity;
+        self.runtime.restore_tools(checkpoint.runtime_tools);
+        self.deep_research_report_tools = checkpoint.report_tools;
+        self.last_paint = None;
+        self.relayout();
+        self.rebuild_viewport();
+    }
+
     pub(super) fn on_agent_event(&mut self, event: AgentEvent) -> Option<Cmd<Msg>> {
         // After an interrupt, rx is cleared — ignore any late buffered events.
         self.rx.as_ref()?;
@@ -15,6 +55,9 @@ impl App {
             &event,
         );
         match event {
+            AgentEvent::TurnStart { turn } => {
+                self.on_llm_turn_start(turn);
+            }
             AgentEvent::TextDelta { text } => {
                 self.mark_assistant_text(&text);
                 self.got_delta = true;
@@ -365,9 +408,12 @@ impl App {
                     // Core calculates this against the active model's context
                     // window, so it matches the footer without rescaling.
                     let pct = (percent_before * 100.0).round().clamp(0.0, 100.0) as u32;
-                    self.push_line(&Style::new().fg(TN_GRAY).italic().render(&format!(
-                        "  ✦ context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
-                    )));
+                    self.push_notice(
+                        NoticeKind::Info,
+                        format!(
+                            "Context auto-compacted at {pct}% · {before_messages} → {after_messages} messages"
+                        ),
+                    );
                 }
             }
             AgentEvent::ConfirmationRequired {
@@ -393,7 +439,10 @@ impl App {
                     );
                 }
                 self.update_viewport_with_stream();
-                if self.mode.auto_approves(&tool_name) {
+                if self
+                    .mode
+                    .auto_approves(&tool_name, &args, Path::new(&self.cwd))
+                {
                     // Silent: the mode indicator already shows auto-approve is on;
                     // a line per tool is just noise. Do NOT start another
                     // spinner_tick here — the turn's tick loop is already running
@@ -483,6 +532,7 @@ impl App {
             // so ctx% (and the fill warnings) track DURING long multi-tool
             // turns instead of freezing until End.
             AgentEvent::TurnEnd { usage, .. } => {
+                self.llm_turn_checkpoint = None;
                 if usage.prompt_tokens > 0 {
                     self.last_prompt_tokens = usage.prompt_tokens;
                     self.maybe_warn_ctx();
@@ -698,11 +748,7 @@ impl App {
             AgentEvent::Error { message } => {
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
-                self.push_line(
-                    &Style::new()
-                        .fg(TN_RED)
-                        .render(&format!("  error: {message}")),
-                );
+                self.push_notice(NoticeKind::Error, &message);
                 if self.recover_deep_research_report_after_model_error(&message) {
                     return self.complete_turn();
                 }
@@ -717,14 +763,7 @@ impl App {
                 let completed_stream_join = self.stream_join.take();
                 self.finish();
                 if let Some(completed_stream_join) = completed_stream_join {
-                    self.stream_join_settling = true;
-                    self.state = State::Streaming;
-                    self.relayout();
-                    return Some(wait_for_stream_join(
-                        completed_stream_join,
-                        self.stream_start_token,
-                        None,
-                    ));
+                    return Some(self.wait_for_completed_stream_join(completed_stream_join, None));
                 }
                 // Don't strand messages queued while this turn was running.
                 return self.continue_after_stream_settled(None);

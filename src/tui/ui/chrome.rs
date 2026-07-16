@@ -23,6 +23,32 @@ pub(super) const SURFACE_SOFT: Color = Color::Rgb(27, 31, 37);
 pub(super) const SURFACE_USER: Color = Color::Rgb(49, 53, 58);
 pub(super) const SURFACE_SELECTED: Color = Color::Rgb(42, 46, 52);
 
+/// Low-chroma palette for the persistent surfaces around the composer.
+///
+/// These panels remain visible while the user reads the transcript, so their
+/// active and outcome colors are intentionally quieter than the global accent.
+/// Color communicates state on glyphs; text hierarchy stays neutral.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ComposerChromePalette {
+    pub(super) primary: Color,
+    pub(super) secondary: Color,
+    pub(super) faint: Color,
+    pub(super) active: Color,
+    pub(super) success: Color,
+    pub(super) warning: Color,
+    pub(super) error: Color,
+}
+
+pub(super) const COMPOSER_CHROME: ComposerChromePalette = ComposerChromePalette {
+    primary: Color::Rgb(210, 214, 220),
+    secondary: Color::Rgb(139, 147, 158),
+    faint: Color::Rgb(94, 103, 114),
+    active: Color::Rgb(137, 161, 199),
+    success: Color::Rgb(126, 164, 143),
+    warning: Color::Rgb(188, 157, 105),
+    error: Color::Rgb(197, 120, 128),
+};
+
 // A3S brand color is intentionally separate from the neutral Codex-aligned
 // semantic palette above. It is reserved for short, explicit Ultracode
 // transitions so ordinary transcript and composer chrome stay calm.
@@ -355,17 +381,23 @@ pub(super) fn os_gateway_llm_override(
     ))
 }
 
+/// Materialize one already-resolved model preference for a session.
+///
+/// The caller owns the fallback order (session sidecar, then global defaults).
+/// Keeping that policy out of this function is important on resume: loading the
+/// global model or effort here would silently mix settings from another session.
 pub(super) fn restore_model_selection(
+    preference: &ModelSelectionPreference,
     models: &[String],
     os_session: Option<&crate::a3s_os::StoredOsSession>,
     session_id: &str,
+    effort: usize,
 ) -> Option<(String, Option<LlmOverride>)> {
-    let preference = load_model_selection_preference()?;
     match preference.source {
         ModelSelectionSource::Config => models
             .iter()
             .any(|model| model == &preference.model)
-            .then_some((preference.model, None)),
+            .then(|| (preference.model.clone(), None)),
         ModelSelectionSource::Claude | ModelSelectionSource::CodeBuddy => {
             let provider = preference.source.account_provider()?;
             if !provider.is_available() {
@@ -376,23 +408,23 @@ pub(super) fn restore_model_selection(
             Some((model, Some(LlmOverride::Static(client))))
         }
         ModelSelectionSource::Codex => {
+            let effort = EFFORT_LEVELS.get(effort)?;
             if !crate::account_providers::AccountProvider::Codex.is_available() {
                 return None;
             }
-            let effort = load_tui_effort_preference().unwrap_or(DEFAULT_TUI_EFFORT_INDEX);
             let client =
                 crate::account_providers::codex::CodexClient::from_codex_login_with_effort(
                     &preference.model,
                     session_id,
-                    EFFORT_LEVELS[effort].id,
+                    effort.id,
                 )
                 .ok()?;
-            Some((preference.model, Some(LlmOverride::Codex(client))))
+            Some((preference.model.clone(), Some(LlmOverride::Codex(client))))
         }
         ModelSelectionSource::OsGateway => {
             let session = os_session?;
             let client = os_gateway_llm_override(session, &preference.model);
-            Some((preference.model, Some(client)))
+            Some((preference.model.clone(), Some(client)))
         }
     }
 }
@@ -435,4 +467,52 @@ pub(super) fn ctx_warn_tier(pct: usize, warned: u8) -> (u8, Option<u8>) {
         0
     };
     (tier, (tier > warned).then_some(tier))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_model_preference_does_not_require_a_global_preference() {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_home = std::env::var_os("HOME");
+        let home = tempfile::tempdir().expect("temporary HOME");
+        std::env::set_var("HOME", home.path());
+
+        let preference = ModelSelectionPreference {
+            source: ModelSelectionSource::Config,
+            model: "openai/session-model".to_string(),
+        };
+        let restored = restore_model_selection(
+            &preference,
+            std::slice::from_ref(&preference.model),
+            None,
+            "session-id",
+            DEFAULT_TUI_EFFORT_INDEX,
+        );
+
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let (model, client) = restored.expect("session preference should restore");
+        assert_eq!(model, preference.model);
+        assert!(client.is_none());
+    }
+
+    #[test]
+    fn invalid_codex_effort_is_rejected_without_panicking() {
+        let preference = ModelSelectionPreference {
+            source: ModelSelectionSource::Codex,
+            model: "gpt-test".to_string(),
+        };
+
+        assert!(
+            restore_model_selection(&preference, &[], None, "session-id", usize::MAX,).is_none()
+        );
+    }
 }
