@@ -9,6 +9,7 @@ mod claude;
 mod cli_transport;
 mod codebuddy;
 pub(crate) mod codex;
+mod codex_http;
 mod host_tools;
 mod protocol;
 

@@ -67,8 +67,11 @@ Run the exact new test names. Expected: compilation fails because
 - [ ] **Step 3: Add the isolated reqwest 0.12 dependency**
 
 Retain the existing reqwest dependency and add a renamed reqwest 0.12 entry
-with only `json`, `stream`, `cookies`, and `rustls-tls-native-roots` features.
-Regenerate the lockfile without changing unrelated dependency versions.
+with explicit `charset`, `cookies`, `http2`, `json`, `stream`, `system-proxy`,
+and `rustls-tls-native-roots` features. Keep default features disabled so the
+release remains rustls-based and does not acquire an OpenSSL runtime
+dependency. Regenerate the lockfile without changing unrelated dependency
+versions.
 
 - [ ] **Step 4: Implement `CodexHttpClient`**
 

@@ -5,8 +5,8 @@
 //! exists because the ChatGPT-account backend uses a different wire format from
 //! OpenAI chat completions.
 
+use super::codex_http::CodexHttpClient;
 use a3s_code_core::llm::{
-    default_http_client,
     structured::{NativeStructuredSupport, StructuredDirective},
     ContentBlock, HttpClient, LlmClient, LlmResponse, LlmResponseMeta, Message,
     NonRetryableLlmError, StreamEvent, TokenUsage, ToolDefinition,
@@ -498,6 +498,10 @@ pub(crate) struct CodexClient {
     http: Arc<dyn HttpClient>,
 }
 
+fn codex_account_http_client() -> Result<CodexHttpClient> {
+    CodexHttpClient::new()
+}
+
 impl CodexClient {
     /// Read Codex's auth cache and bind it to `model`.
     pub(crate) fn from_codex_login(model: &str, session_id: &str) -> Result<Self> {
@@ -542,7 +546,7 @@ impl CodexClient {
             // A3S profile. The TUI always materializes an explicit profile.
             reasoning_effort: None,
             forced_tool_choice: None,
-            http: default_http_client(),
+            http: Arc::new(codex_account_http_client()?),
         })
     }
 
@@ -1033,7 +1037,7 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use a3s_code_core::llm::{HttpResponse, StreamingHttpResponse};
+    use a3s_code_core::llm::{default_http_client, HttpResponse, StreamingHttpResponse};
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1120,6 +1124,12 @@ mod tests {
             forced_tool_choice: None,
             http: default_http_client(),
         }
+    }
+
+    #[test]
+    fn account_transport_factory_builds_the_dedicated_client() {
+        let transport = codex_account_http_client().expect("Codex transport should build");
+        let _: &super::super::codex_http::CodexHttpClient = &transport;
     }
 
     fn model_with_efforts(default: Option<&str>, supported: &[&str]) -> CodexModel {

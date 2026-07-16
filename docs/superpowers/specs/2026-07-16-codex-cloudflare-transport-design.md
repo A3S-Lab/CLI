@@ -25,16 +25,22 @@ payload failure:
 - Replaying the cookie or changing only headers with curl remains blocked,
   ruling out a header-only or cookie-only fix. The HTTP/TLS implementation and
   the bounded cookie handshake must be aligned together.
+- A live A/B test with reqwest 0.12 but without its HTTP/2 and system-proxy
+  features remained blocked. Enabling HTTP/2 and macOS system-proxy discovery
+  made the existing two-turn `gpt-5.6-sol` smoke test pass. Native TLS was then
+  removed again and the same live test still passed, so the fix can retain
+  rustls portability without adding an OpenSSL runtime dependency on Linux.
 
 ## Considered Approaches
 
 ### 1. Codex-specific reqwest 0.12 transport in the CLI
 
 Add a private `CodexHttpClient` that implements the existing
-`a3s_code_core::llm::HttpClient` abstraction. It uses reqwest 0.12 with native
-roots, streaming, and a session-scoped cookie provider. The provider stores
-only an explicit allowlist of Cloudflare infrastructure cookies for HTTPS
-ChatGPT hosts. The existing Responses request/stream parser remains unchanged.
+`a3s_code_core::llm::HttpClient` abstraction. It uses reqwest 0.12 with HTTP/2,
+system-proxy discovery, rustls native roots, streaming, and a session-scoped
+cookie provider. The provider stores only an explicit allowlist of Cloudflare
+infrastructure cookies for HTTPS ChatGPT hosts. The existing Responses
+request/stream parser remains unchanged.
 
 This is the recommended approach. It is narrowly scoped to the failing account
 provider, requires no unpublished `a3s-code-core` release, preserves A3S tool
@@ -93,9 +99,12 @@ transport and is never written to disk.
 ## Dependency Boundary
 
 Keep the existing reqwest 0.11 dependency for unrelated CLI call sites. Add a
-renamed reqwest 0.12 dependency used only by the Codex transport. This avoids a
-repository-wide HTTP client migration while reusing the 0.12 version already
-present transitively in the lockfile.
+renamed reqwest 0.12 dependency used only by the Codex transport. Enable
+`charset`, `cookies`, `http2`, `json`, `stream`, `system-proxy`, and
+`rustls-tls-native-roots` explicitly while keeping default features disabled,
+so the transport matches the successful official-client path without pulling
+in native-tls/OpenSSL. This avoids a repository-wide HTTP client migration
+while reusing the 0.12 version already present transitively in the lockfile.
 
 ## Testing
 
