@@ -1212,6 +1212,19 @@ When Codex CLI is logged in (`codex login`), the Codex tab can switch the
 current session to Codex account models using `$CODEX_HOME/auth.json` or
 `~/.codex/auth.json`.
 
+Codex account requests start with the native Responses WebSocket transport.
+HTTP 403/426 during the upgrade switches the same request immediately to HTTPS
+SSE; other connection failures receive two bounded WebSocket retries before the
+same fallback. HTTPS retries only transient statuses, and the selected fallback
+remains sticky across turns in that session while a new or child session probes
+WebSocket again. A stream interruption replays the turn over HTTPS without
+committing its provisional deltas. Both transports honor `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, macOS system/PAC proxy settings, platform
+root certificates, and `CODEX_CA_CERTIFICATE` (with `SSL_CERT_FILE` as the
+fallback). Only allowlisted Cloudflare infrastructure cookies are shared between
+the transports. On HTTP 401, A3S first reloads a token rotated by Codex CLI and
+then performs one OAuth refresh and one request retry if necessary.
+
 When WorkBuddy is installed and signed in, the WorkBuddy tab locates its
 bundled CodeBuddy CLI (or `codebuddy`/`cbc` on `PATH`), reuses the account state
 under `~/.workbuddy`, and refreshes the models entitled to that account. A3S

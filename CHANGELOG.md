@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-07-16
+
+### Fixed
+
+- Added a complete Codex account transport fallback: native Responses
+  WebSocket first, immediate HTTPS SSE fallback for HTTP 403/426, bounded
+  retries for other upgrade and transient failures, sticky HTTPS selection per
+  session, and safe turn replay when a WebSocket stream is interrupted.
+- Made both Codex transports honor environment proxies, `NO_PROXY`, HTTP
+  CONNECT, SOCKS5, macOS system and PAC proxy settings, platform root
+  certificates, and explicit CA bundles. Allowlisted Cloudflare infrastructure
+  cookies are shared across transports without exposing unrelated cookies.
+- Recovered HTTP 401 responses by first reloading credentials rotated by Codex
+  CLI and then refreshing OAuth once when necessary. Account usage limits stay
+  terminal and do not trigger amplified retries.
+
 ## [0.9.2] - 2026-07-16
 
 ### Changed
