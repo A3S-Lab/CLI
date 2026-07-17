@@ -14,6 +14,8 @@ use std::path::Path;
 
 pub(super) const PERSPECTIVE_OBJECT_TYPE: &str = "deep_research.perspective";
 pub(super) const QUESTION_OBJECT_TYPE: &str = "deep_research.question";
+pub(super) const OBLIGATION_OBJECT_TYPE: &str = "deep_research.obligation";
+pub(super) const STOP_CONDITION_OBJECT_TYPE: &str = "deep_research.stop_condition";
 pub(super) const OUTLINE_SECTION_OBJECT_TYPE: &str = "deep_research.outline_section";
 pub(super) const SECTION_DRAFT_OBJECT_TYPE: &str = "deep_research.section_draft";
 const INQUIRY_EVENT_SOURCE: &str = "deep_research.inquiry";
@@ -172,6 +174,47 @@ fn projection_operations(
         anyhow::bail!("DeepResearch graph is missing its run object");
     }
     let mut operations = Vec::new();
+    for obligation in &state.obligations {
+        let assessment = state.contract_assessment.as_ref().and_then(|assessment| {
+            assessment
+                .obligations
+                .iter()
+                .find(|item| item.obligation_id == obligation.id)
+        });
+        upsert_object(
+            runtime,
+            &mut operations,
+            object_id(run_id, "obligation", &obligation.id),
+            OBLIGATION_OBJECT_TYPE,
+            serde_json::json!({
+                "obligation": obligation,
+                "assessment": assessment,
+            }),
+        )?;
+    }
+    for (index, condition) in state.stop_conditions.iter().enumerate() {
+        let assessment = state.contract_assessment.as_ref().and_then(|assessment| {
+            assessment
+                .stop_conditions
+                .iter()
+                .find(|item| item.condition_index == index)
+        });
+        upsert_object(
+            runtime,
+            &mut operations,
+            object_id(
+                run_id,
+                "stop-condition",
+                &format!("condition:{}", index + 1),
+            ),
+            STOP_CONDITION_OBJECT_TYPE,
+            serde_json::json!({
+                "condition_index": index,
+                "condition": condition,
+                "assessment": assessment,
+            }),
+        )?;
+    }
     for perspective in &state.perspectives {
         upsert_object(
             runtime,
@@ -179,6 +222,30 @@ fn projection_operations(
             object_id(run_id, "perspective", &perspective.id),
             PERSPECTIVE_OBJECT_TYPE,
             serde_json::to_value(perspective)?,
+        )?;
+    }
+    for obligation in &state.obligations {
+        add_relation(
+            runtime,
+            &mut operations,
+            run_id,
+            "deep_research.has_obligation",
+            &run,
+            &object_id(run_id, "obligation", &obligation.id),
+        )?;
+    }
+    for (index, _) in state.stop_conditions.iter().enumerate() {
+        add_relation(
+            runtime,
+            &mut operations,
+            run_id,
+            "deep_research.has_stop_condition",
+            &run,
+            &object_id(
+                run_id,
+                "stop-condition",
+                &format!("condition:{}", index + 1),
+            ),
         )?;
     }
     for question in &state.questions {
@@ -251,6 +318,16 @@ fn projection_operations(
                 &question_id,
             )?;
         }
+        for obligation_id in &question.obligation_ids {
+            add_relation(
+                runtime,
+                &mut operations,
+                run_id,
+                "deep_research.addresses_obligation",
+                &question_id,
+                &object_id(run_id, "obligation", obligation_id),
+            )?;
+        }
         for evidence_id in &question.evidence_ids {
             add_relation_to_existing_typed_object(
                 runtime,
@@ -292,6 +369,22 @@ fn projection_operations(
                     "deep_research.covers_question",
                     &section_id,
                     &object_id(run_id, "question", question_id),
+                )?;
+            }
+            let covered_obligations = section
+                .question_ids
+                .iter()
+                .filter_map(|question_id| state.question(question_id))
+                .flat_map(|question| question.obligation_ids.iter())
+                .collect::<std::collections::BTreeSet<_>>();
+            for obligation_id in covered_obligations {
+                add_relation(
+                    runtime,
+                    &mut operations,
+                    run_id,
+                    "deep_research.covers_obligation",
+                    &section_id,
+                    &object_id(run_id, "obligation", obligation_id),
                 )?;
             }
             for claim_id in &section.claim_ids {

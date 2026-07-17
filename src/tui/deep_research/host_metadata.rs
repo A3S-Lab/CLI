@@ -448,12 +448,17 @@ fn deep_research_compact_checker_assessments(
 }
 
 pub(super) fn deep_research_collection_status(value: &serde_json::Value) -> &'static str {
-    match validated_inquiry_terminal_outcome(value) {
-        Ok(Some(InquiryTerminalOutcome::Completed | InquiryTerminalOutcome::Qualified)) => {
+    match validated_inquiry_projection(value) {
+        Ok(ValidatedInquiryProjection::Inquiry { ref state, .. })
+            if matches!(
+                inquiry_terminal_outcome(state),
+                Some(InquiryTerminalOutcome::Completed | InquiryTerminalOutcome::Qualified)
+            ) =>
+        {
             return "completed";
         }
-        Ok(Some(InquiryTerminalOutcome::Exhausted)) | Err(_) => return "degraded",
-        Ok(None) => {}
+        Ok(ValidatedInquiryProjection::Inquiry { .. }) | Err(_) => return "degraded",
+        Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {}
     }
     let mode = value
         .get("mode")

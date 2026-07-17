@@ -1,4 +1,4 @@
-//! Cross-process coding-agent presence used by the Code TUI and future status
+//! Cross-process coding-agent presence used by the Code TUI and system status
 //! surfaces.
 //!
 //! Cooperating `a3s code` TUI processes publish an exact, short-lived heartbeat
@@ -24,6 +24,9 @@ use crate::top::AgentKind;
 use crate::top::{collect_processes, ProcessRow};
 
 const PRESENCE_SCHEMA: &str = "a3s.agent_presence.v1";
+const SYSTEM_SNAPSHOT_SCHEMA: &str = "a3s.system_agent_snapshot.v1";
+const SYSTEM_SNAPSHOT_FILE: &str = "system-snapshot.json";
+const ISLAND_LOCK_FILE: &str = "island.lock";
 const PRESENCE_TTL_MS: u64 = 10_000;
 const PRESENCE_FUTURE_SKEW_MS: u64 = 5_000;
 const MAX_REGISTRY_ENTRIES: usize = 4_096;
@@ -34,6 +37,9 @@ const MAX_AGENT_CHARS: usize = 64;
 const MAX_CHILD_ID_CHARS: usize = 64;
 const MAX_WORKSPACE_CHARS: usize = 128;
 const MAX_CHILDREN: usize = 64;
+const MAX_SYSTEM_ACTIVITIES: usize = 256;
+const MAX_SYSTEM_SNAPSHOT_BYTES: u64 = 1024 * 1024;
+const MAX_ACTIVITY_ID_CHARS: usize = 160;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,13 +58,6 @@ pub(crate) enum AgentActivityState {
 }
 
 impl AgentActivityState {
-    pub(crate) fn is_active(self) -> bool {
-        matches!(
-            self,
-            Self::Planning | Self::Working | Self::WaitingApproval | Self::WaitingInput
-        )
-    }
-
     pub(crate) fn attention_rank(self) -> u8 {
         match self {
             Self::Failed => 0,
@@ -70,37 +69,15 @@ impl AgentActivityState {
             Self::Completed => 6,
         }
     }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Planning => "planning",
-            Self::Working => "working",
-            Self::WaitingApproval => "approval",
-            Self::WaitingInput => "waiting",
-            Self::Idle => "idle",
-            Self::Completed => "done",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Unknown => "detected",
-        }
-    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum AgentActivityConfidence {
     /// A cooperating agent emitted a fresh lifecycle heartbeat.
     Exact,
     /// Only a matching host process was observed.
     Process,
-}
-
-impl AgentActivityConfidence {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Exact => "live",
-            Self::Process => "process",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +97,74 @@ pub(crate) struct SystemAgentActivity {
 pub(crate) struct SystemAgentSnapshot {
     pub(crate) activities: Vec<SystemAgentActivity>,
     pub(crate) warnings: Vec<String>,
+}
+
+/// Outcome of one heartbeat, whole-system collection, and shared snapshot
+/// export. The TUI does not retain the collected rows; the native island is the
+/// presentation owner and reads only the sanitized file named by
+/// `snapshot_path`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SystemAgentRefreshResult {
+    pub(crate) snapshot_path: Option<PathBuf>,
+    pub(crate) lock_path: Option<PathBuf>,
+    pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SystemAgentProtocolSnapshot {
+    schema: String,
+    updated_at_ms: u64,
+    degraded: bool,
+    activities: Vec<SystemAgentProtocolActivity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct SystemAgentProtocolActivity {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
+    agent: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task: Option<String>,
+    state: AgentActivityState,
+    confidence: AgentActivityConfidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Default)]
+struct PresenceScan {
+    presences: Vec<AgentPresence>,
+    truncated: bool,
+}
+
+impl SystemAgentProtocolSnapshot {
+    fn from_collected(snapshot: &SystemAgentSnapshot, updated_at_ms: u64) -> Self {
+        let activities = snapshot
+            .activities
+            .iter()
+            .take(MAX_SYSTEM_ACTIVITIES)
+            .map(|activity| SystemAgentProtocolActivity {
+                id: sanitize_nonempty(&activity.id, MAX_ACTIVITY_ID_CHARS, "agent"),
+                parent_id: sanitize_optional(activity.parent_id.as_deref(), MAX_ACTIVITY_ID_CHARS),
+                agent: sanitize_nonempty(&activity.agent, MAX_AGENT_CHARS, "agent"),
+                workspace: sanitize_optional(activity.workspace.as_deref(), MAX_WORKSPACE_CHARS),
+                task: sanitize_optional(activity.task.as_deref(), MAX_TASK_CHARS),
+                state: activity.state,
+                confidence: activity.confidence,
+                started_at_ms: activity.started_at_ms,
+            })
+            .collect();
+        Self {
+            schema: SYSTEM_SNAPSHOT_SCHEMA.to_string(),
+            updated_at_ms,
+            degraded: !snapshot.warnings.is_empty()
+                || snapshot.activities.len() > MAX_SYSTEM_ACTIVITIES,
+            activities,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +292,9 @@ impl AgentPresencePublisher {
                 a3s::components::ComponentPaths::from_env()
                     .ok()
                     .map(|paths| paths.state_root.join("code").join("agent-presence"))
+            })
+            .and_then(|directory| {
+                absolute_status_directory(directory, std::env::current_dir().ok().as_deref())
             });
         let share_tasks = std::env::var_os("A3S_AGENT_STATUS_SHARE_TASKS")
             .is_some_and(|value| value == OsStr::new("1"));
@@ -254,7 +302,7 @@ impl AgentPresencePublisher {
     }
 
     #[cfg(test)]
-    fn for_directory(directory: PathBuf) -> Self {
+    pub(crate) fn for_directory(directory: PathBuf) -> Self {
         Self::new(Some(directory), false)
     }
 
@@ -288,13 +336,14 @@ impl AgentPresencePublisher {
         self.started_at_ms
     }
 
-    /// Publish the local exact state and collect one whole-system snapshot.
-    /// File and process failures are partial: the successfully collected rows
-    /// remain visible and warnings make the degraded evidence explicit.
-    pub(crate) async fn publish_and_collect(
+    /// Publish the local exact state, collect whole-system evidence, and export
+    /// the native island's sanitized shared snapshot. File and process failures
+    /// are partial: successfully collected rows are still exported with
+    /// `degraded: true` whenever the private snapshot file can be replaced.
+    pub(crate) async fn publish_collect_and_export(
         &self,
         mut local: AgentPresence,
-    ) -> SystemAgentSnapshot {
+    ) -> SystemAgentRefreshResult {
         local.updated_at_ms = epoch_ms();
         let publish = self.write_presence(&local);
         let processes = collect_processes();
@@ -306,17 +355,25 @@ impl AgentPresencePublisher {
             warnings.push(format!("heartbeat: {error}"));
         }
 
-        let mut presences = match self.read_presences(now_ms).await {
-            Ok(presences) => presences,
+        let scan = match self.scan_presences(now_ms).await {
+            Ok(scan) => scan,
             Err(error) => {
                 warnings.push(format!("presence: {error}"));
-                Vec::new()
+                PresenceScan::default()
             }
         };
-        // The current process remains exact even when its state directory is
-        // unavailable or an atomic replace was briefly invisible to this scan.
+        if scan.truncated {
+            warnings.push(format!(
+                "presence: live registry exceeds the {MAX_PRESENCE_FILES}-publisher evidence limit"
+            ));
+        }
+        let mut presences = scan.presences;
+        // The current process remains exact even when its heartbeat directory
+        // is unavailable or an atomic replace was briefly invisible to this
+        // scan. It must cross the same privacy boundary as remote heartbeats:
+        // never aggregate the TUI's full path or raw in-memory task directly.
         presences.retain(|presence| presence.instance_id != local.instance_id);
-        presences.push(local);
+        presences.push(local.protocol_copy(self.share_tasks));
 
         let processes = match process_result {
             Ok(processes) => processes,
@@ -326,10 +383,23 @@ impl AgentPresencePublisher {
             }
         };
 
-        SystemAgentSnapshot {
+        let snapshot = SystemAgentSnapshot {
             activities: aggregate_activities(&presences, &processes, &self.instance_id, now_ms),
             warnings,
+        };
+        let mut result = SystemAgentRefreshResult {
+            snapshot_path: None,
+            lock_path: self
+                .directory
+                .as_ref()
+                .map(|directory| directory.join(ISLAND_LOCK_FILE)),
+            warnings: snapshot.warnings.clone(),
+        };
+        match self.write_system_snapshot(&snapshot).await {
+            Ok(path) => result.snapshot_path = Some(path),
+            Err(error) => result.warnings.push(format!("snapshot: {error}")),
         }
+        result
     }
 
     pub(crate) async fn remove(&self) {
@@ -396,16 +466,80 @@ impl AgentPresencePublisher {
         result
     }
 
-    async fn read_presences(&self, now_ms: u64) -> anyhow::Result<Vec<AgentPresence>> {
+    async fn write_system_snapshot(
+        &self,
+        snapshot: &SystemAgentSnapshot,
+    ) -> anyhow::Result<PathBuf> {
+        let _write = self.write_lock.lock().await;
+        if self.closed.load(Ordering::Acquire) {
+            anyhow::bail!("publisher is closed");
+        }
         let Some(directory) = &self.directory else {
-            return Ok(Vec::new());
+            anyhow::bail!("no per-user A3S state directory is available");
+        };
+        ensure_private_directory(directory)
+            .await
+            .with_context(|| "secure the agent-presence directory")?;
+
+        let snapshot = SystemAgentProtocolSnapshot::from_collected(snapshot, epoch_ms());
+        let bytes = serde_json::to_vec(&snapshot)?;
+        if bytes.len() as u64 > MAX_SYSTEM_SNAPSHOT_BYTES {
+            anyhow::bail!("system-agent snapshot exceeds the protocol size limit");
+        }
+
+        let path = directory.join(SYSTEM_SNAPSHOT_FILE);
+        let temporary = directory.join(format!(
+            ".system-snapshot-{:016x}.tmp",
+            rand::random::<u64>()
+        ));
+        let result = async {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            let mut file = options
+                .open(&temporary)
+                .await
+                .with_context(|| "create a private snapshot temporary file")?;
+            file.write_all(&bytes)
+                .await
+                .with_context(|| "write the snapshot temporary file")?;
+            file.flush()
+                .await
+                .with_context(|| "flush the snapshot temporary file")?;
+            drop(file);
+            if self.closed.load(Ordering::Acquire) {
+                anyhow::bail!("publisher closed during snapshot write");
+            }
+            replace_presence_file(&temporary, &path)
+                .await
+                .with_context(|| "replace the shared system-agent snapshot")
+        }
+        .await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+        }
+        result.map(|()| path)
+    }
+
+    #[cfg(test)]
+    async fn read_presences(&self, now_ms: u64) -> anyhow::Result<Vec<AgentPresence>> {
+        Ok(self.scan_presences(now_ms).await?.presences)
+    }
+
+    async fn scan_presences(&self, now_ms: u64) -> anyhow::Result<PresenceScan> {
+        let Some(directory) = &self.directory else {
+            return Ok(PresenceScan::default());
         };
         let mut entries = match tokio::fs::read_dir(directory).await {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(PresenceScan::default())
+            }
             Err(error) => return Err(error.into()),
         };
         let mut presences = Vec::new();
+        let mut truncated = false;
         let mut entries_seen = 0usize;
         while let Some(entry) = entries.next_entry().await? {
             if entries_seen == MAX_REGISTRY_ENTRIES {
@@ -413,13 +547,6 @@ impl AgentPresencePublisher {
             }
             entries_seen += 1;
 
-            // Keep counting directory entries after the valid-presence cap is
-            // reached. Otherwise a registry whose first 256 entries are valid
-            // could bypass the hard directory limit and return unmarked
-            // partial evidence instead of degrading the snapshot.
-            if presences.len() == MAX_PRESENCE_FILES {
-                continue;
-            }
             let path = entry.path();
             let Some(identity) = parse_presence_file_name(&entry.file_name()) else {
                 continue;
@@ -446,9 +573,27 @@ impl AgentPresencePublisher {
                 continue;
             }
             presence.sanitize_received();
-            presences.push(presence);
+            if presences.len() == MAX_PRESENCE_FILES {
+                // Continue validating and counting after the evidence cap so a
+                // live publisher flood cannot look complete. The caller keeps
+                // the bounded rows and marks the exported snapshot degraded.
+                truncated = true;
+            } else {
+                presences.push(presence);
+            }
         }
-        Ok(presences)
+        Ok(PresenceScan {
+            presences,
+            truncated,
+        })
+    }
+}
+
+fn absolute_status_directory(directory: PathBuf, current_dir: Option<&Path>) -> Option<PathBuf> {
+    if directory.is_absolute() {
+        Some(directory)
+    } else {
+        current_dir.map(|current_dir| current_dir.join(directory))
     }
 }
 
@@ -768,21 +913,45 @@ async fn replace_presence_file(temporary: &Path, path: &Path) -> std::io::Result
 
 #[cfg(windows)]
 async fn replace_presence_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
-    match tokio::fs::rename(temporary, path).await {
-        Ok(()) => Ok(()),
-        Err(first)
-            if matches!(
-                first.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            if !tokio::fs::try_exists(path).await? {
-                return Err(first);
-            }
-            tokio::fs::remove_file(path).await?;
-            tokio::fs::rename(temporary, path).await
-        }
-        Err(error) => Err(error),
+    let temporary = temporary.to_path_buf();
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || replace_file_windows(&temporary, &path))
+        .await
+        .map_err(|error| std::io::Error::other(format!("atomic replace task failed: {error}")))?
+}
+
+#[cfg(windows)]
+fn replace_file_windows(temporary: &Path, path: &Path) -> std::io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let temporary = temporary
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both pointers reference NUL-terminated UTF-16 buffers that stay
+    // alive for the call. The files share a private directory/volume, and the
+    // replace flags preserve the previous complete file until the move wins.
+    let replaced = unsafe {
+        MoveFileExW(
+            temporary.as_ptr(),
+            path.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 

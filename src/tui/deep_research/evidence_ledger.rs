@@ -83,6 +83,7 @@ pub(crate) fn synthesis_payload_with_context(
             serde_json::json!({
                 "evidence_id": item.id,
                 "summary": summary,
+                "claims": item.claims,
                 "sources": item.sources.iter().map(|source| serde_json::json!({
                     "source_id": source.id,
                     "title": source.title,
@@ -93,6 +94,8 @@ pub(crate) fn synthesis_payload_with_context(
                     "tier": source.tier,
                 })).collect::<Vec<_>>(),
                 "confidence": item.confidence,
+                "contradictions": item.contradictions,
+                "gaps": item.gaps,
             })
         })
         .collect::<Vec<_>>();

@@ -179,14 +179,6 @@ impl App {
                     }
                     return None;
                 }
-                // Expanded agent status is a read-only modal. Keep the draft
-                // untouched and accept either Esc or the global Ctrl+G toggle.
-                if self.system_agent_island.expanded {
-                    if key.code == KeyCode::Esc || is_system_agent_island_key(&key) {
-                        self.system_agent_island.expanded = false;
-                    }
-                    return None;
-                }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
                     return self.handle_help_key(&key);
@@ -316,10 +308,6 @@ impl App {
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
-                }
-                if is_system_agent_island_key(&key) {
-                    self.toggle_system_agent_island();
-                    return None;
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -594,16 +582,6 @@ impl App {
                         MouseEventKind::ScrollDown => self.scroll_help_by(3),
                         _ => {}
                     }
-                    return None;
-                }
-                let island = self.system_agent_island_frame();
-                if island.hit_test(m.row, m.column) {
-                    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
-                        self.toggle_system_agent_island();
-                    }
-                    return None;
-                }
-                if self.system_agent_island.expanded {
                     return None;
                 }
                 // Full-screen /ide //config //kb page: the transcript isn't
@@ -923,6 +901,7 @@ impl App {
                     return None;
                 }
                 // Channel closed without a normal End event (abnormal close).
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 if self.deep_research_loop.is_some()
@@ -964,17 +943,23 @@ impl App {
                 }
             }
 
-            Msg::SystemAgentsTick => {
-                let next = system_agent_tick();
-                if self.system_agent_island.refreshing {
-                    return Some(next);
+            Msg::AgentPresenceTick => {
+                let mut commands = vec![agent_presence_tick()];
+                if let Some(restart) = self.poll_agent_island() {
+                    commands.push(restart);
                 }
-                let refresh = self.refresh_system_agents();
-                return Some(cmd::batch(vec![refresh, next]));
+                if !self.agent_presence.refreshing {
+                    commands.push(self.refresh_agent_presence());
+                }
+                return Some(cmd::batch(commands));
             }
 
-            Msg::SystemAgentsRefreshed(snapshot) => {
-                self.system_agent_island.apply(snapshot);
+            Msg::AgentPresenceRefreshed(result) => {
+                return self.apply_agent_presence_refresh(result);
+            }
+
+            Msg::AgentIslandLaunchFinished(result) => {
+                self.apply_agent_island_launch_result(result);
             }
 
             Msg::BannerTick => {

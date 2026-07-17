@@ -4,8 +4,76 @@ use std::collections::HashSet;
 
 use super::{
     InquiryError, InquiryLimits, InquiryState, OutlineSection, Question, QuestionStatus,
-    ResearchMethod, ResearchOutline,
+    ResearchMethod, ResearchObligation, ResearchOutline,
 };
+
+pub(super) fn validate_research_obligations(
+    obligations: &[ResearchObligation],
+    stop_conditions: &[String],
+    limits: &InquiryLimits,
+) -> Result<(), InquiryError> {
+    ensure_nonempty(obligations, "research obligations")?;
+    ensure_limit(
+        "research obligations",
+        obligations.len(),
+        limits.max_obligations,
+    )?;
+    ensure_nonempty(stop_conditions, "research stop conditions")?;
+    ensure_limit(
+        "research stop conditions",
+        stop_conditions.len(),
+        limits.max_stop_conditions,
+    )?;
+    ensure_strings(
+        stop_conditions,
+        "research stop condition",
+        limits.max_text_chars,
+    )?;
+    ensure_unique_ids(
+        obligations.iter().map(|obligation| obligation.id.as_str()),
+        "research obligation",
+    )?;
+
+    let mut material = 0usize;
+    for obligation in obligations {
+        ensure_string(
+            &obligation.id,
+            "research obligation id",
+            limits.max_identifier_chars,
+        )?;
+        ensure_string(
+            &obligation.title,
+            "research obligation title",
+            limits.max_text_chars,
+        )?;
+        ensure_string(
+            &obligation.focus,
+            "research obligation focus",
+            limits.max_text_chars,
+        )?;
+        ensure_nonempty(
+            &obligation.completion_criteria,
+            "research obligation completion criteria",
+        )?;
+        ensure_limit(
+            "research obligation completion criteria",
+            obligation.completion_criteria.len(),
+            limits.max_completion_criteria_per_obligation,
+        )?;
+        ensure_strings(
+            &obligation.completion_criteria,
+            "research obligation completion criterion",
+            limits.max_text_chars,
+        )?;
+        material += usize::from(obligation.material);
+    }
+    if material == 0 {
+        return Err(InquiryError::InvalidResearchPlan {
+            reason: "at least one research obligation must be material".to_string(),
+        });
+    }
+    Ok(())
+}
 
 pub(super) fn validate_queued_questions(
     state: &InquiryState,
@@ -29,6 +97,11 @@ pub(super) fn validate_queued_questions(
         .iter()
         .map(|perspective| perspective.id.as_str())
         .collect::<HashSet<_>>();
+    let obligation_ids = state
+        .obligations
+        .iter()
+        .map(|obligation| obligation.id.as_str())
+        .collect::<HashSet<_>>();
     for question in questions {
         if !all_question_ids.insert(&question.id) {
             return Err(InquiryError::DuplicateId {
@@ -48,6 +121,34 @@ pub(super) fn validate_queued_questions(
         }
         ensure_string(&question.id, "question id", limits.max_identifier_chars)?;
         ensure_string(&question.prompt, "question prompt", limits.max_text_chars)?;
+        if obligation_ids.is_empty() && !question.obligation_ids.is_empty() {
+            return Err(InquiryError::InvalidResearchPlan {
+                reason: format!(
+                    "question `{}` references research obligations before a contract was committed",
+                    question.id
+                ),
+            });
+        }
+        if !obligation_ids.is_empty() {
+            ensure_nonempty(&question.obligation_ids, "question obligation ids")?;
+            ensure_limit(
+                "question obligation ids",
+                question.obligation_ids.len(),
+                limits.max_obligations,
+            )?;
+            ensure_unique_ids(
+                question.obligation_ids.iter().map(String::as_str),
+                "question obligation",
+            )?;
+            for obligation_id in &question.obligation_ids {
+                if !obligation_ids.contains(obligation_id.as_str()) {
+                    return Err(InquiryError::UnknownId {
+                        resource: "research obligation",
+                        id: obligation_id.clone(),
+                    });
+                }
+            }
+        }
         ensure_limit(
             "question round",
             question.round as usize,
@@ -60,6 +161,57 @@ pub(super) fn validate_queued_questions(
                     resource: "parent question",
                     id: parent_id.to_string(),
                 });
+            }
+            if !obligation_ids.is_empty() {
+                let parent = state
+                    .questions
+                    .iter()
+                    .find(|candidate| candidate.id == parent_id)
+                    .ok_or_else(|| InquiryError::UnknownId {
+                        resource: "parent question",
+                        id: parent_id.to_string(),
+                    })?;
+                let parent_obligations = parent
+                    .obligation_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                let follow_up_obligations = question
+                    .obligation_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<HashSet<_>>();
+                if parent_obligations != follow_up_obligations {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "follow-up question `{}` changed the obligations of parent `{parent_id}`",
+                            question.id
+                        ),
+                    });
+                }
+                let expected_round = parent.round.checked_add(1).ok_or_else(|| {
+                    InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "parent question `{parent_id}` cannot advance beyond u32::MAX"
+                        ),
+                    }
+                })?;
+                if question.round != expected_round {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "follow-up question `{}` must use parent round + 1 ({expected_round})",
+                            question.id
+                        ),
+                    });
+                }
+                if question.perspective_id != parent.perspective_id {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "follow-up question `{}` changed the perspective of parent `{parent_id}`",
+                            question.id
+                        ),
+                    });
+                }
             }
         }
         match question.perspective_id.as_deref() {

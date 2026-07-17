@@ -1,8 +1,8 @@
 use super::super::deep_research_evidence_ledger::{AcceptedClaim, AcceptedSource, SourceTier};
 use super::*;
 use a3s::research::{
-    EvidenceRef, OutlineSection, Question, QuestionStatus, ResearchMethod, ResearchOutline,
-    SectionDraft,
+    replay, EvidenceRef, InquiryEvent, InquiryLimits, OutlineSection, Question, QuestionStatus,
+    ResearchMethod, ResearchOutline, SectionDraft,
 };
 
 fn ids(values: &[&str]) -> BTreeSet<String> {
@@ -53,6 +53,129 @@ fn second_evidence() -> AcceptedEvidence {
         contradictions: Vec::new(),
         gaps: Vec::new(),
     }
+}
+
+fn sectioned_inquiry_snapshots() -> (
+    Vec<InquiryEvent>,
+    InquiryState,
+    Vec<InquiryEvent>,
+    InquiryState,
+) {
+    let mut collected = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![Question::queued(
+                "question:one",
+                None,
+                "What does the evidence establish?",
+            )],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:one",
+                vec!["claim:one".to_string()],
+                vec!["source:one".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:one".to_string(),
+            answer: "The evidence establishes the accepted claim.".to_string(),
+            evidence_ids: vec!["evidence:one".to_string()],
+        },
+    ];
+    let collected_state = replay(&collected, &InquiryLimits::default()).unwrap();
+    collected.extend([
+        InquiryEvent::OutlineCommitted {
+            outline: ResearchOutline {
+                sections: vec![OutlineSection {
+                    id: "section:answer".to_string(),
+                    heading: "Answer".to_string(),
+                    purpose: "Answer the question.".to_string(),
+                    perspective_ids: Vec::new(),
+                    question_ids: vec!["question:one".to_string()],
+                    claim_ids: vec!["claim:one".to_string()],
+                    source_ids: vec!["source:one".to_string()],
+                    composition_hint: "Lead with the evidence.".to_string(),
+                }],
+            },
+        },
+        InquiryEvent::SectionDrafted {
+            section_id: "section:answer".to_string(),
+            content: "The accepted claim is supported by the source.".to_string(),
+            citation_ids: vec!["claim:one".to_string(), "source:one".to_string()],
+        },
+        InquiryEvent::AuditCompleted {
+            passed: true,
+            issues: Vec::new(),
+        },
+    ]);
+    let completed_state = replay(&collected, &InquiryLimits::default()).unwrap();
+    (
+        collected[..4].to_vec(),
+        collected_state,
+        collected,
+        completed_state,
+    )
+}
+
+#[test]
+fn sectioned_merge_preserves_retrieval_context_and_commits_only_terminal_projection() {
+    let (collected_events, collected_state, completed_events, completed_state) =
+        sectioned_inquiry_snapshots();
+    let mut workflow = serde_json::json!({
+        "mode": "inquiry_collection_wave",
+        "execution": {
+            "mode": "collect_only",
+            "terminal_authority": "host_inquiry_reducer"
+        },
+        "inquiry": {
+            "events": collected_events,
+            "state": collected_state,
+            "scout": {"query": "source landscape"},
+            "retrieval_waves": [{"id": "wave:2"}]
+        }
+    })
+    .to_string();
+    let generation = serde_json::json!({
+        "inquiry": {"events": completed_events, "state": completed_state}
+    });
+
+    assert!(merge_sectioned_inquiry_projection(&mut workflow, None, Some(&generation)).unwrap());
+    let merged: Value = serde_json::from_str(&workflow).unwrap();
+    assert_eq!(
+        merged["inquiry"]["scout"],
+        serde_json::json!({"query": "source landscape"})
+    );
+    assert_eq!(
+        merged["inquiry"]["retrieval_waves"],
+        serde_json::json!([{"id": "wave:2"}])
+    );
+    assert_eq!(merged["inquiry"]["state"]["phase"], "completed");
+}
+
+#[test]
+fn inquiry_backed_sectioned_merge_rejects_missing_or_nonterminal_generation_projection() {
+    let (collected_events, collected_state, _, _) = sectioned_inquiry_snapshots();
+    let mut workflow = serde_json::json!({
+        "mode": "inquiry_collection_wave",
+        "execution": {"terminal_authority": "host_inquiry_reducer"},
+        "inquiry": {"events": collected_events, "state": collected_state}
+    })
+    .to_string();
+
+    let missing = merge_sectioned_inquiry_projection(&mut workflow, None, None).unwrap_err();
+    assert!(
+        missing.contains("required terminal Inquiry projection"),
+        "{missing}"
+    );
+
+    let parsed: Value = serde_json::from_str(&workflow).unwrap();
+    let nonterminal = serde_json::json!({"inquiry": parsed["inquiry"].clone()});
+    let error =
+        merge_sectioned_inquiry_projection(&mut workflow, None, Some(&nonterminal)).unwrap_err();
+    assert!(error.contains("must reach Completed"), "{error}");
 }
 
 #[test]
@@ -160,6 +283,7 @@ fn outline_packet_preserves_question_evidence_claim_source_graph() {
         graph["question_evidence_bindings"][0],
         serde_json::json!({
             "question_id": "question:one",
+            "obligation_ids": [],
             "evidence_ids": ["evidence:one"],
         })
     );

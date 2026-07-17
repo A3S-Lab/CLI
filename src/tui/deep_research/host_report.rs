@@ -18,6 +18,9 @@ pub(super) fn deep_research_report_view_spec_for_current_run(
     workflow_metadata: Option<&serde_json::Value>,
     baseline: &DeepResearchReportArtifactBaseline,
 ) -> Option<remote_ui::ViewSpec> {
+    if deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata).is_err() {
+        return None;
+    }
     let artifacts = deep_research_report_artifacts_from_output_for_current_run(
         output,
         workspace,
@@ -67,6 +70,11 @@ pub(super) fn deep_research_report_is_missing_since(
     }
     match query {
         Some(query) => {
+            if deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata)
+                .is_err()
+            {
+                return true;
+            }
             let validate = |output: &str| match baseline {
                 Some(baseline) => deep_research_report_artifacts_from_output_for_current_run(
                     output,
@@ -202,10 +210,12 @@ pub(super) fn deep_research_evidence_package_is_complete_for_query(
     let canonical_output =
         deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) {
-        match validated_inquiry_terminal_outcome(&value) {
-            Ok(Some(outcome)) => return outcome == InquiryTerminalOutcome::Completed,
+        match validated_inquiry_projection(&value) {
+            Ok(ValidatedInquiryProjection::Inquiry { ref state, .. }) => {
+                return inquiry_terminal_outcome(state) == Some(InquiryTerminalOutcome::Completed);
+            }
             Err(_) => return false,
-            Ok(None) => {}
+            Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {}
         }
     }
     if deep_research_workflow_needs_recovery_report_with_metadata(
@@ -267,16 +277,19 @@ pub(super) fn deep_research_report_outcome_for_workflow(
     let canonical_output =
         deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) {
-        match validated_inquiry_terminal_outcome(&value) {
-            Ok(Some(outcome)) => {
+        match validated_inquiry_projection(&value) {
+            Ok(ValidatedInquiryProjection::Inquiry { ref state, .. }) => {
+                let Some(outcome) = inquiry_terminal_outcome(state) else {
+                    return DeepResearchRunOutcome::Degraded;
+                };
                 return match outcome {
                     InquiryTerminalOutcome::Completed => DeepResearchRunOutcome::Completed,
                     InquiryTerminalOutcome::Qualified => DeepResearchRunOutcome::Qualified,
                     InquiryTerminalOutcome::Exhausted => DeepResearchRunOutcome::Degraded,
-                }
+                };
             }
             Err(_) => return DeepResearchRunOutcome::Degraded,
-            Ok(None) => {}
+            Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {}
         }
     }
     if deep_research_workflow_needs_recovery_report_with_metadata(
@@ -320,6 +333,27 @@ pub(super) fn deep_research_report_outcome_for_workflow(
         // a generic recovery artifact or claiming full completion.
         DeepResearchRunOutcome::Qualified
     }
+}
+
+/// Validate the successful-report authority after synthesis.
+///
+/// Inquiry-backed runs must have committed outline, section, and passing audit
+/// events. `Ok(None)` means the output is a legacy checked-loop run whose
+/// publication remains governed by the legacy report validators.
+pub(super) fn deep_research_inquiry_publication_outcome(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Result<Option<DeepResearchRunOutcome>, String> {
+    let canonical = deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    let value = serde_json::from_str::<serde_json::Value>(&canonical)
+        .map_err(|error| format!("decode DeepResearch workflow for publication: {error}"))?;
+    validated_inquiry_publication_outcome(&value).map(|outcome| {
+        outcome.map(|outcome| match outcome {
+            InquiryTerminalOutcome::Completed => DeepResearchRunOutcome::Completed,
+            InquiryTerminalOutcome::Qualified => DeepResearchRunOutcome::Qualified,
+            InquiryTerminalOutcome::Exhausted => DeepResearchRunOutcome::Degraded,
+        })
+    })
 }
 
 fn inquiry_has_only_supporting_gaps(
@@ -508,6 +542,24 @@ pub(super) fn recover_missing_deep_research_report(
         };
     }
 
+    if deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata).is_err() {
+        return match materialize_deep_research_recovery_report(
+            workspace,
+            query,
+            review_text,
+            workflow_output,
+            workflow_metadata,
+        ) {
+            Ok(artifacts) => {
+                *loop_remaining = 0;
+                DeepResearchReportRecovery::RecoveryMaterialized { artifacts }
+            }
+            Err(error) => DeepResearchReportRecovery::Missing(format!(
+                "DeepResearch Inquiry did not complete its report audit and recovery failed: {error}"
+            )),
+        };
+    }
+
     if let Some(artifacts) = materialize_deep_research_completed_report_from_answer_text(
         workspace,
         query,
@@ -566,7 +618,8 @@ pub(super) fn materialize_deep_research_timeout_completed_report(
     if deep_research_workflow_needs_recovery_report_with_metadata(
         workflow_output,
         workflow_metadata,
-    ) {
+    ) || deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata).is_err()
+    {
         return None;
     }
     [Some(streamed_text), prior_synthesis_text]

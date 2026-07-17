@@ -6,7 +6,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use a3s::research::{InquiryPhase, InquiryState, QuestionStatus};
+use a3s::research::{
+    research_contract_outcome, InquiryEvent, InquiryPhase, InquiryState, QuestionStatus,
+    ResearchContractOutcome,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +17,38 @@ pub(crate) enum InquiryTerminalOutcome {
     Completed,
     Qualified,
     Exhausted,
+}
+
+/// The validated terminal authority carried by a workflow output.
+///
+/// Old checked-loop outputs predate the Inquiry projection and remain eligible
+/// for their legacy checker gates. A host-managed collection wave must carry a
+/// replayable Inquiry projection; losing it is an error, never a signal to
+/// reinterpret the inner wave as a legacy completed run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ValidatedInquiryProjection {
+    LegacyCheckedLoop,
+    Inquiry {
+        events: Vec<InquiryEvent>,
+        state: InquiryState,
+    },
+}
+
+#[cfg(test)]
+impl ValidatedInquiryProjection {
+    pub(crate) fn terminal_outcome(&self) -> Option<InquiryTerminalOutcome> {
+        match self {
+            Self::LegacyCheckedLoop => None,
+            Self::Inquiry { state, .. } => inquiry_terminal_outcome(state),
+        }
+    }
+
+    pub(crate) fn state(&self) -> Option<&InquiryState> {
+        match self {
+            Self::LegacyCheckedLoop => None,
+            Self::Inquiry { state, .. } => Some(state),
+        }
+    }
 }
 
 /// Derive the only publishable terminal meaning from the replayed inquiry
@@ -49,6 +84,15 @@ pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTe
     {
         return None;
     }
+    let contract_outcome = if state.obligations.is_empty() {
+        None
+    } else {
+        match research_contract_outcome(state) {
+            Some(ResearchContractOutcome::Satisfied) => Some(InquiryTerminalOutcome::Completed),
+            Some(ResearchContractOutcome::Qualified) => Some(InquiryTerminalOutcome::Qualified),
+            Some(ResearchContractOutcome::Unsatisfied) | None => return None,
+        }
+    };
     if state
         .questions
         .iter()
@@ -56,20 +100,33 @@ pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTe
     {
         Some(InquiryTerminalOutcome::Qualified)
     } else {
-        Some(InquiryTerminalOutcome::Completed)
+        contract_outcome.or(Some(InquiryTerminalOutcome::Completed))
     }
 }
 
-/// Validate an embedded inquiry projection before it can override legacy
-/// workflow status fields. This prevents a forged or stale serialized state
-/// from becoming a publication decision.
-pub(crate) fn validated_inquiry_terminal_outcome(
+/// Validate and classify the workflow's terminal authority.
+pub(crate) fn validated_inquiry_projection(
     workflow: &serde_json::Value,
-) -> Result<Option<InquiryTerminalOutcome>, String> {
+) -> Result<ValidatedInquiryProjection, String> {
     let Some(inquiry) = workflow.get("inquiry") else {
-        return Ok(None);
+        let host_managed = workflow
+            .pointer("/execution/terminal_authority")
+            .and_then(serde_json::Value::as_str)
+            == Some("host_inquiry_reducer")
+            || workflow
+                .pointer("/execution/mode")
+                .and_then(serde_json::Value::as_str)
+                == Some("collect_only")
+            || workflow.get("mode").and_then(serde_json::Value::as_str)
+                == Some("inquiry_collection_wave");
+        if host_managed {
+            return Err(
+                "host-managed DeepResearch output omitted its Inquiry projection".to_string(),
+            );
+        }
+        return Ok(ValidatedInquiryProjection::LegacyCheckedLoop);
     };
-    let events: Vec<a3s::research::InquiryEvent> = serde_json::from_value(
+    let events: Vec<InquiryEvent> = serde_json::from_value(
         inquiry
             .get("events")
             .cloned()
@@ -88,7 +145,35 @@ pub(crate) fn validated_inquiry_terminal_outcome(
     if replayed != state {
         return Err("DeepResearch inquiry state differs from its event replay".to_string());
     }
-    Ok(inquiry_terminal_outcome(&state))
+    Ok(ValidatedInquiryProjection::Inquiry { events, state })
+}
+
+/// Require report-authored Inquiry runs to have completed their draft audit.
+/// `Ok(None)` is reserved for genuinely legacy checked-loop outputs.
+pub(crate) fn validated_inquiry_publication_outcome(
+    workflow: &serde_json::Value,
+) -> Result<Option<InquiryTerminalOutcome>, String> {
+    match validated_inquiry_projection(workflow)? {
+        ValidatedInquiryProjection::LegacyCheckedLoop => Ok(None),
+        ValidatedInquiryProjection::Inquiry { state, .. } => {
+            if state.phase != InquiryPhase::Completed {
+                return Err(format!(
+                    "DeepResearch Inquiry must reach Completed before publication; current phase is {:?}",
+                    state.phase
+                ));
+            }
+            match inquiry_terminal_outcome(&state) {
+                Some(
+                    outcome @ (InquiryTerminalOutcome::Completed
+                    | InquiryTerminalOutcome::Qualified),
+                ) => Ok(Some(outcome)),
+                Some(InquiryTerminalOutcome::Exhausted) | None => Err(
+                    "completed DeepResearch Inquiry has no publishable terminal outcome"
+                        .to_string(),
+                ),
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +341,73 @@ mod tests {
             evaluate_convergence(input()).action,
             ConvergenceAction::Continue
         );
+    }
+
+    #[test]
+    fn terminal_authority_distinguishes_legacy_absence_from_host_projection_loss() {
+        let legacy = serde_json::json!({
+            "mode": "direct_web",
+            "checker": {"decision": "finalize"}
+        });
+        assert!(matches!(
+            validated_inquiry_projection(&legacy),
+            Ok(ValidatedInquiryProjection::LegacyCheckedLoop)
+        ));
+
+        let host_managed = serde_json::json!({
+            "mode": "direct_web",
+            "execution": {"terminal_authority": "host_inquiry_reducer"},
+            "checker": {"decision": "finalize"}
+        });
+        let error = validated_inquiry_projection(&host_managed)
+            .expect_err("a raw host-managed wave cannot fall back to its inner checker");
+        assert!(error.contains("omitted its Inquiry projection"), "{error}");
+    }
+
+    #[test]
+    fn inquiry_publication_requires_the_completed_audit_phase() {
+        let events = vec![
+            InquiryEvent::StrategySelected {
+                method: a3s::research::ResearchMethod::Focused,
+            },
+            InquiryEvent::QuestionsQueued {
+                questions: vec![a3s::research::Question::queued(
+                    "question:material",
+                    None,
+                    "What does the evidence establish?",
+                )],
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: a3s::research::EvidenceRef::new(
+                    "evidence:one",
+                    vec!["claim:one".to_string()],
+                    vec!["source:one".to_string()],
+                ),
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: "question:material".to_string(),
+                answer: "The accepted evidence establishes the finding.".to_string(),
+                evidence_ids: vec!["evidence:one".to_string()],
+            },
+        ];
+        let state =
+            a3s::research::replay(&events, &a3s::research::InquiryLimits::default()).unwrap();
+        let workflow = serde_json::json!({
+            "inquiry": {"events": events, "state": state}
+        });
+
+        let projection = validated_inquiry_projection(&workflow).unwrap();
+        assert_eq!(
+            projection.state().map(|state| state.phase),
+            Some(InquiryPhase::Outlining)
+        );
+        assert_eq!(
+            projection.terminal_outcome(),
+            Some(InquiryTerminalOutcome::Completed)
+        );
+        let error = validated_inquiry_publication_outcome(&workflow)
+            .expect_err("evidence readiness must not masquerade as report completion");
+        assert!(error.contains("current phase is Outlining"), "{error}");
     }
 
     #[test]

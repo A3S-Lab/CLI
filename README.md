@@ -58,9 +58,11 @@ The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, or Use. This keeps a Code-only installation
 small, while every product still has one public entry point under `a3s`.
 
-The Homebrew `a3s` formula also installs the native RemoteUI helper
-`a3s-webview` on macOS. If a source or Cargo installation does not have that
-helper, `a3s code` falls back immediately to printing the browser URL.
+Release packages install the native `a3s-webview` companion on supported
+desktop platforms. It owns both RemoteUI windows and the system-agent island.
+If a source or Cargo installation does not have that helper, RemoteUI falls
+back immediately to the browser and agent-island startup is skipped with a
+diagnostic; neither condition prevents the TUI from starting.
 
 ### Components and delayed installation
 
@@ -178,6 +180,39 @@ not a compatible control-component release. Until that release exists,
 `a3s install bench` and direct `a3s bench ...` use fail with an explicit
 diagnostic that the control component is not published and do not create an
 installed-component record. Bench does not opt into first-use installation.
+
+### Reviewable component plans
+
+Installation, upgrade, and uninstall support an immutable review/apply guard:
+
+```sh
+a3s install box --source release --dry-run --json
+a3s install box --source release --plan-digest <reviewed-sha256> --json
+
+a3s upgrade box --dry-run --json
+a3s uninstall box --purge --dry-run --json
+```
+
+The dry-run result contains `planSchemaVersion`, `planCommand`, `planDigest`,
+and the ordered `plans` array. The digest covers the requested operation and
+flags, target platform, current component state and normalized receipt,
+operation order, local-package path and content, and every exact GitHub release
+version, asset URL, asset name, and SHA-256 selected during resolution.
+Presentation text is deliberately excluded.
+
+A release dry-run reads release metadata and, when necessary, its checksum
+file. It never downloads the component payload or changes component state. An
+apply with `--plan-digest` resolves the plan again and fails with
+`component.plan_mismatch` before payload download or mutation when anything
+covered by the digest changed. Once accepted, the installer consumes the exact
+resolved artifact from that plan instead of performing another `latest`
+lookup. Local Use packages are fingerprinted deterministically, including file
+paths, executable permissions, sizes, and contents.
+
+`--plan-digest` and `--dry-run` are mutually exclusive. Homebrew plans bind the
+formula, operation, flags, and current receipt, but Homebrew remains responsible
+for selecting and installing its current bottle; use `--source release` when an
+exact A3S release artifact must be bound by the digest.
 
 ### Listing installed components
 
@@ -748,7 +783,7 @@ transcript prefix instead of rebuilding the full viewport.
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
 | Approvals | Mutating tools pause in a confirmation overlay with arguments and result context. Default mode prompts, plan mode auto-approves read-only discovery, and auto mode approves later tool calls in the session. |
 | Footer | The footer shows model/provider, effort, mode, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
-| System agent island | The centered top island summarizes cooperating `a3s code` TUI publishers plus supported coding-agent processes visible to the current user on this host. Fresh TUI heartbeats show exact parent and child lifecycle; `a3s code exec`, `a3s web`, and third-party agents do not publish authoritative TUI lifecycle state. Recognized process-only discoveries are labeled `detected / process` because process existence alone cannot prove task execution. Click it or press `Ctrl+G` for the bounded detail view. |
+| System agent island | An independent native window requests the physical screen's top center and summarizes cooperating `a3s code` TUI publishers plus supported coding-agent processes visible to the current user on this host. It stays outside the terminal and expands when clicked. Fresh TUI heartbeats show exact parent and child lifecycle; `a3s code exec`, `a3s web`, and third-party agents do not publish authoritative TUI lifecycle state. Recognized process-only discoveries are labeled `detected / process` because process existence alone cannot prove task execution. Standard Wayland compositors may constrain exact global placement. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
@@ -767,25 +802,33 @@ Key interactions:
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
 | `Ctrl+T` | Open the complete live semantic session transcript, including full tool output and the current streaming tail. |
-| `Ctrl+G` | Expand or collapse the whole-system coding-agent island without changing the composer draft. |
 | `Esc` | Interrupt the running turn or close the active panel. |
 | `Ctrl+C` twice | Quit the TUI after session persistence runs. |
 
-The island refreshes every two seconds. Cooperating `a3s code` TUI instances
-write versioned heartbeats under the platform's per-user A3S state root and
-expire after ten seconds, so a crash cannot leave a permanently running agent.
-Only a sanitized, bounded workspace basename is persisted, never the full path.
-Parent and child task descriptions are omitted on disk by default, while the
-full text remains local to the owning process.
+The CLI refreshes the island snapshot every two seconds. Cooperating `a3s code`
+TUI instances write versioned heartbeats under the platform's per-user A3S
+state root; they expire after ten seconds, so a crash cannot leave a permanently
+running agent. Parent and child terminal outcomes remain visible for eight
+seconds. Each collector atomically replaces `system-snapshot.json` with a
+versioned, bounded projection for the native helper. Only a sanitized workspace
+basename crosses this process boundary, never the full path. Parent and child
+task descriptions are omitted on disk by default, while the full text remains
+inside the owning TUI process.
 `A3S_AGENT_STATUS_SHARE_TASKS=1` opts into sharing sanitized, single-line,
-bounded task labels with other local TUI instances. The island never displays
-or persists command arguments from inferred third-party processes.
+bounded task labels through heartbeats and the native snapshot. The collector
+never exports command arguments from inferred third-party processes.
 
-On Unix, the registry directory and heartbeat files are restricted to `0700`
-and `0600`. On Windows, the default registry is beneath the current user's
-`%LOCALAPPDATA%` tree and relies on inherited ACLs; A3S does not install a
-dedicated ACL. `A3S_AGENT_STATUS_DIR` can point diagnostics or hermetic tests at
-an isolated registry and should always identify a user-private directory.
+On Unix, the registry directory is restricted to `0700`; heartbeat and snapshot
+files are `0600`. On Windows, the default registry is beneath the current
+user's `%LOCALAPPDATA%` tree and relies on inherited ACLs; A3S does not install
+a dedicated ACL. `A3S_AGENT_STATUS_DIR` can point diagnostics or hermetic tests
+at an isolated registry and should always identify a user-private directory.
+
+Set `A3S_AGENT_ISLAND=0` to disable native island launch, or
+`A3S_AGENT_ISLAND_BIN` to select a specific helper. SSH sessions and headless
+Linux sessions skip automatic launch; `A3S_AGENT_ISLAND=1` explicitly enables
+an attempt in those environments. Launch and GUI failures are diagnostic only
+and never block `a3s code` startup.
 
 ### Startup, Sessions, And Safety
 

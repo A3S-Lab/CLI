@@ -179,6 +179,14 @@ impl App {
                     Ok(Some((_, state))) => {
                         evaluate_terminal_inquiry_convergence(state, convergence_input.clone())
                     }
+                    Ok(None) if deep_research_host_managed_inquiry(&args) => {
+                        ConvergenceDecision {
+                            action: ConvergenceAction::Degrade,
+                            reason: "the host-managed DeepResearch run returned without its Inquiry projection"
+                                .to_string(),
+                            input: convergence_input.clone(),
+                        }
+                    }
                     Ok(None) => evaluate_convergence(convergence_input.clone()),
                     Err(error) => ConvergenceDecision {
                         action: ConvergenceAction::Degrade,
@@ -339,12 +347,17 @@ impl App {
             &output,
             metadata.as_ref(),
         );
-        let inquiry_exhausted = inquiry_projection_from_workflow(&output, metadata.as_ref())
+        let inquiry_projection = inquiry_projection_from_workflow(&output, metadata.as_ref());
+        let inquiry_exhausted = inquiry_projection
+            .as_ref()
             .ok()
-            .flatten()
+            .and_then(Option::as_ref)
             .is_some_and(|(_, state)| state.phase == a3s::research::InquiryPhase::Exhausted);
+        let missing_host_inquiry =
+            deep_research_host_managed_inquiry(&args) && !matches!(inquiry_projection, Ok(Some(_)));
         if accepted_evidence.is_empty()
             || inquiry_exhausted
+            || missing_host_inquiry
             || matches!(report_outcome, DeepResearchRunOutcome::Degraded)
         {
             self.loop_remaining = 0;

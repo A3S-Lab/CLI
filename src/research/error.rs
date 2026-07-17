@@ -48,6 +48,9 @@ pub enum InquiryError {
     MissingSourceCitation {
         section_id: String,
     },
+    InvalidResearchPlan {
+        reason: String,
+    },
     InvalidOutline {
         reason: String,
     },
@@ -102,6 +105,9 @@ impl fmt::Display for InquiryError {
                     formatter,
                     "section `{section_id}` must cite at least one source"
                 )
+            }
+            Self::InvalidResearchPlan { reason } => {
+                write!(formatter, "invalid research plan: {reason}")
             }
             Self::InvalidOutline { reason } => {
                 write!(formatter, "invalid research outline: {reason}")

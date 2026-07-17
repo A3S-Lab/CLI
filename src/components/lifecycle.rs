@@ -15,7 +15,7 @@ use super::id::ComponentId;
 use super::lock::ComponentOperationLock;
 use super::paths::ComponentPaths;
 use super::probe::probe_version;
-use super::release_install::install_release;
+use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,6 +51,8 @@ pub struct InstallRequest {
     pub force: bool,
     pub allow_unsigned: bool,
     pub progress: bool,
+    pub resolved_releases: BTreeMap<String, ResolvedRelease>,
+    pub resolved_sources: BTreeMap<String, InstallSource>,
 }
 
 impl Default for InstallRequest {
@@ -63,6 +65,8 @@ impl Default for InstallRequest {
             force: false,
             allow_unsigned: false,
             progress: true,
+            resolved_releases: BTreeMap::new(),
+            resolved_sources: BTreeMap::new(),
         }
     }
 }
@@ -91,12 +95,32 @@ pub async fn install_component(
     install_component_locked(id, request, paths).await
 }
 
-async fn install_component_locked(
+pub(super) async fn install_component_locked(
     id: &ComponentId,
     request: &InstallRequest,
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     if let Some(spec) = catalog::find(id) {
+        if request.package.is_some() {
+            bail!("--from is valid only for external Use extensions");
+        }
+        if request.allow_unsigned {
+            bail!("--allow-unsigned is valid only for external Use extensions");
+        }
+        if request.version.is_some() && !matches!(spec.distribution, Distribution::Release(_)) {
+            bail!(
+                "component '{}' does not own a versioned release; --version is not supported",
+                id
+            );
+        }
+        if request.source != InstallSource::Auto
+            && !matches!(spec.distribution, Distribution::Release(_))
+        {
+            bail!(
+                "component '{}' does not own an install source; --source is not supported",
+                id
+            );
+        }
         return match spec.distribution {
             Distribution::Bundled => install_bundled(id, spec, paths),
             Distribution::Release(release) => {
@@ -107,7 +131,7 @@ async fn install_component_locked(
             }
             Distribution::Delegated { parent } => {
                 let parent = ComponentId::parse(parent)?;
-                let parent_path = ensure_parent(&parent, paths, request.progress).await?;
+                let parent_path = ensure_parent(&parent, paths, request).await?;
                 delegate_install(id, &parent, &parent_path, request)
             }
         };
@@ -123,10 +147,29 @@ async fn install_component_locked(
             id
         );
     }
-    let parent_path = ensure_parent(&use_id, paths, request.progress).await?;
+    if !request.allow_unsigned {
+        bail!(
+            "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
+            id
+        );
+    }
+    if request.version.is_some() {
+        bail!(
+            "external component '{}' derives its version from the package manifest; --version is not supported",
+            id
+        );
+    }
+    if request.source != InstallSource::Auto {
+        bail!(
+            "external component '{}' uses its explicit --from package; --source is not supported",
+            id
+        );
+    }
+    let parent_path = ensure_parent(&use_id, paths, request).await?;
     delegate_install(id, &use_id, &parent_path, request)
 }
 
+#[cfg(test)]
 pub fn uninstall_component(
     id: &ComponentId,
     cascade: bool,
@@ -137,7 +180,7 @@ pub fn uninstall_component(
     uninstall_component_locked(id, cascade, purge, paths)
 }
 
-fn uninstall_component_locked(
+pub(super) fn uninstall_component_locked(
     id: &ComponentId,
     cascade: bool,
     purge: bool,
@@ -219,7 +262,7 @@ fn uninstall_component_locked(
 async fn ensure_parent(
     parent: &ComponentId,
     paths: &ComponentPaths,
-    progress: bool,
+    request: &InstallRequest,
 ) -> anyhow::Result<PathBuf> {
     let state = find_state(parent, paths)?;
     if state.is_ready() {
@@ -229,11 +272,13 @@ async fn ensure_parent(
         .with_context(|| format!("parent component '{}' is not registered", parent))?;
     let release = catalog::release(spec)
         .with_context(|| format!("parent component '{}' is not installable", parent))?;
-    let request = InstallRequest {
-        progress,
+    let parent_request = InstallRequest {
+        progress: request.progress,
+        resolved_releases: request.resolved_releases.clone(),
+        resolved_sources: request.resolved_sources.clone(),
         ..InstallRequest::default()
     };
-    let record = install_product(parent, spec, release, &request, paths).await?;
+    let record = install_product(parent, spec, release, &parent_request, paths).await?;
     record
         .path
         .context("installed parent did not report an executable path")
@@ -291,7 +336,41 @@ async fn install_product(
         );
     }
 
-    let source = match request.source {
+    let source = resolve_install_source(id, release, request)?;
+    match source {
+        InstallSource::Homebrew => install_homebrew(id, release, request, paths),
+        InstallSource::Release => {
+            install_release(
+                id,
+                release,
+                request,
+                request.resolved_releases.get(id.as_str()),
+                paths,
+            )
+            .await
+        }
+        InstallSource::Auto => {
+            bail!("automatic install source was not resolved")
+        }
+    }
+}
+
+pub(super) fn resolve_install_source(
+    id: &ComponentId,
+    release: ReleaseSpec,
+    request: &InstallRequest,
+) -> anyhow::Result<InstallSource> {
+    if let Some(resolved) = request.resolved_sources.get(id.as_str()).copied() {
+        if request.source != InstallSource::Auto && request.source != resolved {
+            bail!(
+                "reviewed install source {:?} does not match requested source {:?}",
+                resolved,
+                request.source
+            );
+        }
+        return Ok(resolved);
+    }
+    Ok(match request.source {
         InstallSource::Auto
             if request.version.is_none()
                 && release.homebrew_formula.is_some()
@@ -301,14 +380,7 @@ async fn install_product(
         }
         InstallSource::Auto => InstallSource::Release,
         explicit => explicit,
-    };
-    match source {
-        InstallSource::Homebrew => install_homebrew(id, release, request, paths),
-        InstallSource::Release => install_release(id, release, request, paths).await,
-        InstallSource::Auto => {
-            bail!("automatic install source was not resolved")
-        }
-    }
+    })
 }
 
 fn install_homebrew(

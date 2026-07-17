@@ -5,9 +5,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    reduce, EvidenceRef, InquiryAudit, InquiryBudgetInput, InquiryConvergenceInput, InquiryError,
-    InquiryEvent, InquiryLimits, InquiryPhase, InquiryReplayError, OutlineValidationContext,
-    Perspective, Question, QuestionStatus, ResearchMethod, ResearchOutline, SectionDraft,
+    reduce, research_contract_outcome, EvidenceRef, InquiryAudit, InquiryBudgetInput,
+    InquiryConvergenceInput, InquiryError, InquiryEvent, InquiryLimits, InquiryPhase,
+    InquiryReplayError, OutlineValidationContext, Perspective, Question, QuestionStatus,
+    ResearchContractAssessment, ResearchMethod, ResearchObligation, ResearchOutline, SectionDraft,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -15,6 +16,12 @@ use super::{
 pub struct InquiryState {
     pub phase: InquiryPhase,
     pub method: Option<ResearchMethod>,
+    #[serde(default)]
+    pub obligations: Vec<ResearchObligation>,
+    #[serde(default)]
+    pub stop_conditions: Vec<String>,
+    #[serde(default)]
+    pub contract_assessment: Option<ResearchContractAssessment>,
     pub scout_completed: bool,
     pub scout_source_ids: Vec<String>,
     pub perspectives: Vec<Perspective>,
@@ -90,6 +97,11 @@ impl InquiryState {
                 .filter(|question| question.material)
                 .map(|question| question.id.clone())
                 .collect(),
+            required_question_ids: self
+                .questions
+                .iter()
+                .map(|question| question.id.clone())
+                .collect(),
         }
     }
 
@@ -158,6 +170,14 @@ impl InquiryState {
             questions_bounded: budget.bounded_questions,
             unresolved_questions,
             unresolved_material_questions,
+            research_obligations: self.obligations.len(),
+            material_obligations: self
+                .obligations
+                .iter()
+                .filter(|obligation| obligation.material)
+                .count(),
+            contract_assessed: self.contract_assessment.is_some(),
+            contract_outcome: research_contract_outcome(self),
             outline_sections: budget.outline_sections,
             drafted_sections: budget.drafted_sections,
             undrafted_sections: budget

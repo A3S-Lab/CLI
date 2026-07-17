@@ -13,18 +13,23 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use self::execution::{
-    attach_inquiry_projection, resolve_questions_with_bounded_follow_up_waves,
-    run_dynamic_workflow, run_perspective_guided, InquiryExecution,
+    assess_completed_research_contract, attach_inquiry_projection,
+    resolve_questions_with_bounded_follow_up_waves, run_dynamic_workflow, run_perspective_guided,
+    InquiryExecution,
 };
 use self::plan::{
-    generate_plan, plan_max_iterations, queue_plan_questions, single_wave_research_plan,
-    workflow_args_with_plan,
+    commit_plan_research_contract, generate_plan, plan_max_iterations, queue_plan_questions,
+    single_wave_research_plan, workflow_args_with_plan,
 };
-use super::deep_research_canonical_workflow_output;
+use super::{
+    deep_research_canonical_workflow_output, validated_inquiry_projection,
+    ValidatedInquiryProjection,
+};
 
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 const PERSPECTIVE_DISCOVERY_TIMEOUT_MS: u64 = 90_000;
 const QUESTION_RESOLUTION_TIMEOUT_MS: u64 = 90_000;
+const RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS: u64 = 90_000;
 const MAX_FOLLOW_UP_QUESTIONS_PER_WAVE: usize = 4;
 const MAX_QUESTION_EVIDENCE_ITEMS: usize = 24;
 pub(super) const DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS: u64 = 12 * 60 * 1_000;
@@ -58,29 +63,10 @@ pub(super) fn inquiry_projection_from_workflow(
     let canonical = deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
     let value = serde_json::from_str::<Value>(&canonical)
         .map_err(|error| format!("decode DeepResearch inquiry projection: {error}"))?;
-    let Some(inquiry) = value.get("inquiry") else {
-        return Ok(None);
-    };
-    let events = serde_json::from_value::<Vec<InquiryEvent>>(
-        inquiry
-            .get("events")
-            .cloned()
-            .ok_or_else(|| "DeepResearch inquiry projection omitted events".to_string())?,
-    )
-    .map_err(|error| format!("decode DeepResearch inquiry events: {error}"))?;
-    let state = serde_json::from_value::<InquiryState>(
-        inquiry
-            .get("state")
-            .cloned()
-            .ok_or_else(|| "DeepResearch inquiry projection omitted state".to_string())?,
-    )
-    .map_err(|error| format!("decode DeepResearch inquiry state: {error}"))?;
-    let replayed = a3s::research::replay(&events, &InquiryLimits::default())
-        .map_err(|error| format!("replay DeepResearch inquiry projection: {error}"))?;
-    if replayed != state {
-        return Err("DeepResearch inquiry state differs from its event replay".to_string());
+    match validated_inquiry_projection(&value)? {
+        ValidatedInquiryProjection::LegacyCheckedLoop => Ok(None),
+        ValidatedInquiryProjection::Inquiry { events, state } => Ok(Some((events, state))),
     }
-    Ok(Some((events, state)))
 }
 
 async fn run_inquiry(
@@ -116,7 +102,7 @@ async fn run_inquiry(
         },
         &limits,
     )?;
-
+    commit_plan_research_contract(&plan.value, &mut state, &mut inquiry_events, &limits)?;
     let mut execution = match plan.method {
         ResearchMethod::Focused => {
             queue_plan_questions(&plan.value, None, &mut state, &mut inquiry_events, &limits)?;
@@ -156,6 +142,28 @@ async fn run_inquiry(
         &limits,
     )
     .await?;
+
+    if state.phase == a3s::research::InquiryPhase::Outlining {
+        let outcome = assess_completed_research_contract(
+            &session,
+            &progress_tx,
+            &execution,
+            &mut state,
+            &mut inquiry_events,
+            &limits,
+        )
+        .await?;
+        if outcome == a3s::research::ResearchContractOutcome::Unsatisfied {
+            apply_event(
+                &mut state,
+                &mut inquiry_events,
+                InquiryEvent::BudgetExhausted {
+                    reason: "the LLM-selected retrieval budget ended before the material research contract and stop conditions were satisfied".to_string(),
+                },
+                &limits,
+            )?;
+        }
+    }
 
     attach_inquiry_projection(execution.result, &inquiry_events, &state)
 }

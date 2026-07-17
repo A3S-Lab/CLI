@@ -30,6 +30,103 @@ impl InquiryPhase {
     }
 }
 
+/// A stable, planner-authored coverage contract that must remain traceable
+/// through questions, accepted evidence, and the final report.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchObligation {
+    pub id: String,
+    pub title: String,
+    pub focus: String,
+    pub material: bool,
+    pub completion_criteria: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContractAssessmentStatus {
+    Satisfied,
+    Bounded,
+    Uncovered,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletionCriterionAssessment {
+    pub criterion_index: usize,
+    pub status: ContractAssessmentStatus,
+    pub rationale: String,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchObligationAssessment {
+    pub obligation_id: String,
+    pub criteria: Vec<CompletionCriterionAssessment>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StopConditionAssessment {
+    pub condition_index: usize,
+    pub status: ContractAssessmentStatus,
+    pub rationale: String,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticDisposition {
+    Resolved,
+    Bounded,
+    Irrelevant,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceDiagnosticAssessment {
+    pub diagnostic_id: String,
+    pub disposition: DiagnosticDisposition,
+    pub obligation_ids: Vec<String>,
+    pub rationale: String,
+    pub evidence_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResearchContractAssessment {
+    pub obligations: Vec<ResearchObligationAssessment>,
+    pub stop_conditions: Vec<StopConditionAssessment>,
+    pub diagnostics: Vec<EvidenceDiagnosticAssessment>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResearchContractOutcome {
+    Satisfied,
+    Qualified,
+    Unsatisfied,
+}
+
+impl ResearchObligation {
+    pub fn new(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        focus: impl Into<String>,
+        material: bool,
+        completion_criteria: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            focus: focus.into(),
+            material,
+            completion_criteria,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Perspective {
@@ -69,6 +166,11 @@ pub struct Question {
     pub id: String,
     pub perspective_id: Option<String>,
     pub parent_question_id: Option<String>,
+    /// Stable research obligations this question is responsible for closing.
+    /// Legacy journals may omit the field, but host-managed Inquiry runs fail
+    /// closed unless every planned obligation is linked before outlining.
+    #[serde(default)]
+    pub obligation_ids: Vec<String>,
     /// A model-authored, search-engine-ready query for retrieving evidence for
     /// this question. The human-facing question remains in `prompt`.
     #[serde(default)]
@@ -93,6 +195,7 @@ impl Question {
             id: id.into(),
             perspective_id,
             parent_question_id: None,
+            obligation_ids: Vec::new(),
             retrieval_query: None,
             material: true,
             round: 0,
@@ -139,6 +242,9 @@ pub struct InquiryLimits {
     pub max_events: usize,
     pub max_identifier_chars: usize,
     pub max_text_chars: usize,
+    pub max_obligations: usize,
+    pub max_completion_criteria_per_obligation: usize,
+    pub max_stop_conditions: usize,
     pub max_scout_sources: usize,
     pub max_perspectives: usize,
     pub max_questions: usize,
@@ -160,6 +266,9 @@ impl Default for InquiryLimits {
             max_events: 256,
             max_identifier_chars: 160,
             max_text_chars: 4_000,
+            max_obligations: 16,
+            max_completion_criteria_per_obligation: 8,
+            max_stop_conditions: 8,
             max_scout_sources: 16,
             max_perspectives: 4,
             max_questions: 32,
@@ -208,6 +317,10 @@ pub struct InquiryConvergenceInput {
     pub questions_bounded: usize,
     pub unresolved_questions: usize,
     pub unresolved_material_questions: usize,
+    pub research_obligations: usize,
+    pub material_obligations: usize,
+    pub contract_assessed: bool,
+    pub contract_outcome: Option<ResearchContractOutcome>,
     pub outline_sections: usize,
     pub drafted_sections: usize,
     pub undrafted_sections: usize,

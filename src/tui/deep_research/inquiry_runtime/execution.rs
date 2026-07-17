@@ -4,9 +4,11 @@ use std::collections::BTreeSet;
 
 use a3s::research::{
     perspective_discovery_events, perspective_discovery_generation_params,
-    question_resolution_events, question_resolution_generation_params, EvidenceRef, InquiryEvent,
-    InquiryLimits, InquiryState, PerspectiveDiscoveryOutput, Question, QuestionResolutionOutput,
-    QuestionStatus,
+    question_resolution_events, question_resolution_generation_params,
+    research_contract_assessment_event, research_contract_assessment_generation_params,
+    research_contract_outcome, EvidenceDiagnostic, EvidenceDiagnosticKind, EvidenceRef,
+    InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput, Question,
+    QuestionResolutionOutput, QuestionStatus, ResearchContractAssessment, ResearchContractOutcome,
 };
 use a3s_code_core::{AgentEvent, AgentSession, ToolCallResult};
 use serde::de::DeserializeOwned;
@@ -26,7 +28,7 @@ use super::plan::{
 use super::{
     apply_event, FOLLOW_UP_WORKFLOW_TIMEOUT_MS, MAX_FOLLOW_UP_QUESTIONS_PER_WAVE,
     MAX_QUESTION_EVIDENCE_ITEMS, PERSPECTIVE_DISCOVERY_TIMEOUT_MS, QUESTION_RESOLUTION_TIMEOUT_MS,
-    SCOUT_WORKFLOW_TIMEOUT_MS,
+    RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS, SCOUT_WORKFLOW_TIMEOUT_MS,
 };
 
 #[derive(Debug)]
@@ -93,17 +95,11 @@ pub(super) async fn run_perspective_guided(
     )?;
 
     let scout_packet = accepted_evidence_synthesis_payload(&scout_evidence, &scout_output);
-    let tracks_digest = serde_json::to_string(
-        plan.value
-            .get("tracks")
-            .unwrap_or(&Value::Array(Vec::new())),
-    )
-    .map_err(|error| format!("encode stable research obligations: {error}"))?;
     let discovery_args = perspective_discovery_generation_params(
         args.pointer("/input/query")
             .and_then(Value::as_str)
             .unwrap_or_default(),
-        &tracks_digest,
+        &state.obligations,
         &scout_packet,
         &allowed_source_ids,
         PERSPECTIVE_DISCOVERY_TIMEOUT_MS,
@@ -119,8 +115,9 @@ pub(super) async fn run_perspective_guided(
     )
     .await?;
     let discovery: PerspectiveDiscoveryOutput = generated_object(&generated)?;
-    let discovered_events = perspective_discovery_events(&discovery, &allowed_source_ids)
-        .map_err(|error| error.to_string())?;
+    let discovered_events =
+        perspective_discovery_events(&discovery, &allowed_source_ids, &state.obligations)
+            .map_err(|error| error.to_string())?;
     for event in discovered_events {
         apply_event(state, inquiry_events, event, limits)?;
     }
@@ -237,6 +234,52 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
     }
 }
 
+pub(super) async fn assess_completed_research_contract(
+    session: &AgentSession,
+    progress_tx: &mpsc::Sender<AgentEvent>,
+    execution: &InquiryExecution,
+    state: &mut InquiryState,
+    events: &mut Vec<InquiryEvent>,
+    limits: &InquiryLimits,
+) -> Result<ResearchContractOutcome, String> {
+    if state.phase != a3s::research::InquiryPhase::Outlining {
+        return Err(format!(
+            "research contract assessment requires Outlining; current phase is {:?}",
+            state.phase
+        ));
+    }
+    let canonical = deep_research_canonical_workflow_output(
+        &execution.result.output,
+        execution.result.metadata.as_ref(),
+    );
+    let evidence = accepted_evidence_ledger(&canonical, execution.result.metadata.as_ref());
+    let packet = accepted_evidence_synthesis_payload(&evidence, &canonical);
+    let generation_args = research_contract_assessment_generation_params(
+        canonical_query(&canonical)
+            .as_deref()
+            .unwrap_or("DeepResearch inquiry"),
+        state,
+        &bounded_chars(&packet, 60_000),
+        RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS,
+    )
+    .map_err(|error| error.to_string())?;
+    let generated = call_tool_with_progress(
+        session,
+        "generate_object",
+        serde_json::to_value(generation_args)
+            .map_err(|error| format!("encode research contract assessment request: {error}"))?,
+        progress_tx,
+        false,
+    )
+    .await?;
+    let assessment: ResearchContractAssessment = generated_object(&generated)?;
+    let event =
+        research_contract_assessment_event(state, assessment).map_err(|error| error.to_string())?;
+    apply_event(state, events, event, limits)?;
+    research_contract_outcome(state)
+        .ok_or_else(|| "research contract assessment produced no terminal outcome".to_string())
+}
+
 fn exhaust_if_material_inquiry_unresolved(
     state: &mut InquiryState,
     events: &mut Vec<InquiryEvent>,
@@ -282,11 +325,8 @@ async fn resolve_queued_questions(
         deep_research_canonical_workflow_output(&result.output, result.metadata.as_ref());
     let evidence = accepted_evidence_ledger(&canonical, result.metadata.as_ref());
     let addressable_evidence = accept_evidence_catalog(state, events, limits, &evidence)?;
-    let packet_evidence = addressable_evidence
-        .iter()
-        .take(MAX_QUESTION_EVIDENCE_ITEMS)
-        .cloned()
-        .collect::<Vec<_>>();
+    let packet_evidence =
+        balanced_evidence_packet(&addressable_evidence, MAX_QUESTION_EVIDENCE_ITEMS);
     if packet_evidence.is_empty() {
         return defer_or_bound_question_batch(
             state,
@@ -303,6 +343,8 @@ async fn resolve_queued_questions(
     let generation_args = question_resolution_generation_params(
         query.as_deref().unwrap_or("DeepResearch inquiry"),
         queued,
+        &state.obligations,
+        &state.stop_conditions,
         &allowed_evidence_ids,
         &bounded_chars(&packet, 60_000),
         QUESTION_RESOLUTION_TIMEOUT_MS,
@@ -356,6 +398,33 @@ async fn resolve_queued_questions(
         apply_event(state, events, event, limits)?;
     }
     Ok(())
+}
+
+/// Keep both the initial evidence base and the newest retrieval wave in a
+/// bounded resolver packet. A first-N truncation can otherwise make a
+/// successful follow-up invisible once earlier waves fill the packet.
+pub(super) fn balanced_evidence_packet(
+    evidence: &[AcceptedEvidence],
+    maximum: usize,
+) -> Vec<AcceptedEvidence> {
+    if evidence.len() <= maximum {
+        return evidence.to_vec();
+    }
+    if maximum == 0 {
+        return Vec::new();
+    }
+    let leading = maximum / 2;
+    let trailing = maximum.saturating_sub(leading);
+    evidence
+        .iter()
+        .take(leading)
+        .chain(
+            evidence
+                .iter()
+                .skip(evidence.len().saturating_sub(trailing)),
+        )
+        .cloned()
+        .collect()
 }
 
 pub(super) async fn run_dynamic_workflow(
@@ -514,7 +583,27 @@ fn accept_evidence_catalog(
         if claim_ids.is_empty() || source_ids.is_empty() {
             continue;
         }
-        let accepted = EvidenceRef::new(item.id.clone(), claim_ids, source_ids);
+        let diagnostics = item
+            .contradictions
+            .iter()
+            .enumerate()
+            .map(|(index, detail)| {
+                EvidenceDiagnostic::new(
+                    format!("diagnostic:{}:contradiction:{}", item.id, index + 1),
+                    EvidenceDiagnosticKind::Contradiction,
+                    detail.clone(),
+                )
+            })
+            .chain(item.gaps.iter().enumerate().map(|(index, detail)| {
+                EvidenceDiagnostic::new(
+                    format!("diagnostic:{}:gap:{}", item.id, index + 1),
+                    EvidenceDiagnosticKind::Gap,
+                    detail.clone(),
+                )
+            }))
+            .collect();
+        let accepted =
+            EvidenceRef::new(item.id.clone(), claim_ids, source_ids).with_diagnostics(diagnostics);
         match state.evidence(&item.id) {
             Some(existing) if existing != &accepted => {
                 return Err(format!(

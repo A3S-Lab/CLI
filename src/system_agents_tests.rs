@@ -191,6 +191,22 @@ fn registry_file_names_are_canonical_pid_and_hex_instances() {
     }
 }
 
+#[test]
+fn relative_status_directory_is_made_absolute_for_the_helper_contract() {
+    let current = std::env::current_dir().unwrap();
+    let relative = PathBuf::from("private-agent-status");
+
+    let resolved = absolute_status_directory(relative.clone(), Some(&current)).unwrap();
+
+    assert!(resolved.is_absolute());
+    assert_eq!(resolved, current.join(relative));
+    assert_eq!(
+        absolute_status_directory(current.clone(), None),
+        Some(current)
+    );
+    assert!(absolute_status_directory(PathBuf::from("relative"), None).is_none());
+}
+
 #[tokio::test]
 async fn registry_preserves_non_protocol_and_identity_mismatched_files() {
     let temp = tempfile::tempdir().unwrap();
@@ -261,6 +277,44 @@ async fn registry_directory_overflow_is_reported_instead_of_returning_partial_ev
     let error = reader.read_presences(now).await.unwrap_err();
 
     assert!(error.to_string().contains("directory entry limit"));
+}
+
+#[tokio::test]
+async fn live_publisher_cap_marks_the_exported_snapshot_degraded() {
+    let temp = tempfile::tempdir().unwrap();
+    let now = epoch_ms();
+    for index in 1..=MAX_PRESENCE_FILES + 1 {
+        let pid = (40_000 + index) as u32;
+        let mut item = presence(
+            &format!("{pid}-{index:016x}"),
+            pid,
+            AgentActivityState::Working,
+        );
+        item.updated_at_ms = now;
+        write_raw_presence(temp.path(), &item).await;
+    }
+    let publisher = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let scan = publisher.scan_presences(now).await.unwrap();
+    assert_eq!(scan.presences.len(), MAX_PRESENCE_FILES);
+    assert!(scan.truncated);
+
+    let local = presence(
+        publisher.instance_id(),
+        std::process::id(),
+        AgentActivityState::Idle,
+    );
+    let result = publisher.publish_collect_and_export(local).await;
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("publisher evidence limit")));
+    let bytes = tokio::fs::read(result.snapshot_path.unwrap())
+        .await
+        .unwrap();
+    let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(snapshot.degraded);
+    assert!(snapshot.activities.len() <= MAX_SYSTEM_ACTIVITIES);
+    publisher.remove().await;
 }
 
 #[tokio::test]
@@ -419,6 +473,180 @@ async fn heartbeat_redacts_tasks_by_default_and_shares_only_with_opt_in() {
         Some("child-private description")
     );
     shared.remove().await;
+}
+
+#[tokio::test]
+async fn exported_snapshot_redacts_the_local_process_and_is_fresh_and_private() {
+    let temp = tempfile::tempdir().unwrap();
+    let publisher = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let local = AgentPresence::new(
+        publisher.instance_id(),
+        std::process::id(),
+        "/Users/example/private-parent/repository",
+        Some("raw parent\nsecret prompt\u{1b}[2J".to_string()),
+        AgentActivityState::Working,
+        vec![AgentChildPresence {
+            id: "child-1".to_string(),
+            agent: "codex".to_string(),
+            task: Some("raw child secret".to_string()),
+            state: AgentActivityState::WaitingInput,
+            started_at_ms: Some(epoch_ms().saturating_sub(100)),
+        }],
+        epoch_ms().saturating_sub(500),
+    );
+    let before = epoch_ms();
+
+    let result = publisher.publish_collect_and_export(local).await;
+    let after = epoch_ms();
+    let path = result
+        .snapshot_path
+        .expect("snapshot export should succeed");
+    let bytes = tokio::fs::read(&path).await.unwrap();
+    let raw = String::from_utf8(bytes.clone()).unwrap();
+    let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(snapshot.schema, SYSTEM_SNAPSHOT_SCHEMA);
+    assert!(snapshot.updated_at_ms >= before);
+    assert!(snapshot.updated_at_ms <= after);
+    let parent = snapshot
+        .activities
+        .iter()
+        .find(|activity| activity.id == publisher.instance_id())
+        .expect("local parent should be exported through the privacy protocol");
+    assert_eq!(parent.workspace.as_deref(), Some("repository"));
+    assert!(parent.task.is_none());
+    assert_eq!(parent.state, AgentActivityState::Working);
+    assert_eq!(parent.confidence, AgentActivityConfidence::Exact);
+    let child = snapshot
+        .activities
+        .iter()
+        .find(|activity| activity.parent_id.as_deref() == Some(publisher.instance_id()))
+        .expect("local child should be exported through the privacy protocol");
+    assert!(child.task.is_none());
+    assert_eq!(child.state, AgentActivityState::WaitingInput);
+    assert!(!raw.contains("private-parent"));
+    assert!(!raw.contains("raw parent"));
+    assert!(!raw.contains("raw child"));
+    assert!(!raw.contains("\"local\""));
+    assert!(raw.contains("\"state\":\"working\""));
+    assert!(raw.contains("\"confidence\":\"exact\""));
+    assert!(!raw.contains("\"parent_id\":null"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    publisher.remove().await;
+}
+
+#[tokio::test]
+async fn exported_local_tasks_require_opt_in_and_are_sanitized() {
+    let temp = tempfile::tempdir().unwrap();
+    let publisher =
+        AgentPresencePublisher::for_directory_with_task_sharing(temp.path().to_path_buf());
+    let local = AgentPresence::new(
+        publisher.instance_id(),
+        std::process::id(),
+        "/private/repository",
+        Some("parent\nlabel\u{1b}[2J".to_string()),
+        AgentActivityState::Planning,
+        vec![AgentChildPresence {
+            id: "child-1".to_string(),
+            agent: "codex".to_string(),
+            task: Some("child\r\nlabel".to_string()),
+            state: AgentActivityState::Working,
+            started_at_ms: None,
+        }],
+        epoch_ms(),
+    );
+
+    let result = publisher.publish_collect_and_export(local).await;
+    let bytes = tokio::fs::read(result.snapshot_path.unwrap())
+        .await
+        .unwrap();
+    let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let parent = snapshot
+        .activities
+        .iter()
+        .find(|activity| activity.id == publisher.instance_id())
+        .unwrap();
+    let child = snapshot
+        .activities
+        .iter()
+        .find(|activity| activity.parent_id.as_deref() == Some(publisher.instance_id()))
+        .unwrap();
+
+    assert_eq!(parent.task.as_deref(), Some("parent label"));
+    assert_eq!(child.task.as_deref(), Some("child label"));
+    publisher.remove().await;
+}
+
+#[tokio::test]
+async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
+    let temp = tempfile::tempdir().unwrap();
+    let publisher = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let activities = (0..MAX_SYSTEM_ACTIVITIES + 40)
+        .map(|index| SystemAgentActivity {
+            id: format!("agent-{index}-{}", "x".repeat(MAX_ACTIVITY_ID_CHARS + 20)),
+            parent_id: None,
+            agent: format!("agent\n{}", "界".repeat(MAX_AGENT_CHARS + 20)),
+            workspace: Some(format!(
+                "workspace\u{1b}[2J{}",
+                "界".repeat(MAX_WORKSPACE_CHARS)
+            )),
+            task: Some(format!("task\n{}", "界".repeat(MAX_TASK_CHARS + 20))),
+            state: AgentActivityState::Unknown,
+            confidence: AgentActivityConfidence::Process,
+            started_at_ms: None,
+            local: false,
+        })
+        .collect();
+    let first = SystemAgentSnapshot {
+        activities,
+        warnings: Vec::new(),
+    };
+
+    let path = publisher.write_system_snapshot(&first).await.unwrap();
+    let bytes = tokio::fs::read(&path).await.unwrap();
+    let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(snapshot.degraded);
+    assert_eq!(snapshot.activities.len(), MAX_SYSTEM_ACTIVITIES);
+    assert!(bytes.len() as u64 <= MAX_SYSTEM_SNAPSHOT_BYTES);
+    assert!(snapshot.activities.iter().all(|activity| {
+        activity.id.chars().count() <= MAX_ACTIVITY_ID_CHARS
+            && activity.agent.chars().count() <= MAX_AGENT_CHARS
+            && activity
+                .workspace
+                .as_deref()
+                .map_or(true, |value| value.chars().count() <= MAX_WORKSPACE_CHARS)
+            && activity
+                .task
+                .as_deref()
+                .map_or(true, |value| value.chars().count() <= MAX_TASK_CHARS)
+    }));
+
+    let replacement = SystemAgentSnapshot {
+        activities: Vec::new(),
+        warnings: Vec::new(),
+    };
+    publisher.write_system_snapshot(&replacement).await.unwrap();
+    let bytes = tokio::fs::read(&path).await.unwrap();
+    let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert!(!snapshot.degraded);
+    assert!(snapshot.activities.is_empty());
+    let leftovers = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".system-snapshot-")
+        })
+        .count();
+    assert_eq!(leftovers, 0);
 }
 
 #[tokio::test]

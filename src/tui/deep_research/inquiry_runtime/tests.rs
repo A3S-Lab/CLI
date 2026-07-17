@@ -1,10 +1,14 @@
 use a3s::research::{InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput};
 use serde_json::Value;
 
+use super::super::deep_research_evidence_ledger::{
+    AcceptedClaim, AcceptedEvidence, AcceptedSource, SourceTier,
+};
+use super::execution::balanced_evidence_packet;
 use super::plan::{
-    defer_or_bound_question_batch, perspective_research_plan, questions_scheduled_for_retrieval,
-    queue_plan_questions, scout_plan, single_wave_research_plan, validate_plan,
-    workflow_args_with_plan,
+    commit_plan_research_contract, defer_or_bound_question_batch, perspective_research_plan,
+    questions_scheduled_for_retrieval, queue_plan_questions, scout_plan, single_wave_research_plan,
+    validate_plan, workflow_args_with_plan,
 };
 
 fn production_planner_plan(method: &str, scouts: &[&str]) -> Value {
@@ -41,6 +45,42 @@ fn production_planner_plan(method: &str, scouts: &[&str]) -> Value {
     })
 }
 
+fn evidence_fixture(index: usize) -> AcceptedEvidence {
+    AcceptedEvidence {
+        id: format!("evidence:{index}"),
+        summary: format!("Evidence {index}"),
+        confidence: Some("high".to_string()),
+        sources: vec![AcceptedSource {
+            id: format!("source:{index}"),
+            anchor: format!("https://example.com/{index}"),
+            title: None,
+            date: None,
+            reliability: None,
+            quote_or_fact: Some(format!("Fact {index}")),
+            tier: SourceTier::Secondary,
+        }],
+        claims: vec![AcceptedClaim {
+            id: format!("claim:{index}"),
+            text: format!("Claim {index}"),
+        }],
+        contradictions: Vec::new(),
+        gaps: Vec::new(),
+    }
+}
+
+#[test]
+fn resolver_packet_preserves_initial_and_latest_waves() {
+    let evidence = (0..8).map(evidence_fixture).collect::<Vec<_>>();
+    let packet = balanced_evidence_packet(&evidence, 4);
+    assert_eq!(
+        packet
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["evidence:0", "evidence:1", "evidence:6", "evidence:7"]
+    );
+}
+
 fn plan(method: &str, scouts: &[&str]) -> Value {
     validate_plan(production_planner_plan(method, scouts))
         .expect("production planner fixture")
@@ -67,6 +107,21 @@ fn planner_must_select_at_least_one_material_track() {
     let error = validate_plan(supporting_only)
         .expect_err("a plan without a core evidence obligation must fail closed");
     assert!(error.contains("at least one material track"), "{error}");
+}
+
+#[test]
+fn planner_must_define_bounded_completion_and_stop_conditions() {
+    let mut missing_criteria = production_planner_plan("focused", &[]);
+    missing_criteria["tracks"][0]["completion_criteria"] = serde_json::json!([]);
+    let error = validate_plan(missing_criteria)
+        .expect_err("a stable obligation without completion criteria must fail closed");
+    assert!(error.contains("completion criterion"), "{error}");
+
+    let mut missing_stop = production_planner_plan("focused", &[]);
+    missing_stop["stop_conditions"] = serde_json::json!([]);
+    let error = validate_plan(missing_stop)
+        .expect_err("an inquiry without a stopping condition must fail closed");
+    assert!(error.contains("stopping condition"), "{error}");
 }
 
 #[test]
@@ -97,11 +152,16 @@ fn focused_questions_inherit_the_model_selected_track_materiality() {
         &limits,
     )
     .expect("strategy");
+    commit_plan_research_contract(&mixed, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&mixed, None, &mut state, &mut events, &limits)
         .expect("focused questions");
 
     assert!(state.questions[0].material);
     assert!(!state.questions[1].material);
+    assert_eq!(state.questions[0].obligation_ids, ["track:material"]);
+    assert_eq!(state.questions[1].obligation_ids, ["track:supporting"]);
+    assert_eq!(state.obligations.len(), 2);
 }
 
 #[test]
@@ -123,6 +183,8 @@ fn focused_maker_plan_uses_track_questions_when_search_queries_are_empty() {
         &limits,
     )
     .expect("strategy");
+    commit_plan_research_contract(&local, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&local, None, &mut state, &mut events, &limits)
         .expect("track-driven focused questions");
 
@@ -153,6 +215,8 @@ fn transient_question_failure_defers_until_no_retry_wave_remains() {
         &limits,
     )
     .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&focused, None, &mut state, &mut events, &limits)
         .expect("focused question");
     let question = state.questions[0].clone();
@@ -280,6 +344,8 @@ fn focused_question_identity_is_owned_by_the_host() {
         &limits,
     )
     .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&focused, None, &mut state, &mut events, &limits).expect("host questions");
 
     let ids = state
@@ -289,9 +355,22 @@ fn focused_question_identity_is_owned_by_the_host() {
         .collect::<Vec<_>>();
     assert_eq!(ids, ["question:plan-1-1", "question:plan-1-2"]);
     assert!(ids.iter().all(|id| !id.contains("material.v2")));
-    assert!(state.questions.iter().all(|question| {
-        question.retrieval_query.as_deref() == Some("targeted evidence query")
-    }));
+    assert_eq!(
+        state.questions[0].retrieval_query.as_deref(),
+        Some("targeted evidence query")
+    );
+    assert_eq!(
+        state.questions[1].retrieval_query.as_deref(),
+        Some("What survives independent checking?")
+    );
+    assert_eq!(
+        questions_scheduled_for_retrieval(&state, &focused)
+            .expect("initial question retrieval opportunity")
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["question:plan-1-1"]
+    );
 }
 
 #[test]
@@ -325,6 +404,7 @@ fn perspective_questions_become_the_retrieval_plan() {
                 id: "question:evidence".to_string(),
                 prompt: "Which conclusion survives cross-checking?".to_string(),
                 retrieval_query: "cross-check evidence conclusion".to_string(),
+                obligation_ids: vec!["track:material".to_string()],
                 material: true,
                 round: 0,
             }],
@@ -358,6 +438,7 @@ fn perspective_retrieval_budget_covers_each_lens_before_extra_queries() {
                 id: format!("question:{id}-{index}"),
                 prompt: format!("Human-facing question {id}-{index}?"),
                 retrieval_query: (*query).to_string(),
+                obligation_ids: vec!["track:material".to_string()],
                 material: true,
                 round: 0,
             })

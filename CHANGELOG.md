@@ -15,14 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and keeps credentials in Kimi-owned state instead of A3S configuration,
   output, or logs. OAuth refresh uses a file lock and atomic credential
   rotation, while model responses preserve native A3S host-tool execution.
-- Added a cross-platform system-agent island to `a3s code`. Fresh per-user
+- Added a native system-agent island to `a3s code`. Fresh per-user
   heartbeats provide exact A3S parent/subagent lifecycle from cooperating
   `a3s code` TUI processes; the shared `a3s top` process collector supplies
   explicitly inferred fallbacks for Claude Code, Codex, Cursor, Gemini, and
   WorkBuddy. Heartbeats persist only a sanitized workspace basename and redact
   parent and child task descriptions unless
-  `A3S_AGENT_STATUS_SHARE_TASKS=1` explicitly enables local sharing. `Ctrl+G`
-  or a click expands the centered, ANSI-safe status overlay.
+  `A3S_AGENT_STATUS_SHARE_TASKS=1` explicitly enables local sharing. The CLI
+  atomically exports the same bounded, sanitized evidence to a private snapshot
+  and best-effort launches `a3s-webview --agent-island`, which owns the
+  independent desktop window, requested at screen top center, and its
+  click-to-expand interaction.
+  The island never overlays or intercepts input inside the terminal.
 
 ### Fixed
 

@@ -7,7 +7,7 @@ use std::time::Duration;
 use a3s::research::{
     perspective_discovery_events, DiscoveredPerspective, DiscoveredQuestion, InquiryEvent,
     InquiryLimits, InquiryPhase, InquiryState, PerspectiveDiscoveryOutput, QuestionStatus,
-    ResearchMethod,
+    ResearchMethod, ResearchObligation,
 };
 use a3s_code_core::llm::{
     LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
@@ -18,12 +18,23 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use super::execution::{
-    call_tool_with_progress, forward_tool_call_with_progress,
+    assess_completed_research_contract, call_tool_with_progress, forward_tool_call_with_progress,
     resolve_questions_with_bounded_follow_up_waves, InquiryExecution,
 };
 use super::plan::{
-    perspective_research_plan, queue_plan_questions, queued_questions, workflow_args_with_plan,
+    commit_plan_research_contract, perspective_research_plan, queue_plan_questions,
+    queued_questions, workflow_args_with_plan,
 };
+
+fn inquiry_obligations() -> Vec<ResearchObligation> {
+    vec![ResearchObligation::new(
+        "track:material.v2",
+        "Material obligation",
+        "Resolve the material evidence obligation",
+        true,
+        vec!["A traceable answer or a bounded gap".to_string()],
+    )]
+}
 
 pub(super) fn inquiry_plan() -> serde_json::Value {
     serde_json::json!({
@@ -105,6 +116,71 @@ pub(super) fn successful_tool_result(name: &str, output: String) -> ToolCallResu
 struct ScriptedResolutionClient {
     calls: AtomicUsize,
     evidence_id: String,
+}
+
+struct ContractAssessmentClient {
+    calls: AtomicUsize,
+    evidence_id: String,
+}
+
+impl ContractAssessmentClient {
+    fn response(&self) -> LlmResponse {
+        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        let value = serde_json::json!({
+            "obligations": [{
+                "obligation_id": "track:material.v2",
+                "criteria": [{
+                    "criterion_index": 0,
+                    "status": "satisfied",
+                    "rationale": "The accepted evidence directly supports the material criterion.",
+                    "evidence_ids": [self.evidence_id]
+                }]
+            }],
+            "stop_conditions": [{
+                "condition_index": 0,
+                "status": "satisfied",
+                "rationale": "The material obligation is traceably resolved.",
+                "evidence_ids": [self.evidence_id]
+            }],
+            "diagnostics": []
+        });
+        LlmResponse {
+            message: Message::assistant(&value.to_string()),
+            usage: TokenUsage::default(),
+            stop_reason: Some("stop".to_string()),
+            token_logprobs: Vec::new(),
+            meta: None,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for ContractAssessmentClient {
+    async fn complete(
+        &self,
+        _messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        Ok(self.response())
+    }
+
+    async fn complete_streaming(
+        &self,
+        _messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        let response = self.response();
+        let text = response.message.text();
+        let (tx, rx) = mpsc::channel(4);
+        tokio::spawn(async move {
+            tx.send(StreamEvent::TextDelta(text)).await.ok();
+            tx.send(StreamEvent::Done(response)).await.ok();
+        });
+        Ok(rx)
+    }
 }
 
 impl ScriptedResolutionClient {
@@ -536,6 +612,7 @@ fn maximum_perspective_discovery() -> PerspectiveDiscoveryOutput {
                         retrieval_query: format!(
                             "perspective {perspective_index} evidence {question_index}"
                         ),
+                        obligation_ids: vec!["track:material.v2".to_string()],
                         material: true,
                         round: 0,
                     })
@@ -574,6 +651,105 @@ async fn closed_progress_channel_still_awaits_the_tool_join() {
 }
 
 #[tokio::test]
+async fn completed_questions_require_a_traceable_contract_assessment_before_reporting() {
+    let output = evidence_output("contract");
+    let evidence = super::super::accepted_evidence_ledger(&output, None);
+    let accepted = evidence.first().expect("accepted evidence");
+    let evidence_id = accepted.id.clone();
+    let client = Arc::new(ContractAssessmentClient {
+        calls: AtomicUsize::new(0),
+        evidence_id: evidence_id.clone(),
+    });
+    let (_agent, session, _temp) = test_session(
+        "contract-assessment",
+        Arc::clone(&client) as Arc<dyn LlmClient>,
+    )
+    .await;
+
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    let plan = inquiry_plan();
+    commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    queue_plan_questions(&plan, None, &mut state, &mut events, &limits)
+        .expect("material question");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::EvidenceAccepted {
+            evidence: a3s::research::EvidenceRef::new(
+                evidence_id.clone(),
+                accepted
+                    .claims
+                    .iter()
+                    .map(|claim| claim.id.clone())
+                    .collect(),
+                accepted
+                    .sources
+                    .iter()
+                    .map(|source| source.id.clone())
+                    .collect(),
+            ),
+        },
+        &limits,
+    )
+    .expect("accepted evidence");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:plan-1-1".to_string(),
+            answer: "The accepted evidence resolves the material criterion.".to_string(),
+            evidence_ids: vec![evidence_id],
+        },
+        &limits,
+    )
+    .expect("answer");
+    assert_eq!(state.phase, InquiryPhase::Outlining);
+    assert!(state.contract_assessment.is_none());
+
+    let execution = InquiryExecution {
+        result: successful_tool_result("dynamic_workflow", output),
+        retrieval_plan: plan.clone(),
+        workflow_args: workflow_args_with_plan(workflow_args(), plan, None)
+            .expect("workflow args"),
+        follow_up_waves_remaining: 0,
+    };
+    let (progress_tx, _progress_rx) = mpsc::channel(16);
+    let outcome = assess_completed_research_contract(
+        &session,
+        &progress_tx,
+        &execution,
+        &mut state,
+        &mut events,
+        &limits,
+    )
+    .await
+    .expect("contract assessment");
+    assert_eq!(
+        outcome,
+        a3s::research::ResearchContractOutcome::Satisfied
+    );
+    assert!(state.contract_assessment.is_some());
+    assert!(matches!(
+        events.last(),
+        Some(InquiryEvent::ResearchContractAssessed { .. })
+    ));
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
+    session.close().await;
+}
+
+#[tokio::test]
 async fn inquiry_executes_the_llm_selected_follow_up_wave_budget() {
     let initial_output = evidence_output("initial");
     let evidence = super::super::accepted_evidence_ledger(&initial_output, None);
@@ -605,6 +781,8 @@ async fn inquiry_executes_the_llm_selected_follow_up_wave_budget() {
     )
     .expect("strategy");
     let plan = inquiry_plan();
+    commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&plan, None, &mut state, &mut events, &limits).expect("initial question");
     let planned_args = workflow_args_with_plan(workflow_args(), plan.clone(), None)
         .expect("planned workflow args");
@@ -684,6 +862,16 @@ async fn initial_material_questions_receive_retrieval_waves_before_deferred_ques
     super::apply_event(
         &mut state,
         &mut events,
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations: inquiry_obligations(),
+            stop_conditions: vec!["The material obligation is resolved".to_string()],
+        },
+        &limits,
+    )
+    .expect("research obligations");
+    super::apply_event(
+        &mut state,
+        &mut events,
         InquiryEvent::ScoutCompleted {
             source_ids: vec!["source:scout".to_string()],
         },
@@ -691,9 +879,12 @@ async fn initial_material_questions_receive_retrieval_waves_before_deferred_ques
     )
     .expect("scout");
     let discovery = maximum_perspective_discovery();
-    for event in
-        perspective_discovery_events(&discovery, &BTreeSet::from(["source:scout".to_string()]))
-            .expect("perspective discovery")
+    for event in perspective_discovery_events(
+        &discovery,
+        &BTreeSet::from(["source:scout".to_string()]),
+        &inquiry_obligations(),
+    )
+    .expect("perspective discovery")
     {
         super::apply_event(&mut state, &mut events, event, &limits).expect("discovery event");
     }
@@ -782,6 +973,8 @@ async fn follow_up_wave_can_recover_a_previously_bounded_material_question() {
     )
     .expect("strategy");
     let plan = inquiry_plan();
+    commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&plan, None, &mut state, &mut events, &limits).expect("initial question");
     let planned_args = workflow_args_with_plan(workflow_args(), plan.clone(), None)
         .expect("planned workflow args");
@@ -840,6 +1033,8 @@ async fn all_bounded_material_questions_exhaust_the_inquiry() {
     )
     .expect("strategy");
     let plan = inquiry_plan();
+    commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(&plan, None, &mut state, &mut events, &limits).expect("material question");
     let planned_args = workflow_args_with_plan(workflow_args(), plan.clone(), None)
         .expect("planned workflow args");
@@ -896,6 +1091,7 @@ fn perspective_discovery_rejects_a_source_outside_the_scout_catalog() {
                     id: "question:first".to_string(),
                     prompt: "What does the first accepted source establish?".to_string(),
                     retrieval_query: "first accepted source finding".to_string(),
+                    obligation_ids: vec!["track:material.v2".to_string()],
                     material: true,
                     round: 0,
                 }],
@@ -909,6 +1105,7 @@ fn perspective_discovery_rejects_a_source_outside_the_scout_catalog() {
                     id: "question:second".to_string(),
                     prompt: "Does independent evidence support the conclusion?".to_string(),
                     retrieval_query: "independent evidence conclusion".to_string(),
+                    obligation_ids: vec!["track:material.v2".to_string()],
                     material: true,
                     round: 0,
                 }],
@@ -917,7 +1114,7 @@ fn perspective_discovery_rejects_a_source_outside_the_scout_catalog() {
     };
     output.perspectives[1].source_ids = vec!["source:fabricated".to_string()];
 
-    let error = perspective_discovery_events(&output, &allowed)
+    let error = perspective_discovery_events(&output, &allowed, &inquiry_obligations())
         .expect_err("a model-authored source ID must fail closed");
     assert!(error.to_string().contains("unknown scout source id"));
 }

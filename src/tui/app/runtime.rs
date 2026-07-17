@@ -137,7 +137,16 @@ impl App {
                 self.deep_research_stream_timeout_token =
                     self.deep_research_stream_timeout_token.wrapping_add(1);
                 let token = self.deep_research_stream_timeout_token;
-                let timeout_ms = if self.deep_research_report_repair_used {
+                let sectioned_report = sectioned_report_available(
+                    self.deep_research_workflow
+                        .output
+                        .as_deref()
+                        .unwrap_or_default(),
+                    self.deep_research_workflow.metadata.as_ref(),
+                );
+                let timeout_ms = if sectioned_report {
+                    DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+                } else if self.deep_research_report_repair_used {
                     DEEP_RESEARCH_REPAIR_TIMEOUT_MS
                 } else {
                     deep_research_planned_synthesis_timeout_ms(
@@ -628,6 +637,11 @@ impl App {
             .and_then(|args| args.get("run_id"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
+        let host_managed_inquiry = self
+            .deep_research_workflow
+            .args
+            .as_ref()
+            .is_some_and(deep_research_host_managed_inquiry);
         let outcome = match self.deep_research_outcome {
             DeepResearchRunOutcome::Active if exit == DeepResearchSettlementExit::Interrupted => {
                 Some(ResearchOutcome::Failed)
@@ -648,16 +662,61 @@ impl App {
                 .unwrap_or_default();
             let workflow_metadata = self.deep_research_workflow.metadata.clone();
             return Some(cmd::cmd(move || async move {
-                let inquiry_result = match inquiry_projection_from_workflow(
-                    &workflow_output,
-                    workflow_metadata.as_ref(),
-                ) {
-                    Ok(Some((events, state))) => {
-                        record_deep_research_inquiry_state(&workspace, &run_id, &events, &state)
+                let successful_report = matches!(
+                    outcome,
+                    ResearchOutcome::Completed | ResearchOutcome::Qualified
+                );
+                let publication_result = if successful_report {
+                    match deep_research_inquiry_publication_outcome(
+                        &workflow_output,
+                        workflow_metadata.as_ref(),
+                    ) {
+                        Ok(Some(DeepResearchRunOutcome::Completed))
+                            if outcome == ResearchOutcome::Completed =>
+                        {
+                            Ok(())
+                        }
+                        Ok(Some(DeepResearchRunOutcome::Qualified))
+                            if outcome == ResearchOutcome::Qualified =>
+                        {
+                            Ok(())
+                        }
+                        Ok(Some(actual)) => Err(format!(
+                            "DeepResearch report outcome disagrees with terminal Inquiry: {actual:?}"
+                        )),
+                        Ok(None) if host_managed_inquiry => Err(
+                            "host-managed DeepResearch cannot journal success without an Inquiry projection"
+                                .to_string(),
+                        ),
+                        Ok(None) => Ok(()),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    Ok(())
+                };
+                let inquiry_result = match publication_result {
+                    Ok(()) => match inquiry_projection_from_workflow(
+                        &workflow_output,
+                        workflow_metadata.as_ref(),
+                    ) {
+                        Ok(Some((events, state))) => {
+                            record_deep_research_inquiry_state(
+                                &workspace,
+                                &run_id,
+                                &events,
+                                &state,
+                            )
                             .await
                             .map_err(|error| error.to_string())
-                    }
-                    Ok(None) => Ok(()),
+                        }
+                        Ok(None) if host_managed_inquiry && successful_report => Err(
+                            "host-managed DeepResearch terminal journal omitted its Inquiry projection"
+                                .to_string(),
+                        ),
+                        Ok(None) => Ok(()),
+                        Err(error) if successful_report => Err(error),
+                        Err(_) => Ok(()),
+                    },
                     Err(error) => Err(error),
                 };
                 let result = match inquiry_result {

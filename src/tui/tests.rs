@@ -650,7 +650,7 @@ fn deep_research_smoke_remaining_budget_is_absolute() {
 fn deep_research_hard_fuse_does_not_shorten_independent_phase_clocks() {
     let required = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
         + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
-        + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+        + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
         + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
         + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
 
@@ -4512,6 +4512,7 @@ fn deep_research_workflow_args_force_local_even_when_runtime_requested() {
     let safety = deep_research_safety_envelope(DeepResearchEvidenceScope::WebAndWorkspace, budget);
 
     assert_eq!(args["input"]["query"], "rust async runtimes");
+    assert_eq!(args["input"]["inquiry_host_managed"], true);
     assert!(
         args["input"]["current_date"]
             .as_str()
@@ -4799,9 +4800,10 @@ fn deep_research_workflow_args_force_local_even_when_runtime_requested() {
         "{source}"
     );
     assert!(
-        source.len() <= 128 * 1024,
-        "embedded DeepResearch workflow must remain compatible with the published 128 KiB program limit: {} bytes",
-        source.len()
+        source.len() <= a3s_code_core::tools::MAX_PROGRAM_SCRIPT_SOURCE_BYTES,
+        "embedded DeepResearch workflow exceeds the active A3S Code program limit: {} > {} bytes",
+        source.len(),
+        a3s_code_core::tools::MAX_PROGRAM_SCRIPT_SOURCE_BYTES,
     );
     assert!(
         source.contains("Use at most ${localEvidenceToolBudget} high-signal tool rounds"),

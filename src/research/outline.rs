@@ -55,6 +55,9 @@ pub struct OutlineValidationContext {
     pub question_evidence_ids: BTreeMap<String, BTreeSet<String>>,
     pub material_perspective_ids: BTreeSet<String>,
     pub material_question_ids: BTreeSet<String>,
+    /// Every inquiry path the final report must address, including bounded
+    /// supporting paths that make an otherwise complete report qualified.
+    pub required_question_ids: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -208,6 +211,11 @@ pub fn validate_research_outline(
         &context.material_question_ids,
         &context.allowed_question_ids,
     )?;
+    validate_material_catalog(
+        OutlineIdKind::Question,
+        &context.required_question_ids,
+        &context.allowed_question_ids,
+    )?;
     validate_evidence_graph(context)?;
 
     let mut section_ids = BTreeSet::new();
@@ -287,7 +295,7 @@ pub fn validate_research_outline(
     )?;
     validate_material_coverage(
         OutlineIdKind::Question,
-        &context.material_question_ids,
+        &context.required_question_ids,
         &question_ids,
     )?;
     validate_material_question_evidence_coverage(outline, context, &section_evidence_coverage)?;
@@ -640,6 +648,7 @@ mod tests {
             .collect(),
             material_perspective_ids: set(&["perspective:official", "perspective:independent"]),
             material_question_ids: set(&["question:official", "question:independent"]),
+            required_question_ids: set(&["question:official", "question:independent"]),
         };
         (outline, context)
     }

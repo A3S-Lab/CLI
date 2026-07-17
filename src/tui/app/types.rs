@@ -303,10 +303,12 @@ pub(super) enum Msg {
     StreamCommitTick,
     /// Advance the welcome-mascot animation frame.
     BannerTick,
-    /// Refresh the independent whole-system coding-agent collector.
-    SystemAgentsTick,
-    /// Exact A3S heartbeats plus process-level fallbacks for other agents.
-    SystemAgentsRefreshed(crate::system_agents::SystemAgentSnapshot),
+    /// Refresh the independent whole-system coding-agent collector/exporter.
+    AgentPresenceTick,
+    /// Completion of an exact heartbeat plus sanitized shared snapshot export.
+    AgentPresenceRefreshed(crate::system_agents::SystemAgentRefreshResult),
+    /// Best-effort native system-island helper launch result.
+    AgentIslandLaunchFinished(Result<AgentIslandLaunchOutcome, String>),
     /// Drive the short, high-frame-rate Ultracode activation transition.
     UltracodeTick {
         epoch: u64,

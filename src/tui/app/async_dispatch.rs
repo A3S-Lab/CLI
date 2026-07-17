@@ -244,16 +244,16 @@ impl App {
                             self.pending_deep_research_report_view = None;
                         }
                         self.deep_research_projection = Some(projection);
-                        self.plan.clear();
-                        self.runtime.clear_subagent_entities();
-                        self.running_task = None;
-                        self.relayout();
-                        self.rebuild_viewport();
                     }
                     Err(error) => self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
                         "  ⚠ DeepResearch terminal state journal failed: {error}"
                     ))),
                 }
+                self.plan.clear();
+                self.runtime.clear_subagent_entities();
+                self.running_task = None;
+                self.relayout();
+                self.rebuild_viewport();
                 return self.complete_deep_research_settlement(exit);
             }
             Msg::DeepResearchJournalEventRecorded { run_id, result } => {

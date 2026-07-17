@@ -52,6 +52,7 @@ const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
 const BREW_SHORT_FORMULA: &str = "a3s";
 const WEBVIEW_FORMULA: &str = "a3s-lab/tap/a3s-webview";
 const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const A3S_BINARY: &str = if cfg!(windows) { "a3s.exe" } else { "a3s" };
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
     "a3s-webview.exe"
 } else {
@@ -351,15 +352,33 @@ fn sibling_webview_helper(current_exe: &Path) -> Option<PathBuf> {
     sibling.is_file().then_some(sibling)
 }
 
-fn path_webview_helper(runner: &impl CommandRunner) -> Option<PathBuf> {
+pub(crate) fn webview_supports_agent_island_output(stdout: &[u8], stderr: &[u8]) -> bool {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    let contract = format!("{stdout}\n{stderr}");
+    contract.contains("usage: a3s-webview --agent-island")
+        && contract.contains("--snapshot")
+        && contract.contains("--lock-file")
+}
+
+fn webview_supports_agent_island(runner: &impl CommandRunner, binary: &Path) -> bool {
     runner
-        .output(OsStr::new(WEBVIEW_BINARY), &[OsString::from("--help")])
-        .filter(|out| out.success)
-        .map(|_| PathBuf::from(WEBVIEW_BINARY))
+        .output(
+            binary.as_os_str(),
+            &[OsString::from("--agent-island"), OsString::from("--help")],
+        )
+        .is_some_and(|output| webview_supports_agent_island_output(&output.stdout, &output.stderr))
+}
+
+fn path_webview_helper(runner: &impl CommandRunner) -> Option<PathBuf> {
+    let binary = PathBuf::from(WEBVIEW_BINARY);
+    webview_supports_agent_island(runner, &binary).then_some(binary)
 }
 
 fn webview_helper_path(runner: &impl CommandRunner, current_exe: &Path) -> Option<PathBuf> {
-    sibling_webview_helper(current_exe).or_else(|| path_webview_helper(runner))
+    sibling_webview_helper(current_exe)
+        .filter(|binary| webview_supports_agent_island(runner, binary))
+        .or_else(|| path_webview_helper(runner))
 }
 
 fn ensure_remoteui_helper_with(
@@ -380,9 +399,12 @@ fn ensure_remoteui_helper_with(
         return Ok(Some(path));
     }
     if installed {
-        Err("Homebrew installed a3s-webview, but the helper is still not on PATH".to_string())
+        Err(
+            "Homebrew installed a3s-webview, but no helper with Agent Island support is available"
+                .to_string(),
+        )
     } else {
-        Err("a3s-webview is missing and Homebrew could not install it".to_string())
+        Err("a3s-webview is missing or obsolete and Homebrew could not install it".to_string())
     }
 }
 
@@ -393,8 +415,8 @@ fn ensure_remoteui_helper_best_effort(runner: &impl CommandRunner, current_exe: 
     }
 }
 
-/// Repair install-time companion tools. Today this means the macOS RemoteUI
-/// helper, which old Homebrew installs did not depend on.
+/// Repair install-time companion tools. The helper must expose the Agent Island
+/// contract; an older RemoteUI-only binary is not considered ready.
 pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
     let runner = RealCommandRunner;
     let exe =
@@ -407,7 +429,7 @@ pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
         }
     }
     if let Some(path) = ensure_remoteui_helper_with(&runner, &exe, cfg!(target_os = "macos"))? {
-        repaired.push(format!("RemoteUI helper ready: {}", path.display()));
+        repaired.push(format!("Native window helper ready: {}", path.display()));
     }
     Ok(repaired)
 }
@@ -578,6 +600,7 @@ fn standalone_upgrade_with(
         return Err("release archive did not contain an a3s binary".to_string());
     }
     let new_bin = new_bin.unwrap();
+    let new_webview = find_downloaded_webview_helper(&tmp);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -592,7 +615,20 @@ fn standalone_upgrade_with(
         ));
     }
     let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => Ok(exe),
+        Ok(()) => {
+            if let Some(helper) = new_webview {
+                if let Err(error) = install_sibling_companion(&helper, &exe, WEBVIEW_BINARY) {
+                    eprintln!(
+                        "\n⚠  a3s was updated, but its native window helper could not be installed: {error}"
+                    );
+                }
+            } else {
+                eprintln!(
+                    "\n⚠  the a3s release archive did not contain {WEBVIEW_BINARY}; native RemoteUI and Agent Island windows may be unavailable"
+                );
+            }
+            Ok(exe)
+        }
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
             Err(err)
@@ -607,9 +643,7 @@ fn release_asset_digest(
     latest: &str,
     asset_name: &str,
 ) -> Result<String, String> {
-    let url = format!(
-        "https://api.github.com/repos/A3S-Lab/Cli/releases/tags/v{latest}"
-    );
+    let url = format!("https://api.github.com/repos/A3S-Lab/Cli/releases/tags/v{latest}");
     let output = runner
         .output(
             OsStr::new("curl"),
@@ -666,7 +700,15 @@ fn release_asset_digest(
 }
 
 fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
-    let direct = root.join("a3s");
+    find_downloaded_named_binary(root, A3S_BINARY)
+}
+
+fn find_downloaded_webview_helper(root: &Path) -> Option<PathBuf> {
+    find_downloaded_named_binary(root, WEBVIEW_BINARY)
+}
+
+fn find_downloaded_named_binary(root: &Path, binary_name: &str) -> Option<PathBuf> {
+    let direct = root.join(binary_name);
     if direct.is_file() {
         return Some(direct);
     }
@@ -681,7 +723,7 @@ fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
                 stack.push(path);
             } else if path
                 .file_name()
-                .is_some_and(|name| name == OsStr::new("a3s"))
+                .is_some_and(|name| name == OsStr::new(binary_name))
             {
                 return Some(path);
             }
@@ -715,6 +757,160 @@ fn copy_executable(src: &Path, dst: &Path) -> std::io::Result<()> {
         std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_sibling_companion(
+    staging: &Path,
+    target: &Path,
+    _target_existed: bool,
+) -> std::io::Result<()> {
+    // Both paths are in the install directory, so rename replaces the visible
+    // helper in one filesystem operation without a missing-target window.
+    std::fs::rename(staging, target)
+}
+
+#[cfg(windows)]
+fn replace_sibling_companion(
+    staging: &Path,
+    target: &Path,
+    target_existed: bool,
+) -> std::io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, ReplaceFileW, MOVEFILE_WRITE_THROUGH, REPLACEFILE_WRITE_THROUGH,
+    };
+
+    let staging = staging
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let target = target
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both path buffers are NUL-terminated and remain alive for the
+    // call. ReplaceFileW preserves a continuously addressable target; the
+    // no-target case uses a same-directory, write-through move.
+    let replaced = unsafe {
+        if target_existed {
+            ReplaceFileW(
+                target.as_ptr(),
+                staging.as_ptr(),
+                std::ptr::null(),
+                REPLACEFILE_WRITE_THROUGH,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        } else {
+            MoveFileExW(staging.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH)
+        }
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn preserve_sibling_companion(target: &Path, backup: &Path) -> std::io::Result<()> {
+    std::fs::hard_link(target, backup).or_else(|_| std::fs::copy(target, backup).map(|_| ()))
+}
+
+fn install_sibling_companion(
+    source: &Path,
+    current_exe: &Path,
+    binary_name: &str,
+) -> Result<PathBuf, String> {
+    let directory = current_exe.parent().ok_or_else(|| {
+        format!(
+            "cannot locate the install directory for {}",
+            current_exe.display()
+        )
+    })?;
+    let target = directory.join(binary_name);
+    if target.exists() && !target.is_file() {
+        return Err(format!("{} is not a regular file", target.display()));
+    }
+    let staging = sibling_temp_path(&target, "new")
+        .ok_or_else(|| format!("cannot derive a staging path for {}", target.display()))?;
+    let backup = sibling_temp_path(&target, "bak")
+        .ok_or_else(|| format!("cannot derive a backup path for {}", target.display()))?;
+
+    let _ = std::fs::remove_file(&staging);
+    let _ = std::fs::remove_file(&backup);
+    copy_executable(source, &staging).map_err(|error| {
+        format!(
+            "copy {} to {}: {error}",
+            source.display(),
+            staging.display()
+        )
+    })?;
+
+    let had_target = target.is_file();
+    #[cfg(windows)]
+    if had_target {
+        if let Err(error) = preserve_sibling_companion(&target, &backup) {
+            return Err(format!(
+                "preserve existing helper {} at {} before replacement: {error}; the installed helper remains intact and the new helper remains staged at {}",
+                target.display(),
+                backup.display(),
+                staging.display()
+            ));
+        }
+    }
+
+    if let Err(error) = replace_sibling_companion(&staging, &target, had_target) {
+        #[cfg(windows)]
+        {
+            let preserved = if !had_target {
+                "no previous helper existed".to_string()
+            } else if backup.is_file() {
+                format!("the previous helper is preserved at {}", backup.display())
+            } else if target.is_file() {
+                format!("the installed helper remains at {}", target.display())
+            } else {
+                "the installed helper location must be checked manually".to_string()
+            };
+            let staged = if staging.is_file() {
+                format!("the new helper remains staged at {}", staging.display())
+            } else {
+                "the staged helper was consumed by the operating system".to_string()
+            };
+            let retry = if had_target {
+                format!("Close any running {binary_name} windows and retry the update")
+            } else {
+                "Retry the update".to_string()
+            };
+            return Err(format!(
+                "atomically replace {}: {error}; {preserved}; {staged}. {retry}",
+                target.display()
+            ));
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = std::fs::remove_file(&staging);
+            let _ = std::fs::remove_file(&backup);
+            return Err(format!(
+                "atomically replace staged helper {} at {}: {error}",
+                staging.display(),
+                target.display()
+            ));
+        }
+    }
+    if !target.is_file() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!(
+            "replacement completed without a regular helper at {}",
+            target.display()
+        ));
+    }
+    let _ = std::fs::remove_file(&backup);
+    Ok(target)
 }
 
 fn swap_binary_and_verify(
@@ -1203,11 +1399,21 @@ mod tests {
     impl CommandRunner for HelperRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
-            if line == format!("{WEBVIEW_BINARY} --help") {
+            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+                let available = self.helper_available.load(Ordering::SeqCst);
                 return Some(CommandOutput {
-                    success: self.helper_available.load(Ordering::SeqCst),
+                    // The real helper intentionally exits non-zero after printing
+                    // its mode-specific usage for this capability probe.
+                    success: false,
                     stdout: Vec::new(),
-                    stderr: Vec::new(),
+                    stderr: available
+                        .then(|| {
+                            b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
+                                .to_vec()
+                        })
+                        .unwrap_or_else(|| {
+                            b"usage: a3s-webview --url <http(s)://...>\n".to_vec()
+                        }),
                 });
             }
             None
@@ -1232,7 +1438,10 @@ mod tests {
         let result = ensure_remoteui_helper_with(&runner, &tmp.path("a3s"), true).unwrap();
 
         assert_eq!(result.as_deref(), Some(Path::new(WEBVIEW_BINARY)));
-        assert_eq!(runner.commands(), vec![format!("{WEBVIEW_BINARY} --help")]);
+        assert_eq!(
+            runner.commands(),
+            vec![format!("{WEBVIEW_BINARY} --agent-island --help")]
+        );
     }
 
     #[test]
@@ -1254,10 +1463,22 @@ mod tests {
         assert_eq!(
             commands
                 .iter()
-                .filter(|c| c.as_str() == format!("{WEBVIEW_BINARY} --help"))
+                .filter(|c| { c.as_str() == format!("{WEBVIEW_BINARY} --agent-island --help") })
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn agent_island_capability_rejects_remoteui_only_helpers() {
+        assert!(!webview_supports_agent_island_output(
+            &[],
+            b"a3s-webview: unknown argument: --agent-island\nusage: a3s-webview --url <http(s)://...>\n",
+        ));
+        assert!(webview_supports_agent_island_output(
+            &[],
+            b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n",
+        ));
     }
 
     #[test]
@@ -1293,6 +1514,26 @@ mod tests {
         assert!(err.contains("did not report version 9.9.9"));
         let out = Command::new(&target).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn sibling_companion_install_replaces_an_existing_helper_atomically() {
+        let tmp = TempDir::new("companion-replace");
+        let current = tmp.path("a3s");
+        let downloaded = tmp.path("downloaded-webview");
+        let installed = tmp.path(WEBVIEW_BINARY);
+        write_executable(&current, "9.9.9");
+        write_executable(&downloaded, "0.1.2");
+        write_executable(&installed, "0.1.1");
+
+        let result = install_sibling_companion(&downloaded, &current, WEBVIEW_BINARY).unwrap();
+
+        assert_eq!(result, installed);
+        let out = Command::new(&installed).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.2\n");
+        assert!(!sibling_temp_path(&installed, "new").unwrap().exists());
+        assert!(!sibling_temp_path(&installed, "bak").unwrap().exists());
     }
 
     #[cfg(unix)]
@@ -1382,6 +1623,7 @@ mod tests {
         let root = tmp.path("root");
         let archive = tmp.path("release.tar.gz");
         write_executable(&root.join(binary_path), version);
+        write_executable(&root.join(WEBVIEW_BINARY), "0.1.2");
         let top_level = Path::new(binary_path)
             .components()
             .next()
@@ -1393,6 +1635,7 @@ mod tests {
             .arg("-C")
             .arg(&root)
             .arg(top_level)
+            .arg(WEBVIEW_BINARY)
             .status()
             .unwrap();
         assert!(status.success());
@@ -1416,12 +1659,15 @@ mod tests {
         assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+        assert!(tmp.path(WEBVIEW_BINARY).is_file());
 
         let commands = runner.commands();
         assert!(commands
             .iter()
             .any(|c| c.contains(&format!("a3s-v9.9.9-{target}.tar.gz"))));
-        assert!(commands.iter().any(|c| c.contains("api.github.com/repos/A3S-Lab/Cli/releases/tags/v9.9.9")));
+        assert!(commands
+            .iter()
+            .any(|c| c.contains("api.github.com/repos/A3S-Lab/Cli/releases/tags/v9.9.9")));
         assert!(!commands.iter().any(|c| c.starts_with("tar ")));
     }
 
@@ -1438,6 +1684,7 @@ mod tests {
         assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+        assert!(tmp.path(WEBVIEW_BINARY).is_file());
     }
 
     #[test]

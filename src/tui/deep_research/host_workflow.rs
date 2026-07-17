@@ -200,16 +200,58 @@ pub(crate) fn deep_research_workflow_timeout_tool_result(
     args: &serde_json::Value,
     message: String,
 ) -> Result<ToolCallResult, String> {
-    let Some(recovered) = recover_deep_research_workflow_run_from_store(workspace, args) else {
+    let Some(mut recovered) = recover_deep_research_workflow_run_from_store(workspace, args) else {
         return Err(message);
     };
+    let mut output = recovered.output.unwrap_or(message);
+    if deep_research_host_managed_inquiry(args) {
+        stamp_host_inquiry_authority_text(&mut output);
+        if let Some(snapshot_output) = recovered
+            .metadata
+            .pointer_mut("/dynamic_workflow/snapshot/output")
+        {
+            stamp_host_inquiry_authority_value(snapshot_output);
+        }
+    }
     Ok(ToolCallResult {
         name: "dynamic_workflow".to_string(),
-        output: recovered.output.unwrap_or(message),
+        output,
         exit_code: recovered.exit_code,
         metadata: Some(recovered.metadata),
         error_kind: None,
     })
+}
+
+pub(super) fn deep_research_host_managed_inquiry(args: &serde_json::Value) -> bool {
+    args.pointer("/input/inquiry_host_managed")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+fn stamp_host_inquiry_authority_text(output: &mut String) {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return;
+    };
+    stamp_host_inquiry_authority_value(&mut value);
+    if let Ok(encoded) = serde_json::to_string(&value) {
+        *output = encoded;
+    }
+}
+
+fn stamp_host_inquiry_authority_value(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    let execution = object
+        .entry("execution")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(execution) = execution.as_object_mut() else {
+        return;
+    };
+    execution.insert(
+        "terminal_authority".to_string(),
+        serde_json::Value::String("host_inquiry_reducer".to_string()),
+    );
 }
 
 pub(super) fn deep_research_workflow_args_for_budget(
@@ -238,6 +280,7 @@ pub(super) fn deep_research_workflow_args_for_budget(
         "source": deep_research_workflow_source(),
         "input": {
             "query": query,
+            "inquiry_host_managed": true,
             "current_date": current_date,
             "run_started_at_ms": run_started_at_ms,
             "loop_contract": loop_contract,
@@ -270,3 +313,31 @@ pub(super) const DEEP_RESEARCH_PROMPT_TEXT_LIMIT: usize = 12_000;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_EVIDENCE: usize = 18;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_SOURCES: usize = 12;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_STRINGS: usize = 12;
+
+#[cfg(test)]
+mod terminal_authority_tests {
+    use super::*;
+
+    #[test]
+    fn host_managed_args_and_recovered_output_retain_terminal_authority() {
+        let args = deep_research_workflow_args_with_scope(
+            "source-backed answer",
+            false,
+            DeepResearchEvidenceScope::WebAndWorkspace,
+        );
+        assert!(deep_research_host_managed_inquiry(&args));
+
+        let mut output = serde_json::json!({
+            "mode": "direct_web",
+            "checker": {"decision": "finalize"}
+        })
+        .to_string();
+        stamp_host_inquiry_authority_text(&mut output);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            value.pointer("/execution/terminal_authority"),
+            Some(&serde_json::json!("host_inquiry_reducer"))
+        );
+        assert!(validated_inquiry_projection(&value).is_err());
+    }
+}

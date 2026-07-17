@@ -7,6 +7,7 @@ mod id;
 mod lifecycle;
 mod lock;
 mod paths;
+mod plan;
 mod probe;
 mod release_install;
 mod state;
@@ -19,6 +20,7 @@ pub use command::{
 };
 pub use id::ComponentId;
 pub use paths::ComponentPaths;
+pub use plan::ComponentPlanMismatch;
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {

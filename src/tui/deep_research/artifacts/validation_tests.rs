@@ -1,4 +1,5 @@
 use super::*;
+use a3s::research::{EvidenceRef, InquiryEvent, InquiryLimits, Question, ResearchMethod};
 
 fn observed_workflow_output(sources: &[&str]) -> String {
     let sources = sources
@@ -32,6 +33,49 @@ fn observed_workflow_output(sources: &[&str]) -> String {
         }
     })
     .to_string()
+}
+
+#[test]
+fn completed_artifact_validation_rejects_an_outlining_inquiry() {
+    let events = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![Question::queued(
+                "question:one",
+                None,
+                "What does the evidence establish?",
+            )],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:one",
+                vec!["claim:one".to_string()],
+                vec!["source:one".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:one".to_string(),
+            answer: "The evidence establishes the finding.".to_string(),
+            evidence_ids: vec!["evidence:one".to_string()],
+        },
+    ];
+    let state = a3s::research::replay(&events, &InquiryLimits::default()).unwrap();
+    let workflow = serde_json::json!({
+        "inquiry": {"events": events, "state": state}
+    })
+    .to_string();
+
+    let error = validate_deep_research_completed_report_content(
+        "# Report\n\nA sufficiently long report body that would otherwise continue through the remaining validation gates.",
+        "<!doctype html><html><body>report</body></html>",
+        "query",
+        &workflow,
+        None,
+    )
+    .expect_err("Outlining evidence readiness must not publish a completed artifact");
+    assert!(error.contains("current phase is Outlining"), "{error}");
 }
 
 #[test]

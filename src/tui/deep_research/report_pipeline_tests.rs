@@ -245,6 +245,51 @@ fn collect_only_inquiry_projection_owns_completion_and_fails_closed() {
         DeepResearchRunOutcome::Completed,
     );
 
+    let nonterminal_events = output["inquiry"]["events"]
+        .as_array()
+        .expect("inquiry events")
+        .iter()
+        .take(2)
+        .cloned()
+        .collect::<Vec<_>>();
+    let decoded_nonterminal_events: Vec<InquiryEvent> =
+        serde_json::from_value(serde_json::Value::Array(nonterminal_events.clone()))
+            .expect("decode nonterminal inquiry events");
+    let nonterminal_state = replay(&decoded_nonterminal_events, &InquiryLimits::default())
+        .expect("replay nonterminal inquiry");
+    let mut nonterminal = output.clone();
+    nonterminal["inquiry"]["events"] = serde_json::Value::Array(nonterminal_events);
+    nonterminal["inquiry"]["state"] = serde_json::to_value(nonterminal_state).unwrap();
+    assert_eq!(deep_research_collection_status(&nonterminal), "degraded");
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Determine the conclusion",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &nonterminal.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Degraded,
+    );
+
+    let mut missing_projection = output.clone();
+    missing_projection
+        .as_object_mut()
+        .unwrap()
+        .remove("inquiry");
+    assert_eq!(
+        deep_research_collection_status(&missing_projection),
+        "degraded"
+    );
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Determine the conclusion",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &missing_projection.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Degraded,
+    );
+
     output["inquiry"]["state"]["events_applied"] = serde_json::json!(999);
     assert_eq!(deep_research_collection_status(&output), "degraded");
     assert!(deep_research_workflow_needs_recovery_report(

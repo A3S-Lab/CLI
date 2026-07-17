@@ -1,4 +1,5 @@
 async function run(ctx, inputs) {
+  const executeWorkflow = async () => {
   const input = inputs.input || {};
   const query = input.query || "";
   const loopContract = input.loop_contract && typeof input.loop_contract === "object"

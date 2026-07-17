@@ -2,13 +2,20 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{EvidenceRef, Perspective, Question, ResearchMethod, ResearchOutline};
+use super::{
+    EvidenceRef, Perspective, Question, ResearchContractAssessment, ResearchMethod,
+    ResearchObligation, ResearchOutline,
+};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InquiryEvent {
     StrategySelected {
         method: ResearchMethod,
+    },
+    ResearchObligationsCommitted {
+        obligations: Vec<ResearchObligation>,
+        stop_conditions: Vec<String>,
     },
     ScoutCompleted {
         source_ids: Vec<String>,
@@ -37,6 +44,9 @@ pub enum InquiryEvent {
         question_id: String,
         reason: String,
     },
+    ResearchContractAssessed {
+        assessment: ResearchContractAssessment,
+    },
     OutlineCommitted {
         outline: ResearchOutline,
     },
@@ -58,6 +68,7 @@ impl InquiryEvent {
     pub fn name(&self) -> &'static str {
         match self {
             Self::StrategySelected { .. } => "strategy_selected",
+            Self::ResearchObligationsCommitted { .. } => "research_obligations_committed",
             Self::ScoutCompleted { .. } => "scout_completed",
             Self::PerspectivesCommitted { .. } => "perspectives_committed",
             Self::QuestionsQueued { .. } => "questions_queued",
@@ -65,6 +76,7 @@ impl InquiryEvent {
             Self::QuestionAnswered { .. } => "question_answered",
             Self::QuestionDeferred { .. } => "question_deferred",
             Self::QuestionBounded { .. } => "question_bounded",
+            Self::ResearchContractAssessed { .. } => "research_contract_assessed",
             Self::OutlineCommitted { .. } => "outline_committed",
             Self::SectionDrafted { .. } => "section_drafted",
             Self::AuditCompleted { .. } => "audit_completed",

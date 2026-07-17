@@ -4,8 +4,10 @@ use super::super::super::deep_research_evidence_ledger::{
 use super::super::{DeepResearchStateJournal, ResearchSpec};
 use super::*;
 use a3s::research::{
-    EvidenceRef, InquiryEvent, InquiryLimits, InquiryState, OutlineSection, Perspective, Question,
-    ResearchMethod, ResearchOutline,
+    CompletionCriterionAssessment, ContractAssessmentStatus, EvidenceRef, InquiryEvent,
+    InquiryLimits, InquiryState, OutlineSection, Perspective, Question, ResearchContractAssessment,
+    ResearchMethod, ResearchObligation, ResearchObligationAssessment, ResearchOutline,
+    StopConditionAssessment,
 };
 
 fn inquiry_spec() -> ResearchSpec {
@@ -21,9 +23,25 @@ fn inquiry_spec() -> ResearchSpec {
 }
 
 fn inquiry_events() -> Vec<InquiryEvent> {
+    let mut question = Question::queued(
+        "question:root",
+        Some("perspective:risk".to_string()),
+        "What does the evidence establish?",
+    );
+    question.obligation_ids = vec!["obligation:root".to_string()];
     vec![
         InquiryEvent::StrategySelected {
             method: ResearchMethod::PerspectiveGuided,
+        },
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations: vec![ResearchObligation::new(
+                "obligation:root",
+                "Material finding",
+                "Resolve the material finding",
+                true,
+                vec!["The finding is traceable to accepted evidence".to_string()],
+            )],
+            stop_conditions: vec!["The material finding is traceable".to_string()],
         },
         InquiryEvent::ScoutCompleted {
             source_ids: vec!["source:scout".to_string()],
@@ -37,11 +55,7 @@ fn inquiry_events() -> Vec<InquiryEvent> {
             )],
         },
         InquiryEvent::QuestionsQueued {
-            questions: vec![Question::queued(
-                "question:root",
-                Some("perspective:risk".to_string()),
-                "What does the evidence establish?",
-            )],
+            questions: vec![question],
         },
         InquiryEvent::EvidenceAccepted {
             evidence: EvidenceRef::new(
@@ -54,6 +68,27 @@ fn inquiry_events() -> Vec<InquiryEvent> {
             question_id: "question:root".to_string(),
             answer: "The evidence establishes the material finding.".to_string(),
             evidence_ids: vec!["evidence:accepted".to_string()],
+        },
+        InquiryEvent::ResearchContractAssessed {
+            assessment: ResearchContractAssessment {
+                obligations: vec![ResearchObligationAssessment {
+                    obligation_id: "obligation:root".to_string(),
+                    criteria: vec![CompletionCriterionAssessment {
+                        criterion_index: 0,
+                        status: ContractAssessmentStatus::Satisfied,
+                        rationale: "The accepted evidence supports the material finding."
+                            .to_string(),
+                        evidence_ids: vec!["evidence:accepted".to_string()],
+                    }],
+                }],
+                stop_conditions: vec![StopConditionAssessment {
+                    condition_index: 0,
+                    status: ContractAssessmentStatus::Satisfied,
+                    rationale: "The material finding is traceable.".to_string(),
+                    evidence_ids: vec!["evidence:accepted".to_string()],
+                }],
+                diagnostics: Vec::new(),
+            },
         },
         InquiryEvent::OutlineCommitted {
             outline: ResearchOutline {
@@ -130,6 +165,8 @@ async fn inquiry_objects_replay_idempotently_with_final_state() {
     for (object_type, expected) in [
         (PERSPECTIVE_OBJECT_TYPE, 1),
         (QUESTION_OBJECT_TYPE, 1),
+        (OBLIGATION_OBJECT_TYPE, 1),
+        (STOP_CONDITION_OBJECT_TYPE, 1),
         (OUTLINE_SECTION_OBJECT_TYPE, 1),
         (SECTION_DRAFT_OBJECT_TYPE, 1),
     ] {
@@ -178,11 +215,14 @@ async fn inquiry_relations_replay_with_stable_direction_and_run_scope() {
     let run_id = "run-inquiry-relations";
     let perspective = object_id(run_id, "perspective", "perspective:risk");
     let question = object_id(run_id, "question", "question:root");
+    let obligation = object_id(run_id, "obligation", "obligation:root");
     let section = object_id(run_id, "outline-section", "section:findings");
     let draft = object_id(run_id, "section-draft", "section:findings");
     let relations = journal.runtime.graph().relations().collect::<Vec<_>>();
     for (relation_type, source, target) in [
         ("deep_research.frames_question", &perspective, &question),
+        ("deep_research.addresses_obligation", &question, &obligation),
+        ("deep_research.covers_obligation", &section, &obligation),
         ("deep_research.covers_perspective", &section, &perspective),
         ("deep_research.covers_question", &section, &question),
         ("deep_research.has_section_draft", &section, &draft),
@@ -275,14 +315,14 @@ async fn redrafted_section_replaces_stale_claim_and_source_relations() {
     let mut events = inquiry_events();
     let InquiryEvent::EvidenceAccepted {
         evidence: reference,
-    } = &mut events[4]
+    } = &mut events[5]
     else {
-        panic!("fixture event 4 must accept evidence");
+        panic!("fixture event 5 must accept evidence");
     };
     reference.claim_ids.push("claim:replacement".to_string());
     reference.source_ids.push("source:replacement".to_string());
-    let InquiryEvent::OutlineCommitted { outline } = &mut events[6] else {
-        panic!("fixture event 6 must commit the outline");
+    let InquiryEvent::OutlineCommitted { outline } = &mut events[8] else {
+        panic!("fixture event 8 must commit the outline");
     };
     outline.sections[0]
         .claim_ids
@@ -290,8 +330,8 @@ async fn redrafted_section_replaces_stale_claim_and_source_relations() {
     outline.sections[0]
         .source_ids
         .push("source:replacement".to_string());
-    let InquiryEvent::AuditCompleted { passed, issues } = &mut events[8] else {
-        panic!("fixture event 8 must complete the audit");
+    let InquiryEvent::AuditCompleted { passed, issues } = &mut events[10] else {
+        panic!("fixture event 10 must complete the audit");
     };
     *passed = false;
     issues.push("replace the draft evidence".to_string());

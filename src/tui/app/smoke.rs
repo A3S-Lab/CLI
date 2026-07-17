@@ -648,14 +648,20 @@ async fn run_smoke_deep_research(
         };
         match generated {
             Ok((report, sectioned_metadata)) => {
-                if sectioned_metadata.is_some() {
-                    merge_sectioned_inquiry_projection(
+                if use_sectioned_report
+                    && !merge_sectioned_inquiry_projection(
                         &mut workflow_output,
                         metadata.as_mut(),
                         sectioned_metadata.as_ref(),
                     )
-                    .map_err(anyhow::Error::msg)?;
+                    .map_err(anyhow::Error::msg)?
+                {
+                    anyhow::bail!(
+                        "sectioned DeepResearch synthesis did not merge a terminal Inquiry projection"
+                    );
                 }
+                deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref())
+                    .map_err(anyhow::Error::msg)?;
                 let markdown = report.markdown.clone();
                 generated_report = Some(report);
                 markdown
@@ -670,41 +676,45 @@ async fn run_smoke_deep_research(
         eprintln!("[smoke] {status}");
         status
     };
+    let mut publication_ready =
+        deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref()).is_ok();
     let mut artifacts = None;
-    if let Some(report) = generated_report.as_ref() {
-        match run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "structured synthesis materialization",
-            || {
-                materialize_deep_research_completed_report_from_generation(
-                    workspace,
-                    &query,
-                    report,
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )? {
-            Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
-            Err(error) => {
-                eprintln!("[smoke] DeepResearch structured synthesis rejected: {error}")
+    if publication_ready {
+        if let Some(report) = generated_report.as_ref() {
+            match run_deep_research_smoke_artifact_step(
+                run_deadline,
+                "structured synthesis materialization",
+                || {
+                    materialize_deep_research_completed_report_from_generation(
+                        workspace,
+                        &query,
+                        report,
+                        &workflow_output,
+                        metadata.as_ref(),
+                    )
+                },
+            )? {
+                Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
+                Err(error) => {
+                    eprintln!("[smoke] DeepResearch structured synthesis rejected: {error}")
+                }
             }
+        } else {
+            artifacts = run_deep_research_smoke_artifact_step(
+                run_deadline,
+                "synthesis artifact discovery",
+                || {
+                    deep_research_report_artifacts_from_output_for_current_run(
+                        &final_text,
+                        workspace,
+                        &query,
+                        &workflow_output,
+                        metadata.as_ref(),
+                        &report_baseline,
+                    )
+                },
+            )?;
         }
-    } else {
-        artifacts = run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "synthesis artifact discovery",
-            || {
-                deep_research_report_artifacts_from_output_for_current_run(
-                    &final_text,
-                    workspace,
-                    &query,
-                    &workflow_output,
-                    metadata.as_ref(),
-                    &report_baseline,
-                )
-            },
-        )?;
     }
 
     if let Some(clean_text) = artifacts
@@ -713,7 +723,8 @@ async fn run_smoke_deep_research(
     {
         final_text = clean_text;
     }
-    if artifacts.is_none()
+    if publication_ready
+        && artifacts.is_none()
         && generated_report.is_none()
         && !deep_research_output_has_internal_leak(&final_text)
     {
@@ -736,7 +747,7 @@ async fn run_smoke_deep_research(
             final_text = clean_text;
         }
     }
-    if artifacts.is_none() && generated_report.is_none() {
+    if publication_ready && artifacts.is_none() && generated_report.is_none() {
         artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
             "markdown artifact fallback",
@@ -769,7 +780,16 @@ async fn run_smoke_deep_research(
         );
     }
 
-    if artifacts.is_none() || deep_research_output_has_internal_leak(&final_text) {
+    let repair_uses_sectioned_report =
+        sectioned_report_available(&workflow_output, metadata.as_ref());
+    let inquiry_backed = !matches!(
+        inquiry_projection_from_workflow(&workflow_output, metadata.as_ref()),
+        Ok(None)
+    );
+    let repair_allowed = !inquiry_backed || repair_uses_sectioned_report;
+    if (artifacts.is_none() || deep_research_output_has_internal_leak(&final_text))
+        && repair_allowed
+    {
         if deep_research_output_has_internal_leak(&final_text) {
             eprintln!(
                 "[smoke] deepresearch report contained internal/tool-status text; running repair pass"
@@ -784,69 +804,113 @@ async fn run_smoke_deep_research(
             metadata.as_ref(),
             &final_text,
         );
+        let repair_timeout_ms = if repair_uses_sectioned_report {
+            DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+        } else {
+            DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+        };
         if let Some(repair_deadline) = deep_research_smoke_phase_deadline(
             run_deadline,
             Instant::now(),
-            Duration::from_millis(DEEP_RESEARCH_REPAIR_TIMEOUT_MS),
+            Duration::from_millis(repair_timeout_ms),
             "repair",
         ) {
             generated_report = None;
-            final_text =
-                match generate_smoke_report(session.as_ref(), repair.as_str(), repair_deadline)
-                    .await
-                {
-                    Ok(report) => {
-                        let markdown = report.markdown.clone();
-                        generated_report = Some(report);
-                        markdown
-                    }
-                    Err(error) => {
-                        eprintln!("[smoke] DeepResearch structured repair failed: {error}");
-                        error
-                    }
-                };
-            artifacts = None;
-            if let Some(report) = generated_report.as_ref() {
-                match run_deep_research_smoke_artifact_step(
-                    run_deadline,
-                    "structured repair materialization",
-                    || {
-                        materialize_deep_research_completed_report_from_generation(
-                            workspace,
-                            &query,
-                            report,
-                            &workflow_output,
-                            metadata.as_ref(),
-                        )
-                    },
-                )? {
-                    Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
-                    Err(error) => {
-                        eprintln!("[smoke] DeepResearch structured repair rejected: {error}")
-                    }
-                }
+            let generated = if repair_uses_sectioned_report {
+                generate_smoke_sectioned_report(
+                    session.as_ref(),
+                    &query,
+                    &workflow_output,
+                    metadata.as_ref(),
+                    &run_id,
+                    repair_deadline,
+                )
+                .await
             } else {
-                artifacts = run_deep_research_smoke_artifact_step(
-                    run_deadline,
-                    "repair artifact discovery",
-                    || {
-                        deep_research_report_artifacts_from_output_for_current_run(
-                            &final_text,
-                            workspace,
-                            &query,
-                            &workflow_output,
-                            metadata.as_ref(),
-                            &report_baseline,
-                        )
-                    },
-                )?;
+                generate_smoke_report(session.as_ref(), repair.as_str(), repair_deadline)
+                    .await
+                    .map(|report| (report, None))
+            };
+            final_text = match generated {
+                Ok((report, sectioned_metadata)) => {
+                    if repair_uses_sectioned_report {
+                        match merge_sectioned_inquiry_projection(
+                            &mut workflow_output,
+                            metadata.as_mut(),
+                            sectioned_metadata.as_ref(),
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let error = "sectioned DeepResearch repair did not merge a terminal Inquiry projection";
+                                eprintln!("[smoke] {error}");
+                                return Err(anyhow::anyhow!(error));
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                        "[smoke] DeepResearch sectioned repair projection failed: {error}"
+                                    );
+                                return Err(anyhow::anyhow!(error));
+                            }
+                        }
+                    }
+                    deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref())
+                        .map_err(anyhow::Error::msg)?;
+                    let markdown = report.markdown.clone();
+                    generated_report = Some(report);
+                    markdown
+                }
+                Err(error) => {
+                    eprintln!("[smoke] DeepResearch structured repair failed: {error}");
+                    error
+                }
+            };
+            publication_ready =
+                deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref())
+                    .is_ok();
+            artifacts = None;
+            if publication_ready {
+                if let Some(report) = generated_report.as_ref() {
+                    match run_deep_research_smoke_artifact_step(
+                        run_deadline,
+                        "structured repair materialization",
+                        || {
+                            materialize_deep_research_completed_report_from_generation(
+                                workspace,
+                                &query,
+                                report,
+                                &workflow_output,
+                                metadata.as_ref(),
+                            )
+                        },
+                    )? {
+                        Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
+                        Err(error) => {
+                            eprintln!("[smoke] DeepResearch structured repair rejected: {error}")
+                        }
+                    }
+                } else {
+                    artifacts = run_deep_research_smoke_artifact_step(
+                        run_deadline,
+                        "repair artifact discovery",
+                        || {
+                            deep_research_report_artifacts_from_output_for_current_run(
+                                &final_text,
+                                workspace,
+                                &query,
+                                &workflow_output,
+                                metadata.as_ref(),
+                                &report_baseline,
+                            )
+                        },
+                    )?;
+                }
             }
             if let Some(clean_text) = artifacts.as_ref().and_then(|artifacts| {
                 clean_deep_research_final_text_from_artifacts(artifacts, workspace)
             }) {
                 final_text = clean_text;
             }
-            if artifacts.is_none() && generated_report.is_none() {
+            if publication_ready && artifacts.is_none() && generated_report.is_none() {
                 artifacts = run_deep_research_smoke_artifact_step(
                     run_deadline,
                     "repair markdown artifact fallback",
@@ -885,9 +949,12 @@ async fn run_smoke_deep_research(
             eprintln!("[smoke] {status}");
             final_text = status;
         }
+    } else if !repair_allowed && artifacts.is_none() {
+        eprintln!("[smoke] Inquiry-backed report did not reach Completed; skipping legacy repair");
     }
 
-    if artifacts.is_none()
+    if publication_ready
+        && artifacts.is_none()
         && generated_report.is_none()
         && !deep_research_output_has_internal_leak(&final_text)
     {

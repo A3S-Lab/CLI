@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use a3s::research::{
-    InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput, Question, ResearchMethod,
+    InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput, Question,
+    ResearchMethod, ResearchObligation,
 };
 use a3s_code_core::{AgentEvent, AgentSession};
 use serde_json::{Map, Value};
@@ -92,46 +93,121 @@ pub(super) fn validate_plan(value: Value) -> Result<PlannedInquiry, String> {
         }
         _ => {}
     }
+    let (obligations, _) = research_contract_from_plan(&value)?;
     let tracks = object
         .get("tracks")
         .and_then(Value::as_array)
-        .filter(|tracks| !tracks.is_empty())
-        .ok_or_else(|| "DeepResearch plan did not contain stable research tracks".to_string())?;
-    let mut track_ids = BTreeSet::new();
-    let mut material_tracks = 0usize;
+        .expect("research contract validation requires tracks");
     for track in tracks {
         let track = track
             .as_object()
             .ok_or_else(|| "DeepResearch planner returned a non-object track".to_string())?;
-        let track_id = required_text(track, "id")?;
-        if !is_stable_plan_id(track_id) {
-            return Err(format!(
-                "DeepResearch track id `{track_id}` is not a stable ASCII identifier"
-            ));
-        }
-        if !track_ids.insert(track_id) {
-            return Err(format!("duplicate DeepResearch track id `{track_id}`"));
-        }
-        required_text(track, "title")?;
-        required_text(track, "focus")?;
-        let material = track
-            .get("material")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| format!("DeepResearch track `{track_id}` omitted boolean `material`"))?;
-        material_tracks += usize::from(material);
         let questions = string_array(track.get("questions"), "track questions", 3)?;
         if questions.is_empty() {
             return Err("DeepResearch track has no research question".to_string());
         }
     }
-    if material_tracks == 0 {
-        return Err("DeepResearch plan must contain at least one material track".to_string());
-    }
+    debug_assert!(obligations.iter().any(|obligation| obligation.material));
     Ok(PlannedInquiry {
         value,
         method,
         scout_queries,
     })
+}
+
+/// Convert the LLM-authored stable tracks into the typed coverage contract
+/// consumed by the replayable Inquiry reducer. This is the only planner-to-
+/// state boundary for research obligations and stopping conditions.
+pub(super) fn research_contract_from_plan(
+    plan: &Value,
+) -> Result<(Vec<ResearchObligation>, Vec<String>), String> {
+    let object = plan
+        .as_object()
+        .ok_or_else(|| "DeepResearch planner returned a non-object plan".to_string())?;
+    let tracks = object
+        .get("tracks")
+        .and_then(Value::as_array)
+        .filter(|tracks| !tracks.is_empty())
+        .ok_or_else(|| "DeepResearch plan did not contain stable research tracks".to_string())?;
+    let limits = InquiryLimits::default();
+    if tracks.len() > limits.max_obligations {
+        return Err(format!(
+            "DeepResearch plan has {} stable research tracks; maximum is {}",
+            tracks.len(),
+            limits.max_obligations
+        ));
+    }
+
+    let mut track_ids = BTreeSet::new();
+    let mut obligations = Vec::with_capacity(tracks.len());
+    for track in tracks {
+        let track = track
+            .as_object()
+            .ok_or_else(|| "DeepResearch planner returned a non-object track".to_string())?;
+        let id = required_text(track, "id")?;
+        if !is_stable_plan_id(id) {
+            return Err(format!(
+                "DeepResearch track id `{id}` is not a stable ASCII identifier"
+            ));
+        }
+        if !track_ids.insert(id) {
+            return Err(format!("duplicate DeepResearch track id `{id}`"));
+        }
+        let title = required_text(track, "title")?;
+        let focus = required_text(track, "focus")?;
+        let material = track
+            .get("material")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| format!("DeepResearch track `{id}` omitted boolean `material`"))?;
+        let completion_criteria = string_array(
+            track.get("completion_criteria"),
+            "track completion_criteria",
+            limits.max_completion_criteria_per_obligation,
+        )?;
+        if completion_criteria.is_empty() {
+            return Err(format!(
+                "DeepResearch track `{id}` has no completion criterion"
+            ));
+        }
+        obligations.push(ResearchObligation::new(
+            id,
+            title,
+            focus,
+            material,
+            completion_criteria,
+        ));
+    }
+    if !obligations.iter().any(|obligation| obligation.material) {
+        return Err("DeepResearch plan must contain at least one material track".to_string());
+    }
+
+    let stop_conditions = string_array(
+        object.get("stop_conditions"),
+        "stop_conditions",
+        limits.max_stop_conditions,
+    )?;
+    if stop_conditions.is_empty() {
+        return Err("DeepResearch plan has no stopping condition".to_string());
+    }
+    Ok((obligations, stop_conditions))
+}
+
+pub(super) fn commit_plan_research_contract(
+    plan: &Value,
+    state: &mut InquiryState,
+    events: &mut Vec<InquiryEvent>,
+    limits: &InquiryLimits,
+) -> Result<(), String> {
+    let (obligations, stop_conditions) = research_contract_from_plan(plan)?;
+    apply_event(
+        state,
+        events,
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations,
+            stop_conditions,
+        },
+        limits,
+    )
 }
 
 fn is_stable_plan_id(value: &str) -> bool {
@@ -552,11 +628,12 @@ pub(super) fn queue_plan_questions(
         .ok_or_else(|| "DeepResearch plan has no tracks".to_string())?;
     let retrieval_queries = string_array(plan.get("search_queries"), "search_queries", 4)?;
     let mut questions = Vec::new();
+    let mut retrieval_index = 0usize;
     for (track_index, track) in tracks.iter().enumerate() {
         let track = track
             .as_object()
             .ok_or_else(|| "DeepResearch plan contains a non-object track".to_string())?;
-        required_text(track, "id")?;
+        let obligation_id = required_text(track, "id")?;
         let material = track
             .get("material")
             .and_then(Value::as_bool)
@@ -575,11 +652,14 @@ pub(super) fn queue_plan_questions(
             let id = format!("question:plan-{}-{}", track_index + 1, question_index + 1);
             let mut question =
                 Question::queued(id, perspective_id.map(str::to_string), prompt.to_string());
-            question.retrieval_query = Some(if retrieval_queries.is_empty() {
-                prompt.trim().to_string()
-            } else {
-                retrieval_queries[track_index % retrieval_queries.len()].clone()
-            });
+            question.obligation_ids = vec![obligation_id.to_string()];
+            question.retrieval_query = Some(
+                retrieval_queries
+                    .get(retrieval_index)
+                    .cloned()
+                    .unwrap_or_else(|| prompt.trim().to_string()),
+            );
+            retrieval_index = retrieval_index.saturating_add(1);
             question.material = material;
             question.round = 0;
             questions.push(question);

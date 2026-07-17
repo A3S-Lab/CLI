@@ -1,3 +1,285 @@
+#[derive(Clone, Copy)]
+enum CollectOnlyDirectOutcome {
+    Evidence,
+    Empty,
+    Failure,
+}
+
+struct CollectOnlyRouteSearchTool {
+    calls: Arc<AtomicUsize>,
+    outcome: CollectOnlyDirectOutcome,
+}
+
+struct CollectOnlyRouteFetchTool {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Tool for CollectOnlyRouteSearchTool {
+    fn name(&self) -> &str {
+        "collect_only_route_web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Returns deterministic direct-retrieval outcomes for collect-only route tests."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(match self.outcome {
+            CollectOnlyDirectOutcome::Evidence => ToolOutput::success(
+                serde_json::json!([{
+                    "title": "Route matrix evidence",
+                    "url": "https://route-matrix.example/evidence",
+                    "content": "Route matrix evidence is available for direct verification.",
+                    "published_date": "2026-07-17",
+                    "engines": ["fixture"]
+                }])
+                .to_string(),
+            ),
+            CollectOnlyDirectOutcome::Empty => ToolOutput::success("[]"),
+            CollectOnlyDirectOutcome::Failure => {
+                ToolOutput::error("simulated direct retrieval failure")
+            }
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CollectOnlyRouteFetchTool {
+    fn name(&self) -> &str {
+        "collect_only_route_web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Returns deterministic fetched evidence for collect-only route tests."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let url = args
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(ToolOutput::success(format!(
+            "# Route matrix evidence\n\nRoute matrix evidence was fetched and verified from {url}."
+        )))
+    }
+}
+
+async fn run_collect_only_route(
+    execution_route: &str,
+    direct_outcome: CollectOnlyDirectOutcome,
+) -> (serde_json::Value, usize, usize, usize, usize, usize) {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-collect-only-route-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    let search_calls = Arc::new(AtomicUsize::new(0));
+    let fetch_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    executor.register_dynamic_tool(Arc::new(CollectOnlyRouteSearchTool {
+        calls: Arc::clone(&search_calls),
+        outcome: direct_outcome,
+    }));
+    executor.register_dynamic_tool(Arc::new(CollectOnlyRouteFetchTool {
+        calls: Arc::clone(&fetch_calls),
+    }));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "route matrix evidence",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "collect_only_route_web_search",
+        "collect_only_route_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["input"]["execution_mode"] = serde_json::json!("collect_only");
+    args["input"]["research_plan"] = serde_json::json!({
+        "answer_shape": "briefing",
+        "freshness_required": false,
+        "workspace_evidence_required": false,
+        "execution_route": execution_route,
+        "report_title": "Collect-only route matrix",
+        "phases": [{
+            "name": "collect evidence",
+            "success_criterion": "One traceable source is retained."
+        }],
+        "tracks": [{
+            "title": "Route behavior",
+            "focus": "Collect traceable route matrix evidence."
+        }],
+        "search_queries": ["route matrix evidence"],
+        "seed_urls": [],
+        "budget": {
+            "retrieval_timeout_ms": 30000,
+            "synthesis_timeout_ms": 15000,
+            "max_iterations": 2,
+            "max_parallel_tasks": 1,
+            "max_steps_per_task": 2,
+            "per_task_timeout_ms": 10000,
+            "direct_searches": 1,
+            "direct_fetches": 1
+        },
+        "stop_conditions": ["The evidence obligation is traceable."]
+    });
+    args["limits"]["timeoutMs"] = serde_json::json!(30_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(10);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("collect-only route should execute");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output = serde_json::from_str(&result.output).unwrap();
+    let counts = (
+        planner_calls.load(Ordering::SeqCst),
+        checker_calls.load(Ordering::SeqCst),
+        maker_calls.load(Ordering::SeqCst),
+        search_calls.load(Ordering::SeqCst),
+        fetch_calls.load(Ordering::SeqCst),
+    );
+    let _ = std::fs::remove_dir_all(&workspace);
+    (output, counts.0, counts.1, counts.2, counts.3, counts.4)
+}
+
+#[tokio::test]
+async fn collect_only_route_matrix_preserves_planned_collection_semantics() {
+    for (route, expected_maker_calls, expected_search_calls, expected_fetch_calls) in [
+        ("direct_only", 0, 1, 1),
+        ("direct_then_review", 0, 1, 1),
+        ("direct_then_maker", 1, 1, 1),
+        ("maker_first", 1, 0, 0),
+    ] {
+        let (output, planner_calls, checker_calls, maker_calls, search_calls, fetch_calls) =
+            run_collect_only_route(route, CollectOnlyDirectOutcome::Evidence).await;
+        assert_eq!(
+            output["mode"], "inquiry_collection_wave",
+            "{route}: {output:#}"
+        );
+        assert_eq!(
+            output["execution"]["terminal_authority"], "host_inquiry_reducer",
+            "{route}: {output:#}"
+        );
+        assert_eq!(
+            output["execution"]["mode"], "collect_only",
+            "{route}: {output:#}"
+        );
+        assert!(output.get("checker").is_none(), "{route}: {output:#}");
+        assert_eq!(
+            planner_calls, 0,
+            "{route}: planner must use the supplied plan"
+        );
+        assert_eq!(
+            checker_calls, 0,
+            "{route}: collect-only cannot run a checker"
+        );
+        assert_eq!(maker_calls, expected_maker_calls, "{route}: {output:#}");
+        assert_eq!(search_calls, expected_search_calls, "{route}: {output:#}");
+        assert_eq!(fetch_calls, expected_fetch_calls, "{route}: {output:#}");
+    }
+}
+
+#[tokio::test]
+async fn collect_only_failed_direct_routes_return_control_without_a_checker_or_unplanned_maker() {
+    for direct_outcome in [
+        CollectOnlyDirectOutcome::Empty,
+        CollectOnlyDirectOutcome::Failure,
+    ] {
+        let (output, planner_calls, checker_calls, maker_calls, search_calls, fetch_calls) =
+            run_collect_only_route("direct_then_review", direct_outcome).await;
+        assert_eq!(output["mode"], "inquiry_collection_wave", "{output:#}");
+        assert_eq!(
+            output["execution"]["terminal_authority"], "host_inquiry_reducer",
+            "{output:#}"
+        );
+        assert_eq!(output["execution"]["mode"], "collect_only", "{output:#}");
+        assert_eq!(output["research"]["status"], "failed", "{output:#}");
+        assert_eq!(planner_calls, 0);
+        assert_eq!(
+            checker_calls, 0,
+            "collect-only cannot run a checker: {output:#}"
+        );
+        assert_eq!(
+            maker_calls, 0,
+            "review route cannot fall through to maker: {output:#}"
+        );
+        assert_eq!(search_calls, 1, "{output:#}");
+        assert_eq!(fetch_calls, 0, "{output:#}");
+    }
+
+    let (output, planner_calls, checker_calls, maker_calls, search_calls, fetch_calls) =
+        run_collect_only_route("direct_only", CollectOnlyDirectOutcome::Failure).await;
+    assert_eq!(output["mode"], "inquiry_collection_wave", "{output:#}");
+    assert_eq!(output["execution"]["mode"], "collect_only", "{output:#}");
+    assert_eq!(
+        output["execution"]["terminal_authority"], "host_inquiry_reducer",
+        "{output:#}"
+    );
+    assert_eq!(
+        output["execution"]["collection_outcome"], "direct_web_degraded",
+        "the central collect-only terminal normalizer must preserve the route outcome: {output:#}"
+    );
+    assert_eq!(planner_calls, 0);
+    assert_eq!(
+        checker_calls, 0,
+        "collect-only cannot run a checker: {output:#}"
+    );
+    assert_eq!(
+        maker_calls, 0,
+        "direct-only cannot fall through to maker: {output:#}"
+    );
+    assert_eq!(search_calls, 1, "{output:#}");
+    assert_eq!(fetch_calls, 0, "{output:#}");
+}
+
 #[tokio::test]
 async fn model_authored_retrieval_query_can_cross_the_original_query_language() {
     let workspace = std::env::temp_dir().join(format!(

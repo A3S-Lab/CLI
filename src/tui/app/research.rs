@@ -18,6 +18,17 @@ impl App {
         {
             return false;
         }
+        match inquiry_projection_from_workflow(workflow_output, workflow_metadata) {
+            Ok(Some((_, state))) if state.phase != a3s::research::InquiryPhase::Outlining => {
+                // A generic repair would replace report content without
+                // producing matching outline/draft/audit events. Inquiry
+                // repair is only safe while the sectioned pipeline can be
+                // replayed from its collected Outlining state.
+                return false;
+            }
+            Err(_) => return false,
+            Ok(Some(_)) | Ok(None) => {}
+        }
         let prior_is_safe =
             !prior_text.trim().is_empty() && !deep_research_output_has_internal_leak(prior_text);
         if prior_is_safe {
@@ -89,7 +100,17 @@ impl App {
         self.deep_research_stream_timeout_token =
             self.deep_research_stream_timeout_token.wrapping_add(1);
         let token = self.deep_research_stream_timeout_token;
-        let timeout_ms = if phase.is_repair() {
+        let workflow_output = self
+            .deep_research_workflow
+            .output
+            .clone()
+            .unwrap_or_default();
+        let workflow_metadata = self.deep_research_workflow.metadata.clone();
+        let use_sectioned_report =
+            sectioned_report_available(&workflow_output, workflow_metadata.as_ref());
+        let timeout_ms = if use_sectioned_report {
+            DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+        } else if phase.is_repair() {
             DEEP_RESEARCH_REPAIR_TIMEOUT_MS
         } else {
             deep_research_planned_synthesis_timeout_ms(
@@ -99,12 +120,6 @@ impl App {
         };
         let args = deep_research_report_generation_args(&prompt, timeout_ms);
         let session = Arc::clone(&self.session);
-        let workflow_output = self
-            .deep_research_workflow
-            .output
-            .clone()
-            .unwrap_or_default();
-        let workflow_metadata = self.deep_research_workflow.metadata.clone();
         let run_id = self
             .deep_research_workflow
             .args
@@ -113,9 +128,6 @@ impl App {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("deepresearch-report")
             .to_string();
-        let use_sectioned_report = !phase.is_repair()
-            && sectioned_report_available(&workflow_output, workflow_metadata.as_ref());
-
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let result = if use_sectioned_report {
@@ -184,16 +196,34 @@ impl App {
         self.host_progress_inflight = false;
 
         let mut projection_merge_error = None;
+        let mut inquiry_publication_outcome = None;
         if let Ok(generated) = result.as_ref() {
-            if let Some(workflow_output) = self.deep_research_workflow.output.as_mut() {
-                if let Err(error) = merge_sectioned_inquiry_projection(
+            match self.deep_research_workflow.output.as_mut() {
+                Some(workflow_output) => match merge_sectioned_inquiry_projection(
                     workflow_output,
                     self.deep_research_workflow.metadata.as_mut(),
                     generated.metadata.as_ref(),
                 ) {
-                    projection_merge_error = Some(format!(
-                        "DeepResearch sectioned report projection merge failed: {error}"
-                    ));
+                    Ok(_) => match deep_research_inquiry_publication_outcome(
+                        workflow_output,
+                        self.deep_research_workflow.metadata.as_ref(),
+                    ) {
+                        Ok(outcome) => inquiry_publication_outcome = outcome,
+                        Err(error) => {
+                            projection_merge_error = Some(format!(
+                                "DeepResearch publication authority rejected the report: {error}"
+                            ));
+                        }
+                    },
+                    Err(error) => {
+                        projection_merge_error = Some(format!(
+                            "DeepResearch sectioned report projection merge failed: {error}"
+                        ));
+                    }
+                },
+                None => {
+                    projection_merge_error =
+                        Some("DeepResearch report generation has no workflow output".to_string());
                 }
             }
         }
@@ -228,12 +258,14 @@ impl App {
             .as_ref()
             .map(|args| deep_research_evidence_scope_from_args(args, &query))
             .unwrap_or_default();
-        let report_outcome = deep_research_report_outcome_for_workflow(
-            &query,
-            evidence_scope,
-            &workflow_output,
-            workflow_metadata.as_ref(),
-        );
+        let report_outcome = inquiry_publication_outcome.unwrap_or_else(|| {
+            deep_research_report_outcome_for_workflow(
+                &query,
+                evidence_scope,
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            )
+        });
         let workspace = PathBuf::from(&self.cwd);
         let artifacts = generated_report.as_ref().and_then(|report| {
             match materialize_deep_research_completed_report_from_generation(
@@ -356,7 +388,16 @@ impl App {
         }
 
         let repair_phase = self.deep_research_report_repair_used;
-        let timeout_ms = if repair_phase {
+        let use_sectioned_report = sectioned_report_available(
+            self.deep_research_workflow
+                .output
+                .as_deref()
+                .unwrap_or_default(),
+            self.deep_research_workflow.metadata.as_ref(),
+        );
+        let timeout_ms = if use_sectioned_report {
+            DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+        } else if repair_phase {
             DEEP_RESEARCH_REPAIR_TIMEOUT_MS
         } else {
             deep_research_planned_synthesis_timeout_ms(
@@ -428,6 +469,17 @@ impl App {
             "{RESEARCH_VIEW_MARKER} .a3s/research/{}/index.html",
             deep_research_report_slug(query)
         );
+        if deep_research_inquiry_publication_outcome(
+            self.deep_research_workflow
+                .output
+                .as_deref()
+                .unwrap_or_default(),
+            self.deep_research_workflow.metadata.as_ref(),
+        )
+        .is_err()
+        {
+            return None;
+        }
         let baseline = self.deep_research_workflow.report_baseline.as_ref()?;
         deep_research_report_artifacts_from_output_for_current_run(
             &marker,
@@ -512,14 +564,29 @@ impl App {
                 .as_ref()
                 .map(|args| deep_research_evidence_scope_from_args(args, query))
                 .unwrap_or_default();
-            deep_research_report_outcome_for_workflow(
-                query,
-                evidence_scope,
+            match deep_research_inquiry_publication_outcome(
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            ) {
+                Ok(Some(outcome)) => outcome,
+                Ok(None) => deep_research_report_outcome_for_workflow(
+                    query,
+                    evidence_scope,
+                    &workflow_output,
+                    workflow_metadata.as_ref(),
+                ),
+                Err(_) => DeepResearchRunOutcome::Degraded,
+            }
+        });
+        let validated_view = query.as_deref().and_then(|query| {
+            if deep_research_inquiry_publication_outcome(
                 &workflow_output,
                 workflow_metadata.as_ref(),
             )
-        });
-        let validated_view = query.as_deref().and_then(|query| {
+            .is_err()
+            {
+                return None;
+            }
             let baseline = self.deep_research_workflow.report_baseline.as_ref()?;
             deep_research_report_view_spec_for_current_run(
                 &streamed_text,

@@ -303,7 +303,9 @@ fn replay_requires_material_question_answer_evidence_pairing() {
     assert!(matches!(
         error.error,
         InquiryError::InvalidOutline { ref reason }
-            if reason.contains("not paired with answer evidence id `evidence:answer`")
+            if reason.contains("material question id `question:root`")
+                && reason.contains("claim id `claim:answer`")
+                && reason.contains("answer evidence id `evidence:answer`")
     ));
 }
 
@@ -405,6 +407,11 @@ fn replay_allows_outlining_when_only_a_supporting_question_is_bounded() {
         "Which non-gating context remains useful?",
     );
     supporting.material = false;
+    let mut qualified_section =
+        outline_section("section:qualified", "claim:accepted", "source:accepted");
+    qualified_section
+        .question_ids
+        .push("question:supporting".to_string());
     let events = vec![
         InquiryEvent::StrategySelected {
             method: ResearchMethod::Focused,
@@ -437,11 +444,7 @@ fn replay_allows_outlining_when_only_a_supporting_question_is_bounded() {
         },
         InquiryEvent::OutlineCommitted {
             outline: ResearchOutline {
-                sections: vec![outline_section(
-                    "section:qualified",
-                    "claim:accepted",
-                    "source:accepted",
-                )],
+                sections: vec![qualified_section],
             },
         },
     ];

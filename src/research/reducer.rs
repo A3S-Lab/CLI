@@ -4,11 +4,13 @@ use std::collections::HashSet;
 
 use super::validation::{
     ensure_limit, ensure_nonempty, ensure_string, ensure_strings, ensure_unique_ids,
-    validate_outline_limits, validate_queued_questions, validate_section_citations,
+    validate_outline_limits, validate_queued_questions, validate_research_obligations,
+    validate_section_citations,
 };
 use super::{
-    validate_research_outline, InquiryAudit, InquiryError, InquiryEvent, InquiryLimits,
-    InquiryPhase, InquiryState, QuestionStatus, ResearchMethod, SectionDraft,
+    research_contract_outcome, validate_research_contract_assessment, validate_research_outline,
+    InquiryAudit, InquiryError, InquiryEvent, InquiryLimits, InquiryPhase, InquiryState,
+    QuestionStatus, ResearchContractOutcome, ResearchMethod, SectionDraft,
 };
 
 pub fn reduce(
@@ -34,6 +36,28 @@ pub fn reduce(
                 ResearchMethod::Focused => InquiryPhase::Questioning,
                 ResearchMethod::PerspectiveGuided => InquiryPhase::Scouting,
             };
+        }
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations,
+            stop_conditions,
+        } => {
+            require_phase(
+                state,
+                event,
+                &[InquiryPhase::Scouting, InquiryPhase::Questioning],
+            )?;
+            if !state.obligations.is_empty()
+                || !state.stop_conditions.is_empty()
+                || state.scout_completed
+                || !state.perspectives.is_empty()
+                || !state.questions.is_empty()
+                || !state.evidence_catalog.is_empty()
+            {
+                return Err(invalid_transition(state, event));
+            }
+            validate_research_obligations(obligations, stop_conditions, limits)?;
+            next.obligations.clone_from(obligations);
+            next.stop_conditions.clone_from(stop_conditions);
         }
         InquiryEvent::ScoutCompleted { source_ids } => {
             require_phase(state, event, &[InquiryPhase::Scouting])?;
@@ -156,6 +180,30 @@ pub fn reduce(
                 "evidence source id",
                 limits.max_identifier_chars,
             )?;
+            ensure_limit(
+                "evidence diagnostics",
+                evidence.diagnostics.len(),
+                limits.max_citation_ids_per_section,
+            )?;
+            ensure_unique_ids(
+                evidence
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.id.as_str()),
+                "evidence diagnostic",
+            )?;
+            for diagnostic in &evidence.diagnostics {
+                ensure_string(
+                    &diagnostic.id,
+                    "evidence diagnostic id",
+                    limits.max_identifier_chars,
+                )?;
+                ensure_string(
+                    &diagnostic.detail,
+                    "evidence diagnostic detail",
+                    limits.max_text_chars,
+                )?;
+            }
             if let Some(accepted) = state.evidence_catalog.get(&evidence.evidence_id) {
                 return if accepted == evidence {
                     Err(InquiryError::DuplicateId {
@@ -239,6 +287,19 @@ pub fn reduce(
             question.bound_reason = Some(reason.clone());
             advance_after_question_resolution(&mut next);
         }
+        InquiryEvent::ResearchContractAssessed { assessment } => {
+            require_phase(state, event, &[InquiryPhase::Outlining])?;
+            if state.contract_assessment.is_some() {
+                return Err(invalid_transition(state, event));
+            }
+            validate_obligation_coverage(state)?;
+            validate_research_contract_assessment(state, assessment).map_err(|error| {
+                InquiryError::InvalidResearchPlan {
+                    reason: error.to_string(),
+                }
+            })?;
+            next.contract_assessment = Some(assessment.clone());
+        }
         InquiryEvent::OutlineCommitted { outline } => {
             require_phase(state, event, &[InquiryPhase::Outlining])?;
             let unresolved = unresolved_questions(state);
@@ -267,6 +328,19 @@ pub fn reduce(
                     reason: format!(
                         "every material research question must be answered before outlining; {unresolved_material} remain bounded"
                     ),
+                });
+            }
+            validate_obligation_coverage(state)?;
+            if !state.obligations.is_empty()
+                && !matches!(
+                    research_contract_outcome(state),
+                    Some(ResearchContractOutcome::Satisfied | ResearchContractOutcome::Qualified)
+                )
+            {
+                return Err(InquiryError::InvalidOutline {
+                    reason:
+                        "research completion criteria and stop conditions have not been satisfied"
+                            .to_string(),
                 });
             }
             validate_outline_limits(outline, limits)?;
@@ -366,6 +440,54 @@ pub fn reduce(
     }
     next.events_applied += 1;
     Ok(next)
+}
+
+fn validate_obligation_coverage(state: &InquiryState) -> Result<(), InquiryError> {
+    if state.obligations.is_empty() {
+        return Ok(());
+    }
+    for obligation in &state.obligations {
+        let linked = state
+            .questions
+            .iter()
+            .filter(|question| question.obligation_ids.contains(&obligation.id))
+            .collect::<Vec<_>>();
+        if linked.is_empty() {
+            return Err(InquiryError::InvalidOutline {
+                reason: format!(
+                    "research obligation `{}` has no traceable question path",
+                    obligation.id
+                ),
+            });
+        }
+        if obligation.material {
+            let material = linked
+                .iter()
+                .filter(|question| question.material)
+                .collect::<Vec<_>>();
+            if material.is_empty() {
+                return Err(InquiryError::InvalidOutline {
+                    reason: format!(
+                        "material research obligation `{}` has no material question",
+                        obligation.id
+                    ),
+                });
+            }
+            let unresolved = material
+                .iter()
+                .filter(|question| question.status != QuestionStatus::Answered)
+                .count();
+            if unresolved > 0 {
+                return Err(InquiryError::InvalidOutline {
+                    reason: format!(
+                        "material research obligation `{}` has {unresolved} unanswered material question(s)",
+                        obligation.id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn queued_question_mut<'a>(

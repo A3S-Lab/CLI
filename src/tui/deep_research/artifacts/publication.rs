@@ -674,6 +674,11 @@ fn validate_deep_research_completed_report_content(
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> Result<(), String> {
+    // Evidence readiness (Outlining) is not report completion. Inquiry-backed
+    // content is publishable only after the section drafts and citation audit
+    // have been committed to the replayable event log. Legacy checked-loop
+    // outputs return `Ok(None)` and retain their existing validation path.
+    deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata)?;
     if looks_like_deep_research_fallback_draft(markdown) {
         return Err("content rejected: the response is an incomplete fallback draft".to_string());
     }

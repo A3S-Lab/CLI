@@ -1,5 +1,6 @@
 //! Deterministic, replayable state machine for bounded research inquiries.
 
+mod assessment;
 mod error;
 mod event;
 mod evidence;
@@ -13,10 +14,13 @@ mod validation;
 
 pub use error::{InquiryError, InquiryReplayError};
 pub use event::InquiryEvent;
-pub use evidence::EvidenceRef;
+pub use evidence::{EvidenceDiagnostic, EvidenceDiagnosticKind, EvidenceRef};
 pub use model::{
-    InquiryAudit, InquiryBudgetInput, InquiryConvergenceInput, InquiryLimits, InquiryPhase,
-    Perspective, Question, QuestionStatus, ResearchMethod, SectionDraft,
+    CompletionCriterionAssessment, ContractAssessmentStatus, DiagnosticDisposition,
+    EvidenceDiagnosticAssessment, InquiryAudit, InquiryBudgetInput, InquiryConvergenceInput,
+    InquiryLimits, InquiryPhase, Perspective, Question, QuestionStatus, ResearchContractAssessment,
+    ResearchContractOutcome, ResearchMethod, ResearchObligation, ResearchObligationAssessment,
+    SectionDraft, StopConditionAssessment,
 };
 pub use outline::{
     research_outline_json_schema, validate_research_outline, OutlineIdKind, OutlineSection,
@@ -39,3 +43,9 @@ pub use state::{replay, InquiryState};
 
 #[cfg(test)]
 mod tests;
+pub use assessment::{
+    research_contract_assessment_event, research_contract_assessment_generation_params,
+    research_contract_assessment_json_schema, research_contract_outcome,
+    validate_research_contract_assessment, ResearchContractAssessmentError,
+    ResearchContractAssessmentGenerationParams,
+};

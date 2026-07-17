@@ -37,7 +37,7 @@ use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
     Alert, AlertKind, DiffLineKind, DiffSpan, InlineAction, Meter, Scrollbar, SessionStatusChip,
-    Spinner, TextOverlay, Textarea, Toast, ToastKind, Viewport,
+    Spinner, Textarea, Toast, ToastKind, Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -126,9 +126,9 @@ pub(crate) use deep_research_artifacts::{
 };
 use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
 use deep_research_convergence::{
-    evaluate_convergence, evaluate_terminal_inquiry_convergence,
-    validated_inquiry_terminal_outcome, ConvergenceAction, ConvergenceDecision, ConvergenceInput,
-    InquiryTerminalOutcome,
+    evaluate_convergence, evaluate_terminal_inquiry_convergence, inquiry_terminal_outcome,
+    validated_inquiry_projection, validated_inquiry_publication_outcome, ConvergenceAction,
+    ConvergenceDecision, ConvergenceInput, InquiryTerminalOutcome, ValidatedInquiryProjection,
 };
 use deep_research_evidence_ledger::{
     accepted_evidence_ledger,
@@ -297,6 +297,8 @@ mod runtime_projection;
 mod transcript;
 
 // Terminal UI support.
+#[path = "app/agent_presence.rs"]
+mod agent_presence;
 #[path = "app/actions.rs"]
 mod app_actions;
 #[path = "app/async_dispatch.rs"]
@@ -357,15 +359,13 @@ mod program_preview;
 mod render;
 #[path = "ui/syntax.rs"]
 mod syntax;
-#[path = "ui/agent_island.rs"]
-mod system_agent_island;
 #[path = "ui/tool_style.rs"]
 mod tool_style;
 #[path = "ui/tool_transcript_view.rs"]
 mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
-use system_agent_island::{is_system_agent_island_key, system_agent_tick};
+use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
 #[cfg(test)]
@@ -437,7 +437,7 @@ const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 // it must never silently shorten a valid phase timeout.
 const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
     + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
-    + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
+    + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
     + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
     + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
 const STREAM_START_TIMEOUT_MS: u64 = 10_000;
@@ -688,9 +688,9 @@ struct App {
     loop_remaining: usize,
     /// ECS-style projection of live runtime tool and subagent entities.
     runtime: RuntimeProjection,
-    /// Cross-process coding-agent presence plus the collapsed/expanded island
-    /// presentation state. The current App lifecycle is merged at render time.
-    system_agent_island: system_agent_island::SystemAgentIsland,
+    /// Exact local lifecycle publishing and the system-level island bridge.
+    /// Rendering belongs to the independent native `a3s-webview` process.
+    agent_presence: agent_presence::AgentPresenceRuntime,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -860,8 +860,7 @@ struct App {
 
 impl App {
     fn composer_input_is_hidden(&self) -> bool {
-        self.system_agent_island.expanded
-            || self.goal_resume_prompt.is_some()
+        self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
@@ -909,7 +908,7 @@ impl App {
         let session = Arc::clone(&self.session);
         let stream_join = self.stream_join.take();
         let host_tool_abort = self.host_tool_abort.take();
-        let agent_presence = self.system_agent_island.publisher.clone();
+        let agent_presence = self.agent_presence.publisher.clone();
         self.rx = None;
 
         Some(cmd::cmd(move || async move {

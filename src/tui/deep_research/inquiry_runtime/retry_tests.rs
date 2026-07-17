@@ -15,7 +15,7 @@ use super::execution::{resolve_questions_with_bounded_follow_up_waves, InquiryEx
 use super::integration_tests::{
     evidence_output, inquiry_plan, successful_tool_result, test_session, workflow_args,
 };
-use super::plan::{queue_plan_questions, workflow_args_with_plan};
+use super::plan::{commit_plan_research_contract, queue_plan_questions, workflow_args_with_plan};
 
 struct SequenceResolutionClient {
     calls: AtomicUsize,
@@ -156,6 +156,8 @@ fn inquiry_state(plan: &serde_json::Value) -> (InquiryState, Vec<InquiryEvent>, 
         &limits,
     )
     .expect("strategy");
+    commit_plan_research_contract(plan, &mut state, &mut events, &limits)
+        .expect("stable research contract");
     queue_plan_questions(plan, None, &mut state, &mut events, &limits).expect("focused question");
     (state, events, limits)
 }

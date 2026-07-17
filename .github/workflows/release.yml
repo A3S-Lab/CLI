@@ -2,9 +2,9 @@ name: Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
-# Binary and Homebrew artifacts wait for the crate job so release channels do
-# not drift. Missing publish credentials or unpublished dependency crates fail
-# the release instead of producing a misleading green job.
+# Every publishing job waits for the pinned native helper release preflight.
+# Missing helper assets fail before GitHub or crates.io release mutations;
+# missing publish credentials or dependency crates still fail the workflow.
 on:
   push:
     tags: ["v*"]
@@ -13,8 +13,122 @@ permissions:
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
   A3S_WEB_SOURCE_REF: d7a3ee72e660c88802cff5e653e93ecfe512220a
+  # Exact companion prerequisite; preflight rejects an absent or incomplete release.
+  A3S_WEBVIEW_VERSION: 0.1.2
 jobs:
+  webview-helper-preflight:
+    name: Verify Agent Island helper (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, helper: a3s-webview }
+          - { target: x86_64-apple-darwin, helper: a3s-webview }
+          - { target: x86_64-unknown-linux-gnu, helper: a3s-webview }
+          - { target: aarch64-unknown-linux-gnu, helper: a3s-webview }
+          - { target: x86_64-pc-windows-msvc, helper: a3s-webview.exe }
+    steps:
+      - name: Verify pinned helper release and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          HELPER_NAME: ${{ matrix.helper }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$A3S_WEBVIEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::A3S_WEBVIEW_VERSION must be an exact semantic version"
+            exit 1
+          fi
+
+          tag="v${A3S_WEBVIEW_VERSION}"
+          base="a3s-webview-${tag}-${RELEASE_TARGET}"
+          archive="${base}.tar.gz"
+          checksum="${base}.sha256"
+          api_path="repos/A3S-Lab/WebView/releases/tags/${tag}"
+
+          if ! gh api "$api_path" > release.json; then
+            echo "::error::Pinned Agent Island helper release ${tag} does not exist"
+            echo "::error::Release A3S-Lab/WebView ${tag} with every target asset before releasing the CLI"
+            exit 1
+          fi
+          if ! jq -e --arg tag "$tag" \
+            '.tag_name == $tag and .draft == false and .prerelease == false' \
+            release.json >/dev/null; then
+            echo "::error::Pinned helper ${tag} must be a published, non-prerelease release"
+            exit 1
+          fi
+
+          asset_url() {
+            jq -er --arg name "$1" \
+              '[.assets[] | select(.name == $name)] | if length == 1 then .[0].browser_download_url else empty end' \
+              release.json
+          }
+          if ! archive_url="$(asset_url "$archive")"; then
+            echo "::error::Pinned helper release ${tag} is missing exactly one ${archive} asset"
+            exit 1
+          fi
+          if ! checksum_url="$(asset_url "$checksum")"; then
+            echo "::error::Pinned helper release ${tag} is missing exactly one ${checksum} asset"
+            exit 1
+          fi
+
+          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+            "$archive_url" -o "$archive"
+          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+            "$checksum_url" -o "$checksum"
+
+          checksum_lines="$(awk 'END { print NR }' "$checksum")"
+          expected="$(awk 'NR == 1 && NF == 2 { print $1 }' "$checksum")"
+          listed_archive="$(awk 'NR == 1 && NF == 2 { print $2 }' "$checksum")"
+          if [[ "$checksum_lines" != 1 \
+            || ! "$expected" =~ ^[0-9a-f]{64}$ \
+            || "$listed_archive" != "$archive" ]]; then
+            echo "::error::${checksum} must contain one SHA-256 entry for ${archive}"
+            exit 1
+          fi
+          actual="$(sha256sum "$archive" | awk '{ print $1 }')"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::SHA-256 mismatch for ${archive}"
+            exit 1
+          fi
+
+          tar -tzf "$archive" > archive-contents.txt
+          while IFS= read -r entry; do
+            case "$entry" in
+              /*|../*|*/../*|*/..)
+                echo "::error::Unsafe path in ${archive}: ${entry}"
+                exit 1
+                ;;
+            esac
+          done < archive-contents.txt
+          mkdir unpacked
+          tar -xzf "$archive" -C unpacked
+          payload_count="$(find unpacked ! -type d -print | wc -l | tr -d ' ')"
+          payload="$(find unpacked ! -type d -print -quit)"
+          if [[ "$payload_count" -ne 1 \
+            || ! -f "$payload" \
+            || "$(basename "$payload")" != "$HELPER_NAME" ]]; then
+            echo "::error::${archive} must contain only the ${HELPER_NAME} executable"
+            exit 1
+          fi
+          if ! grep -aFq -- "--agent-island" "$payload"; then
+            echo "::error::${archive} does not support the required --agent-island mode"
+            exit 1
+          fi
+      - name: Preserve verified helper archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-webview-helper-${{ matrix.target }}
+          path: |
+            a3s-webview-v${{ env.A3S_WEBVIEW_VERSION }}-${{ matrix.target }}.tar.gz
+            a3s-webview-v${{ env.A3S_WEBVIEW_VERSION }}-${{ matrix.target }}.sha256
+          if-no-files-found: error
+          retention-days: 1
+
   create-release:
+    needs: webview-helper-preflight
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -91,16 +205,16 @@ jobs:
           retention-days: 1
 
   binaries:
-    needs: [create-release, crate, web-assets]
+    needs: [webview-helper-preflight, create-release, crate, web-assets]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { target: aarch64-apple-darwin, os: macos-latest }
-          - { target: x86_64-apple-darwin, os: macos-latest }
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest }
-          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-apple-darwin, os: macos-latest, helper: a3s-webview }
+          - { target: x86_64-apple-darwin, os: macos-latest, helper: a3s-webview }
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-latest, helper: a3s-webview }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest, helper: a3s-webview.exe }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -116,16 +230,48 @@ jobs:
       - name: Validate packaged Web workspace
         shell: bash
         run: test -f web/index.html
+      - name: Download verified Agent Island helper
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-webview-helper-${{ matrix.target }}
+          path: webview-release
+      - name: Bundle native Agent Island helper
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+          HELPER_NAME: ${{ matrix.helper }}
+        run: |
+          set -euo pipefail
+          tag="v${A3S_WEBVIEW_VERSION}"
+          base="a3s-webview-${tag}-${RELEASE_TARGET}"
+          archive="webview-release/${base}.tar.gz"
+          checksum="webview-release/${base}.sha256"
+          expected="$(awk 'NR == 1 { print $1 }' "$checksum")"
+          if command -v sha256sum >/dev/null 2>&1; then
+            actual="$(sha256sum "$archive" | awk '{ print $1 }')"
+          else
+            actual="$(shasum -a 256 "$archive" | awk '{ print $1 }')"
+          fi
+          test -n "$expected" && test "$actual" = "$expected"
+          mkdir webview-helper
+          tar -xzf "$archive" -C webview-helper
+          helper="$(find webview-helper -type f -name "$HELPER_NAME" -print -quit)"
+          test -n "$helper"
+          cp "$helper" "$HELPER_NAME"
+          if [[ "$HELPER_NAME" != *.exe ]]; then chmod 0755 "$HELPER_NAME"; fi
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: a3s
           target: ${{ matrix.target }}
           archive: a3s-$tag-$target
-          include: web
+          include: web,${{ matrix.helper }}
+          tar: all
+          zip: none
+          checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
 
   crate:
-    needs: create-release
+    needs: [webview-helper-preflight, create-release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -147,7 +293,7 @@ jobs:
             "a3s-boot 0.1.2"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
-            "a3s-tui 0.1.11"
+            "a3s-tui 0.1.12"
             "a3s-search 1.4.3"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
@@ -193,9 +339,6 @@ jobs:
             license "MIT"
 
             on_macos do
-              # RemoteUI popup helper (own repo/formula): A3S-Lab/WebView. Pulled
-              # in automatically so the inline OS popup works out of the box.
-              depends_on "a3s-lab/tap/a3s-webview"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-apple-darwin.tar.gz"
                 sha256 "${mac_arm}"
@@ -207,6 +350,7 @@ jobs:
             end
 
             on_linux do
+              depends_on "webkitgtk"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${lin_arm}"
@@ -218,7 +362,7 @@ jobs:
             end
 
             def install
-              bin.install "a3s"
+              bin.install "a3s", "a3s-webview"
               pkgshare.install "web"
             end
 

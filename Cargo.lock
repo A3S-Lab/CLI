@@ -47,6 +47,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "webpki-roots 1.0.8",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -238,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "comrak",
  "crossterm",

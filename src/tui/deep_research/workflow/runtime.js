@@ -309,6 +309,19 @@
     }
 
     if ((directWebResearch && !hasStructuredEvidence(directWebResearch)) || directWebFailure) {
+      if (collectOnly && executionRoute === "direct_then_review") {
+        return completeCollectionWave(
+          directWebResearch || {
+            status: "failed",
+            algorithm: "direct_web_search_fetch",
+            error: directWebFailure && directWebFailure.error
+              ? directWebFailure.error
+              : "Direct retrieval ended before retaining evidence."
+          },
+          null,
+          "Direct retrieval retained no evidence; the host inquiry reducer owns any subsequent wave."
+        );
+      }
       return scheduleMakerStep(
         roundStepId("local_research", 1),
         1,
@@ -400,4 +413,41 @@
   }
 
   return { error: `unknown dynamic workflow invocation: ${inputs.kind}/${inputs.step_name || ""}` };
+  };
+
+  const result = await executeWorkflow();
+  const requestedMode = inputs && inputs.input && inputs.input.execution_mode;
+  if (
+    requestedMode !== "collect_only" ||
+    !result ||
+    result.type !== "complete"
+  ) {
+    return result;
+  }
+
+  const output = result.output && typeof result.output === "object" && !Array.isArray(result.output)
+    ? result.output
+    : { research: result.output === undefined ? null : result.output };
+  const collectionOutcome = typeof output.mode === "string" && output.mode !== "inquiry_collection_wave"
+    ? output.mode
+    : null;
+  const priorExecution = output.execution && typeof output.execution === "object" && !Array.isArray(output.execution)
+    ? output.execution
+    : {};
+  const execution = Object.assign({}, priorExecution, {
+    mode: "collect_only",
+    terminal_authority: "host_inquiry_reducer"
+  });
+  if (collectionOutcome) {
+    execution.collection_outcome = collectionOutcome;
+  }
+  if (typeof execution.note !== "string" || !execution.note.trim()) {
+    execution.note = "The workflow completed one bounded evidence-collection wave; question resolution and convergence are host-managed.";
+  }
+  return Object.assign({}, result, {
+    output: Object.assign({}, output, {
+      mode: "inquiry_collection_wave",
+      execution
+    })
+  });
 }

@@ -361,9 +361,16 @@ fn planned_report_tracks(workflow_output: &str) -> Vec<(String, String)> {
         return Vec::new();
     };
     let mut seen = HashSet::new();
-    workflow
-        .pointer("/plan/tracks")
+    let stable_obligations = workflow
+        .pointer("/inquiry/state/obligations")
         .and_then(serde_json::Value::as_array)
+        .filter(|obligations| !obligations.is_empty());
+    stable_obligations
+        .or_else(|| {
+            workflow
+                .pointer("/plan/tracks")
+                .and_then(serde_json::Value::as_array)
+        })
         .into_iter()
         .flatten()
         .filter_map(|track| {
