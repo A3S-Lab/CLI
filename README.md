@@ -716,14 +716,17 @@ one queued successor. The bottom queue strip contains pending turns only and
 removes a message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. Streamed
-Markdown commits only complete lines, paces stable rows with adaptive catch-up,
-keeps active tables in a replaceable tail, and provisionally completes a
-candidate table before painting it so raw pipe rows never flash or move the
-scrollbar. Tables use compact rounded cards with a soft header surface and a
-stacked narrow-screen fallback while preserving code, URLs, Unicode graphemes,
-headings, and every cell value. Tail-only updates reuse the already-wrapped
-transcript prefix instead of rebuilding the full viewport.
+reflows semantic arguments, output, diffs, and Markdown after a resize. User
+surfaces and assistant Markdown each own a blank row above and below their
+content; streaming and finalized assistant cells keep the same vertical rhythm
+while adjacent tool activity remains compact. Streamed Markdown commits only
+complete lines, paces stable rows with adaptive catch-up, keeps active tables in
+a replaceable tail, and provisionally completes a candidate table before
+painting it so raw pipe rows never flash or move the scrollbar. Tables use
+compact rounded cards with a soft header surface and a stacked narrow-screen
+fallback while preserving code, URLs, Unicode graphemes, headings, and every
+cell value. Tail-only updates reuse the already-wrapped transcript prefix
+instead of rebuilding the full viewport.
 
 | Surface | What you see and control |
 | --- | --- |
@@ -790,7 +793,9 @@ mode; the second enters the session with the goal still paused, where
 The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
 prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
 the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
-auto-approves read-only discovery tools but still asks before writes. Tool
+auto-approves read-only discovery tools but still asks before writes. Auto mode
+silently approves every operation that reaches HITL; hard permission denials
+remain non-bypassable and never enter the confirmation overlay. Tool
 timeouts and confirmation timeouts are tracked separately so a human approval
 pause does not consume the command runtime budget.
 

@@ -440,10 +440,7 @@ impl App {
                     );
                 }
                 self.update_viewport_with_stream();
-                if self
-                    .mode
-                    .auto_approves(&tool_name, &args, Path::new(&self.cwd))
-                {
+                if self.mode.auto_approves_confirmation() {
                     // Silent: the mode indicator already shows auto-approve is on;
                     // a line per tool is just noise. Do NOT start another
                     // spinner_tick here — the turn's tick loop is already running

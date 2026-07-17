@@ -563,7 +563,7 @@ pub(super) enum Mode {
     Default,
     /// Exploration/planning mode: safe reads run quietly and side effects prompt.
     Plan,
-    /// Streamlined mode: bounded workspace edits auto-run; unbounded operations still prompt.
+    /// Auto-approve every confirmable operation; hard permission denials remain blocked.
     Auto,
 }
 
@@ -601,25 +601,12 @@ impl Mode {
         }
     }
 
-    /// Whether a pending risk-aware confirmation is auto-approved in this mode.
-    pub(super) fn auto_approves(
-        self,
-        tool: &str,
-        args: &serde_json::Value,
-        workspace: &Path,
-    ) -> bool {
-        match self {
-            Mode::Auto => {
-                let checker =
-                    a3s_code_core::permissions::InteractiveToolGuardrail::for_mode("auto")
-                        .with_workspace(workspace);
-                a3s_code_core::permissions::PermissionChecker::check(&checker, tool, args)
-                    == a3s_code_core::permissions::PermissionDecision::Allow
-            }
-            // Known-safe operations never emit a confirmation event. If one is
-            // pending, default and plan modes always leave the decision to HITL.
-            Mode::Plan | Mode::Default => false,
-        }
+    /// Whether an operation that already reached Core's confirmable `Ask`
+    /// branch should be approved without opening the HITL overlay. Critical
+    /// operations never call this method because Core emits `PermissionDenied`
+    /// for them before a confirmation can be requested.
+    pub(super) const fn auto_approves_confirmation(self) -> bool {
+        matches!(self, Mode::Auto)
     }
 }
 

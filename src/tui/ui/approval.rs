@@ -146,7 +146,7 @@ impl ApprovalPrompt {
     fn option_line(&self, index: usize, width: usize) -> String {
         let (glyph, label, glyph_color) = match index {
             0 => ("↵", "Allow once", TN_SUBTLE),
-            1 => ("∞", "Enable streamlined auto mode", TN_SUBTLE),
+            1 => ("∞", "Enable auto mode", TN_SUBTLE),
             _ => ("⊘", "Deny", TN_RED),
         };
         let marker = if index == self.selected_index() {
@@ -221,7 +221,7 @@ mod tests {
         assert!(plain.iter().any(|line| line.contains("1  ↵ Allow once")));
         assert!(plain
             .iter()
-            .any(|line| line.contains("2  ∞ Enable streamlined auto mode")));
+            .any(|line| line.contains("2  ∞ Enable auto mode")));
         assert!(plain.iter().any(|line| line.contains("3  ⊘ Deny")));
         assert!(lines[0].contains(&TN_YELLOW.fg_ansi()));
         assert!(lines.iter().any(|line| line.contains(&TN_RED.fg_ansi())));

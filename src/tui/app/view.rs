@@ -483,7 +483,10 @@ impl App {
             blocks.push(reasoning);
         }
         if !self.streaming.raw_content().is_empty() {
-            blocks.push(gutter(TN_GRAY, &self.streaming.full_view()));
+            let block = assistant_block(&self.streaming.full_view(), content_width);
+            if !block.is_empty() {
+                blocks.push(block);
+            }
         }
         let plan = self.plan_lines();
         if !plan.is_empty() {
@@ -574,19 +577,17 @@ impl App {
         if !blocks.is_empty() {
             prefix.push_str(&join_transcript_blocks(&blocks));
         }
-        if !stable.is_empty() {
+        let suffix = if let Some((stream_prefix, stream_suffix)) =
+            assistant_stream_block_parts(&stable, &tail, content_width)
+        {
             if !blocks.is_empty() {
                 prefix.push('\n');
             }
-            prefix.push_str(&gutter(TN_GRAY, &stable));
-            prefix.push('\n');
+            prefix.push_str(&stream_prefix);
+            format!("{stream_suffix}\n")
         } else {
             prefix.push('\n');
-        }
-        let suffix = if tail.is_empty() {
             String::new()
-        } else {
-            format!("{}\n", gutter(TN_GRAY, &tail))
         };
         // Stable stream rows live in the retained prefix; only the
         // structurally mutable Markdown tail is replaced. Finalization still

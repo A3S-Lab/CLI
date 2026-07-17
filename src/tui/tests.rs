@@ -1363,7 +1363,7 @@ fn rendered_stream_rows_from_chunks(screen_width: u16, chunks: &[&str]) -> Vec<S
     for chunk in chunks {
         streaming.push(chunk);
     }
-    let block = gutter(TN_GRAY, &streaming.final_view());
+    let block = assistant_block(&streaming.final_view(), viewport_width);
     let mut viewport = Viewport::new(viewport_width as u16, 12).with_auto_scroll(false);
     viewport.set_content(&format!("\n{block}\n"));
 
@@ -1393,6 +1393,36 @@ fn composer_and_transcript_share_the_scrollbar_aware_width_budget() {
 
 fn rendered_stream_rows(screen_width: u16, text: &str) -> Vec<String> {
     rendered_stream_rows_from_chunks(screen_width, &[text])
+}
+
+#[test]
+fn streaming_and_finalized_assistant_blocks_keep_the_same_padding_rows() {
+    let width = 40_u16;
+    let content_width = viewport_content_width_for(width);
+    let source = "alpha line\nbeta line\n";
+    let mut streaming = StreamingMarkdown::new(transcript_markdown_width_for(width));
+    assert!(streaming.push(source));
+    assert!(streaming.commit_tick(Instant::now() + Duration::from_secs(1)));
+
+    let stable = streaming.visible_stable_view();
+    assert!(!stable.is_empty());
+    let (prefix, suffix) =
+        assistant_stream_block_parts(&stable, &streaming.tail_view(), content_width)
+            .expect("stream block");
+    let live = a3s_tui::style::strip_ansi(&format!("{prefix}{suffix}"));
+    let finalized = a3s_tui::style::strip_ansi(
+        &TranscriptEntry::assistant_markdown(source).render(width, content_width),
+    );
+
+    assert_eq!(live, finalized);
+    let rows = live.lines().collect::<Vec<_>>();
+    assert!(rows.first().is_some_and(|row| row == &" "), "{live:?}");
+    assert!(rows.last().is_some_and(|row| row == &" "), "{live:?}");
+    assert_eq!(
+        rows.iter().filter(|row| row.trim().is_empty()).count(),
+        2,
+        "{live:?}"
+    );
 }
 
 fn assert_assistant_rows_aligned(rows: &[String], viewport_width: usize) {
@@ -1494,10 +1524,7 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
     assert!(plain[0].contains("◆ Permission required"), "{plain:?}");
     assert!(plain[1].contains("Run"), "{plain:?}");
     assert!(plain[3].contains("1  ↵ Allow once"), "{plain:?}");
-    assert!(
-        plain[4].contains("2  ∞ Enable streamlined auto mode"),
-        "{plain:?}"
-    );
+    assert!(plain[4].contains("2  ∞ Enable auto mode"), "{plain:?}");
     assert!(plain[5].contains("3  ⊘ Deny"), "{plain:?}");
     assert!(plain[6].contains("Enter select"), "{plain:?}");
     assert!(
@@ -6137,21 +6164,20 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
 }
 
 #[test]
-fn tui_auto_uses_shared_selective_guardrail_routing() {
+fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
     use a3s_code_core::permissions::{
         InteractiveToolGuardrail, PermissionChecker, PermissionDecision, ToolRiskAction,
         ToolRiskLevel,
     };
 
     let checker = InteractiveToolGuardrail::for_mode("auto").with_workspace(Path::new("."));
-    for (tool, args, level, action, permission, auto_approved) in [
+    for (tool, args, level, action, permission) in [
         (
             "read",
             serde_json::json!({"file_path": "README.md"}),
             ToolRiskLevel::Routine,
             ToolRiskAction::Allow,
             PermissionDecision::Allow,
-            true,
         ),
         (
             "write",
@@ -6159,7 +6185,6 @@ fn tui_auto_uses_shared_selective_guardrail_routing() {
             ToolRiskLevel::Bounded,
             ToolRiskAction::Allow,
             PermissionDecision::Allow,
-            true,
         ),
         (
             "bash",
@@ -6167,7 +6192,6 @@ fn tui_auto_uses_shared_selective_guardrail_routing() {
             ToolRiskLevel::High,
             ToolRiskAction::ReviewByLlm,
             PermissionDecision::Ask,
-            false,
         ),
         (
             "bash",
@@ -6175,43 +6199,24 @@ fn tui_auto_uses_shared_selective_guardrail_routing() {
             ToolRiskLevel::Critical,
             ToolRiskAction::RuleDeny,
             PermissionDecision::Deny,
-            false,
         ),
     ] {
         assert_eq!(checker.assess(tool, &args).level, level);
         assert_eq!(checker.risk_action(tool, &args), action);
         assert_eq!(checker.check(tool, &args), permission);
-        assert_eq!(
-            Mode::Auto.auto_approves(tool, &args, Path::new(".")),
-            auto_approved,
-            "TUI auto routing drifted from the shared guardrail for {tool}"
-        );
     }
 }
 
 #[test]
-fn auto_mode_retains_hitl_for_unbounded_tools() {
-    let mode = Mode::Auto;
+fn auto_mode_approves_every_confirmation_required_tool() {
+    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
+    let checker = TuiHitlPermissionChecker::new(
+        tui_permission_policy(),
+        DeepResearchReportToolGate::default(),
+    );
     for (tool, args) in [
         ("write", serde_json::json!({"file_path": "README.md"})),
-        (
-            "git",
-            serde_json::json!({"command": "checkout", "ref": "feature"}),
-        ),
-        (
-            "batch",
-            serde_json::json!({"invocations": [
-                {"tool": "write", "args": {"file_path": "README.md"}}
-            ]}),
-        ),
-    ] {
-        assert!(
-            mode.auto_approves(tool, &args, Path::new(".")),
-            "{tool} should stay streamlined"
-        );
-    }
-    for (tool, args) in [
         ("bash", serde_json::json!({"command": "cargo test"})),
         ("runtime", serde_json::json!({"tasks": ["external work"]})),
         ("program", serde_json::json!({"source": "return 1"})),
@@ -6240,11 +6245,16 @@ fn auto_mode_retains_hitl_for_unbounded_tools() {
             ]}),
         ),
     ] {
-        assert!(
-            !mode.auto_approves(tool, &args, Path::new(".")),
-            "{tool} must retain an explicit HITL boundary in auto mode"
+        assert_eq!(
+            checker.check(tool, &args),
+            PermissionDecision::Ask,
+            "{tool} must reach HITL instead of bypassing a hard denial"
         );
+        assert!(Mode::Auto.auto_approves_confirmation());
     }
+
+    assert!(!Mode::Default.auto_approves_confirmation());
+    assert!(!Mode::Plan.auto_approves_confirmation());
 }
 
 #[test]
