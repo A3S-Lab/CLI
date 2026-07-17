@@ -40,18 +40,21 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
         .unwrap_or((0, 0))
 }
 
-// Per-source accents, tuned to the DESIGN.md brand palette.
-const A3S_COLOR: Color = ACCENT;
-const CLAUDE_COLOR: Color = TN_ORANGE;
-const CODEX_COLOR: Color = TN_CYAN;
-const CODEBUDDY_COLOR: Color = TN_PURPLE;
+// Verified provider brand colors used by the `/model` source tabs.
+const A3S_COLOR: Color = Color::Rgb(108, 163, 255);
+const CLAUDE_COLOR: Color = Color::Rgb(217, 119, 87);
+const CODEX_COLOR: Color = Color::Rgb(16, 163, 127);
+const KIMI_COLOR: Color = Color::Rgb(23, 131, 255);
+const WORKBUDDY_COLOR: Color = Color::Rgb(12, 200, 164);
+const OS_GATEWAY_COLOR: Color = Color::Rgb(116, 108, 240);
 const CODEX_MODEL_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 fn account_provider_color(provider: AccountProvider) -> Color {
     match provider {
         AccountProvider::Claude => CLAUDE_COLOR,
         AccountProvider::Codex => CODEX_COLOR,
-        AccountProvider::CodeBuddy => CODEBUDDY_COLOR,
+        AccountProvider::Kimi => KIMI_COLOR,
+        AccountProvider::CodeBuddy => WORKBUDDY_COLOR,
     }
 }
 
@@ -124,6 +127,8 @@ fn model_menu_panel(
         .hint_color(TN_GRAY)
         .text_color(TN_GRAY)
         .muted_color(TN_GRAY)
+        .inactive_tabs_use_tab_color(true)
+        .active_tab_foreground(Color::Rgb(0, 0, 0))
         .selected_colors(TN_FG, SURFACE_SELECTED)
 }
 
@@ -330,7 +335,7 @@ impl App {
             };
             tabs.push(ModelTab {
                 label: "OS Gateway",
-                color: TN_CYAN,
+                color: OS_GATEWAY_COLOR,
                 models,
                 source: ModelSelectionSource::OsGateway,
             });
@@ -529,6 +534,7 @@ impl App {
             ModelSelectionSource::Config => model.and_then(|model| self.switch_model(&model)),
             ModelSelectionSource::Claude
             | ModelSelectionSource::Codex
+            | ModelSelectionSource::Kimi
             | ModelSelectionSource::CodeBuddy => model.and_then(|model| {
                 let provider = tab.source.account_provider()?;
                 self.sign_in_account(provider, &model)
@@ -1047,6 +1053,7 @@ impl App {
                     ModelSelectionSource::Config => format!("switched to {model}"),
                     ModelSelectionSource::Claude => format!("Claude Code · {model}"),
                     ModelSelectionSource::Codex => format!("Codex · {model}"),
+                    ModelSelectionSource::Kimi => format!("Kimi · {model}"),
                     ModelSelectionSource::CodeBuddy => format!("WorkBuddy · {model}"),
                     ModelSelectionSource::OsGateway => format!("OS Gateway · {model}"),
                 };
@@ -1296,6 +1303,90 @@ impl App {
 mod tests {
     use super::*;
 
+    fn provider_brand_tabs() -> Vec<ModelTab> {
+        [
+            ("a3s-code", A3S_COLOR),
+            ("Claude Code", CLAUDE_COLOR),
+            ("Codex", CODEX_COLOR),
+            ("Kimi", KIMI_COLOR),
+            ("WorkBuddy", WORKBUDDY_COLOR),
+            ("OS Gateway", OS_GATEWAY_COLOR),
+        ]
+        .into_iter()
+        .map(|(label, color)| ModelTab {
+            label,
+            color,
+            models: vec!["provider-model".into()],
+            source: ModelSelectionSource::Config,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn model_provider_brand_colors_match_verified_rgb_values() {
+        assert_eq!(A3S_COLOR, Color::Rgb(108, 163, 255));
+        assert_eq!(CLAUDE_COLOR, Color::Rgb(217, 119, 87));
+        assert_eq!(CODEX_COLOR, Color::Rgb(16, 163, 127));
+        assert_eq!(KIMI_COLOR, Color::Rgb(23, 131, 255));
+        assert_eq!(WORKBUDDY_COLOR, Color::Rgb(12, 200, 164));
+        assert_eq!(OS_GATEWAY_COLOR, Color::Rgb(116, 108, 240));
+        assert_eq!(
+            account_provider_color(AccountProvider::Claude),
+            CLAUDE_COLOR
+        );
+        assert_eq!(account_provider_color(AccountProvider::Codex), CODEX_COLOR);
+        assert_eq!(account_provider_color(AccountProvider::Kimi), KIMI_COLOR);
+        assert_eq!(
+            account_provider_color(AccountProvider::CodeBuddy),
+            WORKBUDDY_COLOR
+        );
+    }
+
+    #[test]
+    fn model_menu_inactive_tabs_keep_provider_brand_colors() {
+        let tabs = provider_brand_tabs();
+        let height = model_menu_height(&tabs, 0, 3);
+
+        for active_tab in 0..tabs.len() {
+            let rendered = model_menu_panel(&tabs, active_tab, 0, None, 3).view(160, height);
+            for (tab_index, tab) in tabs.iter().enumerate() {
+                if tab_index == active_tab {
+                    continue;
+                }
+                let chip = format!(" {} ", tab.label);
+                let expected = Style::new().fg(tab.color).render(&chip);
+                assert!(
+                    rendered.contains(&expected),
+                    "inactive {} tab lost its brand color: {:?}",
+                    tab.label,
+                    a3s_tui::style::strip_ansi(&rendered)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_menu_active_tabs_use_dark_foreground_on_brand_backgrounds() {
+        let tabs = provider_brand_tabs();
+        let height = model_menu_height(&tabs, 0, 3);
+
+        for (active_tab, tab) in tabs.iter().enumerate() {
+            let rendered = model_menu_panel(&tabs, active_tab, 0, None, 3).view(160, height);
+            let chip = format!(" {} ", tab.label);
+            let expected = Style::new()
+                .fg(Color::Rgb(0, 0, 0))
+                .bg(tab.color)
+                .bold()
+                .render(&chip);
+            assert!(
+                rendered.contains(&expected),
+                "active {} tab did not use dark text on its brand background: {:?}",
+                tab.label,
+                a3s_tui::style::strip_ansi(&rendered)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn async_rebuild_initializes_default_file_memory() {
         let root = std::env::temp_dir().join(format!(
@@ -1468,7 +1559,7 @@ mod tests {
         };
         let gateway_tab = ModelTab {
             label: "OS Gateway",
-            color: TN_CYAN,
+            color: OS_GATEWAY_COLOR,
             models: vec!["(loading…)".into()],
             source: ModelSelectionSource::OsGateway,
         };
@@ -1522,9 +1613,15 @@ mod tests {
         };
         let workbuddy_tab = ModelTab {
             label: "WorkBuddy",
-            color: CODEBUDDY_COLOR,
+            color: WORKBUDDY_COLOR,
             models: vec!["auto".into()],
             source: ModelSelectionSource::CodeBuddy,
+        };
+        let kimi_tab = ModelTab {
+            label: "Kimi",
+            color: KIMI_COLOR,
+            models: vec!["k3-agent".into()],
+            source: ModelSelectionSource::Kimi,
         };
         let codex_tab = ModelTab {
             label: "Codex",
@@ -1541,6 +1638,12 @@ mod tests {
         ));
         assert!(should_fetch_account_models(
             Some(&workbuddy_tab),
+            false,
+            false,
+            false
+        ));
+        assert!(should_fetch_account_models(
+            Some(&kimi_tab),
             false,
             false,
             false

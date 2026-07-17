@@ -5,13 +5,36 @@ use super::*;
 /// PTC source used by the `?` DeepResearch workflow. The workflow function is
 /// deterministic and only schedules work; side effects live in Flow steps.
 pub(super) fn deep_research_workflow_source() -> &'static str {
-    concat!(
-        include_str!("workflow/collection.js"),
-        include_str!("workflow/direct_collection.js"),
-        include_str!("workflow/policy.js"),
-        include_str!("workflow/loop.js"),
-        include_str!("workflow/runtime.js")
-    )
+    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SOURCE.get_or_init(|| {
+        compact_workflow_source(concat!(
+            include_str!("workflow/collection.js"),
+            include_str!("workflow/direct_collection.js"),
+            include_str!("workflow/policy.js"),
+            include_str!("workflow/loop_prelude.js"),
+            include_str!("workflow/loop.js"),
+            include_str!("workflow/runtime.js")
+        ))
+    })
+}
+
+fn compact_workflow_source(source: &str) -> String {
+    let mut compact = String::with_capacity(source.len());
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("//") {
+            continue;
+        }
+        compact.push_str(line);
+        // These punctuators unambiguously separate JavaScript tokens, so a
+        // newline after them carries no ASI meaning. Preserve every other
+        // newline to keep `return`, postfix operators, regex literals, and
+        // future workflow edits safe without depending on an opaque minifier.
+        if !matches!(line.as_bytes().last(), Some(b';' | b',' | b'{')) {
+            compact.push('\n');
+        }
+    }
+    compact
 }
 
 pub(super) fn deep_research_report_target_note(query: &str) -> String {

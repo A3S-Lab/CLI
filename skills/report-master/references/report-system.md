@@ -2,6 +2,17 @@
 
 This is the execution kernel for `report-master`. It transfers the strategy, specification-lock, page-rhythm, semantic-visualization, anti-drift, and rendered-review principles of `ppt-master` to evidence-grounded long-form reports.
 
+## Contents
+
+1. [Build an evidence model before an outline](#1-build-an-evidence-model-before-an-outline)
+2. [Strategist pass](#2-strategist-pass)
+3. [Lock the report specification](#3-lock-the-report-specification)
+4. [Select visual forms by semantic fit](#4-select-visual-forms-by-semantic-fit)
+5. [Execute section by section](#5-execute-section-by-section)
+6. [Visual system requirements](#6-visual-system-requirements)
+7. [Visual review and repair](#7-visual-review-and-repair)
+8. [Rejection conditions](#8-rejection-conditions)
+
 ## 1. Build an evidence model before an outline
 
 Create a compact internal inventory with four distinct concepts:
@@ -52,6 +63,8 @@ Section sequence:
 
 The dominant thesis is a one-sentence answer, not a topic label. The section sequence must advance that thesis; remove any section whose only purpose is “showing more research.”
 
+Before locking art direction, apply an identity test: name the dominant information relationship, the reader's intended use, and the structural choice that follows. If the rationale would still fit an unrelated report after removing topic nouns, reject it as generic. Structural choice means hero, navigation, rhythm, geometry, or composition—not palette alone.
+
 ### Communication mode: how the report argues
 
 Choose one dominant mode. A section may lean differently, but do not blend modes accidentally.
@@ -76,6 +89,8 @@ In host-rendered reports choose one approved archetype. This is a layout decisio
 - **Field notes** — observations, case work, exploratory findings, and qualified interpretation with an annotated-paper character.
 
 Then independently choose an approved palette (`ocean`, `graphite`, `forest`, `amber`, `plum`), density (`compact`, `balanced`, `spacious`), hero (`statement`, `split`, `metrics`), and stance (`safe`, `shifted`, `bold`). The combination must be explained by audience and information structure. Never map a subject keyword directly to a template or palette.
+
+Choose a metrics hero only when an evidence profile helps the reader evaluate the work; do not elevate source, section, or reading-time counts merely to fill the cover. A statement hero is a genuinely thesis-only cover. A split hero uses its second region as a reading path; a metrics hero alone uses the evidence profile.
 
 ### Visual-style position: how the report looks
 
@@ -132,6 +147,16 @@ Build a private section map:
 | Section | Editorial purpose | Key claim | Evidence | Rhythm | Composition | Why it fits | Rejected runner-up |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 
+For a host-owned structured response, translate this map into the compact `presentation.section_plan` only after the Markdown outline is final. Keep no more than 12 H2 sections. Copy each H2 exactly and emit one entry per H2, in report order:
+
+```text
+heading: exact H2 text
+rhythm: anchor | dense | breathing
+composition: prose | key_points | comparison | timeline | process | evidence | source_ledger
+```
+
+The renderer rejects missing, renamed, or duplicate headings. Do not use the plan as another outline or rationale; its only job is to bind semantic sections to safe compositions.
+
 ## 4. Select visual forms by semantic fit
 
 Choose the smallest form that makes the relationship easier to understand.
@@ -162,7 +187,7 @@ For every major section:
 
 Use deterministic CSS tokens for consistency, but do not batch-stamp identical HTML across sections. Shared scaffolding is appropriate; editorial composition requires per-section judgment.
 
-In host-owned DeepResearch, express the strategy through the structured `editorial` and `presentation` fields. The host applies a safe renderer whose variants implement these composition families. Never return arbitrary HTML, CSS, class names, scripts, or network assets in those fields. In ordinary file-authoring mode, execute the same lock directly in the standalone HTML.
+In host-owned DeepResearch, express the strategy through the structured `editorial` and `presentation` fields. The host applies a safe renderer whose global variants and section plan implement these composition families. Never return arbitrary HTML, CSS, class names, scripts, or network assets in those fields. In ordinary file-authoring mode, execute the same lock directly in the standalone HTML.
 
 The cover establishes subject, scope, evidence date, and visual thesis. It must not reproduce the full user prompt. The executive summary answers the question with conclusion, strongest support, implication, and confidence boundary. Methodology and source quality remain compact and secondary. The ending synthesizes consequences or next actions; it must not merely repeat the summary.
 

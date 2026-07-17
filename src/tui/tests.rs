@@ -1957,7 +1957,7 @@ fn deep_research_prompt_directs_research_and_keeps_query() {
     assert!(p.contains("Do not call tools"), "{p}");
     assert!(p.contains("or print an `A3S_RESEARCH_VIEW` marker"), "{p}");
     assert!(p.contains("appends the trusted view marker"), "{p}");
-    assert!(p.contains("host-owned renderer"), "{p}");
+    assert!(p.contains("copy every H2 exactly"), "{p}");
     assert!(p.contains("Do not repeat an identical grep"), "{p}");
 }
 
@@ -4714,8 +4714,9 @@ fn deep_research_workflow_args_force_local_even_when_runtime_requested() {
             "disabled OS Runtime branches should not consume workflow source or schedule work: {source}"
         );
     assert!(
-        source.contains("providedTracks.length > 0 ? providedTracks : fallbackTracks"),
-        "{source}"
+        source.contains("const tracks = providedTracks.slice(0, maxLocalParallelTasks)")
+            && !source.contains("fallbackTracks"),
+        "production DeepResearch must use the LLM plan instead of a hidden fallback template: {source}"
     );
     assert!(source.contains("direct_web_research"), "{source}");
     assert!(source.contains("direct_web_search_fetch"), "{source}");
@@ -4825,7 +4826,7 @@ fn deep_research_workflow_args_force_local_even_when_runtime_requested() {
     );
     assert!(
         source.len() <= 128 * 1024,
-        "embedded DeepResearch workflow must stay executable: {} bytes",
+        "embedded DeepResearch workflow must remain compatible with the published 128 KiB program limit: {} bytes",
         source.len()
     );
     assert!(
@@ -4899,6 +4900,96 @@ fn deep_research_collection_status_follows_research_outcome() {
     assert!(deep_research_workflow_needs_recovery_report(
         &partial_with_evidence.to_string()
     ));
+
+    let checker_degraded = serde_json::json!({
+        "mode": "direct_web_degraded",
+        "checker": {
+            "decision": "degrade",
+            "coverage_summary": "Traceable evidence is useful, but one planned comparison remains unresolved."
+        },
+        "research": partial_with_evidence["research"].clone()
+    });
+    assert_eq!(
+        deep_research_collection_status(&checker_degraded),
+        "degraded"
+    );
+    assert!(!deep_research_workflow_needs_recovery_report(
+        &checker_degraded.to_string()
+    ));
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Compare the options",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &checker_degraded.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Qualified,
+    );
+
+    let checker_degraded_with_truncated_output = serde_json::json!({
+        "mode": "hybrid_direct_web_parallel_degraded",
+        "checker": {
+            "decision": "degrade",
+            "coverage_summary": "One planned track remains unresolved."
+        },
+        "research": {
+            "status": "partial_success",
+            "results": [{
+                "success": true,
+                "truncated_for_context": true,
+                "structured": null
+            }]
+        }
+    });
+    let full_evidence_metadata = serde_json::json!({
+        "dynamic_workflow": {
+            "snapshot": {
+                "steps": {
+                    "local_research": {
+                        "output": {
+                            "metadata": {
+                                "results": [{
+                                    "success": true,
+                                    "structured": {
+                                        "summary": "The full event metadata retained useful evidence.",
+                                        "sources": [{
+                                            "title": "Official evidence",
+                                            "url_or_path": "https://example.com/full-evidence",
+                                            "quote_or_fact": "The source-backed finding survived output truncation.",
+                                            "reliability": "Official source"
+                                        }],
+                                        "key_evidence": ["The finding is source-backed."],
+                                        "contradictions": [],
+                                        "confidence": "medium",
+                                        "gaps": []
+                                    }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    assert!(deep_research_workflow_needs_recovery_report(
+        &checker_degraded_with_truncated_output.to_string()
+    ));
+    assert!(
+        !deep_research_workflow_needs_recovery_report_with_metadata(
+            &checker_degraded_with_truncated_output.to_string(),
+            Some(&full_evidence_metadata),
+        ),
+        "metadata-retained evidence must produce a qualified report instead of generic recovery"
+    );
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Compare the options",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &checker_degraded_with_truncated_output.to_string(),
+            Some(&full_evidence_metadata),
+        ),
+        DeepResearchRunOutcome::Qualified,
+    );
 
     let finalized_partial = serde_json::json!({
         "mode": "direct_web",

@@ -1,4 +1,7 @@
 use super::*;
+use crate::tui::deep_research_report_generation::{
+    ReportSectionComposition, ReportSectionRhythm, ReportSectionTreatment,
+};
 
 #[test]
 fn markdown_report_html_renders_safe_clickable_sources() {
@@ -123,7 +126,7 @@ fn editorial_report_uses_distinct_information_shapes_instead_of_one_markdown_she
     for class in [
         "section--summary",
         "section--findings",
-        "class=\"finding\"",
+        "class=\"key-point\"",
         "section--matrix",
         "class=\"table-wrap\"",
         "section--caveats",
@@ -147,6 +150,23 @@ fn report_master_presentation_changes_the_site_composition_for_the_same_content(
         hero: crate::tui::deep_research_report_generation::ReportHero::Metrics,
         visual_stance: crate::tui::deep_research_report_generation::ReportVisualStance::Safe,
         rationale: "Dense comparison for a decision reader.".to_string(),
+        section_plan: vec![
+            ReportSectionTreatment {
+                heading: "Executive Summary".to_string(),
+                rhythm: ReportSectionRhythm::Anchor,
+                composition: ReportSectionComposition::Prose,
+            },
+            ReportSectionTreatment {
+                heading: "Key Findings".to_string(),
+                rhythm: ReportSectionRhythm::Dense,
+                composition: ReportSectionComposition::KeyPoints,
+            },
+            ReportSectionTreatment {
+                heading: "Sources".to_string(),
+                rhythm: ReportSectionRhythm::Breathing,
+                composition: ReportSectionComposition::SourceLedger,
+            },
+        ],
     };
     let chronicle = ReportPresentation {
         narrative_mode: crate::tui::deep_research_report_generation::ReportNarrativeMode::Narrative,
@@ -156,6 +176,23 @@ fn report_master_presentation_changes_the_site_composition_for_the_same_content(
         hero: crate::tui::deep_research_report_generation::ReportHero::Statement,
         visual_stance: crate::tui::deep_research_report_generation::ReportVisualStance::Bold,
         rationale: "Ordered change needs a chronological reading rhythm.".to_string(),
+        section_plan: vec![
+            ReportSectionTreatment {
+                heading: "Executive Summary".to_string(),
+                rhythm: ReportSectionRhythm::Breathing,
+                composition: ReportSectionComposition::Prose,
+            },
+            ReportSectionTreatment {
+                heading: "Key Findings".to_string(),
+                rhythm: ReportSectionRhythm::Anchor,
+                composition: ReportSectionComposition::Timeline,
+            },
+            ReportSectionTreatment {
+                heading: "Sources".to_string(),
+                rhythm: ReportSectionRhythm::Dense,
+                composition: ReportSectionComposition::SourceLedger,
+            },
+        ],
     };
 
     let analytical_html = deep_research_completed_report_html_with_presentation(
@@ -179,7 +216,26 @@ fn report_master_presentation_changes_the_site_composition_for_the_same_content(
     ));
     assert!(analytical_html.contains("The evidence supports an immediate bounded decision."));
     assert!(chronicle_html.contains("The evidence explains how the situation changed over time."));
+    assert!(analytical_html.contains("class=\"evidence-profile\""));
+    assert!(!chronicle_html.contains("class=\"evidence-profile\""));
+    assert!(analytical_html.contains("rhythm-dense composition-key-points"));
+    assert!(chronicle_html.contains("rhythm-anchor composition-timeline"));
     assert_ne!(analytical_html, chronicle_html);
+}
+
+#[test]
+fn split_hero_uses_the_report_reading_path_instead_of_decorative_metrics() {
+    let presentation = ReportPresentation::default();
+    let html = deep_research_completed_report_html_with_presentation(
+        "A bounded decision",
+        "# Decision\n\n## Answer\n\nAct now.\n\n## Trade-offs\n\nThe boundary is explicit.\n\n## Sources\n\n- [Source](https://example.com)",
+        Some(&presentation),
+        Some("The evidence changes the decision boundary."),
+    );
+
+    assert!(html.contains("class=\"hero-map\""), "{html}");
+    assert!(html.contains("Reading path"), "{html}");
+    assert!(!html.contains("class=\"evidence-profile\""), "{html}");
 }
 
 #[test]
@@ -251,7 +307,7 @@ fn print_layout_does_not_expand_every_inline_link_or_pin_large_tables() {
 
     assert!(!html.contains("attr(href)"), "{html}");
     assert!(
-        html.contains(".finding, tr { break-inside: avoid; }"),
+        html.contains(".key-point, .timeline-entry, .process-step, tr { break-inside: avoid; }"),
         "{html}"
     );
     assert!(html.contains(".table-wrap { overflow: visible;"), "{html}");
@@ -268,7 +324,7 @@ fn editorial_report_counts_unique_external_source_urls() {
         html.contains("<strong>02</strong><span>Cited sources</span>"),
         "{html}"
     );
-    assert!(html.contains("Cited sources: 2"), "{html}");
+    assert!(!html.contains("Cited sources: 2"), "{html}");
 }
 
 #[test]
@@ -307,7 +363,7 @@ fn editorial_lead_style_targets_paragraph_after_first_section_heading() {
         "{html}"
     );
     assert!(
-        html.contains("class=\"report-section section--summary\"")
+        html.contains("class=\"report-section section--summary rhythm-anchor composition-prose\"")
             && html.contains("<h2>Executive summary</h2>")
             && html.contains("<p>This paragraph is the report lead.</p>"),
         "{html}"
@@ -315,19 +371,59 @@ fn editorial_lead_style_targets_paragraph_after_first_section_heading() {
 }
 
 #[test]
-fn mobile_rail_keeps_source_label_and_value_semantically_visible() {
+fn mobile_rail_keeps_navigation_without_decorative_section_counts() {
     let html = deep_research_completed_report_html(
         "Mobile metadata",
         "# Mobile metadata\n\n## Summary\n\nLead.\n\n## Sources\n\n- [Source](https://example.com)",
     );
 
+    assert!(html.contains("class=\"toc\""), "{html}");
+    assert!(html.contains("href=\"#section-2\""), "{html}");
+    assert!(!html.contains("rail-stat"), "{html}");
+}
+
+#[test]
+fn analytical_mobile_layout_overrides_the_archetype_sidebar_grid() {
+    let html = deep_research_completed_report_html_with_presentation(
+        "Responsive analysis",
+        "# Responsive analysis\n\n## Findings\n\nThe bounded conclusion.\n\n## Sources\n\n- [Source](https://example.com)",
+        Some(&ReportPresentation {
+            archetype: crate::tui::deep_research_report_generation::ReportArchetype::Analytical,
+            ..ReportPresentation::default()
+        }),
+        Some("The layout must preserve a readable article width on narrow screens."),
+    );
+
     assert!(
-        html.contains("<dl class=\"rail-stat\"><dt>Story sections</dt><dd>02</dd></dl>"),
+        html.contains("body.archetype-analytical .report-shell { grid-template-columns:1fr; }"),
+        "{html}"
+    );
+}
+
+#[test]
+fn print_source_ledger_is_single_column_and_does_not_create_a_footer_only_page() {
+    let html = deep_research_completed_report_html(
+        "Printable sources",
+        "# Printable sources\n\n## Sources\n\n- [One](https://example.com/one)\n- [Two](https://example.com/two)",
+    );
+
+    assert!(
+        html.contains(".composition-source-ledger { break-inside:avoid; }"),
         "{html}"
     );
     assert!(
-        html.contains(".rail-stat{flex-direction:row;align-items:baseline"),
+        html.contains(
+            ".composition-source-ledger .section-body > ul { grid-template-columns:1fr; }"
+        ),
         "{html}"
     );
-    assert!(!html.contains(".rail-stat dt{display:none}"), "{html}");
+    assert!(
+        html.contains(".composition-source-ledger .section-body > ul > li { padding:10px 12px 10px 44px; break-inside:avoid;"),
+        "{html}"
+    );
+    assert!(
+        html.contains("body.density-compact main, body.density-spacious main, main { max-width: none; padding: 20px 0 0; }"),
+        "{html}"
+    );
+    assert!(html.contains(".footer-note { display:none; }"), "{html}");
 }

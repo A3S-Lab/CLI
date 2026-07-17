@@ -10,6 +10,7 @@ mod cli_transport;
 mod codebuddy;
 pub(crate) mod codex;
 mod host_tools;
+mod kimi;
 mod protocol;
 
 use a3s_code_core::llm::LlmClient;
@@ -22,16 +23,18 @@ use std::sync::Arc;
 pub(crate) enum AccountProvider {
     Claude,
     Codex,
+    Kimi,
     CodeBuddy,
 }
 
 impl AccountProvider {
-    pub(crate) const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::CodeBuddy];
+    pub(crate) const ALL: [Self; 4] = [Self::Claude, Self::Codex, Self::Kimi, Self::CodeBuddy];
 
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Kimi => "Kimi",
             Self::CodeBuddy => "WorkBuddy",
         }
     }
@@ -41,6 +44,7 @@ impl AccountProvider {
         match self {
             Self::Claude => claude::has_claude_login(),
             Self::Codex => codex::has_codex_login(),
+            Self::Kimi => kimi::has_kimi_login(),
             Self::CodeBuddy => codebuddy::has_workbuddy_login(),
         }
     }
@@ -57,6 +61,7 @@ impl AccountProvider {
                 .into_iter()
                 .map(|model| model.slug)
                 .collect(),
+            Self::Kimi => kimi::fallback_models(),
             Self::CodeBuddy => codebuddy::fallback_models(),
         }
     }
@@ -70,6 +75,7 @@ impl AccountProvider {
                 .into_iter()
                 .map(|model| model.slug)
                 .collect()),
+            Self::Kimi => kimi::discover_models().await,
             Self::CodeBuddy => codebuddy::discover_models().await,
         }
     }
@@ -77,7 +83,7 @@ impl AccountProvider {
     pub(crate) fn canonical_model(self, model: &str) -> String {
         match self {
             Self::Claude => claude::canonical_model_name(model),
-            Self::Codex | Self::CodeBuddy => model.trim().to_string(),
+            Self::Codex | Self::Kimi | Self::CodeBuddy => model.trim().to_string(),
         }
     }
 
@@ -90,6 +96,7 @@ impl AccountProvider {
             Self::Codex => Ok(Arc::new(codex::CodexClient::from_codex_login(
                 &model, session_id,
             )?)),
+            Self::Kimi => Ok(Arc::new(kimi::KimiClient::from_kimi_login(&model)?)),
             Self::CodeBuddy => Ok(Arc::new(codebuddy::CodeBuddyClient::from_workbuddy_login(
                 &model,
             )?)),
@@ -99,6 +106,7 @@ impl AccountProvider {
     pub(crate) fn model_context(self, model: &str) -> Option<u32> {
         match self {
             Self::Codex => codex::codex_model_context(model),
+            Self::Kimi => kimi::model_context(model),
             Self::Claude | Self::CodeBuddy => None,
         }
     }
@@ -109,6 +117,7 @@ impl AccountProvider {
         match self {
             Self::Claude => claude::claude_config_dir(),
             Self::Codex => codex::codex_home(),
+            Self::Kimi => kimi::kimi_home(),
             Self::CodeBuddy => codebuddy::workbuddy_config_dir(),
         }
     }

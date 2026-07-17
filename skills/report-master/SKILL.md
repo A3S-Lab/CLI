@@ -1,7 +1,6 @@
 ---
 name: report-master
 description: Create polished, responsive, evidence-grounded HTML research reports and matching Markdown. Use for DeepResearch deliverables, executive reports, analytical briefs, timelines, comparison reports, and whenever the user asks for a beautiful, professional, premium, visual, or presentation-quality web report.
-kind: instruction
 allowed-tools: "read(*), write(*), edit(*)"
 ---
 
@@ -26,7 +25,7 @@ In host-owned DeepResearch synthesis, do not write files or author arbitrary HTM
 
 - `markdown`: the finished report;
 - `editorial`: a private thesis and one coverage treatment for every semantic research-plan track;
-- `presentation`: a private, schema-constrained art-direction lock.
+- `presentation`: a private, schema-constrained global art direction and per-section composition lock.
 
 The host validates depth and citations, then renders only approved layout, palette, density, hero, and visual-stance tokens. This keeps content-driven variation without allowing generated code into the artifact pipeline.
 
@@ -60,9 +59,12 @@ Read and follow [`references/report-system.md`](references/report-system.md) for
 ## Design standard
 
 - Treat communication mode as how the report argues and visual style as how it looks. Lock them independently.
+- Make art direction structural, not cosmetic. A different choice must materially affect the hero, navigation, section rhythm, geometry, or composition—not merely swap palette tokens.
+- Lock the Markdown outline before its section plan. Copy each H2 exactly, then choose that section's rhythm and smallest semantically useful composition; never force prose into a decorative form.
 - Alternate `anchor`, `dense`, and `breathing` sections according to meaning; do not stamp every section into the same card grid.
 - Use a visualization only when its semantic fit is stronger than prose or a table. Record the selected form and rejected runner-up in the section plan.
 - Use one coherent token system and a small composition vocabulary, but make each major section composition-specific.
+- Use a metrics-led hero only when the evidence profile materially helps the reader judge the report. Prefer a statement or split hero when counts would be decorative.
 - Avoid the default “premium dashboard” look: excessive cards, glass effects, neon gradients, arbitrary metrics, decorative charts, and repeated two-column blocks are failures.
 - Preserve reading comfort: constrained prose width, strong hierarchy, responsive tables, visible focus, sufficient contrast, reduced-motion support, and useful print CSS.
 
@@ -77,7 +79,11 @@ When the host requests a `presentation` object, select each axis independently f
 - hero: `statement`, `split`, or `metrics`;
 - visual stance: `safe`, `shifted`, or `bold`.
 
+For every Markdown H2, add one `section_plan` entry in report order with the exact `heading`, a rhythm (`anchor`, `dense`, or `breathing`), and a composition (`prose`, `key_points`, `comparison`, `timeline`, `process`, `evidence`, or `source_ledger`). Keep the plan compact. Use different forms only when the underlying relationships differ.
+
 Write a concise rationale that ties the combination to information structure and audience. Do not select from topic keywords, literal brand colors, a memorized task template, or a desire for novelty. Reusing the same combination is valid only when the semantic rationale is genuinely the same.
+
+Apply the identity test: the rationale must name the dominant information relationship, the reader's use, and at least one resulting structural choice. If it could describe an unrelated report after replacing the title, reject it and choose again.
 
 Choose from relationships, not nouns: comparison and trade-off structure, temporal change, causal mechanism, procedural sequence, evidence uncertainty, decision stakes, and reading speed are useful design inputs. No input maps mechanically to one archetype. Select the combination that best exposes the report's dominant relationship, then use section rhythm to avoid a one-template page.
 
@@ -92,6 +98,7 @@ Read both files after writing. Reject and repair the report if any of these are 
 - the page resembles raw Markdown, a dashboard template, a recovery page, or a wall of identical cards;
 - heading hierarchy, overflow, mobile layout, contrast, links, tables, or print output fail review;
 - the rendered hierarchy disagrees with the report thesis or a section's editorial purpose.
+- the section plan omits, duplicates, or renames an H2, or assigns a composition that does not fit its information relationship.
 
 Repair locally before rewriting globally. Preserve valid prose and evidence; correct a missing track treatment, malformed citation, weak thesis, or mismatched presentation field at the smallest possible scope. Never restart research from the report phase.
 

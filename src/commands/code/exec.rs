@@ -1,12 +1,12 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use a3s_code_core::{Agent, AgentEvent, PlanningMode, SessionOptions};
+use a3s_code_core::{Agent, AgentEvent};
 use anyhow::{bail, Context};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{CodeExecArgs, CodeMode, OutputMode};
+use crate::cli::args::{CodeExecArgs, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
 
@@ -21,13 +21,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .await
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
-    let mut options = SessionOptions::new()
-        .with_session_id(&session_id)
-        .with_planning_mode(match args.mode {
-            CodeMode::Plan => PlanningMode::Enabled,
-            CodeMode::Default => PlanningMode::Disabled,
-            CodeMode::Auto => PlanningMode::Auto,
-        });
+    let workspace = &context.directory;
+    let mut options = super::exec_policy::session_options(args.mode, workspace, &session_id);
     if let Some(model) = args.model {
         options = options.with_model(model);
     }
@@ -35,9 +30,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
     options = options.with_llm_client(Arc::clone(&client));
-    let workspace = &context.directory;
     let session = agent
-        .session_async(workspace.to_string_lossy().to_string(), Some(options))
+        .session_builder(workspace.to_string_lossy().to_string())
+        .options(options)
+        .build()
         .await?;
 
     let (mut receiver, worker) = session.stream(&prompt, None).await?;
@@ -46,6 +42,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     let mut final_text = String::new();
     let mut usage = serde_json::Value::Null;
     let mut approval_required = None;
+    let mut runtime_error = None;
+    let mut completed = false;
     let mut cancelled = false;
     loop {
         let event = tokio::select! {
@@ -82,6 +80,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                         ),
                     )
                     .await;
+                let _ = session.cancel().await;
                 if output == OutputMode::Human {
                     eprintln!("denied approval-required tool: {tool_name}");
                 }
@@ -93,9 +92,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             } => {
                 final_text = text.clone();
                 usage = serde_json::to_value(event_usage)?;
+                completed = true;
             }
-            AgentEvent::Error { message } if output == OutputMode::Human => {
-                eprintln!("error: {message}");
+            AgentEvent::Error { message } => {
+                runtime_error = Some(message.clone());
+                if output == OutputMode::Human {
+                    eprintln!("error: {message}");
+                }
             }
             _ => {}
         }
@@ -120,26 +123,11 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .with_jsonl_sequence(sequence)
         .into());
     }
-    worker_result.map_err(|error| {
-        CliError::new(
-            "code.exec.failed",
-            format!("code execution failed: {error:#}"),
-            ExitClass::Failure,
-        )
-        .with_jsonl_sequence(sequence)
-    })?;
-    if let Some(tool_name) = approval_required {
-        return Err(CliError::new(
-            "approval.required",
-            format!(
-                "tool `{tool_name}` requires approval that cannot be requested in non-interactive execution"
-            ),
-            ExitClass::Failure,
-        )
-        .with_suggestion("Run the task interactively with `a3s code` or adjust the configured permission policy.")
-        .with_details(json!({"tool": tool_name}))
-        .with_jsonl_sequence(sequence)
-        .into());
+    let worker_error = worker_result.err().map(|error| format!("{error:#}"));
+    if let Some(failure) =
+        terminal_failure(approval_required, runtime_error, worker_error, completed)
+    {
+        return Err(failure.into_cli_error(sequence).into());
     }
     let emitted_stream = !streamed.is_empty();
     if final_text.is_empty() {
@@ -170,6 +158,75 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         json!({"text": final_text, "usage": usage, "sessionId": session_id}),
         || {},
     )
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum TerminalFailure {
+    ApprovalRequired { tool_name: String },
+    Runtime { message: String },
+    Worker { message: String },
+    Incomplete,
+}
+
+impl TerminalFailure {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::ApprovalRequired { .. } => "approval.required",
+            Self::Runtime { .. } | Self::Worker { .. } => "code.exec.failed",
+            Self::Incomplete => "code.exec.incomplete",
+        }
+    }
+
+    fn into_cli_error(self, sequence: u64) -> CliError {
+        let code = self.code();
+        match self {
+            Self::ApprovalRequired { tool_name } => CliError::new(
+                code,
+                format!(
+                    "tool `{tool_name}` requires approval that cannot be requested in non-interactive execution"
+                ),
+                ExitClass::Failure,
+            )
+            .with_suggestion(
+                "Run the task interactively with `a3s code` or adjust the configured permission policy.",
+            )
+            .with_details(json!({"tool": tool_name}))
+            .with_jsonl_sequence(sequence),
+            Self::Runtime { message } | Self::Worker { message } => CliError::new(
+                code,
+                format!("code execution failed: {message}"),
+                ExitClass::Failure,
+            )
+            .with_jsonl_sequence(sequence),
+            Self::Incomplete => CliError::new(
+                code,
+                "code execution ended without a terminal completion event",
+                ExitClass::Failure,
+            )
+            .with_jsonl_sequence(sequence),
+        }
+    }
+}
+
+fn terminal_failure(
+    approval_required: Option<String>,
+    runtime_error: Option<String>,
+    worker_error: Option<String>,
+    completed: bool,
+) -> Option<TerminalFailure> {
+    if let Some(tool_name) = approval_required {
+        return Some(TerminalFailure::ApprovalRequired { tool_name });
+    }
+    if let Some(message) = runtime_error {
+        return Some(TerminalFailure::Runtime { message });
+    }
+    if !completed {
+        return Some(TerminalFailure::Incomplete);
+    }
+    if let Some(message) = worker_error {
+        return Some(TerminalFailure::Worker { message });
+    }
+    None
 }
 
 async fn read_prompt(
@@ -213,4 +270,80 @@ fn execution_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("exec-{nanos:016x}-{:x}", std::process::id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_failure_precedes_worker_cancellation() {
+        let failure = terminal_failure(
+            Some("bash".to_string()),
+            None,
+            Some("task was cancelled".to_string()),
+            false,
+        )
+        .expect("approval must be terminal");
+
+        assert_eq!(failure.code(), "approval.required");
+        assert_eq!(
+            failure,
+            TerminalFailure::ApprovalRequired {
+                tool_name: "bash".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn agent_error_is_a_failed_execution_even_if_the_worker_completes() {
+        let failure = terminal_failure(None, Some("provider failed".to_string()), None, false)
+            .expect("AgentEvent::Error must be terminal");
+
+        assert_eq!(failure.code(), "code.exec.failed");
+        assert_eq!(
+            failure,
+            TerminalFailure::Runtime {
+                message: "provider failed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn closed_stream_without_end_is_incomplete() {
+        let failure = terminal_failure(
+            None,
+            None,
+            Some("worker stopped before completion".to_string()),
+            false,
+        )
+        .expect("a stream without AgentEvent::End must not succeed");
+
+        assert_eq!(failure.code(), "code.exec.incomplete");
+        assert_eq!(failure, TerminalFailure::Incomplete);
+    }
+
+    #[test]
+    fn worker_failure_after_end_is_a_failed_execution() {
+        let failure = terminal_failure(
+            None,
+            None,
+            Some("worker failed to settle".to_string()),
+            true,
+        )
+        .expect("a failed worker must not report success");
+
+        assert_eq!(failure.code(), "code.exec.failed");
+        assert_eq!(
+            failure,
+            TerminalFailure::Worker {
+                message: "worker failed to settle".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_completion_without_errors_can_succeed() {
+        assert_eq!(terminal_failure(None, None, None, true), None);
+    }
 }

@@ -49,6 +49,15 @@ fn command(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> C
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_HOME")
+        .env_remove("A3S_KIMI_HOME")
+        .env_remove("A3S_KIMI_DESKTOP_HOME")
+        .env_remove("A3S_KIMI_BASE_URL")
+        .env_remove("A3S_KIMI_OAUTH_HOST")
+        .env_remove("KIMI_CODE_HOME")
+        .env_remove("KIMI_SHARE_DIR")
+        .env_remove("KIMI_DESKTOP_HOME")
+        .env_remove("KIMI_CODE_BASE_URL")
+        .env_remove("KIMI_CODE_OAUTH_HOST")
         .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
         .env("RUST_BACKTRACE", "0");
@@ -206,6 +215,65 @@ fn codex_login_models_are_selectable_from_the_product_cache() {
     let acl = std::fs::read_to_string(&config).unwrap();
     assert!(acl.contains(r#"default_model = "codex/gpt-test-codex""#));
     assert!(!acl.contains("codex-secret"));
+}
+
+#[test]
+fn kimi_desktop_models_are_selectable_without_copying_the_app_key() {
+    let (_workspace, home, config) = fixture();
+    let daimon = home.join(".config/kimi-desktop/daimon-share/daimon");
+    std::fs::create_dir_all(&daimon).unwrap();
+    std::fs::write(
+        daimon.join("kimi-code-key.json"),
+        r#"{"userId":"user-1","apiKey":"kimi-desktop-secret"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        daimon.join("config.json"),
+        r#"{
+  "model": {
+    "current": "k3-agent",
+    "providers": {
+      "desktop-kimi": {
+        "type": "kimi",
+        "baseUrl": "https://example.invalid/coding/v1",
+        "credential": "kimiCode"
+      }
+    },
+    "models": {
+      "k3-agent": {
+        "provider": "desktop-kimi",
+        "model": "k3-agent",
+        "maxContextSize": 262144,
+        "capabilities": ["thinking", "tool_use"]
+      }
+    }
+  },
+  "kimiCode": {
+    "kimiRequestHeaders": {"User-Agent": "Desktop Kimi Work"}
+  },
+  "credentials": {"kimiCode": {"apiKey": "must-not-be-read-from-config"}}
+}"#,
+    )
+    .unwrap();
+
+    let list = run_json(&home, &config, &["model", "list"]);
+    let model = model_by_id(&list, "kimi/k3-agent");
+    assert_eq!(model["source"], "Kimi");
+    assert_eq!(model["contextWindow"], 262_144);
+    assert!(!list.to_string().contains("kimi-desktop-secret"));
+    assert!(!list.to_string().contains("must-not-be-read-from-config"));
+
+    let selected = run(&home, &config, &["model", "use", "kimi/k3-agent"]);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&selected.stdout).contains("kimi-desktop-secret"));
+    let acl = std::fs::read_to_string(&config).unwrap();
+    assert!(acl.contains(r#"default_model = "kimi/k3-agent""#));
+    assert!(!acl.contains("kimi-desktop-secret"));
+    assert!(!acl.contains("must-not-be-read-from-config"));
 }
 
 #[test]

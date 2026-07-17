@@ -33,6 +33,7 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
         .is_some();
     let claude_signed_in = AccountProvider::Claude.is_available();
     let codex_signed_in = AccountProvider::Codex.is_available();
+    let kimi_signed_in = AccountProvider::Kimi.is_available();
     let workbuddy_signed_in = AccountProvider::CodeBuddy.is_available();
     let providers = json!([
         {
@@ -52,6 +53,12 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
             "ownership": "external",
             "configured": true,
             "signedIn": codex_signed_in,
+        },
+        {
+            "id": "kimi",
+            "ownership": "external",
+            "configured": true,
+            "signedIn": kimi_signed_in,
         },
         {
             "id": "workbuddy",
@@ -83,6 +90,14 @@ fn list(context: &InvocationContext) -> anyhow::Result<()> {
         println!(
             "codex          external   {}",
             if codex_signed_in {
+                "signed in"
+            } else {
+                "signed out"
+            }
+        );
+        println!(
+            "kimi           external   {}",
+            if kimi_signed_in {
                 "signed in"
             } else {
                 "signed out"

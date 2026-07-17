@@ -670,6 +670,20 @@ impl App {
                         .unwrap_or_default()
                         .to_string();
                     let workflow_metadata = self.deep_research_workflow.metadata.clone();
+                    let completed_outcome = fallback_query.as_deref().map(|query| {
+                        let evidence_scope = self
+                            .deep_research_workflow
+                            .args
+                            .as_ref()
+                            .map(|args| deep_research_evidence_scope_from_args(args, query))
+                            .unwrap_or_default();
+                        deep_research_report_outcome_for_workflow(
+                            query,
+                            evidence_scope,
+                            &workflow_output,
+                            workflow_metadata.as_ref(),
+                        )
+                    });
                     match recover_missing_deep_research_report(
                         Path::new(&self.cwd),
                         fallback_query.as_deref(),
@@ -682,7 +696,7 @@ impl App {
                         DeepResearchReportRecovery::CompletedMaterialized { artifacts } => {
                             self.stage_deep_research_report(
                                 &artifacts,
-                                DeepResearchRunOutcome::Completed,
+                                completed_outcome.unwrap_or(DeepResearchRunOutcome::Completed),
                             );
                             self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                                 "  ✓ DeepResearch report validated and rendered at {}",
