@@ -4,6 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::fs;
 
 use crate::api::code_web::state::CodeWebState;
@@ -104,6 +105,29 @@ impl WorkspaceService {
         Ok(json!({ "success": true }))
     }
 
+    pub(in crate::api::code_web) async fn create_file(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        let path = required_json_path(&request, "path")?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.map_err(fs_error)?;
+        }
+        let _file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    BootError::Conflict(format!("path already exists: {}", path.display()))
+                } else {
+                    fs_error(error)
+                }
+            })?;
+        Ok(json!({ "success": true }))
+    }
+
     pub(in crate::api::code_web) async fn write_file(
         &self,
         request: Value,
@@ -112,12 +136,59 @@ impl WorkspaceService {
         let content = request
             .get("content")
             .and_then(Value::as_str)
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                BootError::BadRequest("content is required and must be a string".to_string())
+            })?
+            .to_string();
+        let expected_revision = optional_json_string(&request, "expectedRevision")?;
+        let expected_content = optional_json_string(&request, "expectedContent")?;
+        if expected_revision.is_some() && expected_content.is_some() {
+            return Err(BootError::BadRequest(
+                "expectedRevision and expectedContent cannot be used together".to_string(),
+            ));
+        }
+        if expected_revision.as_deref().is_some_and(str::is_empty) {
+            return Err(BootError::BadRequest(
+                "expectedRevision cannot be empty".to_string(),
+            ));
+        }
+
+        // Serialize API writes so two browser clients cannot both satisfy the
+        // same precondition inside this process. External programs can still
+        // modify the file, so the check stays immediately adjacent to write.
+        let _write_guard = self.state.workspace_file_write_lock.lock().await;
+        if expected_revision.is_some() || expected_content.is_some() {
+            let current = fs::read_to_string(&path).await.map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    BootError::PreconditionFailed(format!(
+                        "file changed or was removed before save: {}",
+                        path.display()
+                    ))
+                } else {
+                    fs_error(error)
+                }
+            })?;
+            let revision_matches = expected_revision
+                .as_deref()
+                .is_none_or(|expected| expected == content_revision(current.as_bytes()));
+            let content_matches = expected_content
+                .as_deref()
+                .is_none_or(|expected| expected == current);
+            if !revision_matches || !content_matches {
+                return Err(BootError::PreconditionFailed(format!(
+                    "file changed before save: {}",
+                    path.display()
+                )));
+            }
+        }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).await.map_err(fs_error)?;
         }
-        fs::write(path, content).await.map_err(fs_error)?;
-        Ok(json!({ "success": true }))
+        fs::write(&path, &content).await.map_err(fs_error)?;
+        Ok(json!({
+            "success": true,
+            "revision": content_revision(content.as_bytes()),
+        }))
     }
 
     pub(in crate::api::code_web) async fn write_binary_file(
@@ -153,7 +224,10 @@ impl WorkspaceService {
     ) -> BootResult<serde_json::Value> {
         let path = required_path(path)?;
         let content = fs::read_to_string(path).await.map_err(fs_error)?;
-        Ok(json!({ "content": content }))
+        Ok(json!({
+            "revision": content_revision(content.as_bytes()),
+            "content": content,
+        }))
     }
 
     pub(in crate::api::code_web) async fn read_binary_file(
@@ -250,22 +324,50 @@ impl WorkspaceService {
         Ok(json!({ "success": true }))
     }
 
-    pub(in crate::api::code_web) fn git_status(
+    pub(in crate::api::code_web) async fn workspace_files(
+        &self,
+        root_path: String,
+        query: String,
+        max_results: usize,
+    ) -> BootResult<serde_json::Value> {
+        super::catalog::workspace_files(&self.state, root_path, query, max_results).await
+    }
+
+    pub(in crate::api::code_web) async fn git_status(
         &self,
         root_path: Option<String>,
-    ) -> serde_json::Value {
-        let root = root_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(expand_home)
-            .unwrap_or_else(|| self.state.default_workspace.clone());
-        let is_git_repo = root.join(".git").exists();
-        json!({
-            "isGitRepo": is_git_repo,
-            "branch": git_branch(&root),
-            "files": [],
-        })
+    ) -> BootResult<serde_json::Value> {
+        super::git::status(&self.state, root_path).await
+    }
+
+    pub(in crate::api::code_web) async fn git_diff(
+        &self,
+        root_path: String,
+        path: Option<String>,
+        staged: bool,
+    ) -> BootResult<serde_json::Value> {
+        super::git::diff(&self.state, root_path, path, staged).await
+    }
+
+    pub(in crate::api::code_web) async fn git_stage(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        super::git::stage(&self.state, request).await
+    }
+
+    pub(in crate::api::code_web) async fn git_unstage(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        super::git::unstage(&self.state, request).await
+    }
+
+    pub(in crate::api::code_web) async fn git_commit(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        super::git::commit(&self.state, request).await
     }
 
     pub(in crate::api::code_web) async fn search_files(
@@ -447,6 +549,18 @@ fn optional_json_path(value: &Value, field: &str) -> Option<BootResult<PathBuf>>
         .map(|value| required_path(value.to_string()))
 }
 
+fn optional_json_string(value: &Value, field: &str) -> BootResult<Option<String>> {
+    match value.get(field) {
+        None => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(BootError::BadRequest(format!("{field} must be a string"))),
+    }
+}
+
+fn content_revision(content: &[u8]) -> String {
+    format!("sha256:{:x}", Sha256::digest(content))
+}
+
 fn init_agents_prompt(workspace: &Path) -> String {
     let agents_path = workspace.join("AGENTS.md");
     format!(
@@ -459,7 +573,7 @@ fn init_agents_prompt(workspace: &Path) -> String {
     )
 }
 
-fn required_path(value: String) -> BootResult<PathBuf> {
+pub(super) fn required_path(value: String) -> BootResult<PathBuf> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(BootError::BadRequest("path is required".to_string()));
@@ -515,14 +629,6 @@ fn copy_path_sync(src: &Path, dest: &Path) -> std::io::Result<()> {
         std::fs::copy(src, dest)?;
     }
     Ok(())
-}
-
-fn git_branch(root: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(root.join(".git/HEAD")).ok()?;
-    let head = head.trim();
-    head.strip_prefix("ref: refs/heads/")
-        .map(str::to_string)
-        .or_else(|| (!head.is_empty()).then(|| head.to_string()))
 }
 
 async fn collect_text_candidate_files(

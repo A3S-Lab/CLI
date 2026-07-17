@@ -18,7 +18,7 @@ use super::runtime_projection::{SubagentOutcome, ToolCallState};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
-use super::{gutter, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
+use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -206,7 +206,7 @@ impl TranscriptEntry {
                 let rendered = Markdown::new()
                     .with_width(content_width.saturating_sub(2).max(1))
                     .render(&source);
-                gutter(TN_GRAY, &rendered)
+                assistant_block(&rendered, content_width)
             }
             Self::Reasoning { .. } => String::new(),
             Self::Subagent(subagent) if !subagent.visible => String::new(),
@@ -1112,7 +1112,33 @@ mod tests {
     }
 
     #[test]
-    fn user_message_owns_codex_surface_spacing_at_product_widths() {
+    fn assistant_markdown_owns_top_and_bottom_rows() {
+        let entry = TranscriptEntry::assistant_markdown("The response has breathing room.");
+
+        for width in [24_usize, 80] {
+            let rendered = a3s_tui::style::strip_ansi(&entry.render(width as u16, width));
+            let rows = rendered.lines().collect::<Vec<_>>();
+
+            assert!(
+                rows.first().is_some_and(|row| row.trim().is_empty()),
+                "width {width}: {rendered:?}"
+            );
+            assert!(
+                rows.last().is_some_and(|row| row.trim().is_empty()),
+                "width {width}: {rendered:?}"
+            );
+            assert!(
+                rows.iter().any(|row| row.contains("response")),
+                "width {width}: {rendered:?}"
+            );
+            assert_bounded(&rendered, width);
+        }
+
+        assert_eq!(entry.render(0, 0), "");
+    }
+
+    #[test]
+    fn user_and_assistant_messages_each_own_vertical_spacing_at_product_widths() {
         for width in [24_u16, 48, 80] {
             let mut transcript = Transcript::from_entries(vec![
                 TranscriptEntry::user("Review the message hierarchy."),
@@ -1127,6 +1153,10 @@ mod tests {
                 .iter()
                 .position(|row| row.contains("The hierarchy"))
                 .expect("assistant row");
+            let assistant_last_row = rows
+                .iter()
+                .rposition(|row| !row.trim().is_empty())
+                .expect("last assistant row");
             assert!(
                 rendered
                     .split_whitespace()
@@ -1139,9 +1169,11 @@ mod tests {
             assert!(rows.first().is_some_and(|row| row.trim().is_empty()));
             assert!(rows.iter().any(|row| row.starts_with("› Review")));
             assert!(rows[assistant_row - 1].trim().is_empty());
+            assert!(rows[assistant_row - 2].trim().is_empty());
+            assert!(rows[assistant_last_row + 1].trim().is_empty());
             assert_eq!(
                 rows.iter().filter(|row| row.trim().is_empty()).count(),
-                2,
+                4,
                 "width {width}: {rendered:?}"
             );
             assert!(joined.lines().take(1).all(
@@ -1543,10 +1575,30 @@ mod tests {
         );
 
         let flow = a3s_tui::style::strip_ansi(&join_transcript_blocks(&blocks));
+        let rows = flow.lines().collect::<Vec<_>>();
+        let before = rows
+            .iter()
+            .position(|row| row.contains("both layers."))
+            .expect("assistant before row");
+        let first_tool = rows
+            .iter()
+            .position(|row| row.contains("• Ran cargo check"))
+            .expect("first tool row");
+        let last_tool = rows
+            .iter()
+            .rposition(|row| row.contains("test passed"))
+            .expect("last tool row");
+        let after = rows
+            .iter()
+            .position(|row| row.contains("Both verification"))
+            .expect("assistant after row");
         assert!(
-            flow.contains("both layers.\n• Ran")
-                && flow.contains("test passed\n• Both verification"),
-            "Codex-style history cells should stack without global blank rows: {flow}"
+            rows[before + 1].trim().is_empty() && first_tool == before + 2,
+            "assistant-to-tool spacing should be owned by the assistant block: {flow}"
+        );
+        assert!(
+            rows[last_tool + 1].trim().is_empty() && after == last_tool + 2,
+            "tool-to-assistant spacing should be owned by the assistant block: {flow}"
         );
     }
 

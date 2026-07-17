@@ -140,6 +140,64 @@ pub(crate) fn gutter(color: Color, content: &str) -> String {
         .view()
 }
 
+/// Render one assistant-authored Markdown cell with a blank row owned above
+/// and below its gutter. A visible space keeps the trailing padding row in
+/// `str::lines()` so transcript layout and scroll anchors count it correctly.
+pub(crate) fn assistant_block(content: &str, width: usize) -> String {
+    let body = assistant_body(content, width);
+    if body.is_empty() {
+        return String::new();
+    }
+    let padding = assistant_padding_row(width);
+    format!("{padding}\n{body}\n{padding}")
+}
+
+/// Split a streaming assistant cell at its stable/tail boundary while keeping
+/// exactly one owned padding row on each outside edge. The stable fragment is
+/// newline-terminated so `Viewport::set_content_parts` can retain its wrapped
+/// rows while replacing only the mutable tail.
+pub(crate) fn assistant_stream_block_parts(
+    stable: &str,
+    tail: &str,
+    width: usize,
+) -> Option<(String, String)> {
+    let stable = assistant_body(stable, width);
+    let tail = assistant_body(tail, width);
+    if stable.is_empty() && tail.is_empty() {
+        return None;
+    }
+
+    let padding = assistant_padding_row(width);
+    let mut prefix = format!("{padding}\n");
+    if !stable.is_empty() {
+        prefix.push_str(&stable);
+        prefix.push('\n');
+    }
+    let mut suffix = String::new();
+    if !tail.is_empty() {
+        suffix.push_str(&tail);
+        suffix.push('\n');
+    }
+    suffix.push_str(padding);
+    Some((prefix, suffix))
+}
+
+fn assistant_body(content: &str, width: usize) -> String {
+    if content.is_empty() || width == 0 {
+        String::new()
+    } else {
+        gutter(TN_GRAY, content)
+    }
+}
+
+fn assistant_padding_row(width: usize) -> &'static str {
+    if width == 0 {
+        ""
+    } else {
+        " "
+    }
+}
+
 fn input_chrome_width(width: usize) -> u16 {
     width.min(u16::MAX as usize) as u16
 }
@@ -319,9 +377,9 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_progress_line, gutter, input_gradient_rule, input_prompt_line, input_rule,
-        input_status_rule, shimmer, thinking_block, truncate, user_bubble, wrap_words, ACCENT,
-        SURFACE_USER, TN_FG, TN_GRAY,
+        assistant_block, assistant_stream_block_parts, compact_progress_line, gutter,
+        input_gradient_rule, input_prompt_line, input_rule, input_status_rule, shimmer,
+        thinking_block, truncate, user_bubble, wrap_words, ACCENT, SURFACE_USER, TN_FG, TN_GRAY,
     };
     use a3s_tui::style::{strip_ansi, visible_len, Color, Style};
     use std::time::Duration;
@@ -414,6 +472,54 @@ mod tests {
     #[test]
     fn gutter_keeps_empty_input_empty() {
         assert_eq!(gutter(Color::Green, ""), "");
+    }
+
+    #[test]
+    fn assistant_block_owns_real_padding_rows() {
+        let rendered = assistant_block("hello\nworld", 20);
+        let plain = strip_ansi(&rendered);
+
+        assert_eq!(
+            plain.lines().collect::<Vec<_>>(),
+            [" ", "• hello", "  world", " "]
+        );
+        assert!(rendered.lines().all(|row| visible_len(row) <= 20));
+        assert_eq!(assistant_block("", 20), "");
+        assert_eq!(assistant_block("hello", 0), "");
+    }
+
+    #[test]
+    fn streaming_assistant_parts_keep_padding_on_the_outside_edges() {
+        for (stable, tail) in [("stable", ""), ("", "tail"), ("stable", "tail")] {
+            let (prefix, suffix) =
+                assistant_stream_block_parts(stable, tail, 20).expect("stream parts");
+            assert!(prefix.ends_with('\n'));
+            let rendered = strip_ansi(&format!("{prefix}{suffix}"));
+            let rows = rendered.lines().collect::<Vec<_>>();
+
+            assert!(rows.first().is_some_and(|row| row == &" "), "{rendered:?}");
+            assert!(rows.last().is_some_and(|row| row == &" "), "{rendered:?}");
+            assert_eq!(
+                rows.iter().filter(|row| row.trim().is_empty()).count(),
+                2,
+                "{rendered:?}"
+            );
+        }
+
+        let (stable_prefix, stable_suffix) =
+            assistant_stream_block_parts("stable", "", 20).expect("stable parts");
+        assert_eq!(
+            format!("{stable_prefix}{stable_suffix}"),
+            assistant_block("stable", 20)
+        );
+        let (tail_prefix, tail_suffix) =
+            assistant_stream_block_parts("", "tail", 20).expect("tail parts");
+        assert_eq!(
+            format!("{tail_prefix}{tail_suffix}"),
+            assistant_block("tail", 20)
+        );
+        assert!(assistant_stream_block_parts("", "", 20).is_none());
+        assert!(assistant_stream_block_parts("stable", "tail", 0).is_none());
     }
 
     #[test]

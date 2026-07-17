@@ -381,6 +381,28 @@ read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
 
+Workspace Explorer file creation uses a dedicated atomic endpoint. It creates
+missing parent directories, returns a conflict for an existing path, and never
+truncates an existing file; ordinary saves continue through the separate write
+endpoint.
+
+Text reads and successful writes return a SHA-256 content revision. A write may
+send either `expectedRevision` or `expectedContent`; the service checks the
+precondition immediately before writing and returns HTTP 412 without changing
+the file when it no longer matches. Supplying both preconditions is invalid.
+Omitting both is reserved for an explicit unconditional overwrite. Every write
+must still provide string `content`; malformed requests cannot default to an
+empty write.
+
+Web file Quick Open reads the same watched workspace manifest used by native
+search and Code Intelligence instead of starting another directory traversal.
+It returns canonical and workspace-relative paths, preserves binary metadata,
+ranks exact names before path and fuzzy matches, and caps each response at 500
+items. The Changes view is backed by real per-file index/worktree status and
+complete staged or unstaged file content for Monaco diff tabs. Stage, unstage,
+and commit use validated workspace-relative path arguments, support unborn
+repositories, and keep a nested workspace scoped to its own repository prefix.
+
 The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
 for saved-file symbols, definitions, declarations, references,
 implementations, and diagnostics. Dirty editors remain local and explicitly
@@ -716,14 +738,17 @@ one queued successor. The bottom queue strip contains pending turns only and
 removes a message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. Streamed
-Markdown commits only complete lines, paces stable rows with adaptive catch-up,
-keeps active tables in a replaceable tail, and provisionally completes a
-candidate table before painting it so raw pipe rows never flash or move the
-scrollbar. Tables use compact rounded cards with a soft header surface and a
-stacked narrow-screen fallback while preserving code, URLs, Unicode graphemes,
-headings, and every cell value. Tail-only updates reuse the already-wrapped
-transcript prefix instead of rebuilding the full viewport.
+reflows semantic arguments, output, diffs, and Markdown after a resize. User
+surfaces and assistant Markdown each own a blank row above and below their
+content; streaming and finalized assistant cells keep the same vertical rhythm
+while adjacent tool activity remains compact. Streamed Markdown commits only
+complete lines, paces stable rows with adaptive catch-up, keeps active tables in
+a replaceable tail, and provisionally completes a candidate table before
+painting it so raw pipe rows never flash or move the scrollbar. Tables use
+compact rounded cards with a soft header surface and a stacked narrow-screen
+fallback while preserving code, URLs, Unicode graphemes, headings, and every
+cell value. Tail-only updates reuse the already-wrapped transcript prefix
+instead of rebuilding the full viewport.
 
 | Surface | What you see and control |
 | --- | --- |
@@ -790,7 +815,9 @@ mode; the second enters the session with the goal still paused, where
 The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
 prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
 the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
-auto-approves read-only discovery tools but still asks before writes. Tool
+auto-approves read-only discovery tools but still asks before writes. Auto mode
+silently approves every operation that reaches HITL; hard permission denials
+remain non-bypassable and never enter the confirmation overlay. Tool
 timeouts and confirmation timeouts are tracked separately so a human approval
 pause does not consume the command runtime budget.
 
