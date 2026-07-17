@@ -601,15 +601,40 @@ pub(crate) fn materialize_deep_research_recovery_report(
         })
 }
 
+#[cfg(test)]
 pub(crate) fn deep_research_workflow_needs_recovery_report(workflow_output: &str) -> bool {
-    let trimmed = workflow_output.trim();
+    deep_research_workflow_needs_recovery_report_with_metadata(workflow_output, None)
+}
+
+pub(crate) fn deep_research_workflow_needs_recovery_report_with_metadata(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let canonical_output =
+        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    let trimmed = canonical_output.trim();
     if trimmed.is_empty() {
         return true;
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
         return true;
     };
-    deep_research_collection_status(&value) != "completed"
+    if deep_research_collection_status(&value) == "completed" {
+        return false;
+    }
+
+    // An independent checker may deliberately close a bounded run as
+    // `degrade`: the evidence is useful and traceable, but one or more planned
+    // gaps remain. That package should produce a qualified reader-facing
+    // report, not the generic Recovery artifact. Unreviewed partial evidence
+    // still takes the recovery path.
+    let checker_degraded = value
+        .pointer("/checker/decision")
+        .and_then(serde_json::Value::as_str)
+        == Some("degrade");
+    let has_traceable_evidence =
+        !deep_research_workflow_source_anchors(&canonical_output, workflow_metadata).is_empty();
+    !(checker_degraded && has_traceable_evidence)
 }
 
 fn completed_report_markdown_from_answer_text(query: &str, answer_text: &str) -> Option<String> {
@@ -741,6 +766,15 @@ pub(crate) fn deep_research_report_rejection_diagnostic_from_answer_text(
 fn deep_research_recovery_result_text(answer_text: &str, workflow_output: &str) -> String {
     let answer = answer_text.trim();
     let answer_lower = answer.to_ascii_lowercase();
+    if answer_lower.starts_with("content rejected:")
+        || answer_lower.starts_with("structured report")
+        || answer_lower.starts_with("report plan rejected:")
+    {
+        return format!(
+            "Host publication validation rejected the generated report: {}",
+            deep_research_sanitize_evidence_text(answer)
+        );
+    }
     if visible_char_count(answer) >= 120
         && !is_deep_research_model_failure_text(answer)
         && !deep_research_output_has_internal_leak(answer)

@@ -2,19 +2,198 @@ name: Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
-# Binary and Homebrew artifacts wait for the crate job so release channels do
-# not drift. Missing publish credentials or unpublished dependency crates fail
-# the release instead of producing a misleading green job.
+# Crate publication waits for validated Web and binary assets, and the GitHub
+# release stays draft until every channel is ready. Missing publish credentials
+# or unpublished dependency crates fail instead of producing a misleading green
+# job.
 on:
   push:
     tags: ["v*"]
 permissions:
   contents: write
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
   A3S_WEB_SOURCE_REF: 18b349aa7e125c197b6121258d40b0ef1899bbf5
+  A3S_CODE_CORE_VERSION: 5.3.5
+  A3S_TUI_VERSION: 0.1.12
 jobs:
+  release-gate:
+    name: Validate release candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+      - name: Validate tag and release state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release publishing requires a stable vMAJOR.MINOR.PATCH tag"
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          bash .github/scripts/test-check-release-state.sh
+          bash .github/scripts/check-release-state.sh \
+            "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION"
+
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Release tag must point to a commit reachable from origin/main"
+            exit 1
+          fi
+
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+          if ! [[ "$latest_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Latest GitHub release has an invalid stable tag: $latest_tag"
+            exit 1
+          fi
+          latest_version="${latest_tag#v}"
+          lowest="$(printf '%s\n%s\n' "$latest_version" "$version" | sort -V | head -n 1)"
+          if [ "$lowest" != "$latest_version" ]; then
+            echo "::error::Release $version is older than latest release $latest_version"
+            exit 1
+          fi
+      - name: Validate release credentials
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN is not configured"
+            exit 1
+          fi
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not configured"
+            exit 1
+          fi
+          tap_metadata="$RUNNER_TEMP/homebrew-tap.json"
+          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+            -H "Authorization: Bearer $TAP_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -o "$tap_metadata" \
+            "https://api.github.com/repos/A3S-Lab/homebrew-tap"
+          if ! jq -e '.permissions.push == true' "$tap_metadata" >/dev/null; then
+            echo "::error::HOMEBREW_TAP_TOKEN cannot push to A3S-Lab/homebrew-tap"
+            exit 1
+          fi
+      - name: Verify published A3S dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          required_crates=(
+            "a3s-code-core $A3S_CODE_CORE_VERSION"
+            "a3s-boot 0.1.2"
+            "a3s-lane 0.5.1"
+            "a3s-memory 0.1.2"
+            "a3s-tui $A3S_TUI_VERSION"
+            "a3s-search 1.4.3"
+            "a3s-acl 0.2.2"
+            "a3s-updater 0.3.0"
+          )
+          for requirement in "${required_crates[@]}"; do
+            read -r crate version <<<"$requirement"
+            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+              -A "a3s-release-check/1.0" \
+              "https://crates.io/api/v1/crates/$crate/$version" >/dev/null || {
+                echo "::error::$crate $version is not on crates.io"
+                exit 1
+              }
+          done
+      - name: Prepare reproducible release tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tree="$RUNNER_TEMP/a3s-release-tree"
+          release_manifest="$RUNNER_TEMP/a3s-release-manifest"
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p "$release_tree" "$release_manifest"
+          git archive "$GITHUB_SHA" | tar -x -C "$release_tree"
+
+          crate_metadata="$RUNNER_TEMP/a3s-published-metadata.json"
+          if ! crate_status="$(curl --retry 5 --retry-all-errors --retry-delay 5 -sS \
+            -A "a3s-release-check/1.0" \
+            -o "$crate_metadata" -w '%{http_code}' \
+            "https://crates.io/api/v1/crates/a3s/$version")"; then
+            echo "::error::Failed to query crates.io for a3s $version"
+            exit 1
+          fi
+          case "$crate_status" in
+            200)
+              published_sha="$(jq -er '.version.checksum' "$crate_metadata")"
+              if ! [[ "$published_sha" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "::error::crates.io returned an invalid checksum for a3s $version"
+                exit 1
+              fi
+              published_crate="$RUNNER_TEMP/a3s-$version.crate"
+              published_lock="$RUNNER_TEMP/a3s-$version.Cargo.lock"
+              curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+                -A "a3s-release-check/1.0" \
+                -o "$published_crate" \
+                "https://static.crates.io/crates/a3s/a3s-$version.crate"
+              downloaded_sha="$(sha256sum "$published_crate" | cut -d' ' -f1)"
+              if [ "$downloaded_sha" != "$published_sha" ]; then
+                echo "::error::Downloaded a3s $version does not match the crates.io checksum"
+                exit 1
+              fi
+              tar -xOf "$published_crate" "a3s-$version/Cargo.lock" >"$published_lock"
+              bash .github/scripts/use-published-a3s-crates.sh \
+                "$release_tree/Cargo.toml" "$published_lock"
+              echo "PUBLISHED_CRATE_SHA=$published_sha" >>"$GITHUB_ENV"
+              ;;
+            404)
+              bash .github/scripts/use-published-a3s-crates.sh "$release_tree/Cargo.toml"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $crate_status for a3s $version"
+              exit 1
+              ;;
+          esac
+          cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path "$release_tree/Cargo.toml" >/dev/null
+          cp "$release_tree/Cargo.toml" "$release_tree/Cargo.lock" "$release_manifest/"
+          echo "RELEASE_TREE=$release_tree" >>"$GITHUB_ENV"
+      - name: Format check
+        run: cargo fmt --all --manifest-path "$RELEASE_TREE/Cargo.toml" -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --manifest-path "$RELEASE_TREE/Cargo.toml" -- -D warnings
+      - name: Tests
+        run: cargo test --all-targets --locked --manifest-path "$RELEASE_TREE/Cargo.toml"
+      - name: Package dry run
+        run: cargo package --locked --manifest-path "$RELEASE_TREE/Cargo.toml"
+      - name: Verify reproducible package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          candidate="$RELEASE_TREE/target/package/a3s-$version.crate"
+          candidate_sha="$(sha256sum "$candidate" | cut -d' ' -f1)"
+          if [ -n "${PUBLISHED_CRATE_SHA:-}" ] && [ "$candidate_sha" != "$PUBLISHED_CRATE_SHA" ]; then
+            echo "::error::Tag sources do not reproduce the published a3s $version crate"
+            exit 1
+          fi
+          printf '%s\n' "$candidate_sha" >"$RUNNER_TEMP/a3s-release-manifest/package.sha256"
+      - name: Upload validated release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-release-manifest
+          path: ${{ runner.temp }}/a3s-release-manifest
+          if-no-files-found: error
+          retention-days: 1
+
   create-release:
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,15 +209,16 @@ jobs:
           if [ ! -s release-notes.md ]; then
             echo "a3s ${GITHUB_REF_NAME}" > release-notes.md
           fi
-      - name: Create GitHub release
+      - name: Create draft GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
-                 --notes-file release-notes.md --verify-tag
+                 --notes-file release-notes.md --verify-tag --draft
 
   web-assets:
+    needs: release-gate
     runs-on: ubuntu-latest
     steps:
       - name: Validate Web source revision
@@ -91,7 +271,7 @@ jobs:
           retention-days: 1
 
   binaries:
-    needs: [create-release, crate, web-assets]
+    needs: [create-release, web-assets]
     strategy:
       fail-fast: false
       matrix:
@@ -104,10 +284,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Use published A3S crates
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Download validated release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-release-manifest
+          path: .release-manifest
+      - name: Install validated release manifest
         shell: bash
-        run: bash .github/scripts/use-published-a3s-crates.sh
+        run: |
+          set -euo pipefail
+          cp .release-manifest/Cargo.toml Cargo.toml
+          cp .release-manifest/Cargo.lock Cargo.lock
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Download Web workspace
         uses: actions/download-artifact@v4
         with:
@@ -121,52 +310,123 @@ jobs:
           bin: a3s
           target: ${{ matrix.target }}
           archive: a3s-$tag-$target
+          locked: true
           include: web
           token: ${{ secrets.GITHUB_TOKEN }}
 
   crate:
-    needs: create-release
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Download validated release manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-release-manifest
+          path: .release-manifest
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"; exit 1
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          expected_sha="$(tr -d '\r\n' <.release-manifest/package.sha256)"
+          if ! [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Release gate produced an invalid package checksum"
+            exit 1
           fi
-          crate_exists() {
-            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+
+          crate_metadata="$RUNNER_TEMP/a3s-published-metadata.json"
+          query_crate() {
+            local http_status
+            if ! http_status="$(curl --retry 5 --retry-all-errors --retry-delay 5 -sS \
               -A "a3s-release-check/1.0" \
-              "https://crates.io/api/v1/crates/$1/$2" >/dev/null
-          }
-          required_crates=(
-            "a3s-code-core 5.3.4"
-            "a3s-boot 0.1.2"
-            "a3s-lane 0.5.1"
-            "a3s-memory 0.1.2"
-            "a3s-tui 0.1.10"
-            "a3s-search 1.4.3"
-            "a3s-acl 0.2.2"
-            "a3s-updater 0.3.0"
-          )
-          for requirement in "${required_crates[@]}"; do
-            read -r crate version <<<"$requirement"
-            if ! crate_exists "$crate" "$version"; then
-              echo "::error::$crate $version is not on crates.io yet — cannot publish a3s"
-              exit 1
+              -o "$crate_metadata" -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/a3s/$version")"; then
+              echo "::error::Failed to query crates.io for a3s $version" >&2
+              return 1
             fi
-          done
+            printf '%s' "$http_status"
+          }
+          verify_published_checksum() {
+            local published_sha
+            published_sha="$(jq -er '.version.checksum' "$crate_metadata")"
+            if ! [[ "$published_sha" =~ ^[0-9a-f]{64}$ ]]; then
+              echo "::error::crates.io returned an invalid checksum for a3s $version" >&2
+              return 1
+            fi
+            if [ "$published_sha" != "$expected_sha" ]; then
+              echo "::error::Published a3s $version does not match the release candidate" >&2
+              return 1
+            fi
+          }
+
           publish_dir="$(mktemp -d)"
           trap 'rm -rf "$publish_dir"' EXIT
-          git archive HEAD | tar -x -C "$publish_dir"
-          bash .github/scripts/use-published-a3s-crates.sh "$publish_dir/Cargo.toml"
-          cargo publish --locked --manifest-path "$publish_dir/Cargo.toml"
+          git archive "$GITHUB_SHA" | tar -x -C "$publish_dir"
+          cp .release-manifest/Cargo.toml "$publish_dir/Cargo.toml"
+          cp .release-manifest/Cargo.lock "$publish_dir/Cargo.lock"
+          cargo package --locked --no-verify --manifest-path "$publish_dir/Cargo.toml"
+          candidate="$publish_dir/target/package/a3s-$version.crate"
+          candidate_sha="$(sha256sum "$candidate" | cut -d' ' -f1)"
+          if [ "$candidate_sha" != "$expected_sha" ]; then
+            echo "::error::Publish job did not reproduce the release gate package"
+            exit 1
+          fi
+
+          crate_status="$(query_crate)"
+          case "$crate_status" in
+            200)
+              verify_published_checksum
+              echo "a3s $version is already published with the validated checksum"
+              exit 0
+              ;;
+            404) ;;
+            *)
+              echo "::error::crates.io returned HTTP $crate_status for a3s $version"
+              exit 1
+              ;;
+          esac
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"
+            exit 1
+          fi
+
+          set +e
+          output="$(cargo publish --locked --manifest-path "$publish_dir/Cargo.toml" 2>&1)"
+          publish_status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$publish_status" -ne 0 ]; then
+            for _ in $(seq 1 12); do
+              crate_status="$(query_crate)"
+              case "$crate_status" in
+                200)
+                  verify_published_checksum
+                  exit 0
+                  ;;
+                404) sleep 5 ;;
+                *)
+                  echo "::error::crates.io returned HTTP $crate_status for a3s $version"
+                  exit 1
+                  ;;
+              esac
+            done
+            exit "$publish_status"
+          fi
+
+  finalize-release:
+    needs: [binaries, crate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft=false --latest
 
   homebrew:
-    needs: binaries
+    needs: finalize-release
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew tap formula

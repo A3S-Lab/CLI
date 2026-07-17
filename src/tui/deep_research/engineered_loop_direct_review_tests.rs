@@ -1,9 +1,17 @@
+#[derive(Clone, Copy)]
+enum CheckerGateScenario {
+    Supported,
+    BoundedTrack,
+    UnacceptedSource,
+}
+
 #[derive(Clone)]
 struct DirectReviewRoleTool {
     tool_name: &'static str,
     planner_calls: Arc<AtomicUsize>,
     checker_calls: Arc<AtomicUsize>,
     maker_calls: Arc<AtomicUsize>,
+    checker_scenario: CheckerGateScenario,
 }
 
 #[async_trait::async_trait]
@@ -67,12 +75,45 @@ impl Tool for DirectReviewRoleTool {
                     && prompt.contains("https://independent.example/status"),
                 "the combined review lost direct evidence"
             );
+            let first_track_status = match self.checker_scenario {
+                CheckerGateScenario::BoundedTrack => "bounded",
+                CheckerGateScenario::Supported | CheckerGateScenario::UnacceptedSource => {
+                    "supported"
+                }
+            };
+            let first_track_url = match self.checker_scenario {
+                CheckerGateScenario::UnacceptedSource => "https://invented.example/status",
+                CheckerGateScenario::Supported | CheckerGateScenario::BoundedTrack => {
+                    "https://official.example/status"
+                }
+            };
             return Ok(generated_object_output(serde_json::json!({
                 "decision": "finalize",
                 "coverage_summary": "Two independently hosted sources cover the planned evidence tracks.",
                 "report_summary": "The current status is independently corroborated by the retained sources.",
                 "verified_findings": ["The requested current status is independently corroborated."],
+                "track_assessments": [{
+                    "plan_index": 0,
+                    "status": first_track_status,
+                    "finding": "The official source establishes the current status.",
+                    "source_urls": [first_track_url]
+                }, {
+                    "plan_index": 1,
+                    "status": "supported",
+                    "finding": "An independent source corroborates the current status.",
+                    "source_urls": ["https://independent.example/status"]
+                }],
+                "stop_condition_assessments": [{
+                    "plan_index": 0,
+                    "status": "supported",
+                    "finding": "The current status is independently corroborated.",
+                    "source_urls": [
+                        "https://official.example/status",
+                        "https://independent.example/status"
+                    ]
+                }],
                 "unresolved_gaps": [],
+                "limitations": [],
                 "contradictions": [],
                 "next_action": "none",
                 "search_queries": [],
@@ -88,8 +129,9 @@ impl Tool for DirectReviewRoleTool {
     }
 }
 
-#[tokio::test]
-async fn direct_then_review_combines_synthesis_and_coverage_without_a_maker_turn() {
+async fn run_direct_review_scenario(
+    checker_scenario: CheckerGateScenario,
+) -> (serde_json::Value, usize, usize, usize) {
     let workspace = std::env::temp_dir().join(format!(
         "a3s-direct-review-{}-{}",
         std::process::id(),
@@ -108,6 +150,7 @@ async fn direct_then_review_combines_synthesis_and_coverage_without_a_maker_turn
         planner_calls: Arc::clone(&planner_calls),
         checker_calls: Arc::clone(&checker_calls),
         maker_calls: Arc::clone(&maker_calls),
+        checker_scenario,
     };
     executor.register_dynamic_tool(Arc::new(role.clone()));
     executor.register_dynamic_tool(Arc::new(DirectReviewRoleTool {
@@ -138,12 +181,63 @@ async fn direct_then_review_combines_synthesis_and_coverage_without_a_maker_turn
         .expect("the direct-then-review workflow should converge");
     assert_eq!(result.exit_code, 0, "{}", result.output);
     let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+    let _ = std::fs::remove_dir_all(&workspace);
+
+    (
+        output,
+        planner_calls.load(Ordering::SeqCst),
+        checker_calls.load(Ordering::SeqCst),
+        maker_calls.load(Ordering::SeqCst),
+    )
+}
+
+#[tokio::test]
+async fn direct_then_review_combines_synthesis_and_coverage_without_a_maker_turn() {
+    let (output, planner_calls, checker_calls, maker_calls) =
+        run_direct_review_scenario(CheckerGateScenario::Supported).await;
 
     assert_eq!(output["plan"]["execution_route"], "direct_then_review");
     assert_eq!(output["checker"]["decision"], "finalize", "{output:#}");
-    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        output["checker"]["contract_validation"]["finalize_gate_passed"],
+        true
+    );
+    assert_eq!(planner_calls, 1);
+    assert_eq!(checker_calls, 1);
+    assert_eq!(maker_calls, 0);
+}
 
-    let _ = std::fs::remove_dir_all(&workspace);
+#[tokio::test]
+async fn checker_finalize_with_a_bounded_track_is_forced_to_degrade() {
+    let (output, _, _, _) = run_direct_review_scenario(CheckerGateScenario::BoundedTrack).await;
+
+    assert_eq!(output["checker"]["decision"], "degrade", "{output:#}");
+    assert_eq!(output["mode"], "direct_web_degraded", "{output:#}");
+    assert_eq!(
+        output["checker"]["contract_validation"]["finalize_gate_passed"],
+        false
+    );
+    assert_eq!(
+        output["checker"]["track_assessments"][0]["status"],
+        "bounded"
+    );
+}
+
+#[tokio::test]
+async fn checker_assessment_citing_an_unaccepted_url_is_rejected() {
+    let (output, _, _, _) = run_direct_review_scenario(CheckerGateScenario::UnacceptedSource).await;
+
+    assert_eq!(output["checker"]["decision"], "degrade", "{output:#}");
+    assert_eq!(
+        output["checker"]["contract_validation"]["invalid_source_reference_count"],
+        1
+    );
+    assert_eq!(
+        output["checker"]["track_assessments"][0]["status"],
+        "bounded"
+    );
+    assert_eq!(
+        output["checker"]["track_assessments"][0]["source_urls"],
+        serde_json::json!([])
+    );
 }

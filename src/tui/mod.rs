@@ -61,6 +61,9 @@ mod deep_research_artifacts;
 #[path = "deep_research/convergence.rs"]
 mod deep_research_convergence;
 #[cfg(test)]
+#[path = "deep_research/engineered_loop_contract_tests.rs"]
+mod deep_research_engineered_loop_contract_tests;
+#[cfg(test)]
 #[path = "deep_research/engineered_loop_tests.rs"]
 mod deep_research_engineered_loop_tests;
 #[path = "deep_research/evidence_ledger.rs"]
@@ -85,10 +88,15 @@ mod deep_research_report_audit;
 mod deep_research_report_generation;
 #[path = "deep_research/report_phase.rs"]
 mod deep_research_report_phase;
+#[cfg(test)]
+#[path = "deep_research/report_pipeline_tests.rs"]
+mod deep_research_report_pipeline_tests;
 #[path = "deep_research/state_journal.rs"]
 mod deep_research_state_journal;
 #[path = "deep_research/workflow_store.rs"]
 mod deep_research_workflow_store;
+#[cfg(test)]
+pub(crate) use deep_research_artifacts::deep_research_workflow_needs_recovery_report;
 #[cfg(test)]
 use deep_research_artifacts::looks_like_deep_research_fallback_draft;
 #[cfg(test)]
@@ -103,7 +111,7 @@ pub(crate) use deep_research_artifacts::{
     deep_research_report_artifacts_from_output_for_current_run,
     deep_research_report_artifacts_from_output_for_query,
     deep_research_report_rejection_diagnostic_from_answer_text, deep_research_report_slug,
-    deep_research_workflow_needs_recovery_report,
+    deep_research_workflow_needs_recovery_report_with_metadata,
     materialize_deep_research_completed_report_from_answer_text,
     materialize_deep_research_completed_report_from_generation,
     materialize_deep_research_completed_report_from_markdown,
@@ -141,6 +149,108 @@ use deep_research_state_journal::{
 pub(crate) use deep_research_workflow_store::{
     ensure_deep_research_workflow_run_id, recover_deep_research_workflow_run_from_store,
 };
+
+/// Build the same engineered workflow for `a3s code research` that the TUI
+/// uses for `?` turns. The CLI must not carry a second planner, workflow
+/// source, or timeout policy that can drift from the interactive path.
+pub(crate) fn deep_research_cli_workflow_args_for_budget(
+    query: &str,
+    budget: BudgetPlan,
+) -> serde_json::Value {
+    let evidence_scope = deep_research_inferred_evidence_scope(query);
+    deep_research_workflow_args_for_budget(query, false, evidence_scope, budget)
+}
+
+/// Close the evidence boundary for non-interactive report generation. The
+/// returned flag records whether the checker qualified the result instead of
+/// fully completing it; unsupported evidence never reaches synthesis.
+pub(crate) fn deep_research_cli_report_plan(
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Result<(String, bool), String> {
+    let canonical_output =
+        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    let evidence_scope = deep_research_inferred_evidence_scope(query);
+    let outcome = deep_research_report_outcome_for_workflow(
+        query,
+        evidence_scope,
+        &canonical_output,
+        workflow_metadata,
+    );
+    if matches!(outcome, DeepResearchRunOutcome::Degraded) {
+        return Err("evidence collection did not produce a reportable package".to_string());
+    }
+    let accepted = accepted_evidence_ledger(&canonical_output, workflow_metadata);
+    if accepted.is_empty() {
+        return Err("evidence collection produced no accepted evidence".to_string());
+    }
+    let synthesis_evidence = accepted_evidence_synthesis_payload(&accepted, &canonical_output);
+    let prompt = deep_research_synthesis_prompt_with_scope(
+        query,
+        false,
+        &synthesis_evidence,
+        None,
+        evidence_scope,
+    );
+    Ok((prompt, matches!(outcome, DeepResearchRunOutcome::Qualified)))
+}
+
+pub(crate) fn deep_research_cli_canonical_workflow_output(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> String {
+    deep_research_canonical_workflow_output(workflow_output, workflow_metadata)
+}
+
+pub(crate) fn deep_research_cli_report_generation_args(
+    prompt: &str,
+    timeout_ms: u64,
+) -> serde_json::Value {
+    deep_research_report_generation_args(prompt, timeout_ms)
+}
+
+/// Parse a schema-validated report object and write the Markdown/HTML pair in
+/// one host-side operation. The model never writes either long artifact.
+pub(crate) fn materialize_deep_research_cli_generated_report(
+    workspace: &Path,
+    query: &str,
+    output: &str,
+    exit_code: i32,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Result<(String, PathBuf, PathBuf), String> {
+    let report = deep_research_report_from_generation(output, exit_code)?;
+    let artifacts = materialize_deep_research_completed_report_from_generation(
+        workspace,
+        query,
+        &report,
+        workflow_output,
+        workflow_metadata,
+    )?;
+    let text = clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+        .unwrap_or(report.markdown);
+    Ok((text, artifacts.markdown, artifacts.html))
+}
+
+pub(crate) fn materialize_deep_research_cli_recovery_report(
+    workspace: &Path,
+    query: &str,
+    reason: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Result<(String, PathBuf, PathBuf), String> {
+    let artifacts = materialize_deep_research_recovery_report(
+        workspace,
+        query,
+        reason,
+        workflow_output,
+        workflow_metadata,
+    )?;
+    let text = clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
+        .unwrap_or_else(|| reason.to_string());
+    Ok((text, artifacts.markdown, artifacts.html))
+}
 
 // System integrations.
 #[path = "system/skills.rs"]

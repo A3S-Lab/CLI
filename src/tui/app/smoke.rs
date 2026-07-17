@@ -515,12 +515,13 @@ async fn run_smoke_deep_research(
         Err(error) => (error, 1, None),
     };
     eprintln!("[smoke] deepresearch workflow exit: {exit_code}");
-    if !deep_research_evidence_package_is_complete_for_query(
+    let evidence_outcome = deep_research_report_outcome_for_workflow(
         &query,
         evidence_scope,
         &workflow_output,
         metadata.as_ref(),
-    ) {
+    );
+    if matches!(evidence_outcome, DeepResearchRunOutcome::Degraded) {
         deep_research_report_tool_gate.set_report_only(false);
         let artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
@@ -544,8 +545,11 @@ async fn run_smoke_deep_research(
         eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
         return DeepResearchRunOutcome::Degraded.ensure_smoke_success(&artifacts);
     }
+    let accepted_evidence = accepted_evidence_ledger(&workflow_output, metadata.as_ref());
     let prompt = if exit_code == 0 {
-        deep_research_synthesis_prompt(&query, os_runtime, &workflow_output, metadata.as_ref())
+        let synthesis_evidence =
+            accepted_evidence_synthesis_payload(&accepted_evidence, &workflow_output);
+        deep_research_synthesis_prompt(&query, os_runtime, &synthesis_evidence, None)
     } else {
         deep_research_recovery_prompt(&query, os_runtime, &workflow_output, metadata.as_ref())
     };
@@ -817,7 +821,7 @@ async fn run_smoke_deep_research(
         }
     }
 
-    let mut outcome = DeepResearchRunOutcome::Completed;
+    let mut outcome = evidence_outcome;
     if artifacts.is_none() {
         eprintln!("[smoke] deepresearch report missing; materializing recovery report");
         deep_research_report_tool_gate.set_report_only(false);

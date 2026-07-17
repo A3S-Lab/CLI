@@ -13,12 +13,35 @@ pub(crate) fn materialize_deep_research_completed_report_from_generation(
             "content rejected: structured generation did not contain a completed Markdown report"
                 .to_string()
         })?;
-    let markdown = sanitize_unobserved_markdown_http_citations(
+    let mut markdown = sanitize_unobserved_markdown_http_citations(
         &markdown,
         query,
         workflow_output,
         workflow_metadata,
     );
+    let accepted_evidence = super::deep_research_evidence_ledger::accepted_evidence_ledger(
+        workflow_output,
+        workflow_metadata,
+    );
+    let grounding_texts =
+        super::deep_research_evidence_ledger::report_grounding_texts(query, &accepted_evidence);
+    if let Err(error) = super::deep_research_report_audit::validate_quantitative_grounding(
+        &markdown,
+        &grounding_texts,
+    ) {
+        if !workflow_allows_qualified_sanitization(workflow_output) {
+            return Err(error);
+        }
+        markdown = super::deep_research_report_audit::sanitize_ungrounded_quantitative_claims(
+            &markdown,
+            &grounding_texts,
+        )
+        .ok_or(error)?;
+        super::deep_research_report_audit::validate_quantitative_grounding(
+            &markdown,
+            &grounding_texts,
+        )?;
+    }
     let html = deep_research_completed_report_html_with_presentation(
         query,
         &markdown,
@@ -50,13 +73,34 @@ pub(crate) fn materialize_deep_research_completed_report_from_generation(
         .ok_or_else(|| "completed report artifacts failed content validation".to_string())
 }
 
+fn workflow_allows_qualified_sanitization(workflow_output: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(workflow_output.trim())
+        .ok()
+        .is_some_and(|workflow| {
+            workflow
+                .pointer("/checker/decision")
+                .and_then(serde_json::Value::as_str)
+                == Some("degrade")
+                || workflow
+                    .pointer("/verification/status")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("degraded")
+                || workflow
+                    .get("mode")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|mode| mode.contains("degraded"))
+        })
+}
+
 fn validate_generated_report_depth(
     generated: &GeneratedDeepResearchReport,
     workflow_output: &str,
 ) -> Result<(), String> {
     let thesis = generated.editorial.thesis.trim();
     if thesis.chars().count() < 12 {
-        return Err("content rejected: the report has no substantive answer-first thesis".to_string());
+        return Err(
+            "content rejected: the report has no substantive answer-first thesis".to_string(),
+        );
     }
     if generated.presentation.rationale.trim().chars().count() < 12 {
         return Err(
@@ -150,13 +194,12 @@ fn matched_planned_report_tracks(
         .iter()
         .enumerate()
         .flat_map(|(planned_index, (_, planned_display))| {
-            coverage
-                .iter()
-                .enumerate()
-                .filter_map(move |(coverage_index, (_, coverage_display))| {
+            coverage.iter().enumerate().filter_map(
+                move |(coverage_index, (_, coverage_display))| {
                     report_track_match_score(planned_display, coverage_display)
                         .map(|score| (score, planned_index, coverage_index))
-                })
+                },
+            )
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
@@ -170,9 +213,7 @@ fn matched_planned_report_tracks(
     let mut matched_planned = HashSet::new();
     let mut matched_coverage = HashSet::new();
     for (_, planned_index, coverage_index) in candidates {
-        if matched_planned.contains(&planned_index)
-            || matched_coverage.contains(&coverage_index)
-        {
+        if matched_planned.contains(&planned_index) || matched_coverage.contains(&coverage_index) {
             continue;
         }
         matched_planned.insert(planned_index);
@@ -212,15 +253,13 @@ fn report_track_match_score(planned: &str, coverage: &str) -> Option<usize> {
         return containment_score;
     }
 
-    let token_score = meaningful_report_track_tokens(&planned_full)
-        .and_then(|planned_tokens| {
-            meaningful_report_track_tokens(&coverage_full).and_then(|coverage_tokens| {
-                let common = planned_tokens.intersection(&coverage_tokens).count();
-                let smaller = planned_tokens.len().min(coverage_tokens.len());
-                (common >= 2 && common * 5 >= smaller * 3)
-                    .then_some(600 + (common * 100 / smaller))
-            })
-        });
+    let token_score = meaningful_report_track_tokens(&planned_full).and_then(|planned_tokens| {
+        meaningful_report_track_tokens(&coverage_full).and_then(|coverage_tokens| {
+            let common = planned_tokens.intersection(&coverage_tokens).count();
+            let smaller = planned_tokens.len().min(coverage_tokens.len());
+            (common >= 2 && common * 5 >= smaller * 3).then_some(600 + (common * 100 / smaller))
+        })
+    });
     if token_score.is_some() {
         return token_score;
     }
@@ -266,14 +305,25 @@ fn report_track_containment_score(left: &str, right: &str) -> Option<usize> {
     } else {
         shorter_chars >= 7
     };
-    (specific_enough && longer.contains(shorter))
-        .then_some(800 + shorter_chars.min(100))
+    (specific_enough && longer.contains(shorter)).then_some(800 + shorter_chars.min(100))
 }
 
 fn meaningful_report_track_tokens(track: &str) -> Option<HashSet<String>> {
     const STOP_WORDS: &[&str] = &[
-        "and", "for", "from", "into", "the", "versus", "with", "analysis", "assessment",
-        "comparison", "evaluation", "overview", "review", "track",
+        "and",
+        "for",
+        "from",
+        "into",
+        "the",
+        "versus",
+        "with",
+        "analysis",
+        "assessment",
+        "comparison",
+        "evaluation",
+        "overview",
+        "review",
+        "track",
     ];
     let tokens = track
         .split_whitespace()

@@ -1,69 +1,3 @@
-  const hasStructuredEvidence = (runtimeOutput) =>
-    runtimeOutput &&
-    Array.isArray(runtimeOutput.results) &&
-    runtimeOutput.results.some((item) => item && item.success === true && item.structured);
-  const plannerTaskInput = () => {
-    const planner = loopContract.planner && typeof loopContract.planner === "object"
-      ? loopContract.planner
-      : null;
-    if (!planner || !planner.output_schema || !isNonEmptyString(planner.prompt)) {
-      return null;
-    }
-    return {
-      schema: planner.output_schema,
-      schema_name: "deep_research_plan",
-      schema_description: "LLM-authored adaptive DeepResearch plan and budget",
-      prompt: planner.prompt,
-      mode: "auto",
-      max_repair_attempts: 1,
-      timeout_ms: Math.max(5000, Math.min(120000, Number(planner.timeout_ms) || 120000)),
-    };
-  };
-  const structuredTaskOutput = (output) => {
-    const results = output && output.metadata && Array.isArray(output.metadata.results)
-      ? output.metadata.results
-      : [];
-    const delegated = results
-      .filter((item) => item && item.success === true && item.structured && typeof item.structured === "object")
-      .map((item) => item.structured)[0] || null;
-    if (delegated) {
-      return delegated;
-    }
-    const raw = output && isNonEmptyString(output.output) ? output.output : "";
-    if (!raw) {
-      return null;
-    }
-    try {
-      const generated = JSON.parse(raw);
-      return generated && generated.object && typeof generated.object === "object" && !Array.isArray(generated.object)
-        ? generated.object
-        : null;
-    } catch (_) {
-      return null;
-    }
-  };
-  const checkerStepId = (kind, roundNumber) => {
-    if (kind === "direct") {
-      return "research_checker_direct";
-    }
-    if (kind === "direct_follow_up") {
-      return `research_checker_direct_follow_up_${roundNumber}`;
-    }
-    if (kind === "round_follow_up") {
-      return `research_checker_round_${roundNumber}_direct_follow_up`;
-    }
-    return `research_checker_round_${roundNumber}`;
-  };
-  const boundedDigestStrings = (values, charBudget, maxItems) => {
-    const candidates = uniqueStrings(values);
-    const count = Math.min(candidates.length, maxItems);
-    if (count === 0 || charBudget <= 0) {
-      return [];
-    }
-    // Reserve space for JSON framing and escaping.
-    const perItemChars = Math.max(48, Math.floor((charBudget * 0.8) / count));
-    return candidates.slice(0, count).map((item) => compactText(item, perItemChars));
-  };
   const checkerEvidenceClassDigest = (research, charBudget) => {
     if (!research || typeof research !== "object" || Array.isArray(research)) {
       return { present: false };
@@ -91,7 +25,11 @@
         seenSources.add(key);
         const title = compactText(source.title, 140);
         const reliability = compactText(source.reliability, 120);
-        const fact = compactText(source.quote_or_fact, 320);
+        // The checker must see the retained source fact, not a title-sized
+        // teaser. Truncating schema-bounded evidence here previously forced a
+        // redundant retrieval/checker pass even though the maker had already
+        // collected the required official text.
+        const fact = compactText(source.quote_or_fact, 700);
         sources.push(`${url}${title ? ` — ${title}` : ""}${reliability ? ` [${reliability}]` : ""}${fact ? `: ${fact}` : ""}`);
       }
     }
@@ -103,6 +41,15 @@
       Array.isArray(item.contradictions) ? item.contradictions : []
     );
     const confidence = structured.map((item) => item.confidence);
+    const leads = (Array.isArray(metadata.candidate_leads) ? metadata.candidate_leads : [])
+      .filter((lead) => lead && typeof lead === "object" && isNonEmptyString(lead.url))
+      .map((lead) => {
+        const title = compactText(lead.title, 140);
+        const queries = Array.isArray(lead.queries)
+          ? boundedDigestStrings(lead.queries, 240, 2).join("; ")
+          : "";
+        return `${compactText(lead.url, 300)}${title ? ` — ${title}` : ""}${queries ? ` [lead for: ${queries}]` : ""}`;
+      });
     const failedTasks = research.warnings && Array.isArray(research.warnings.failed_tasks)
       ? research.warnings.failed_tasks
       : [];
@@ -127,17 +74,22 @@
         fetched: Number(metadata.fetched_count) || 0,
         hosts: Number(metadata.host_count) || 0
       },
-      summaries: boundedDigestStrings(summaries, Math.floor(contentBudget * 0.16), 6),
-      sources: boundedDigestStrings(sources, Math.floor(contentBudget * 0.34), 8),
-      key_evidence: boundedDigestStrings(keyEvidence, Math.floor(contentBudget * 0.22), 8),
-      gaps: boundedDigestStrings(gaps, Math.floor(contentBudget * 0.09), 6),
+      summaries: boundedDigestStrings(summaries, Math.floor(contentBudget * 0.08), 6),
+      sources: boundedDigestStrings(sources, Math.floor(contentBudget * 0.55), 10),
+      discovery_leads_not_evidence: boundedDigestStrings(
+        leads,
+        Math.floor(contentBudget * 0.06),
+        8
+      ),
+      key_evidence: boundedDigestStrings(keyEvidence, Math.floor(contentBudget * 0.12), 8),
+      gaps: boundedDigestStrings(gaps, Math.floor(contentBudget * 0.07), 6),
       contradictions: boundedDigestStrings(
         contradictions,
-        Math.floor(contentBudget * 0.09),
+        Math.floor(contentBudget * 0.05),
         6
       ),
-      confidence: boundedDigestStrings(confidence, Math.floor(contentBudget * 0.05), 4),
-      failures: boundedDigestStrings(failures, Math.floor(contentBudget * 0.05), 4)
+      confidence: boundedDigestStrings(confidence, Math.floor(contentBudget * 0.03), 4),
+      failures: boundedDigestStrings(failures, Math.floor(contentBudget * 0.04), 4)
     };
   };
   const checkerEvidenceDigest = (evidence) => {
@@ -148,10 +100,14 @@
     const direct = combined ? evidence.direct : evidence;
     const hasMaker = maker && typeof maker === "object";
     const hasDirect = direct && typeof direct === "object";
-    const makerBudget = hasMaker && hasDirect ? 2600 : 3600;
-    const directBudget = hasMaker && hasDirect ? 1800 : 3600;
+    // Evidence transfer is cheaper than a false-negative checker followed by
+    // another web pass and another checker call. Keep independent hard bounds,
+    // but size them for the schema-bounded source facts collected by a normal
+    // multi-track run.
+    const makerBudget = hasMaker && hasDirect ? 10000 : 14000;
+    const directBudget = hasMaker && hasDirect ? 6000 : 14000;
     return JSON.stringify({
-      digest_version: 1,
+      digest_version: 2,
       maker: checkerEvidenceClassDigest(maker, makerBudget),
       direct: checkerEvidenceClassDigest(direct, directBudget)
     });
@@ -170,12 +126,122 @@
       ? researchPlan.phases.slice(0, 3)
       : [],
     tracks: researchPlan && Array.isArray(researchPlan.tracks)
-      ? researchPlan.tracks.slice(0, 4)
+      ? researchPlan.tracks.slice(0, 4).map((track, planIndex) => ({
+          plan_index: planIndex,
+          objective: assessmentLabel(track, `Track ${planIndex + 1}`)
+        }))
       : [],
     stop_conditions: researchPlan && Array.isArray(researchPlan.stop_conditions)
-      ? researchPlan.stop_conditions.slice(0, 3)
+      ? researchPlan.stop_conditions.slice(0, 3).map((condition, planIndex) => ({
+          plan_index: planIndex,
+          condition: assessmentLabel(condition, `Stop condition ${planIndex + 1}`)
+        }))
       : []
   });
+  const assessmentLabel = (value, fallback) => {
+    if (isNonEmptyString(value)) return compactText(value, 240);
+    if (!value || typeof value !== "object") return fallback;
+    return compactText(value.title || value.focus || value.name || value.success_criterion, 240) || fallback;
+  };
+  const plannedAssessmentLabels = (values, prefix, limit) =>
+    (Array.isArray(values) ? values : []).slice(0, limit)
+      .map((value, index) => assessmentLabel(value, `${prefix} ${index + 1}`));
+  const acceptedEvidenceSources = (evidence) => {
+    const combined = evidence && typeof evidence === "object" &&
+      (Object.prototype.hasOwnProperty.call(evidence, "maker") ||
+        Object.prototype.hasOwnProperty.call(evidence, "direct"));
+    const accepted = new Map();
+    for (const research of combined ? [evidence.direct, evidence.maker] : [evidence]) {
+      for (const result of research && Array.isArray(research.results) ? research.results : []) {
+        if (!result || result.success !== true || !result.structured) continue;
+        for (const source of Array.isArray(result.structured.sources) ? result.structured.sources : []) {
+          const normalized = normalizeObservedSource(source && source.url_or_path);
+          const key = canonicalObservedSourceKey(normalized);
+          if (key && !accepted.has(key)) accepted.set(key, normalized);
+        }
+      }
+    }
+    return accepted;
+  };
+  const validateAssessmentSet = (raw, labels, labelKey, accepted) => {
+    const byIndex = new Map();
+    const duplicates = new Set();
+    for (const item of Array.isArray(raw) ? raw : []) {
+      const index = Number(item && item.plan_index);
+      if (!Number.isInteger(index) || index < 0 || index >= labels.length) continue;
+      if (byIndex.has(index)) duplicates.add(index); else byIndex.set(index, item);
+    }
+    let invalidSources = 0;
+    const assessments = labels.map((label, planIndex) => {
+      const rawItem = byIndex.get(planIndex);
+      const finding = compactText(rawItem && rawItem.finding, 1600) || `No supported finding for ${label}.`;
+      const sourceUrls = [];
+      let invalidForItem = 0;
+      for (const url of uniqueStrings(rawItem && Array.isArray(rawItem.source_urls) ? rawItem.source_urls : [])) {
+        const key = canonicalObservedSourceKey(url);
+        if (key && accepted.has(key)) sourceUrls.push(accepted.get(key));
+        else { invalidSources += 1; invalidForItem += 1; }
+      }
+      let status = rawItem && ["supported", "bounded", "uncovered"].includes(rawItem.status)
+        ? rawItem.status : "bounded";
+      if (duplicates.has(planIndex) ||
+          (status === "supported" && (sourceUrls.length === 0 || invalidForItem > 0))) status = "bounded";
+      const item = { plan_index: planIndex, status, finding, source_urls: uniqueStrings(sourceUrls) };
+      item[labelKey] = label;
+      return item;
+    });
+    return {
+      assessments,
+      invalidSources,
+      ok: labels.length > 0 && assessments.every((item) => item.status === "supported"),
+      gaps: assessments.filter((item) => item.status !== "supported")
+        .map((item) => `${item[labelKey]}: ${item.finding}`)
+    };
+  };
+  const validateCheckerDecision = (decision, evidence) => {
+    if (!decision || typeof decision !== "object") return null;
+    const trackLabels = plannedAssessmentLabels(researchPlan && researchPlan.tracks, "Track", 4);
+    const stopLabels = plannedAssessmentLabels(researchPlan && researchPlan.stop_conditions, "Stop condition", 3);
+    const accepted = acceptedEvidenceSources(evidence);
+    const tracks = validateAssessmentSet(decision.track_assessments, trackLabels, "track", accepted);
+    const stops = validateAssessmentSet(decision.stop_condition_assessments, stopLabels, "stop_condition", accepted);
+    const rawGaps = uniqueStrings(Array.isArray(decision.unresolved_gaps) ? decision.unresolved_gaps : []);
+    const invalidSources = tracks.invalidSources + stops.invalidSources;
+    const contractSatisfied = accepted.size > 0 && tracks.ok && stops.ok && rawGaps.length === 0 && invalidSources === 0;
+    const forcedDegrade = decision.decision === "finalize" && !contractSatisfied;
+    const verifiedFindings = uniqueStrings([...tracks.assessments, ...stops.assessments]
+      .filter((item) => item.status === "supported").map((item) => item.finding)).slice(0, 8);
+    const sanitized = Object.assign({}, decision, {
+      decision: forcedDegrade ? "degrade" : decision.decision,
+      report_summary: compactText(verifiedFindings.join(" ") ||
+        "The retained evidence does not support a complete answer to the requested question.", 4800),
+      verified_findings: verifiedFindings,
+      track_assessments: tracks.assessments,
+      stop_condition_assessments: stops.assessments,
+      unresolved_gaps: uniqueStrings([...rawGaps, ...tracks.gaps, ...stops.gaps]).slice(0, 12),
+      limitations: uniqueStrings(Array.isArray(decision.limitations) ? decision.limitations : []).slice(0, 8),
+      contract_validation: {
+        version: 1,
+        finalize_gate_passed: contractSatisfied,
+        accepted_source_count: accepted.size,
+        planned_track_count: trackLabels.length,
+        supported_track_count: tracks.assessments.filter((item) => item.status === "supported").length,
+        planned_stop_condition_count: stopLabels.length,
+        supported_stop_condition_count: stops.assessments.filter((item) => item.status === "supported").length,
+        invalid_source_reference_count: invalidSources
+      }
+    });
+    if (forcedDegrade) {
+      const issues = [!tracks.ok && "tracks", !stops.ok && "stop conditions",
+        rawGaps.length > 0 && "material gaps", invalidSources > 0 && "unaccepted sources"]
+        .filter(Boolean).join(", ");
+      Object.assign(sanitized, {
+        next_action: "none", search_queries: [], seed_urls: [], next_tracks: [],
+        reason: `Host evidence validation rejected finalize: ${issues || "no accepted evidence"}.`
+      });
+    }
+    return sanitized;
+  };
   const workflowRemainingMs = () => {
     const startedAt = Number(input.run_started_at_ms);
     const timeoutMs = Number(input.workflow_timeout_ms);
@@ -205,10 +271,13 @@
     const boundedEvidence = checkerEvidenceDigest(evidence);
     const boundedPlan = compactText(checkerPlanDigest(), 2400);
     const webOnlyReview = directWebEnabled && !workspaceEvidenceRequired;
+    const remainingDirectPasses = Math.max(0, maxResearchRounds - roundNumber - 1);
     const repeatedDirectDirective = kind === "direct_follow_up" || kind === "round_follow_up"
-      ? (webOnlyReview
-        ? " One direct follow-up already ran. Do not retrieve again or use maker for more web reading; finalize with limitations or degrade."
-        : " One direct follow-up already ran. Do not repeat it; use maker only for a distinct non-web task, otherwise finalize or degrade.")
+      ? (remainingDirectPasses > 0
+        ? ` A direct follow-up already ran; ${remainingDirectPasses} planned evidence pass(es) remain. Request another direct_retrieval only for a still-consequential gap with a new query or unfetched observed lead.`
+        : (webOnlyReview
+          ? " The planned direct evidence passes are exhausted. Do not use maker for more web reading; finalize only if the core answer is supported, otherwise degrade."
+          : " The planned direct evidence passes are exhausted. Use maker only for a distinct non-web task; otherwise finalize only if the core answer is supported, or degrade."))
       : "";
     const capabilityDirective = webOnlyReview
       ? " Public web gaps use direct_retrieval. Maker is only for evidence production or required non-web/local work."
@@ -221,7 +290,7 @@
       schema: checker.output_schema,
       schema_name: "deep_research_check",
       schema_description: "Independent DeepResearch evidence coverage decision",
-      prompt: `Check evidence against the semantic plan; do not call tools. Judge every planned track and stop condition. A URL or search snippet alone is not evidence; titles and snippets are leads unless retained page text supports the claim. Consequential status, quantitative, governance, and recommendation claims need primary or authoritative evidence plus independent corroboration when available. If a track has only snippets, generic/SEO comparisons, failed primary fetches, or unsupported inference and one follow-up fits, continue that gap with direct_retrieval; maker is only for distinct evidence production or non-web work. Never repeat failed work. Finalize only a useful source-backed answer; degrade only if the core answer would mislead. Finalize/degrade require next_action=none.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Return concise schema fields in the query's language. report_summary directly answers the request; unsupported conditions stay in unresolved_gaps. Each verified finding states a fact present in retained evidence and includes its exact supporting source URL(s). Findings state facts, never that sources, articles, comparisons, discussions, or collection exist. Put uncertainty only in gaps or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
+      prompt: `Check evidence against the semantic plan; do not call tools. Judge every planned track and stop condition by its plan_index. Return exactly one track_assessments entry for every planned track and one stop_condition_assessments entry for every stop condition. Mark an entry supported only when its finding is present in retained relevant page text and source_urls contains the exact supporting source URL(s) or path(s) from the retained source list; bounded means partially supported, and uncovered means no retained support. A URL, title, or search snippet alone is a discovery lead, never evidence; only retained relevant page text supports a claim. Consequential status, quantitative, governance, comparison, and recommendation claims need primary or authoritative evidence plus independent corroboration when available. If a material track has only discovery leads, generic/SEO comparisons, failed primary fetches, or unsupported inference and another planned pass fits, continue that exact gap with direct_retrieval; maker is only for distinct evidence production or non-web work. Never repeat a failed URL or unchanged query. Finalize only when every track and stop condition is supported and unresolved_gaps is empty. Put only material plan obligations that prevent the requested answer in unresolved_gaps; put peripheral caveats that do not change the core answer in limitations. An exhausted clock or pass budget never turns insufficient core evidence into finalize. Choose degrade when a core comparison, requested recommendation, or material stop condition remains unsupported. Finalize/degrade require next_action=none.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Return concise schema fields in the query's language. report_summary directly answers the request and must not fill evidence gaps from prior knowledge. Each verified finding states a fact present in retained evidence, but the host will rebuild verified_findings from supported assessments. Findings state facts, never that sources, articles, comparisons, discussions, or collection exist. Put uncertainty only in gaps, limitations, or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
       mode: "auto",
       max_repair_attempts: 1,
       timeout_ms: Math.min(configuredCheckerTimeoutMs, availableCheckerMs),
@@ -270,6 +339,7 @@
     let successCount = 0;
     let failedCount = 0;
     let allEngineered = true;
+    const candidateLeads = [];
     for (const attempt of attempts) {
       const research = attempt.research || {};
       const metadata = research.metadata || {};
@@ -282,6 +352,11 @@
       }
       successCount += Number(metadata.success_count) || 0;
       failedCount += Number(metadata.failed_count) || 0;
+      for (const lead of Array.isArray(metadata.candidate_leads) ? metadata.candidate_leads : []) {
+        if (lead && typeof lead === "object" && isNonEmptyString(lead.url)) {
+          candidateLeads.push(lead);
+        }
+      }
       const attemptResults = Array.isArray(research.results) ? research.results : [];
       for (let index = 0; index < attemptResults.length; index += 1) {
         const item = attemptResults[index];
@@ -295,6 +370,39 @@
         : [];
       collectionErrors.push(...errors);
     }
+    const sourceKeys = new Set();
+    const sourceHosts = new Set();
+    let datedSourceCount = 0;
+    for (const result of results) {
+      const structured = result && result.structured && typeof result.structured === "object"
+        ? result.structured
+        : null;
+      for (const source of structured && Array.isArray(structured.sources) ? structured.sources : []) {
+        const url = source && source.url_or_path;
+        const key = canonicalObservedSourceKey(url);
+        if (!key || sourceKeys.has(key)) {
+          continue;
+        }
+        sourceKeys.add(key);
+        const host = observedSourceHost(url);
+        if (host) {
+          sourceHosts.add(host);
+        }
+        if (source && isNonEmptyString(source.date)) {
+          datedSourceCount += 1;
+        }
+      }
+    }
+    const uniqueCandidateLeads = [];
+    const candidateKeys = new Set();
+    for (const lead of candidateLeads) {
+      const key = canonicalObservedSourceKey(lead.url);
+      if (!key || candidateKeys.has(key)) {
+        continue;
+      }
+      candidateKeys.add(key);
+      uniqueCandidateLeads.push(lead);
+    }
     const hasFailure = failedCount > 0 || collectionErrors.length > 0;
     const metadata = {
       engineered_loop: allEngineered,
@@ -304,6 +412,13 @@
       result_count: results.length,
       success_count: successCount,
       failed_count: failedCount,
+      source_count: sourceKeys.size,
+      fetched_count: sourceKeys.size,
+      host_count: sourceHosts.size,
+      fetched_host_count: sourceHosts.size,
+      dated_source_count: datedSourceCount,
+      candidate_urls: uniqueCandidateLeads.map((lead) => lead.url),
+      candidate_leads: uniqueCandidateLeads,
       all_success: !hasFailure && results.length > 0,
       partial_failure: hasFailure && results.length > 0,
       results
@@ -311,7 +426,9 @@
     const aggregate = {
       tool: "web_search/web_fetch",
       algorithm: "llm_targeted_direct_retrieval",
-      status: results.length === 0 ? "failed" : (hasFailure ? "partial_success" : "success"),
+      status: results.length === 0
+        ? (uniqueCandidateLeads.length > 0 ? "leads_only" : "failed")
+        : (hasFailure ? "partial_success" : "success"),
       completed_iterations: followUps.length,
       metadata,
       results
@@ -359,7 +476,21 @@
       return [];
     }
     const alreadyObserved = new Set(observedDirectUrls(research).map(canonicalObservedSourceKey));
-    const candidates = [];
+    const metadata = research.metadata && typeof research.metadata === "object"
+      ? research.metadata
+      : {};
+    const candidateLeads = Array.isArray(metadata.candidate_leads)
+      ? metadata.candidate_leads
+      : [];
+    const sourceObservedCandidates = candidateLeads
+      .filter((lead) => lead && lead.source_observed === true && isNonEmptyString(lead.url))
+      .map((lead) => lead.url);
+    const discoveryCandidates = candidateLeads.length > 0
+      ? candidateLeads
+          .filter((lead) => lead && lead.source_observed !== true && isNonEmptyString(lead.url))
+          .map((lead) => lead.url)
+      : (Array.isArray(metadata.candidate_urls) ? metadata.candidate_urls : []);
+    const linkedCandidates = [];
     for (const result of Array.isArray(research.results) ? research.results : []) {
       const structured = result && result.structured && typeof result.structured === "object"
         ? result.structured
@@ -375,11 +506,11 @@
           : [])
       ];
       for (const text of texts) {
-        candidates.push(...(String(text || "").match(/https?:\/\/[^\s<>"'\\]+/gi) || []));
+        linkedCandidates.push(...(String(text || "").match(/https?:\/\/[^\s<>"'\\]+/gi) || []));
       }
     }
     const seen = new Set();
-    return candidates
+    const normalized = (candidates) => candidates
       .map((url) => normalizeObservedSource(String(url).replace(/[.,;:!?)\]}]+$/, "")))
       .filter((url) => {
         const key = canonicalObservedSourceKey(url);
@@ -390,7 +521,13 @@
         return true;
       })
       .sort((left, right) => sourceRelevanceScore({ title: "", url: right, content: "" }) -
-        sourceRelevanceScore({ title: "", url: left, content: "" }))
+        sourceRelevanceScore({ title: "", url: left, content: "" }));
+    // A link parsed from a successfully fetched page has stronger provenance
+    // than checker-generated or search-result URLs. Preserve that provenance
+    // through cumulative rounds and only then consider lower-confidence leads.
+    return normalized(sourceObservedCandidates)
+      .concat(normalized(linkedCandidates))
+      .concat(normalized(discoveryCandidates))
       .slice(0, directWebFetchLimit);
   };
   const makerFitsWorkflowBudget = () => {
@@ -401,20 +538,26 @@
     const remainingMs = workflowRemainingMs();
     return remainingMs === null || remainingMs >= checkerReserveMs;
   };
-  const budgetFinalizedChecker = (decision, reason, limitation) => Object.assign({}, decision || {}, {
-    decision: "finalize",
-    next_action: "none",
-    coverage_summary: compactText(
-      `${decision && decision.coverage_summary ? decision.coverage_summary : "Useful traceable evidence was collected."} ${limitation || "Remaining checked gaps must be stated as report limitations because another full checked iteration cannot finish inside the workflow budget."}`,
-      800
-    ),
-    reason: reason || "The evidence package is reportable with explicit limitations; no further maker pass fits the remaining workflow budget."
-  });
+  const budgetClosedChecker = (decision, reason, limitation) => {
+    const priorDecision = decision && decision.decision;
+    const terminalDecision = priorDecision === "finalize" ? "finalize" : "degrade";
+    return Object.assign({}, decision || {}, {
+      decision: terminalDecision,
+      next_action: "none",
+      coverage_summary: compactText(
+        `${decision && decision.coverage_summary ? decision.coverage_summary : "The checked evidence package is incomplete."} ${limitation || "A remaining checked gap cannot be resolved and independently checked inside the workflow budget."}`,
+        800
+      ),
+      reason: reason || (terminalDecision === "finalize"
+        ? "The previously finalized evidence remains reportable; no further checked pass fits the remaining workflow budget."
+        : "The checker requested more evidence, but no further checked pass fits the remaining workflow budget; the run must remain degraded rather than claim completion.")
+    });
+  };
   const failedRecheckFinalizedChecker = (decision) => {
     const gap = "Follow-up evidence was not independently rechecked; conclusions relying on it remain provisional.";
-    const checker = budgetFinalizedChecker(
+    const checker = budgetClosedChecker(
       decision,
-      "Previously checked findings remain reportable, but the follow-up recheck did not complete.",
+      "Previously checked findings are retained, but the follow-up recheck did not complete, so unresolved core gaps remain degraded.",
       gap
     );
     checker.unresolved_gaps = uniqueStrings([
@@ -423,6 +566,31 @@
     ]).slice(0, 4);
     return checker;
   };
+  const noEvidenceAfterFollowUpChecker = (decision) => ({
+    decision: "degrade",
+    next_action: "none",
+    coverage_summary: compactText(
+      `${decision && decision.coverage_summary ? decision.coverage_summary : "The initial evidence pass was incomplete."} The targeted follow-up also retained no relevant page text; discovery leads and transport failures are not evidence.`,
+      800
+    ),
+    report_summary: compactText(
+      decision && decision.report_summary
+        ? decision.report_summary
+        : "The requested answer cannot be supported because no traceable source text was retained.",
+      1200
+    ),
+    verified_findings: [],
+    unresolved_gaps: uniqueStrings(
+      decision && Array.isArray(decision.unresolved_gaps)
+        ? decision.unresolved_gaps
+        : ["No traceable source text was retained after the targeted follow-up."]
+    ).slice(0, 4),
+    contradictions: [],
+    search_queries: [],
+    seed_urls: [],
+    next_tracks: [],
+    reason: "A checked follow-up still produced zero accepted evidence, so another model checker cannot turn the same discovery leads into a supported answer."
+  });
   const checkerContinuationTracks = (decision) => {
     if (!decision || typeof decision !== "object") {
       return [];
@@ -560,7 +728,7 @@
 
     if (
       directWebResearch &&
-      hasStructuredEvidence(directWebResearch) &&
+      (hasStructuredEvidence(directWebResearch) || hasCandidateLeads(directWebResearch)) &&
       localRounds.length === 0 &&
       (localRoundFailures.length === 0 || directRecoveryAfterMakerFailure)
     ) {
@@ -610,9 +778,25 @@
       const checkerKind = directIteration === 0 ? "direct" : "direct_follow_up";
       const checkerId = checkerStepId(checkerKind, directIteration);
       const checkerFailure = stepFailures[checkerId];
-      const checkerDecision = structuredTaskOutput(stepOutputs[checkerId]);
+      const checkerEvidence = directRecoveryAfterMakerFailure
+        ? {
+            direct: directEvidence,
+            maker: aggregateResearchRounds(
+              [],
+              "maker_failed_before_direct_recovery",
+              localRoundFailures
+            )
+          }
+        : directEvidence;
+      const checkerDecision = validateCheckerDecision(
+        structuredTaskOutput(stepOutputs[checkerId]),
+        checkerEvidence
+      );
       const priorDirectChecker = directIteration > 0
-        ? structuredTaskOutput(stepOutputs[checkerStepId("direct", 0)])
+        ? validateCheckerDecision(
+            structuredTaskOutput(stepOutputs[checkerStepId("direct", 0)]),
+            directWebResearch
+          )
         : null;
       const failedFollowUp = stepFailures[directFollowUpStepId(directIteration + 1)];
       if (failedFollowUp) {
@@ -633,17 +817,36 @@
         !checkerFailure &&
         directIteration > 0 &&
         priorDirectChecker &&
+        !hasStructuredEvidence(directEvidence)
+      ) {
+        return {
+          type: "complete",
+          output: {
+            query,
+            mode: "direct_web_degraded",
+            plan: researchPlan,
+            checker: noEvidenceAfterFollowUpChecker(priorDirectChecker),
+            research: directEvidence,
+            zero_evidence_after_follow_up: true
+          }
+        };
+      }
+      if (
+        !checkerDecision &&
+        !checkerFailure &&
+        directIteration > 0 &&
+        priorDirectChecker &&
         !checkerFitsWorkflowBudget()
       ) {
         return {
           type: "complete",
           output: {
             query,
-            mode: "direct_web",
+            mode: "direct_web_degraded",
             plan: researchPlan,
-            checker: budgetFinalizedChecker(
+            checker: budgetClosedChecker(
               priorDirectChecker,
-              "The previously verified findings remain reportable with explicit limitations; the targeted follow-up is retained as evidence, but another independent checker pass cannot finish inside the workflow budget."
+              "The targeted follow-up is retained, but the prior checker requested more evidence and another independent checker pass cannot finish; the run remains degraded."
             ),
             research: directEvidence,
             budget_limited: true
@@ -651,16 +854,6 @@
         };
       }
       if (!checkerDecision && !checkerFailure) {
-        const checkerEvidence = directRecoveryAfterMakerFailure
-          ? {
-              direct: directEvidence,
-              maker: aggregateResearchRounds(
-                [],
-                "maker_failed_before_direct_recovery",
-                localRoundFailures
-              )
-            }
-          : directEvidence;
         const scheduled = scheduleChecker(checkerKind, directIteration, checkerEvidence);
         if (scheduled) {
           return scheduled;
@@ -696,7 +889,7 @@
             type: "complete",
             output: {
               query,
-              mode: "direct_web",
+              mode: "direct_web_degraded",
               plan: researchPlan,
               checker: failedRecheckFinalizedChecker(priorDirectChecker),
               research: directEvidence,
@@ -754,7 +947,8 @@
         checkerDecision.decision === "continue" &&
         checkerDecision.next_action === "direct_retrieval" &&
         directWebEnabled &&
-        directIteration === 0 &&
+        directIteration + 1 < maxResearchRounds &&
+        !retrievalBudgetExhausted &&
         (followUpQueries.length > 0 || followUpUrls.length > 0)
       ) {
         const nextIteration = directIteration + 1;
@@ -774,17 +968,16 @@
       if (
         checkerDecision &&
         checkerDecision.decision === "continue" &&
-        (checkerDecision.next_action === "maker" ||
-          (checkerDecision.next_action === "direct_retrieval" && directIteration > 0)) &&
+        checkerDecision.next_action === "maker" &&
         !makerFitsWorkflowBudget()
       ) {
         return {
           type: "complete",
           output: {
             query,
-            mode: "direct_web",
+            mode: "direct_web_degraded",
             plan: researchPlan,
-            checker: budgetFinalizedChecker(checkerDecision),
+            checker: budgetClosedChecker(checkerDecision),
             research: directEvidence,
             budget_limited: true
           }
@@ -793,8 +986,7 @@
       if (
         checkerDecision &&
         checkerDecision.decision === "continue" &&
-        (checkerDecision.next_action === "maker" ||
-          (checkerDecision.next_action === "direct_retrieval" && directIteration > 0)) &&
+        checkerDecision.next_action === "maker" &&
         !directRecoveryAfterMakerFailure &&
         nextTracks.length > 0
       ) {

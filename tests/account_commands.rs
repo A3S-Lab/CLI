@@ -45,6 +45,15 @@ fn command(home: &std::path::Path, config: &std::path::Path, args: &[&str]) -> C
         .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .env_remove("CODEX_HOME")
+        .env_remove("A3S_KIMI_HOME")
+        .env_remove("A3S_KIMI_DESKTOP_HOME")
+        .env_remove("A3S_KIMI_BASE_URL")
+        .env_remove("A3S_KIMI_OAUTH_HOST")
+        .env_remove("KIMI_CODE_HOME")
+        .env_remove("KIMI_SHARE_DIR")
+        .env_remove("KIMI_DESKTOP_HOME")
+        .env_remove("KIMI_CODE_BASE_URL")
+        .env_remove("KIMI_CODE_OAUTH_HOST")
         .env("A3S_CODEBUDDY_CLI", home.join("bin/codebuddy"))
         .env("PATH", home.join("bin"))
         .env("RUST_BACKTRACE", "0");
@@ -75,6 +84,8 @@ fn external_account_commands_never_mutate_owner_credentials() {
         &["auth", "logout", "claude-code"][..],
         &["auth", "login", "codex"][..],
         &["auth", "logout", "codex"][..],
+        &["auth", "login", "kimi"][..],
+        &["auth", "logout", "kimi"][..],
     ] {
         let output = run(&home, &config, args);
         assert!(
@@ -92,6 +103,18 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
     let config = workspace.path("config.acl");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::write(&config, "os = \"http://127.0.0.1:1\"\n").unwrap();
+    let daimon = home.join(".config/kimi-desktop/daimon-share/daimon");
+    std::fs::create_dir_all(&daimon).unwrap();
+    std::fs::write(
+        daimon.join("kimi-code-key.json"),
+        r#"{"apiKey":"kimi-account-secret"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        daimon.join("config.json"),
+        r#"{"model":{"current":"k3-agent","providers":{"kimi":{"type":"kimi","baseUrl":"https://example.invalid/coding/v1"}},"models":{"k3-agent":{"provider":"kimi","model":"k3-agent","maxContextSize":262144,"capabilities":["thinking"]}}}}"#,
+    )
+    .unwrap();
 
     let login = run_with_stdin(
         &home,
@@ -119,13 +142,18 @@ fn account_list_reports_product_owned_login_sources_without_secrets() {
         .unwrap();
     assert_eq!(os["ownership"], "managed");
     assert_eq!(os["signedIn"], true);
-    for id in ["claude-code", "codex", "workbuddy"] {
+    for id in ["claude-code", "codex", "kimi", "workbuddy"] {
         let provider = providers
             .iter()
             .find(|provider| provider["id"] == id)
             .unwrap();
         assert_eq!(provider["ownership"], "external");
     }
+    let kimi = providers
+        .iter()
+        .find(|provider| provider["id"] == "kimi")
+        .unwrap();
+    assert_eq!(kimi["signedIn"], true);
     assert!(!String::from_utf8_lossy(&output.stdout).contains("secret"));
 
     let logout = run(&home, &config, &["auth", "logout", "os"]);

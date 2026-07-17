@@ -25,203 +25,14 @@ struct PlannedLoopSearchTool;
 struct NoisyPlannedLoopSearchTool;
 struct OversizedPlannedLoopSearchTool;
 struct PlannedLoopFetchTool;
+struct TransientPlannedLoopFetchTool {
+    calls: Arc<AtomicUsize>,
+}
 struct MetadataOnlyPlannedLoopFetchTool;
+struct LateEntityPlannedSeedTool;
+struct LateEntityPlannedSeedFetchTool;
 struct ObservedLinkFetchTool {
     fetched_urls: Arc<Mutex<Vec<String>>>,
-}
-
-#[test]
-fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan() {
-    let args = super::deep_research_workflow_args_with_scope(
-        "A semantically ambiguous question",
-        false,
-        super::DeepResearchEvidenceScope::WebAndWorkspace,
-    );
-    let contract = &args["input"]["loop_contract"];
-    assert_eq!(contract["pattern"], "adaptive-deep-research");
-    assert_eq!(contract["maker_role"], "evidence-researcher");
-    assert_eq!(contract["checker_role"], "evidence-coverage-checker");
-    assert_eq!(contract["planner"]["agent"], "loop-planner");
-    assert_eq!(contract["planner"]["timeout_ms"], 120_000);
-    assert_eq!(contract["checker"]["timeout_ms"], 180_000);
-    assert!(contract["planner"]["output_schema"]["properties"]
-        .get("intent_summary")
-        .is_none());
-    assert!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            .get("per_task_timeout_secs")
-            .is_none()
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["tracks"]["items"]["type"],
-        "string"
-    );
-    assert!(contract["planner"]["output_schema"]["properties"]
-        .get("plan_rationale")
-        .is_none());
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["tracks"]["maxItems"],
-        4
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            ["max_steps_per_task"]["maximum"],
-        2
-    );
-    assert_eq!(contract["checker"]["agent"], "loop-checker");
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt
-            .contains("Never infer stages, depth, route, or budget from keyword counts")));
-    assert!(contract["planner"]["output_schema"]["properties"]["phases"].is_object());
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["phases"]["items"]["type"],
-        "string"
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["execution_route"]["enum"],
-        serde_json::json!(["direct_only", "direct_then_review", "maker_first"])
-    );
-    assert!(contract["planner"]["output_schema"]["properties"]
-        .get("strategy")
-        .is_none());
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["report_title"]["type"],
-        "string"
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["workspace_evidence_required"]["type"],
-        "boolean"
-    );
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt.contains(
-            "explicitly asks about this repository, a local codebase, or attached/local artifacts"
-        )));
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt.contains("direct_then_review")));
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt.contains("same language as the query")));
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt.contains("primary or authoritative evidence")));
-    assert!(contract["planner"]["prompt"]
-        .as_str()
-        .is_some_and(|prompt| prompt.contains("directly fetchable")));
-    assert!(contract["planner"]["output_schema"]["properties"]["search_queries"].is_object());
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["search_queries"]["maxItems"],
-        4
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            ["direct_fetches"]["maximum"],
-        8
-    );
-    assert!(contract["planner"]["output_schema"]["properties"]
-        .get("source_targets")
-        .is_none());
-    assert!(contract["planner"]["output_schema"]["properties"]["seed_urls"].is_object());
-    assert!(contract["planner"]["output_schema"]["properties"]["budget"].is_object());
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            ["synthesis_timeout_secs"]["minimum"],
-        120
-    );
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            ["synthesis_timeout_secs"]["maximum"],
-        180
-    );
-    assert_eq!(contract["hard_caps"]["synthesis_timeout_ms"], 180_000);
-    assert_eq!(
-        contract["checker"]["output_schema"]["properties"]["next_action"]["enum"],
-        serde_json::json!(["none", "direct_retrieval", "maker"])
-    );
-    assert!(contract["checker"]["output_schema"]["properties"]["report_summary"].is_object());
-    assert!(contract["checker"]["output_schema"]["properties"]["verified_findings"].is_object());
-    assert!(args["input"].get("research_plan").is_none());
-    assert!(args["source"].as_str().is_some_and(|source| {
-        source.contains("engineered_loop_enabled: engineeredLoopEnabled")
-            && source.contains("return await collectDirectWebResearch()")
-            && source.contains("const localMinSuccessCount")
-            && source.contains("Authoritative scope: web_only")
-            && source.contains("minItems: 1")
-            && source.contains("const plannerWorkflowRetry")
-            && source.contains("max_attempts: 1")
-            && source.contains("const checkerWorkflowRetry = {\n    max_attempts: 1")
-            && source.contains("step_name: \"generate_object\"")
-            && source.contains("schema_name: \"deep_research_plan\"")
-            && source.contains("schema_name: \"deep_research_check\"")
-            && source.contains("normalizePlannerBudget")
-            && source.contains("ctx.tool(\"batch\"")
-            && source.contains("batchOutputSections")
-            && source.contains("tool: \"web_search\"")
-            && source.contains("tool: \"web_fetch\"")
-            && source.contains("directIteration === 0")
-            && source.contains("excluded_urls")
-            && source.contains("retrieval_elapsed_ms")
-            && source.contains("retrievalBudgetUsedMs")
-            && source.contains("plannerObservedLatencyMs")
-            && source.contains("observedCheckerLatencyMs")
-            && source.contains("plannerStructuredMode")
-            && source.contains("packMakerTracks")
-            && source.contains("checkerReserveMs")
-            && source.contains("promptMakerReserveMs")
-            && source.contains("makerAndCheckerFloorMs")
-            && source.contains("step_elapsed_ms")
-            && source.contains("plannedSeedEvidenceContext")
-            && source.contains("researchPlan.execution_route === \"direct_then_maker\"")
-            && source.contains("return the existing source-backed evidence without a tool call")
-            && source.contains("hasReusableEvidencePackage")
-            && source.contains("Public web gaps use direct_retrieval")
-            && source.contains("Findings state facts")
-            && source.contains("A URL or search snippet alone is not evidence")
-            && source.contains("exact supporting source URL")
-            && !source.contains("researchPlan.answer_shape ===")
-    }));
-    assert_eq!(
-        contract["checker"]["output_schema"]["properties"]["report_summary"]["maxLength"],
-        4800
-    );
-}
-
-#[test]
-fn llm_plan_controls_synthesis_timeout_and_visible_status() {
-    let output = serde_json::json!({
-        "plan": {
-            "answer_shape": "briefing",
-            "budget": {
-                "synthesis_timeout_ms": 42000,
-                "max_iterations": 2,
-                "max_parallel_tasks": 3,
-                "retrieval_timeout_ms": 75000
-            }
-        }
-    })
-    .to_string();
-    assert_eq!(
-        super::deep_research_planned_synthesis_timeout_ms(Some(&output)),
-        Some(42_000)
-    );
-    let status = super::deep_research_plan_status(&output).unwrap();
-    assert!(status.contains("briefing"), "{status}");
-    assert!(status.contains("≤2 iterations"), "{status}");
-    assert!(status.contains("75s retrieval"), "{status}");
-
-    for (planned, expected) in [(5_000, 10_000), (180_000, 180_000), (250_000, 180_000)] {
-        let output = serde_json::json!({
-            "plan": { "budget": { "synthesis_timeout_ms": planned } }
-        })
-        .to_string();
-        assert_eq!(
-            super::deep_research_planned_synthesis_timeout_ms(Some(&output)),
-            Some(expected),
-            "the host must preserve the planner clock up to the shared synthesis ceiling"
-        );
-    }
 }
 
 fn parallel_output(structured: serde_json::Value) -> ToolOutput {
@@ -397,7 +208,7 @@ impl Tool for PlannedLoopTaskTool {
                 "budget": {
                     "retrieval_timeout_ms": 30000,
                     "synthesis_timeout_ms": 15000,
-                    "max_iterations": 1,
+                    "max_iterations": if self.targeted_direct || self.repeated_direct || self.linked_url_priority { 2 } else { 1 },
                     "max_parallel_tasks": 1,
                     "max_steps_per_task": 2,
                     "per_task_timeout_ms": 10000,
@@ -426,10 +237,55 @@ impl Tool for PlannedLoopTaskTool {
                 "checker prompt must expose the remaining workflow budget"
             );
             anyhow::ensure!(
-                prompt.contains("A URL or search snippet alone is not evidence")
+                prompt.contains("A URL, title, or search snippet alone is a discovery lead")
                     && prompt.contains("exact supporting source URL"),
                 "checker prompt must enforce source quality and claim traceability"
             );
+            let checked_role_output = |mut value: serde_json::Value| {
+                let source_url = [
+                    "https://oversized-1.example/status",
+                    "https://official.example/status",
+                    "https://evidence2.example/research",
+                    "https://evidence1.example/research",
+                ]
+                .into_iter()
+                .find(|candidate| prompt.contains(candidate));
+                let supported =
+                    value.get("decision").and_then(serde_json::Value::as_str) == Some("finalize");
+                let finding = value
+                    .get("verified_findings")
+                    .and_then(serde_json::Value::as_array)
+                    .and_then(|findings| findings.first())
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("The planned evidence obligation remains bounded.")
+                    .to_string();
+                let source_urls = source_url
+                    .filter(|_| supported)
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                let track_count = if self.digest_regression { 2 } else { 1 };
+                value["track_assessments"] = serde_json::Value::Array(
+                    (0..track_count)
+                        .map(|plan_index| {
+                            serde_json::json!({
+                                "plan_index": plan_index,
+                                "status": if supported { "supported" } else { "bounded" },
+                                "finding": finding.clone(),
+                                "source_urls": source_urls.clone(),
+                            })
+                        })
+                        .collect(),
+                );
+                value["stop_condition_assessments"] = serde_json::json!([{
+                    "plan_index": 0,
+                    "status": if supported { "supported" } else { "bounded" },
+                    "finding": finding,
+                    "source_urls": source_urls,
+                }]);
+                value["limitations"] = serde_json::json!([]);
+                role_output(value)
+            };
             if self.checker_failure_at == Some(checker_index) {
                 return Ok(ToolOutput::error("simulated checker timeout"));
             }
@@ -440,7 +296,7 @@ impl Tool for PlannedLoopTaskTool {
                 .await;
             }
             if self.linked_url_priority && checker_index == 0 {
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "continue",
                     "coverage_summary": "One linked primary detail should be fetched before finalizing.",
                     "report_summary": "The current status is supported, pending one linked primary detail.",
@@ -456,14 +312,14 @@ impl Tool for PlannedLoopTaskTool {
             }
             if self.maker_failure {
                 anyhow::ensure!(
-                    prompt.chars().count() <= 8_000,
+                    prompt.chars().count() <= 30_000,
                     "checker prompt exceeded the bounded convergence envelope"
                 );
                 anyhow::ensure!(
                     prompt.contains("no usable evidence"),
                     "checker did not receive the failed maker attempt in cumulative evidence"
                 );
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "finalize",
                     "coverage_summary": "Direct recovery evidence is sufficient after the maker timed out.",
                     "report_summary": "Direct sources establish the requested current status.",
@@ -479,7 +335,7 @@ impl Tool for PlannedLoopTaskTool {
             }
             if self.maker_then_direct {
                 if checker_index == 0 {
-                    return Ok(role_output(serde_json::json!({
+                    return Ok(checked_role_output(serde_json::json!({
                         "decision": "continue",
                         "coverage_summary": "Maker evidence needs one current primary source.",
                         "report_summary": "The analysis is supported but still needs one current primary source.",
@@ -497,7 +353,7 @@ impl Tool for PlannedLoopTaskTool {
                     prompt.contains("https://official.example/status"),
                     "checker lost direct evidence gathered after a maker-first round"
                 );
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "finalize",
                     "coverage_summary": "Maker and direct evidence now cover the question.",
                     "report_summary": "Maker analysis and a current primary source jointly answer the question.",
@@ -512,7 +368,7 @@ impl Tool for PlannedLoopTaskTool {
                 })));
             }
             if (self.targeted_direct || self.repeated_direct) && checker_index == 0 {
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "continue",
                     "coverage_summary": "The baseline is supported, but one current externally retrievable fact is missing.",
                     "report_summary": "The retained sources support the baseline finding.",
@@ -530,14 +386,14 @@ impl Tool for PlannedLoopTaskTool {
                 && checker_index == 1
                 && self.maker_calls.load(Ordering::SeqCst) == 0
             {
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "continue",
                     "coverage_summary": "The bounded direct retry did not close the checked gap.",
                     "report_summary": "The baseline remains supported, while one consequential gap is unresolved.",
                     "verified_findings": ["The baseline finding remains source-backed."],
                     "unresolved_gaps": ["one consequential gap still needs evidence production"],
                     "contradictions": [],
-                    "next_action": "direct_retrieval",
+                    "next_action": "maker",
                     "search_queries": ["adaptive loop repeated lookup"],
                     "seed_urls": [],
                     "next_tracks": [],
@@ -545,7 +401,7 @@ impl Tool for PlannedLoopTaskTool {
                 })));
             }
             if self.investigation && checker_index == 0 {
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "continue",
                     "coverage_summary": "The primary explanation is covered but counterevidence is still missing.",
                     "report_summary": "The current evidence supports the primary explanation.",
@@ -569,10 +425,11 @@ impl Tool for PlannedLoopTaskTool {
                 );
                 anyhow::ensure!(
                     prompt.contains("MAKER_DIGEST_MARKER")
-                        && prompt.contains("https://oversized-1.example/status"),
+                        && prompt.contains("https://oversized-1.example/status")
+                        && prompt.contains("SOURCE_FACT_TAIL"),
                     "the first post-maker checker lost cumulative direct and maker evidence"
                 );
-                return Ok(role_output(serde_json::json!({
+                return Ok(checked_role_output(serde_json::json!({
                     "decision": "continue",
                     "coverage_summary": "Maker evidence is preserved; one direct fact remains.",
                     "report_summary": "The maker analysis is preserved and supported by direct evidence.",
@@ -588,12 +445,16 @@ impl Tool for PlannedLoopTaskTool {
             }
             if self.digest_regression && checker_index == 1 {
                 anyhow::ensure!(
-                    prompt.chars().count() <= 8_000,
+                    prompt.chars().count() <= 30_000,
                     "combined checker prompt exceeded the bounded convergence envelope"
                 );
                 anyhow::ensure!(
                     prompt.contains("MAKER_DIGEST_MARKER"),
                     "checker prompt dropped schema-validated maker evidence"
+                );
+                anyhow::ensure!(
+                    prompt.contains("SOURCE_FACT_TAIL"),
+                    "checker prompt truncated the retained source fact"
                 );
                 anyhow::ensure!(
                     prompt.contains("https://oversized-1.example/status"),
@@ -605,7 +466,7 @@ impl Tool for PlannedLoopTaskTool {
                     "post-maker direct follow-up checker lost cumulative evidence"
                 );
             }
-            return Ok(role_output(serde_json::json!({
+            return Ok(checked_role_output(serde_json::json!({
                 "decision": "finalize",
                 "coverage_summary": "Two independently hosted fetched sources support the current fact.",
                 "report_summary": "Two independent sources confirm the current fact.",
@@ -697,7 +558,11 @@ impl Tool for PlannedLoopTaskTool {
                 "title": format!("Evidence {}", maker_index + 1),
                 "url_or_path": url.clone(),
                 "date": "2026-07-12",
-                "quote_or_fact": "Traceable evidence tests the requested decision.",
+                "quote_or_fact": if self.digest_regression {
+                    format!("Retained source fact: {} SOURCE_FACT_TAIL", "x".repeat(500))
+                } else {
+                    "Traceable evidence tests the requested decision.".to_string()
+                },
                 "reliability": "Deterministic integration fixture."
             }],
             "key_evidence": ["Traceable evidence tests the requested decision."],
@@ -817,8 +682,24 @@ impl Tool for NoisyPlannedLoopSearchTool {
                     "https://api.github.com/users/example"
                 ),
                 result(
+                    "Adaptive loop status followers",
+                    "https://api.github.com/users/example/followers"
+                ),
+                result(
+                    "Adaptive loop status following template",
+                    "https://api.github.com/users/example/following{/other_user}"
+                ),
+                result(
+                    "Adaptive loop status gist template",
+                    "https://api.github.com/users/example/gists{/gist_id}"
+                ),
+                result(
                     "Adaptive loop status archive",
                     "https://downloads.example/adaptive-loop-current-status.zip"
+                ),
+                result(
+                    "Truncated adaptive loop result",
+                    "https://truncated.example/adaptive-loop-current-status…"
                 ),
                 result(
                     "Adaptive loop status font",
@@ -904,6 +785,39 @@ impl Tool for PlannedLoopFetchTool {
 }
 
 #[async_trait::async_trait]
+impl Tool for TransientPlannedLoopFetchTool {
+    fn name(&self) -> &str {
+        "transient_planned_web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Fails the initial fetch batch with transport errors, then succeeds on retry."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        if call < 2 {
+            return Ok(ToolOutput::error("TLS handshake EOF"));
+        }
+        let url = args
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(ToolOutput::success(format!(
+            "# Adaptive loop current status\n\nAs of 2026-07-12 the service is operational. Source: {url}"
+        )))
+    }
+}
+
+#[async_trait::async_trait]
 impl Tool for MetadataOnlyPlannedLoopFetchTool {
     fn name(&self) -> &str {
         "metadata_planned_web_fetch"
@@ -924,6 +838,119 @@ impl Tool for MetadataOnlyPlannedLoopFetchTool {
     ) -> anyhow::Result<ToolOutput> {
         Ok(ToolOutput::success(
             r#"\[{"@context":"https://schema.org/","@type":"BlogPosting","headline":"Adaptive loop status","description":"Machine metadata must not become the reader-facing evidence quote."}\]"#,
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for LateEntityPlannedSeedTool {
+    fn name(&self) -> &str {
+        "generate_object"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a plan whose relevant seed identity occurs late in a long query."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let schema_name = args
+            .get("schema_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if schema_name == "deep_research_plan" {
+            return Ok(generated_object_output(serde_json::json!({
+                "answer_shape": "lookup",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "execution_route": "direct_only",
+                "report_title": "Project Quasar isolation",
+                "phases": ["retrieve the planned source"],
+                "tracks": ["Project Quasar isolation boundary"],
+                "search_queries": [],
+                "seed_urls": ["https://github.com/example/project-quasar"],
+                "budget": {
+                    "retrieval_timeout_ms": 30000,
+                    "synthesis_timeout_ms": 15000,
+                    "max_iterations": 1,
+                    "max_parallel_tasks": 1,
+                    "max_steps_per_task": 1,
+                    "per_task_timeout_ms": 10000,
+                    "direct_searches": 0,
+                    "direct_fetches": 1
+                },
+                "stop_conditions": ["the planned source establishes the isolation boundary"]
+            })));
+        }
+        anyhow::ensure!(
+            schema_name == "deep_research_check",
+            "unexpected structured call: {schema_name}"
+        );
+        let prompt = args
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            prompt.contains("Project Quasar uses a separate guest kernel"),
+            "the checker did not receive the fetched planned-seed evidence"
+        );
+        Ok(generated_object_output(serde_json::json!({
+            "decision": "finalize",
+            "coverage_summary": "The fetched project source establishes the requested boundary.",
+            "report_summary": "Project Quasar uses a separate guest kernel for isolation.",
+            "verified_findings": ["Project Quasar uses a separate guest kernel."],
+            "track_assessments": [{
+                "plan_index": 0,
+                "status": "supported",
+                "finding": "Project Quasar uses a separate guest kernel.",
+                "source_urls": ["https://github.com/example/project-quasar"]
+            }],
+            "stop_condition_assessments": [{
+                "plan_index": 0,
+                "status": "supported",
+                "finding": "The planned project source establishes the isolation boundary.",
+                "source_urls": ["https://github.com/example/project-quasar"]
+            }],
+            "unresolved_gaps": [],
+            "limitations": [],
+            "contradictions": [],
+            "next_action": "none",
+            "search_queries": [],
+            "seed_urls": [],
+            "next_tracks": [],
+            "reason": "The planned source directly answers the bounded question."
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for LateEntityPlannedSeedFetchTool {
+    fn name(&self) -> &str {
+        "late_entity_planned_seed_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Returns substantive text for a planned seed with a late query identity."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(ToolOutput::success(
+            "# Project Quasar\n\nProject Quasar uses a separate guest kernel to isolate untrusted workloads from the host kernel. Its project documentation also describes explicit filesystem and network boundaries.",
         ))
     }
 }
@@ -954,7 +981,7 @@ impl Tool for ObservedLinkFetchTool {
             .to_string();
         self.fetched_urls.lock().unwrap().push(url.clone());
         Ok(ToolOutput::success(format!(
-            "# Adaptive loop current status\n\nAdaptive loop current status is operational. Primary detail: https://observed.example/detail. Source: {url}"
+            "# Adaptive loop current status\n\nAdaptive loop current status is operational. Read the [primary status detail](/detail) for the source-backed isolation boundary. The unrelated [project license](/LICENSE) is not evidence for that gap. Source: {url}"
         )))
     }
 }

@@ -340,6 +340,19 @@ a3s code resume 018f-session-id  # resume a specific saved session
 a3s self update                  # update the a3s executable
 ```
 
+Run one non-interactive coding task:
+
+```sh
+a3s code exec --mode auto "Update the focused test and verify it"
+a3s --output json code exec --mode auto --prompt-file ./task.md
+```
+
+Auto mode runs bounded workspace reads and edits without hidden prompts while
+retaining the shared safety floor. Operations that still require human
+approval, such as unbounded shell commands, terminate immediately in this
+non-interactive surface with a nonzero `approval.required` result. Default and
+plan modes never silently approve workspace mutations.
+
 Start the local Web API and bundled 书小安 frontend:
 
 ```sh
@@ -441,13 +454,17 @@ credentials into `config.acl`:
 a3s auth list
 ```
 
-Claude Code, Codex, and WorkBuddy continue to own their login flows and local
-credential stores. The A3S CLI only reports whether those accounts are
+Claude Code, Codex, Kimi, and WorkBuddy continue to own their login flows and
+local credential stores. The A3S CLI only reports whether those accounts are
 available; `a3s auth login/logout` manages the configured A3S OS session.
 
 Model routes use one catalog shared by the root CLI and the Code TUI. Custom
-provider models come from `config.acl`; Claude Code, Codex, WorkBuddy, and A3S
-OS models remain bound to their product-owned credentials:
+provider models come from `config.acl`; Claude Code, Codex, Kimi, WorkBuddy,
+and A3S OS models remain bound to their product-owned credentials:
+
+Inside `/model`, each provider tab uses its corresponding brand color. The
+active tab uses that color as its background, while inactive tabs keep it as
+their label color.
 
 ```sh
 a3s model list
@@ -455,6 +472,7 @@ a3s model current
 a3s model use openai/my-model
 a3s model use claude-code/claude-opus-4-6
 a3s model use codex/gpt-5.2-codex
+a3s model use kimi/k3-agent
 a3s model use workbuddy/glm-5.1
 a3s model use a3s-os/my-model
 a3s model use openai/gpt-5 --scope workspace
@@ -464,9 +482,9 @@ a3s model reset --scope user
 `a3s model use` validates the route and updates `default_model` in the selected
 A3S ACL layer while preserving unrelated ACL text. `--config` always targets
 that explicit file; otherwise `--scope user|workspace` selects the layer. No
-Claude, Codex, WorkBuddy, or A3S OS token is copied. Selecting a route probes
-only that credential source; `model list` refreshes independent account catalogs
-concurrently.
+Claude, Codex, Kimi, WorkBuddy, or A3S OS token is copied. Selecting a route
+probes only that credential source; `model list` refreshes independent account
+catalogs concurrently.
 
 List runtime-callable models:
 
@@ -475,9 +493,10 @@ a3s model list
 a3s model current
 ```
 
-The model commands list `config.acl` models, local Claude/Codex/WorkBuddy
+The model commands list `config.acl` models, local Claude/Codex/Kimi/WorkBuddy
 account models, and signed-in OS gateway models from the unified gateway.
 Codex uses its current account catalog with its cache as an offline fallback;
+Kimi discovers models from Kimi Desktop or Kimi Code account state, and
 WorkBuddy discovery uses its installed CodeBuddy CLI. These runtime routes are
 not digital asset repository entries whose category happens to be `model`.
 
@@ -651,7 +670,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
-| Deep research | Prefix a prompt with `?` to start an adaptive, event-sourced research loop. One A3S Code v5.2.2 schema-constrained planner call chooses the title, phases, independent evidence tracks, queries, stable seed URLs, observable stop conditions, route, and independent budgets. New plans use `direct_only`, `direct_then_review`, or `maker_first`; no topic classifier, keyword count, query length, or task template overrides that LLM decision. Public-source routes run query-aware searches and fetches concurrently through `batch`, preserve source anchors and typed partial failures, and give every planned query a fetch opportunity before spending capacity on seed URLs. The LLM may select up to four searches and eight parallel fetches for a substantive investigation, while narrow questions retain smaller budgets. When unconfigured default engines return no results, one bounded Brave fallback runs without overriding explicit search configuration. `direct_then_review` combines cross-track synthesis with the first independent coverage check, removing the redundant no-tool maker turn that slow reasoning providers could spend 120 seconds on; event-sourced `direct_then_maker` runs remain replayable for compatibility. The checker routes missing public benchmarks, maintenance facts, excerpts, and migration documentation to one focused direct follow-up, reserving makers for genuine evidence production or required local/non-web work. Planner, retrieval, maker, checker, report, and wall-clock deadlines are independent; checker latency is learned from v5.2.2 step events, while the 300-second workflow fuse still bounds the run. Accepted evidence and checker decisions drive an answer-first structured report: every semantic plan track must be answered or explicitly bounded, with findings connected to interpretation, implication, and uncertainty. The same call selects a content-driven `report-master` narrative mode, visual archetype, palette, density, hero, and stance; the host accepts only typed design tokens and atomically publishes audited `report.md` and `index.html`. Reportable evidence survives checker timeout as an explicit provisional report; only runs without traceable evidence become Recovery artifacts. |
+| Deep research | Prefix a prompt with `?` to start an adaptive, event-sourced research loop. One A3S Code 5.3.5 schema-constrained planner call chooses the title, phases, independent evidence tracks, queries, stable seed URLs, observable stop conditions, route, and independent budgets. Plans may use `direct_only`, `direct_then_review`, `direct_then_maker`, or `maker_first`; no topic classifier, keyword count, query length, or task template overrides that LLM decision. Public-source routes run query-aware searches and fetches concurrently through `batch`, preserve source anchors and typed partial failures, and give every planned query a fetch opportunity before spending capacity on seed URLs. The LLM may select up to four searches and eight parallel fetches for a substantive investigation, while narrow questions retain smaller budgets. When unconfigured built-in engines return no results, one bounded Bing China + Brave fallback runs; caller-selected or ACL-configured engines remain authoritative. `direct_then_review` closes a bounded web investigation without a redundant no-tool maker turn; `direct_then_maker` seeds adaptive multi-step evidence collection before the independent checker. The checker routes missing public benchmarks, maintenance facts, excerpts, and migration documentation to one focused direct follow-up, reserving makers for genuine evidence production or required local/non-web work. Planner, retrieval, maker, checker, report, and wall-clock deadlines are independent, while the workflow fuse still bounds collection. The committed event snapshot, rather than display text, is authoritative at the report boundary; the checker receives bounded retained source facts instead of title-sized excerpts, so completed evidence cannot be demoted into Recovery or trigger a redundant search pass. Accepted source facts and checker decisions drive an answer-first structured report: every semantic plan track must be answered or explicitly bounded, with findings connected to interpretation, implication, and uncertainty. The same call locks a content-driven `report-master` narrative mode, visual archetype, palette, density, hero, stance, and an exact H2-bound section rhythm/composition plan; its identity test ties those choices to the dominant information relationship and reader use instead of palette-only variation. Statement covers omit decorative counts, split covers expose the reading path, and metrics covers are reserved for a useful evidence profile. Before atomic publication, the host rejects unaccepted citations and any threshold, range, version, date, multiplier, or approximate magnitude absent from the query or retained source facts. Reportable evidence survives checker timeout as an explicit qualified report; only runs without traceable evidence become Recovery artifacts. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle so long sessions continue through repeated compactions. `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -668,18 +687,19 @@ settlement path without opening an incomplete report, and stale tracker
 snapshots cannot restore already-settled rows. `/exit` and confirmed Ctrl+C
 close the session and settle the active stream before the process exits.
 
-The headless CLI uses the same LLM-planned generic collector as the TUI behind a
-six-minute absolute wall-clock fuse. Planner, direct retrieval, maker children,
-checker, synthesis, and finalization keep separate phase deadlines inside that
-fuse, with the final ten seconds reserved for cancellation and recovery artifact
-publication. It has no subject classifier, topic-specific collector, source
-allowlist, report template, or keyword-based freshness cache; each invocation
-gathers current evidence. Valid structured evidence is materialized as a
-responsive report whose analytical, chronicle, executive, field-notes, or
-editorial composition is selected from the report semantics rather than topic
-keywords. If independent checking cannot finish, that report is marked
-provisional; insufficient or untraceable evidence produces an
-explicit degraded Recovery report and a nonzero result.
+`a3s code deepresearch` and the TUI `?` path use one shared workflow source,
+planner contract, evidence gate, checker, timeout policy, and report pipeline;
+there is no second CLI research implementation. Planner, direct retrieval,
+maker children, checker, synthesis, and finalization keep independent deadlines,
+and terminal publication waits for every observed child to settle. The CLI emits
+`completed`, `qualified`, or `degraded` explicitly. Synthesis returns one
+schema-validated object and never writes long files: host code validates track
+coverage, accepted citations, and quantitative grounding, then atomically
+materializes `report.md` and `index.html`. It has no subject classifier,
+topic-specific collector, source allowlist, report template, or keyword-based
+freshness cache; each invocation gathers current evidence. Insufficient or
+untraceable evidence produces an explicit degraded Recovery report and a
+nonzero result.
 
 ### Everyday Capability Paths
 
@@ -1212,7 +1232,7 @@ the skill matcher for the current request.
 | `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
 | `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
 | `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
-| `? <question>` | Starts bounded DeepResearch. Collection is read-only and scope-aware; delegated tracks reserve a structured-finalization turn. Once collection closes, synthesis sees no tools and returns one typed report object containing final Markdown, a private per-track depth map, and a private `report-master` presentation lock. The host validates semantic coverage and citations, then safely renders only approved layout and color tokens. Failed collection terminates with an explicit degraded report instead of retrying retrieval. Current-run `Completed` validation rejects omitted plan tracks, shallow investigation treatments, stale paths, fallback drafts, leaked tool logs, unsafe links, untraceable citations, and broken Markdown/HTML pairs. |
+| `? <question>` | Starts bounded DeepResearch. Collection is read-only and scope-aware; delegated tracks reserve a structured-finalization turn. The independent checker must assess every planned track and stop condition against accepted source anchors; the host rejects a model `finalize` whenever an assessment is bounded/uncovered, a material gap remains, or a cited source is outside the accepted package. Once collection closes, synthesis sees no tools and only accepted source facts plus supported assessments become checked findings. It returns one typed report object containing final Markdown, a private per-track depth map, and a private `report-master` presentation lock. Host publication rejects invented quantitative claims as well as omitted plan tracks, shallow investigation treatments, stale paths, fallback drafts, leaked tool logs, unsafe links, untraceable citations, and broken Markdown/HTML pairs. Failed collection terminates with an explicit degraded report instead of retrying retrieval. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |
@@ -1252,6 +1272,14 @@ fallback). Only allowlisted Cloudflare infrastructure cookies are shared between
 the transports. On HTTP 401, A3S first reloads a token rotated by Codex CLI and
 then performs one OAuth refresh and one request retry if necessary.
 
+When Kimi Desktop or Kimi Code is signed in, the Kimi tab exposes the models
+enabled for that account as `kimi/<model>`. A3S prefers Kimi Desktop's local
+Daimon model configuration and coding API key, then falls back to Kimi Code
+OAuth state under `~/.kimi-code` or `~/.kimi`. Credentials are read only when
+needed to authenticate requests; they are never copied into A3S configuration,
+command output, or logs. Expired OAuth state is refreshed under a file lock and
+atomically rotated in Kimi's own credential store.
+
 When WorkBuddy is installed and signed in, the WorkBuddy tab locates its
 bundled CodeBuddy CLI (or `codebuddy`/`cbc` on `PATH`), reuses the account state
 under `~/.workbuddy`, and refreshes the models entitled to that account. A3S
@@ -1261,8 +1289,8 @@ normalized into native A3S host-tool events so execution remains inside A3S.
 
 The A3S Web task Composer consumes the same account-model discovery and client
 routing as the TUI. Account-backed entries are source-qualified as
-`claude-code/<model>`, `codex/<model>`, or `workbuddy/<model>` and never expose
-local credentials to the browser.
+`claude-code/<model>`, `codex/<model>`, `kimi/<model>`, or
+`workbuddy/<model>` and never expose local credentials to the browser.
 
 Codex auth can also be used as a normal config provider:
 
@@ -1299,7 +1327,7 @@ on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard installation.
 Claude Code and WorkBuddy share the account-CLI stream and A3S host-tool bridge.
 Their own CLI tools are disabled, provider tool-call output is normalized into
 native A3S tool-use events, and tool results return as structured conversation
-history. Codex keeps its direct Responses transport but uses the same account
+history. Codex and Kimi keep direct account transports but use the same account
 provider registry for availability, model selection, persistence, and restore.
 
 ## Testing

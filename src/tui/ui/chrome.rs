@@ -326,10 +326,12 @@ pub(super) fn ctx_limit_for_model(
         .strip_prefix("codex/")
         .or_else(|| model.strip_prefix("openai-codex/"))
         .unwrap_or(model);
+    let kimi_model = model.strip_prefix("kimi/").unwrap_or(model);
     context_limit_for_model(
         model,
         model_ctx.get(model).copied(),
-        crate::account_providers::codex::codex_model_context(codex_model),
+        crate::account_providers::codex::codex_model_context(codex_model)
+            .or_else(|| crate::account_providers::AccountProvider::Kimi.model_context(kimi_model)),
     )
 }
 
@@ -402,7 +404,9 @@ pub(super) fn restore_model_selection(
             .iter()
             .any(|model| model == &preference.model)
             .then(|| (preference.model.clone(), None)),
-        ModelSelectionSource::Claude | ModelSelectionSource::CodeBuddy => {
+        ModelSelectionSource::Claude
+        | ModelSelectionSource::Kimi
+        | ModelSelectionSource::CodeBuddy => {
             let provider = preference.source.account_provider()?;
             if !provider.is_available() {
                 return None;

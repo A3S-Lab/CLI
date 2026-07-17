@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-07-17
+
+### Added
+
+- Added signed-in Kimi Desktop and Kimi Code account models to the shared CLI
+  and `/model` catalog. Credentials remain in Kimi-owned state, OAuth refresh
+  uses locked atomic rotation, and requests use Kimi's direct account transport.
+
+### Changed
+
+- Styled every `/model` provider tab with its corresponding brand color: A3S
+  blue, Claude coral, Codex green, Kimi blue, WorkBuddy teal, and OS Gateway
+  violet. Active tabs use the brand color as their background; inactive tabs
+  retain it as their foreground color.
+- Updated the embedded A3S Code Core baseline to 5.3.5.
+
+### Fixed
+
+- Made the committed DeepResearch event snapshot authoritative at the report
+  boundary, retained bounded source facts for checking, and rejected reports
+  with uncovered tracks, unaccepted citations, or unsupported quantities.
+- Installed the shared risk-aware permission policy and a real HITL manager for
+  `a3s code exec`. Auto mode now executes bounded workspace edits, unresolved
+  approvals terminate immediately with a nonzero `approval.required` result,
+  and a stream cannot report success without a terminal completion event.
+
 ## [0.9.5] - 2026-07-17
 
 ### Fixed

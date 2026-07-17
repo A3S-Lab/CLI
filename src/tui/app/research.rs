@@ -11,7 +11,10 @@ impl App {
         failure: &str,
     ) -> bool {
         if self.deep_research_report_repair_used
-            || deep_research_workflow_needs_recovery_report(workflow_output)
+            || deep_research_workflow_needs_recovery_report_with_metadata(
+                workflow_output,
+                workflow_metadata,
+            )
         {
             return false;
         }
@@ -178,6 +181,18 @@ impl App {
             .clone()
             .unwrap_or_default();
         let workflow_metadata = self.deep_research_workflow.metadata.clone();
+        let evidence_scope = self
+            .deep_research_workflow
+            .args
+            .as_ref()
+            .map(|args| deep_research_evidence_scope_from_args(args, &query))
+            .unwrap_or_default();
+        let report_outcome = deep_research_report_outcome_for_workflow(
+            &query,
+            evidence_scope,
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        );
         let workspace = PathBuf::from(&self.cwd);
         let artifacts = generated_report.as_ref().and_then(|report| {
             match materialize_deep_research_completed_report_from_generation(
@@ -199,7 +214,7 @@ impl App {
             let final_text = clean_deep_research_final_text_from_artifacts(&artifacts, &workspace)
                 .unwrap_or(report_text);
             self.loop_remaining = 0;
-            self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Completed);
+            self.stage_deep_research_report(&artifacts, report_outcome);
             self.streaming.push(&final_text);
             self.turn_text.clear();
             self.turn_text.push_str(&final_text);
@@ -432,6 +447,13 @@ impl App {
                         )
                     }
                 };
+                let result = result.map(|mut result| {
+                    result.output = deep_research_canonical_workflow_output(
+                        &result.output,
+                        result.metadata.as_ref(),
+                    );
+                    result
+                });
                 let (workflow_output, workflow_metadata) = match &result {
                     Ok(result) => (result.output.as_str(), result.metadata.as_ref()),
                     Err(error) => (error.as_str(), None),
@@ -584,13 +606,14 @@ impl App {
             self.push_line(&Style::new().fg(TN_GRAY).render(&status));
         }
 
+        let report_outcome = deep_research_report_outcome_for_workflow(
+            &query,
+            evidence_scope,
+            &output,
+            metadata.as_ref(),
+        );
         if accepted_evidence.is_empty()
-            || !deep_research_evidence_package_is_complete_for_query(
-                &query,
-                evidence_scope,
-                &output,
-                metadata.as_ref(),
-            )
+            || matches!(report_outcome, DeepResearchRunOutcome::Degraded)
         {
             self.loop_remaining = 0;
             self.deep_research_outcome = DeepResearchRunOutcome::Degraded;
@@ -835,6 +858,18 @@ impl App {
             .unwrap_or_default();
         let workflow_metadata = self.deep_research_workflow.metadata.clone();
         let workflow_args = self.deep_research_workflow.args.clone();
+        let report_outcome = query.as_deref().map(|query| {
+            let evidence_scope = workflow_args
+                .as_ref()
+                .map(|args| deep_research_evidence_scope_from_args(args, query))
+                .unwrap_or_default();
+            deep_research_report_outcome_for_workflow(
+                query,
+                evidence_scope,
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            )
+        });
         let validated_view = query.as_deref().and_then(|query| {
             let baseline = self.deep_research_workflow.report_baseline.as_ref()?;
             deep_research_report_view_spec_for_current_run(
@@ -847,7 +882,8 @@ impl App {
             )
         });
         if let Some(spec) = validated_view {
-            self.deep_research_outcome = DeepResearchRunOutcome::Completed;
+            self.deep_research_outcome =
+                report_outcome.unwrap_or(DeepResearchRunOutcome::Completed);
             self.pending_deep_research_report_view = Some(spec);
             self.push_line(&Style::new().fg(TN_YELLOW).render(
                 "  ⚠ DeepResearch timed out after writing a validated current-query report; preserving its RemoteUI view.",
@@ -898,10 +934,17 @@ impl App {
                         )
                     });
                     if let Some(artifacts) = completed_artifacts {
-                        self.stage_deep_research_report(
-                            &artifacts,
-                            DeepResearchRunOutcome::Completed,
+                        let evidence_scope = workflow_args
+                            .as_ref()
+                            .map(|args| deep_research_evidence_scope_from_args(args, &query))
+                            .unwrap_or_default();
+                        let report_outcome = deep_research_report_outcome_for_workflow(
+                            &query,
+                            evidence_scope,
+                            &workflow_output,
+                            workflow_metadata.as_ref(),
                         );
+                        self.stage_deep_research_report(&artifacts, report_outcome);
                         self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
                             "  ⚠ DeepResearch timed out, but a completed report was recovered into {}",
                             artifacts.html.display()
@@ -977,6 +1020,18 @@ impl App {
             .clone()
             .unwrap_or_default();
         let workflow_metadata = self.deep_research_workflow.metadata.clone();
+        let evidence_scope = self
+            .deep_research_workflow
+            .args
+            .as_ref()
+            .map(|args| deep_research_evidence_scope_from_args(args, &query))
+            .unwrap_or_default();
+        let report_outcome = deep_research_report_outcome_for_workflow(
+            &query,
+            evidence_scope,
+            &workflow_output,
+            workflow_metadata.as_ref(),
+        );
         let partial_text = self.turn_text.clone();
         if let Some(artifacts) = materialize_deep_research_timeout_completed_report(
             &workspace,
@@ -986,7 +1041,7 @@ impl App {
             &workflow_output,
             workflow_metadata.as_ref(),
         ) {
-            self.stage_deep_research_report(&artifacts, DeepResearchRunOutcome::Completed);
+            self.stage_deep_research_report(&artifacts, report_outcome);
             self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
                 "  ⚠ DeepResearch synthesis failed; preserved a completed source-backed report at {}",
                 artifacts.html.display()

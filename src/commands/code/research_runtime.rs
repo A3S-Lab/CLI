@@ -7,26 +7,34 @@ use std::sync::Arc;
 use a3s_code_core::config::CodeConfig;
 use a3s_code_core::{Agent, AgentSession, SessionOptions, ToolCallResult};
 
-mod evidence;
-mod prompts;
-mod report;
-mod workflow_source;
-
-pub(crate) use evidence::*;
-pub(crate) use prompts::*;
-pub(crate) use report::*;
-
 use crate::budget::{
     budget_plan_for_effort_index, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX,
 };
 
 const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
-pub(crate) const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 8 * 60 * 1000;
-pub(crate) const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 3 * 60 * 1000;
+pub(crate) const DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS: u64 = 30_000;
+pub(crate) const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 3 * 60 * 1000;
+const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
+const DEEP_RESEARCH_ABORT_SETTLE_MS: u64 = 250;
 
 pub(crate) fn deep_research_default_budget() -> BudgetPlan {
     budget_plan_for_effort_index(DEFAULT_TUI_EFFORT_INDEX, None, BudgetWorkload::DeepResearch)
+}
+
+pub(crate) fn deep_research_workflow_args(query: &str, _os_runtime: bool) -> serde_json::Value {
+    crate::tui::deep_research_cli_workflow_args_for_budget(query, deep_research_default_budget())
+}
+
+pub(crate) fn deep_research_workflow_timeout_ms(args: &serde_json::Value) -> u64 {
+    args.pointer("/limits/timeoutMs")
+        .and_then(serde_json::Value::as_u64)
+        .filter(|timeout_ms| *timeout_ms >= 1_000)
+        .unwrap_or(300_000)
+}
+
+pub(crate) fn deep_research_workflow_host_timeout_ms(args: &serde_json::Value) -> u64 {
+    deep_research_workflow_timeout_ms(args).saturating_add(DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,7 +124,8 @@ pub(crate) async fn execute_deepresearch_in(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeepResearchReportStatus {
     Completed,
-    FallbackDraft,
+    Qualified,
+    Degraded,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,184 +161,107 @@ async fn synthesize_deepresearch_report(
     session: &AgentSession,
     workspace: &Path,
     query: &str,
-    os_runtime: bool,
+    _os_runtime: bool,
     workflow_output: &str,
     exit_code: i32,
     metadata: Option<&serde_json::Value>,
     report_tool_gate: &DeepResearchReportToolGate,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     eprintln!("deepresearch: synthesizing report artifacts…");
-    if exit_code != 0 && !deep_research_has_source_evidence(workflow_output, metadata) {
-        report_tool_gate.set_report_only(false);
-        let artifacts = materialize_deep_research_fallback_draft(
-            workspace,
-            query,
-            "DeepResearch evidence collection failed before source-backed evidence was available.",
-            workflow_output,
-        )
-        .map_err(anyhow::Error::msg)?;
-        return Ok(DeepResearchReportSynthesis {
-            text: format!(
-                "DeepResearch fallback draft written at {}\n",
-                artifacts.html.display()
-            ),
-            artifacts,
-            status: DeepResearchReportStatus::FallbackDraft,
-        });
-    }
-    let prompt = if exit_code == 0 {
-        deep_research_synthesis_prompt(query, os_runtime, workflow_output, metadata)
-    } else {
-        deep_research_recovery_prompt(query, os_runtime, workflow_output, metadata)
-    };
-    report_tool_gate.set_report_only(true);
-    let (mut final_text, synthesis_completed) = send_deepresearch_text(
-        session,
-        &prompt,
-        DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
-        "synthesis",
-    )
-    .await;
-    let mut artifacts = deep_research_report_artifacts_from_output_for_query(
-        &final_text,
-        workspace,
-        query,
-        workflow_output,
-        metadata,
-    );
-    let mut status = DeepResearchReportStatus::Completed;
-
-    if deep_research_output_has_internal_leak(&final_text) {
-        if let Some(artifacts) = artifacts.as_ref() {
-            if let Some(clean_text) =
-                clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-            {
-                final_text = clean_text;
-            }
-        }
-    }
-    if artifacts.is_none() {
-        artifacts = materialize_deep_research_completed_report_from_markdown(
-            workspace,
-            query,
-            workflow_output,
-            metadata,
-        );
-        if let Some(artifacts) = artifacts.as_ref() {
-            if let Some(clean_text) =
-                clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-            {
-                final_text = clean_text;
-            }
-        }
-    }
-
-    if (artifacts.is_none() || deep_research_output_has_internal_leak(&final_text))
-        && synthesis_completed
-    {
-        eprintln!("deepresearch: report marker/artifacts missing, running focused repair pass…");
-        let repair =
-            deep_research_repair_prompt(query, os_runtime, workflow_output, metadata, &final_text);
-        let (repair_text, repair_completed) =
-            send_deepresearch_text(session, &repair, DEEP_RESEARCH_REPAIR_TIMEOUT_MS, "repair")
-                .await;
-        final_text = repair_text;
-        artifacts = deep_research_report_artifacts_from_output_for_query(
-            &final_text,
-            workspace,
-            query,
-            workflow_output,
-            metadata,
-        );
-        if deep_research_output_has_internal_leak(&final_text) {
-            if let Some(artifacts) = artifacts.as_ref() {
-                if let Some(clean_text) =
-                    clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-                {
-                    final_text = clean_text;
-                }
-            }
-        }
-        if artifacts.is_none() {
-            artifacts = materialize_deep_research_completed_report_from_markdown(
+    let report_plan = crate::tui::deep_research_cli_report_plan(query, workflow_output, metadata);
+    let (prompt, qualified) = match report_plan {
+        Ok(plan) => plan,
+        Err(reason) => {
+            report_tool_gate.set_report_only(false);
+            let reason = format!("report plan rejected: {reason}");
+            eprintln!("deepresearch: {reason}");
+            return materialize_deepresearch_cli_recovery(
                 workspace,
                 query,
+                &reason,
                 workflow_output,
                 metadata,
             );
-            if let Some(artifacts) = artifacts.as_ref() {
-                if let Some(clean_text) =
-                    clean_deep_research_final_text_from_artifacts(artifacts, workspace)
-                {
-                    final_text = clean_text;
-                }
-            }
         }
-        if !repair_completed {
-            eprintln!("deepresearch: repair pass did not complete, using host fallback…");
-        }
-    }
+    };
 
-    if artifacts.is_none() || deep_research_output_has_internal_leak(&final_text) {
-        eprintln!(
-            "deepresearch: report artifacts still missing, materializing host fallback draft…"
-        );
-        report_tool_gate.set_report_only(false);
-        let fallback_artifacts = materialize_deep_research_fallback_draft(
-            workspace,
-            query,
-            &final_text,
-            workflow_output,
-        )
-        .map_err(anyhow::Error::msg)?;
-        if deep_research_output_has_internal_leak(&final_text) {
-            final_text.clear();
-        } else if !final_text.ends_with('\n') {
-            final_text.push('\n');
-        }
-        final_text.push_str(&format!(
-            "DeepResearch fallback draft written at {}\n",
-            fallback_artifacts.html.display()
-        ));
-        artifacts = Some(fallback_artifacts);
-        status = DeepResearchReportStatus::FallbackDraft;
-    }
-
-    let artifacts = artifacts.ok_or_else(|| {
-        anyhow::anyhow!(
-            "DeepResearch did not produce the required report artifacts: expected `A3S_RESEARCH_VIEW: .a3s/research/<slug>/index.html`, plus sibling report.md"
-        )
-    })?;
-    report_tool_gate.set_report_only(false);
-    Ok(DeepResearchReportSynthesis {
-        text: final_text,
-        artifacts,
-        status,
-    })
-}
-
-async fn send_deepresearch_text(
-    session: &AgentSession,
-    prompt: &str,
-    timeout_ms: u64,
-    phase: &str,
-) -> (String, bool) {
-    match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        session.send(prompt, Some(&[])),
+    report_tool_gate.set_report_only(true);
+    let args = crate::tui::deep_research_cli_report_generation_args(
+        &prompt,
+        DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
+    );
+    let generated = match tokio::time::timeout(
+        std::time::Duration::from_millis(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS),
+        session.tool("generate_object", args),
     )
     .await
     {
-        Ok(Ok(result)) => (result.text, true),
-        Ok(Err(error)) => (
-            format!("DeepResearch {phase} model call failed: {error}"),
-            false,
+        Ok(Ok(result)) => crate::tui::materialize_deep_research_cli_generated_report(
+            workspace,
+            query,
+            &result.output,
+            result.exit_code,
+            workflow_output,
+            metadata,
         ),
-        Err(_) => (
-            format!("DeepResearch {phase} model call timed out after {timeout_ms} ms."),
-            false,
-        ),
+        Ok(Err(error)) => Err(format!("structured report generation failed: {error}")),
+        Err(_) => {
+            let _ = session
+                .cancel_and_settle(
+                    std::time::Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    std::time::Duration::from_millis(DEEP_RESEARCH_ABORT_SETTLE_MS),
+                )
+                .await;
+            Err(format!(
+                "structured report generation timed out after {DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS} ms"
+            ))
+        }
+    };
+    report_tool_gate.set_report_only(false);
+
+    match generated {
+        Ok((text, markdown, html)) => Ok(DeepResearchReportSynthesis {
+            text,
+            artifacts: ResearchReportArtifacts { markdown, html },
+            status: if qualified || exit_code != 0 {
+                DeepResearchReportStatus::Qualified
+            } else {
+                DeepResearchReportStatus::Completed
+            },
+        }),
+        Err(reason) => {
+            eprintln!("deepresearch: structured report rejected: {reason}");
+            materialize_deepresearch_cli_recovery(
+                workspace,
+                query,
+                &reason,
+                workflow_output,
+                metadata,
+            )
+        }
     }
+}
+
+fn materialize_deepresearch_cli_recovery(
+    workspace: &Path,
+    query: &str,
+    reason: &str,
+    workflow_output: &str,
+    metadata: Option<&serde_json::Value>,
+) -> anyhow::Result<DeepResearchReportSynthesis> {
+    let (text, markdown, html) = crate::tui::materialize_deep_research_cli_recovery_report(
+        workspace,
+        query,
+        reason,
+        workflow_output,
+        metadata,
+    )
+    .map_err(anyhow::Error::msg)?;
+    Ok(DeepResearchReportSynthesis {
+        text,
+        artifacts: ResearchReportArtifacts { markdown, html },
+        status: DeepResearchReportStatus::Degraded,
+    })
 }
 
 fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
@@ -385,6 +317,7 @@ pub(crate) fn deep_research_report_phase_tool_permission(
     args: &serde_json::Value,
 ) -> a3s_code_core::permissions::PermissionDecision {
     match tool_name.to_ascii_lowercase().as_str() {
+        "generate_object" => a3s_code_core::permissions::PermissionDecision::Allow,
         "write" | "edit" if report_artifact_write_args(args) => {
             a3s_code_core::permissions::PermissionDecision::Allow
         }
@@ -481,7 +414,13 @@ async fn run_deepresearch_workflow(
         }
     };
     progress_drain.abort();
-    result
+    result.map(|mut result| {
+        result.output = crate::tui::deep_research_cli_canonical_workflow_output(
+            &result.output,
+            result.metadata.as_ref(),
+        );
+        result
+    })
 }
 
 #[cfg(test)]
@@ -494,7 +433,6 @@ mod tests {
     use a3s_code_core::llm::{
         ContentBlock, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
     };
-    use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
     use async_trait::async_trait;
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -606,68 +544,6 @@ mod tests {
         }
     }
 
-    struct StructuredCoercionFailsLlmClient;
-
-    #[async_trait]
-    impl LlmClient for StructuredCoercionFailsLlmClient {
-        async fn complete(
-            &self,
-            messages: &[Message],
-            system: Option<&str>,
-            tools: &[ToolDefinition],
-        ) -> anyhow::Result<LlmResponse> {
-            Ok(structured_failure_response(messages, system, tools))
-        }
-
-        async fn complete_streaming(
-            &self,
-            messages: &[Message],
-            system: Option<&str>,
-            tools: &[ToolDefinition],
-            _cancel_token: CancellationToken,
-        ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
-            let response = structured_failure_response(messages, system, tools);
-            let (tx, rx) = mpsc::channel(1);
-            tokio::spawn(async move {
-                let _ = tx.send(StreamEvent::Done(response)).await;
-            });
-            Ok(rx)
-        }
-
-        fn native_structured_support(
-            &self,
-        ) -> a3s_code_core::llm::structured::NativeStructuredSupport {
-            a3s_code_core::llm::structured::NativeStructuredSupport::ForcedTool
-        }
-    }
-
-    fn structured_failure_response(
-        messages: &[Message],
-        system: Option<&str>,
-        tools: &[ToolDefinition],
-    ) -> LlmResponse {
-        if tools.iter().any(|tool| tool.name == "emit_step_output") {
-            return text_response("I found evidence, but I am not emitting the schema tool.");
-        }
-        let last = message_text(messages.last());
-        if system.is_some_and(|system| system.contains("pre-analysis assistant"))
-            || last.contains("ONLY the JSON object")
-        {
-            return text_response(
-                r#"{"intent":"GeneralPurpose","requires_planning":false,"goal":{"description":"DeepResearch child task","success_criteria":["evidence returned"]},"execution_plan":{"complexity":"Simple","steps":[],"required_tools":[]},"optimized_input":"DeepResearch child task"}"#,
-            );
-        }
-        if last
-            .to_ascii_lowercase()
-            .contains("deep-research evidence track for:")
-        {
-            return text_response(
-                "## Summary\n\nThe latest stable Rust version is 1.96.1, released on 2026-06-30.\n\n## Sources\n\n- Official Rust Blog: https://blog.rust-lang.org/2026/06/30/Rust-1.96.1/ confirms Rust 1.96.1.\n- Rust stable manifest: https://static.rust-lang.org/dist/channel-rust-stable.toml confirms pkg.rust.version 1.96.1.\n\n## Confidence\n\nHigh because two official Rust sources agree.",
-            );
-        }
-        text_response("DONE")
-    }
-
     fn message_text(message: Option<&Message>) -> String {
         message
             .map(|message| {
@@ -713,59 +589,6 @@ mod tests {
             stop_reason: Some("tool_use".into()),
             token_logprobs: Vec::new(),
             meta: None,
-        }
-    }
-
-    struct StructuredRuntimeTool {
-        seen_args: std::sync::Arc<Mutex<Vec<serde_json::Value>>>,
-    }
-
-    #[async_trait]
-    impl Tool for StructuredRuntimeTool {
-        fn name(&self) -> &str {
-            "runtime"
-        }
-
-        fn description(&self) -> &str {
-            "Returns completed structured runtime output for DeepResearch tests."
-        }
-
-        fn parameters(&self) -> serde_json::Value {
-            serde_json::json!({ "type": "object" })
-        }
-
-        async fn execute(
-            &self,
-            args: &serde_json::Value,
-            _ctx: &ToolContext,
-        ) -> anyhow::Result<ToolOutput> {
-            self.seen_args.lock().unwrap().push(args.clone());
-            let structured = serde_json::json!({
-                "summary": "Runtime structured evidence confirms OS fan-out completed before synthesis.",
-                "sources": [{
-                    "title": "Runtime Evidence",
-                    "url_or_path": "https://example.com/runtime-evidence",
-                    "date": "2026-07-08",
-                    "quote_or_fact": "OS Runtime returned a schema-shaped evidence object.",
-                    "reliability": "deterministic test fixture"
-                }],
-                "key_evidence": ["OS Runtime results are normalized into structured evidence."],
-                "contradictions": [],
-                "confidence": "high",
-                "gaps": []
-            });
-            Ok(ToolOutput::success(
-                serde_json::json!({
-                    "batchId": "batch-structured",
-                    "results": [{
-                        "invocationId": "inv-1",
-                        "state": "completed",
-                        "output": structured.to_string(),
-                        "error": null
-                    }]
-                })
-                .to_string(),
-            ))
         }
     }
 

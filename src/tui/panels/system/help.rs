@@ -318,7 +318,7 @@ fn help_panel() -> HelpPanel {
                 )
                 .row(
                     "/model",
-                    "configured models plus Claude/Codex/WorkBuddy/OS gateway tabs",
+                    "configured models plus Claude/Codex/Kimi/WorkBuddy/OS gateway tabs",
                 )
                 .row(
                     "/flow /agent /mcp",

@@ -1174,12 +1174,101 @@ mod artifact_boundary_tests {
     }
 
     #[test]
+    fn generated_report_publication_rejects_an_unsupported_decision_threshold() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-quantity-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let query = "Compare the documented benchmark boundary";
+        let workflow = serde_json::json!({
+            "plan": {
+                "answer_shape": "briefing",
+                "tracks": ["Benchmark boundary"]
+            },
+            "research": {
+                "results": [{
+                    "success": true,
+                    "structured": {
+                        "summary": "The benchmark has a documented range.",
+                        "sources": [{
+                            "title": "Published benchmark",
+                            "url_or_path": "https://example.com/benchmark",
+                            "quote_or_fact": "The benchmark covers 1M-10M vectors.",
+                            "reliability": "Published source"
+                        }],
+                        "key_evidence": ["The benchmark covers 1M-10M vectors."],
+                        "contradictions": [],
+                        "gaps": [],
+                        "confidence": "medium"
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let generated = GeneratedDeepResearchReport {
+            markdown: "# Benchmark boundary\n\nUse the product below 1M vectors.\n\n## Evidence\n\nThe published benchmark covers 1M-10M vectors.\n\n## Sources\n\n- https://example.com/benchmark"
+                .to_string(),
+            editorial: ReportEditorialPlan {
+                thesis: "The retained evidence supports a bounded benchmark comparison."
+                    .to_string(),
+                track_coverage: vec![ReportTrackCoverage {
+                    track: "Benchmark boundary".to_string(),
+                    status: ReportTrackStatus::Bounded,
+                    finding: "The benchmark publishes a tested range.".to_string(),
+                    interpretation: "The tested range does not establish a lower threshold."
+                        .to_string(),
+                    implication: "A product decision needs a workload-specific test.".to_string(),
+                    uncertainty: "No evidence establishes a below-1M cutoff.".to_string(),
+                }],
+            },
+            presentation: ReportPresentation {
+                rationale: "A compact analytical briefing fits a bounded benchmark decision."
+                    .to_string(),
+                ..ReportPresentation::default()
+            },
+        };
+
+        let error = materialize_deep_research_completed_report_from_generation(
+            &workspace, query, &generated, &workflow, None,
+        )
+        .expect_err("an unsupported threshold must not reach the artifact head");
+        assert!(error.contains("<1m"), "{error}");
+        let report_dir = workspace
+            .join(".a3s/research")
+            .join(deep_research_report_slug(query));
+        assert!(!report_dir.exists());
+
+        let mut qualified_workflow: serde_json::Value = serde_json::from_str(&workflow).unwrap();
+        qualified_workflow["checker"] = serde_json::json!({
+            "decision": "degrade",
+            "coverage_summary": "The benchmark is useful, but no decision threshold is supported."
+        });
+        let artifacts = materialize_deep_research_completed_report_from_generation(
+            &workspace,
+            query,
+            &generated,
+            &qualified_workflow.to_string(),
+            None,
+        )
+        .expect("a qualified report should converge after deterministic claim removal");
+        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
+        assert!(!markdown.contains("below 1M"), "{markdown}");
+        assert!(markdown.contains("covers 1M-10M"), "{markdown}");
+        assert!(markdown.contains("## Evidence boundary"), "{markdown}");
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
     fn generated_report_depth_gate_matches_concise_semantic_track_labels() {
         let planned = vec![
             (
-                normalize_report_track(
-                    "调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界",
-                ),
+                normalize_report_track("调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界"),
                 "调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界".to_string(),
             ),
             (
@@ -1227,12 +1316,10 @@ mod artifact_boundary_tests {
                 "Operational risk and security".to_string(),
             ),
         ];
-        let coverage = vec![
-            (
-                normalize_report_track("Operational risk"),
-                "Operational risk".to_string(),
-            ),
-        ];
+        let coverage = vec![(
+            normalize_report_track("Operational risk"),
+            "Operational risk".to_string(),
+        )];
 
         assert_eq!(
             matched_planned_report_tracks(&planned, &coverage).len(),
@@ -1267,6 +1354,16 @@ mod artifact_boundary_tests {
         assert!(html.contains("A source-backed partial report"));
 
         let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn recovery_report_preserves_the_host_publication_rejection_reason() {
+        let result = deep_research_recovery_result_text(
+            "content rejected: report introduced ungrounded quantitative claim(s): <1m",
+            r#"{"mode":"direct_web_degraded","research":{"status":"partial_success"}}"#,
+        );
+        assert!(result.contains("Host publication validation"), "{result}");
+        assert!(result.contains("<1m"), "{result}");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use super::{html_escape, markdown_backslash_unescape, markdown_plain_text};
-use crate::tui::deep_research_report_generation::ReportPresentation;
+use crate::tui::deep_research_report_generation::{ReportHero, ReportPresentation};
 use comrak::{markdown_to_html, Options};
 use std::collections::HashSet;
 
@@ -38,7 +38,10 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
     } else {
         declared_source_count
     };
-    let composition = compose_report_fragment(&raw_body, language);
+    let section_plan = presentation
+        .map(|presentation| presentation.section_plan.as_slice())
+        .unwrap_or_default();
+    let composition = compose_report_fragment(&raw_body, language, section_plan);
     let finding_count = composition.finding_count.max(
         markdown
             .lines()
@@ -74,7 +77,6 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
     } else {
         "Cited sources"
     };
-    let sources_separator = if language == "zh-CN" { "：" } else { ": " };
     let confidence_label = if recovery && language == "zh-CN" {
         "不可作为最终定论"
     } else if recovery {
@@ -121,11 +123,6 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
     } else {
         "Key findings"
     };
-    let sections_label = if language == "zh-CN" {
-        "叙事章节"
-    } else {
-        "Story sections"
-    };
     let reading_time_label = if language == "zh-CN" {
         "分钟阅读"
     } else {
@@ -148,14 +145,21 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
         .map(str::trim)
         .filter(|thesis| (12..=1_200).contains(&thesis.chars().count()))
         .unwrap_or(fallback_thesis);
+    let hero_support = match presentation.map(|value| value.hero) {
+        Some(ReportHero::Statement) => String::new(),
+        Some(ReportHero::Split) => composition.hero_guide.clone(),
+        Some(ReportHero::Metrics) | None => format!(
+            r#"<aside class="evidence-profile" aria-label="{profile_label}"><p class="profile-label">{profile_label}</p><div class="profile-grid"><div><strong>{source_count:02}</strong><span>{sources_label}</span></div><div><strong>{finding_count:02}</strong><span>{findings_label}</span></div><div><strong>{reading_minutes:02}</strong><span>{reading_time_label}</span></div></div></aside>"#
+        ),
+    };
     format!(
         r#"<!doctype html>
 <html lang="{language}">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><style>{css}</style></head>
 <body class="{theme}">
-<header class="hero"><div class="hero-inner"><div class="hero-grid"><div><p class="eyebrow">{brief_label}</p><h1>{title}</h1><p class="hero-thesis">{thesis}</p><div class="signal-row"><span class="signal">● <b>{evidence_label}</b></span><span class="signal">{confidence_label}</span></div></div><aside class="evidence-profile" aria-label="{profile_label}"><p class="profile-label">{profile_label}</p><div class="profile-grid"><div><strong>{source_count:02}</strong><span>{sources_label}</span></div><div><strong>{finding_count:02}</strong><span>{findings_label}</span></div><div><strong>{reading_minutes:02}</strong><span>{reading_time_label}</span></div></div></aside></div></div></header>
-<main><div class="report-shell"><aside class="rail" aria-label="{metadata_label}"><p class="rail-label">{reading_label}</p>{toc}<dl class="rail-stat"><dt>{sections_label}</dt><dd>{section_count:02}</dd></dl></aside><article id="report">{body}</article></div></main>
-<p class="footer-note">{brief_label} · {evidence_label} · {sources_label}{sources_separator}{source_count}</p>
+<header class="hero"><div class="hero-inner"><div class="hero-grid"><div><p class="eyebrow">{brief_label}</p><h1>{title}</h1><p class="hero-thesis">{thesis}</p><div class="signal-row"><span class="signal">● <b>{evidence_label}</b></span><span class="signal">{confidence_label}</span></div></div>{hero_support}</div></div></header>
+<main><div class="report-shell"><aside class="rail" aria-label="{metadata_label}"><p class="rail-label">{reading_label}</p>{toc}</aside><article id="report">{body}</article></div></main>
+<p class="footer-note">{brief_label} · {evidence_label}</p>
 </body></html>
 "#,
         language = language,
@@ -166,20 +170,11 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
         thesis = html_escape(thesis),
         evidence_label = evidence_label,
         confidence_label = confidence_label,
-        profile_label = profile_label,
-        source_count = source_count,
-        sources_label = sources_label,
-        finding_count = finding_count,
-        findings_label = findings_label,
-        reading_minutes = reading_minutes,
-        reading_time_label = reading_time_label,
+        hero_support = hero_support,
         metadata_label = metadata_label,
         reading_label = reading_label,
         toc = composition.toc,
-        sections_label = sections_label,
-        section_count = composition.section_count,
         body = composition.body,
-        sources_separator = sources_separator,
     )
 }
 

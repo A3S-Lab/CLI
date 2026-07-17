@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
- "a3s-acl",
+ "a3s-acl 0.2.2",
  "a3s-boot",
  "a3s-code-core",
  "a3s-lane",
@@ -23,6 +23,7 @@ dependencies = [
  "clap_complete",
  "comrak",
  "futures",
+ "fs2",
  "http-body-util",
  "httpdate",
  "image",
@@ -46,6 +47,11 @@ dependencies = [
  "tracing",
  "webpki-roots 1.0.8",
 ]
+
+[[package]]
+name = "a3s-acl"
+version = "0.2.1"
+source = "git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22#6e2a6469edc0f4c61b1e588d0ace873aaf15ce22"
 
 [[package]]
 name = "a3s-acl"
@@ -85,11 +91,9 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "5.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ea4c48286d828e09fb44df83144d05b2d41db25e4695f3bdce768e7a46e0399"
+version = "5.3.5"
 dependencies = [
- "a3s-acl",
+ "a3s-acl 0.2.1",
  "a3s-common",
  "a3s-flow",
  "a3s-lane",
@@ -160,8 +164,6 @@ dependencies = [
 [[package]]
 name = "a3s-flow"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "699f3b680a1d4c5cb08e178ebab3d4b9c37fc3a31b9348ddb980ae9dceb48e10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -212,7 +214,7 @@ dependencies = [
 name = "a3s-search"
 version = "1.4.3"
 dependencies = [
- "a3s-acl",
+ "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
  "a3s-use-browser",
  "anyhow",
@@ -235,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "comrak",
  "crossterm",
@@ -5822,7 +5824,3 @@ version = "0.2.1"
 [[patch.unused]]
 name = "a3s-boot"
 version = "0.1.1"
-
-[[patch.unused]]
-name = "a3s-code-core"
-version = "5.3.2"

@@ -56,9 +56,12 @@
       }
       const sections = batchOutputSections(searchBatch && searchBatch.output, searchQueries.length);
       const fallbackSearches = [];
+      let builtinDefaultEngineSelection = false;
       for (let index = 0; index < searchQueries.length; index += 1) {
         const searchQuery = searchQueries[index];
         const child = batchChildResult(searchBatch, sections, index);
+        builtinDefaultEngineSelection = builtinDefaultEngineSelection ||
+          child.metadata.engine_selection_source === "builtin_default";
         if (!child.success) {
           fallbackSearches.push({
             index,
@@ -72,7 +75,7 @@
           fallbackSearches.push({
             index,
             query: searchQuery,
-            primary_error: `web_search failed for "${searchQuery}" after all configured engines failed`
+            primary_error: `web_search failed for "${searchQuery}": ${compactText(child.output, 300)}`
           });
           continue;
         }
@@ -98,7 +101,11 @@
         }
         searches.push({ query: searchQuery, results });
       }
-      if (fallbackSearches.length > 0 && directWebEngines.length === 0) {
+      if (
+        fallbackSearches.length > 0 &&
+        directWebEngines.length === 0 &&
+        builtinDefaultEngineSelection
+      ) {
         const fallbackInvocations = fallbackSearches.map((item, index) => ({
           id: `search-fallback-${index + 1}`,
           tool: "web_search",
@@ -107,7 +114,7 @@
             format: "json",
             limit: directWebMaxResults,
             timeout: directWebSearchTimeoutSecs,
-            engines: ["brave"]
+            engines: ["bing_cn", "brave"]
           }
         }));
         let fallbackBatch = null;
@@ -135,7 +142,7 @@
           }
           collectionErrors.push(pending.primary_error);
           collectionErrors.push(
-            `web_search Brave fallback returned no usable results for "${pending.query}"`
+            `web_search automatic fallback returned no usable results for "${pending.query}": ${compactText(child.output, 300)}`
           );
           searches.push({ query: pending.query, results: [] });
         }
@@ -149,6 +156,13 @@
     const candidates = queryAwareFetchCandidates(searches, directWebFetchLimit);
     const fetches = [];
     const safeCandidates = [];
+    const isTransientFetchFailure = (output) => {
+      const text = String(output || "").toLowerCase();
+      if (/http\s+(?:4\d\d|501)\b/.test(text)) {
+        return false;
+      }
+      return /(?:timed?\s*out|timeout|tls|handshake|connection|connect|network|resolve|lookup|temporar|sending request|unexpected eof|\beof\b)/i.test(text);
+    };
     for (const item of candidates) {
       const safeUrl = normalizeObservedSource(item.url);
       if (safeUrl && /^https?:\/\//i.test(safeUrl)) {
@@ -178,19 +192,90 @@
         collectionErrors.push(`web_fetch batch failed: ${String(err && err.message ? err.message : err)}`);
       }
       const sections = batchOutputSections(fetchBatch && fetchBatch.output, safeCandidates.length);
+      const initialChildren = safeCandidates.map((_candidate, index) =>
+        batchChildResult(fetchBatch, sections, index)
+      );
+      const retryIndexes = initialChildren
+        .map((child, index) => ({ child, index }))
+        .filter(({ child }) =>
+          (!child.success || !isNonEmptyString(child.output)) && (
+            !isNonEmptyString(child.output) ||
+            isTransientFetchFailure(child.output) ||
+            ["network", "timeout", "transport"].includes(String(child.error_kind || "").toLowerCase())
+          )
+        )
+        .map(({ index }) => index);
+      const retryChildren = new Map();
+      if (retryIndexes.length > 0) {
+        const retryInvocations = retryIndexes.map((candidateIndex, retryIndex) => ({
+          id: `fetch-retry-${retryIndex + 1}`,
+          tool: "web_fetch",
+          args: {
+            url: safeCandidates[candidateIndex].fetchUrl,
+            format: "markdown",
+            timeout: directWebFetchTimeoutSecs
+          }
+        }));
+        let retryBatch = null;
+        try {
+          retryBatch = await ctx.tool("batch", {
+            invocations: retryInvocations,
+            max_concurrency: Math.min(4, retryInvocations.length)
+          });
+        } catch (err) {
+          collectionErrors.push(`web_fetch retry batch failed: ${String(err && err.message ? err.message : err)}`);
+        }
+        const retrySections = batchOutputSections(
+          retryBatch && retryBatch.output,
+          retryInvocations.length
+        );
+        for (let retryIndex = 0; retryIndex < retryIndexes.length; retryIndex += 1) {
+          retryChildren.set(
+            retryIndexes[retryIndex],
+            batchChildResult(retryBatch, retrySections, retryIndex)
+          );
+        }
+      }
+      let transportRetrySuccessCount = 0;
       for (let index = 0; index < safeCandidates.length; index += 1) {
         const { item, safeUrl } = safeCandidates[index];
-        const child = batchChildResult(fetchBatch, sections, index);
+        const initialChild = initialChildren[index];
+        const retriedChild = retryChildren.get(index);
+        const child = retriedChild && retriedChild.success && isNonEmptyString(retriedChild.output)
+          ? retriedChild
+          : (retriedChild && isNonEmptyString(retriedChild.output) ? retriedChild : initialChild);
+        if (retriedChild && child === retriedChild && child.success && isNonEmptyString(child.output)) {
+          transportRetrySuccessCount += 1;
+        }
         const transportOk = child.success && isNonEmptyString(child.output);
-        const relevant = transportOk && textMatchesQuery(child.output);
+        const focusedText = transportOk
+          ? evidenceSnippet(
+              child.output,
+              "",
+              1200,
+              pageEvidenceFocusTerms(item, child.output)
+            )
+          : "";
+        const relevant = isNonEmptyString(focusedText) && textMatchesEvidenceFocus(focusedText, item);
         const ok = Boolean(transportOk && relevant);
-        fetches.push({ url: item.url, ok, output: ok ? child.output : "" });
+        fetches.push({
+          url: item.url,
+          fetch_url: safeCandidates[index].fetchUrl,
+          ok,
+          output: ok ? child.output : ""
+        });
         if (!ok) {
           collectionErrors.push(transportOk
             ? `web_fetch returned off-topic page text for ${safeUrl}`
             : `web_fetch returned no usable page text for ${safeUrl}: ${compactText(child.output, 300)}`);
         }
       }
+      const research = directWebResearchFromSources(searches, fetches, collectionErrors);
+      research.metadata.transport_retry_count = retryIndexes.length;
+      research.metadata.transport_retry_success_count = transportRetrySuccessCount;
+      research.metadata.retrieval_started_at_ms = retrievalStartedAtMs;
+      research.metadata.retrieval_elapsed_ms = Math.max(0, Date.now() - retrievalStartedAtMs);
+      return research;
     }
     const research = directWebResearchFromSources(searches, fetches, collectionErrors);
     research.metadata.retrieval_started_at_ms = retrievalStartedAtMs;
