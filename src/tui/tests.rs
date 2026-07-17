@@ -5755,6 +5755,38 @@ fn scrollbar_thumb_tracks_position() {
 }
 
 #[test]
+fn scrollbar_rows_with_emoji_graphemes_stay_within_the_terminal_canvas() {
+    let canvas_width = 138usize;
+    let headings = [
+        "## ✏️ 代码编辑与生成",
+        "## ⚙️ 执行与验证",
+        "## 🛠️ 专项技能（Skills）",
+        "## 👩‍💻 Agent collaboration",
+    ];
+    let view = headings
+        .iter()
+        .map(|heading| fit_viewport_row(heading, canvas_width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = append_scrollbar(&view, canvas_width, headings.len() + 20, 37);
+
+    for row in rendered.lines() {
+        assert_eq!(
+            a3s_tui::style::visible_len(row),
+            canvas_width,
+            "scrollbar row exceeded the terminal canvas: {row:?}"
+        );
+        assert!(
+            matches!(
+                a3s_tui::style::strip_ansi(row).chars().next_back(),
+                Some('█' | '│')
+            ),
+            "scrollbar left the final column: {row:?}"
+        );
+    }
+}
+
+#[test]
 fn streamed_markdown_table_keeps_the_scrollbar_in_the_final_canvas_column() {
     let canvas_width = 48usize;
     let markdown_width = transcript_markdown_width_for(canvas_width as u16);
