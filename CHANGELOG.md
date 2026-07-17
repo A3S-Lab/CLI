@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-07-17
+
+### Added
+
+- Added native Web workspace file discovery, Git status and diff support,
+  atomic create-only writes, and SHA-256 file revisions shared by the workspace
+  APIs.
+- Added Web editor quick open, navigation history, task-scoped persistence,
+  keyboard-complete explorer workflows, and explicit line-ending controls.
+
+### Changed
+
+- Kept Monaco models alive across editor transitions and aligned streaming and
+  finalized TUI assistant messages with one blank row above and below their
+  content.
+
+### Fixed
+
+- Made TUI auto mode silently approve every operation that reaches the Core
+  confirmation boundary while preserving non-bypassable hard permission
+  denials.
+- Made Web saves conditional on the last observed file revision, return HTTP
+  412 for stale content without overwriting disk state, and provide explicit
+  reload or overwrite recovery. Invalid write requests now return HTTP 400.
+
 ## [0.9.3] - 2026-07-16
 
 ### Fixed

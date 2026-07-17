@@ -12,7 +12,7 @@ permissions:
   contents: write
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: d7a3ee72e660c88802cff5e653e93ecfe512220a
+  A3S_WEB_SOURCE_REF: 18b349aa7e125c197b6121258d40b0ef1899bbf5
 jobs:
   create-release:
     runs-on: ubuntu-latest
