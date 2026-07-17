@@ -9709,6 +9709,7 @@ fn agent_matches_source(agent: AgentKind, source: &str) -> bool {
         AgentKind::Codex => source.contains("codex"),
         AgentKind::Cursor => source.contains("cursor"),
         AgentKind::Gemini => source.contains("gemini"),
+        AgentKind::WorkBuddy => source.contains("workbuddy") || source.contains("codebuddy"),
     }
 }
 
@@ -10615,6 +10616,35 @@ mod tests {
             Some(AgentKind::ClaudeCode)
         );
         assert_eq!(detect_agent("codex exec task"), Some(AgentKind::Codex));
+        assert_eq!(
+            detect_agent("node /opt/node_modules/@anthropic-ai/claude-code/cli.js"),
+            Some(AgentKind::ClaudeCode)
+        );
+        assert_eq!(
+            detect_agent("node C:\\tools\\@openai\\codex\\bin\\codex.js"),
+            Some(AgentKind::Codex)
+        );
+        assert_eq!(
+            detect_agent("C:\\tools\\cursor-agent.exe --print"),
+            Some(AgentKind::Cursor)
+        );
+        assert_eq!(
+            detect_agent("gemini --prompt task"),
+            Some(AgentKind::Gemini)
+        );
+        assert_eq!(
+            detect_agent("/usr/local/bin/workbuddy --resume"),
+            Some(AgentKind::WorkBuddy)
+        );
+        assert_eq!(
+            detect_agent("node /opt/node_modules/workbuddy/bin/cli.js"),
+            Some(AgentKind::WorkBuddy)
+        );
+        assert_eq!(
+            detect_agent("C:\\tools\\codebuddy.exe --resume"),
+            Some(AgentKind::WorkBuddy)
+        );
+        assert_eq!(detect_agent("rg -n codex src"), None);
     }
 
     #[test]

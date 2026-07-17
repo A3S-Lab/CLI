@@ -179,6 +179,14 @@ impl App {
                     }
                     return None;
                 }
+                // Expanded agent status is a read-only modal. Keep the draft
+                // untouched and accept either Esc or the global Ctrl+G toggle.
+                if self.system_agent_island.expanded {
+                    if key.code == KeyCode::Esc || is_system_agent_island_key(&key) {
+                        self.system_agent_island.expanded = false;
+                    }
+                    return None;
+                }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
                     return self.handle_help_key(&key);
@@ -308,6 +316,10 @@ impl App {
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
+                }
+                if is_system_agent_island_key(&key) {
+                    self.toggle_system_agent_island();
+                    return None;
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -584,6 +596,16 @@ impl App {
                     }
                     return None;
                 }
+                let island = self.system_agent_island_frame();
+                if island.hit_test(m.row, m.column) {
+                    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+                        self.toggle_system_agent_island();
+                    }
+                    return None;
+                }
+                if self.system_agent_island.expanded {
+                    return None;
+                }
                 // Full-screen /ide //config //kb page: the transcript isn't
                 // visible, so transcript scroll/select must not act on it
                 // (a drag would silently copy hidden text).
@@ -785,6 +807,11 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
+                if !queued_turn_restored {
+                    self.record_local_agent_terminal(
+                        crate::system_agents::AgentActivityState::Failed,
+                    );
+                }
                 self.finish();
                 if queued_turn_restored {
                     self.push_line(
@@ -837,6 +864,9 @@ impl App {
                 goal_cancelled,
                 status_entry,
             } => {
+                self.record_local_agent_terminal(
+                    crate::system_agents::AgentActivityState::Cancelled,
+                );
                 // Esc force-aborted the turn. The cancel command awaited the
                 // stream join first, so core has committed the interrupted
                 // history before any queued continuation starts.
@@ -932,6 +962,19 @@ impl App {
                     }
                     return Some(stream_commit_tick());
                 }
+            }
+
+            Msg::SystemAgentsTick => {
+                let next = system_agent_tick();
+                if self.system_agent_island.refreshing {
+                    return Some(next);
+                }
+                let refresh = self.refresh_system_agents();
+                return Some(cmd::batch(vec![refresh, next]));
+            }
+
+            Msg::SystemAgentsRefreshed(snapshot) => {
+                self.system_agent_island.apply(snapshot);
             }
 
             Msg::BannerTick => {

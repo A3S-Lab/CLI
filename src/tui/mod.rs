@@ -37,7 +37,7 @@ use a3s_tui::components::textarea::TextareaMsg;
 use a3s_tui::components::viewport::ViewportMsg;
 use a3s_tui::components::{
     Alert, AlertKind, DiffLineKind, DiffSpan, InlineAction, Meter, Scrollbar, SessionStatusChip,
-    Spinner, Textarea, Toast, ToastKind, Viewport,
+    Spinner, TextOverlay, Textarea, Toast, ToastKind, Viewport,
 };
 use a3s_tui::event::{KeyEvent, MouseEvent};
 use a3s_tui::keymap::{KeyBinding, Keymap};
@@ -80,6 +80,8 @@ mod deep_research_host_prompt;
 mod deep_research_host_report;
 #[path = "deep_research/host_workflow.rs"]
 mod deep_research_host_workflow;
+#[path = "deep_research/inquiry_runtime.rs"]
+mod deep_research_inquiry_runtime;
 #[path = "deep_research/prompts.rs"]
 mod deep_research_prompts;
 #[path = "deep_research/report_audit.rs"]
@@ -91,6 +93,8 @@ mod deep_research_report_phase;
 #[cfg(test)]
 #[path = "deep_research/report_pipeline_tests.rs"]
 mod deep_research_report_pipeline_tests;
+#[path = "deep_research/sectioned_report.rs"]
+mod deep_research_sectioned_report;
 #[path = "deep_research/state_journal.rs"]
 mod deep_research_state_journal;
 #[path = "deep_research/workflow_store.rs"]
@@ -121,7 +125,11 @@ pub(crate) use deep_research_artifacts::{
     ResearchReportArtifacts,
 };
 use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
-use deep_research_convergence::{evaluate_convergence, ConvergenceDecision, ConvergenceInput};
+use deep_research_convergence::{
+    evaluate_convergence, evaluate_terminal_inquiry_convergence,
+    validated_inquiry_terminal_outcome, ConvergenceAction, ConvergenceDecision, ConvergenceInput,
+    InquiryTerminalOutcome,
+};
 use deep_research_evidence_ledger::{
     accepted_evidence_ledger,
     synthesis_payload_with_context as accepted_evidence_synthesis_payload, AcceptedEvidence,
@@ -132,15 +140,23 @@ use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
 use deep_research_host_report::*;
 use deep_research_host_workflow::*;
+use deep_research_inquiry_runtime::{
+    inquiry_projection_from_workflow, spawn_deep_research_inquiry,
+    DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS,
+};
 use deep_research_report_generation::*;
 use deep_research_report_phase::{
     suppress_tool_output as suppress_deep_research_report_phase_tool_output, ReportPhaseToolBuffer,
+};
+use deep_research_sectioned_report::{
+    generate_sectioned_report, merge_sectioned_inquiry_projection, sectioned_report_available,
 };
 use deep_research_state_journal::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run,
     record_child_event as record_deep_research_child_event,
     record_convergence as record_deep_research_convergence,
     record_evidence_ledger as record_deep_research_evidence_ledger,
+    record_inquiry_state as record_deep_research_inquiry_state,
     record_run_terminal as record_deep_research_run_terminal,
     record_workflow_completed as record_deep_research_workflow_completed,
     record_workflow_started as record_deep_research_workflow_started, research_diagnostic,
@@ -297,6 +313,8 @@ mod app_permissions;
 mod app_projections;
 #[path = "app/research.rs"]
 mod app_research;
+#[path = "app/research_workflow.rs"]
+mod app_research_workflow;
 #[path = "app/runtime.rs"]
 mod app_runtime;
 #[path = "app/session_state.rs"]
@@ -339,12 +357,15 @@ mod program_preview;
 mod render;
 #[path = "ui/syntax.rs"]
 mod syntax;
+#[path = "ui/agent_island.rs"]
+mod system_agent_island;
 #[path = "ui/tool_style.rs"]
 mod tool_style;
 #[path = "ui/tool_transcript_view.rs"]
 mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
+use system_agent_island::{is_system_agent_island_key, system_agent_tick};
 
 pub(crate) mod panels;
 #[cfg(test)]
@@ -405,19 +426,17 @@ const HITL_CONFIRM_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 const BACKGROUND_CONFIRM_TIMEOUT_MS: u64 = 500;
 const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-const DEEP_RESEARCH_SCRIPT_TIMEOUT_MS: u64 = 300 * 1000;
-const DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS: u64 = 30_000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
 const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 180 * 1000;
+const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = (75 + 90 + 75 + 15) * 1000;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 120 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 // Planning/retrieval/checking, synthesis, and the single repair pass keep
 // independent active-work clocks. The wall-clock fuse therefore covers the
 // sum of their safety ceilings plus cancellation and artifact finalization;
 // it must never silently shorten a valid phase timeout.
-const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS
-    + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
-    + DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS
+const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
+    + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
     + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
     + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
     + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
@@ -669,6 +688,9 @@ struct App {
     loop_remaining: usize,
     /// ECS-style projection of live runtime tool and subagent entities.
     runtime: RuntimeProjection,
+    /// Cross-process coding-agent presence plus the collapsed/expanded island
+    /// presentation state. The current App lifecycle is merged at render time.
+    system_agent_island: system_agent_island::SystemAgentIsland,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -838,7 +860,8 @@ struct App {
 
 impl App {
     fn composer_input_is_hidden(&self) -> bool {
-        self.goal_resume_prompt.is_some()
+        self.system_agent_island.expanded
+            || self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
@@ -886,9 +909,14 @@ impl App {
         let session = Arc::clone(&self.session);
         let stream_join = self.stream_join.take();
         let host_tool_abort = self.host_tool_abort.take();
+        let agent_presence = self.system_agent_island.publisher.clone();
         self.rx = None;
 
         Some(cmd::cmd(move || async move {
+            // Remove the exact heartbeat before potentially waiting on model
+            // cleanup. Other TUI instances immediately stop advertising this
+            // process; crashes are still covered by the heartbeat TTL.
+            agent_presence.remove().await;
             if let Some(abort) = host_tool_abort {
                 abort.abort();
             }

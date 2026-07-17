@@ -50,12 +50,14 @@ impl ModelCatalog {
         catalog.add_config_models(config);
         catalog.add_local_account_models(AccountProvider::Claude);
         let os_config = config.os.clone();
-        let (codex, workbuddy, os) = tokio::join!(
+        let (codex, kimi, workbuddy, os) = tokio::join!(
             discover_codex_models(refresh_remote),
+            discover_account_models(AccountProvider::Kimi, refresh_remote),
             discover_account_models(AccountProvider::CodeBuddy, refresh_remote),
             discover_os_models(os_config)
         );
         catalog.extend(codex);
+        catalog.extend(kimi);
         catalog.extend(workbuddy);
         catalog.extend(os);
         catalog.sort_and_deduplicate();
@@ -73,7 +75,7 @@ impl ModelCatalog {
                 .list_models()
                 .into_iter()
                 .any(|(provider, model)| format!("{}/{}", provider.name, model.id) == route.model),
-            ModelSource::Claude | ModelSource::CodeBuddy => {
+            ModelSource::Claude | ModelSource::Kimi | ModelSource::CodeBuddy => {
                 let Some(provider) = route.source.account_provider() else {
                     return false;
                 };
@@ -291,7 +293,8 @@ fn source_rank(source: ModelSource) -> usize {
         ModelSource::Config => 0,
         ModelSource::Claude => 1,
         ModelSource::Codex => 2,
-        ModelSource::CodeBuddy => 3,
-        ModelSource::OsGateway => 4,
+        ModelSource::Kimi => 3,
+        ModelSource::CodeBuddy => 4,
+        ModelSource::OsGateway => 5,
     }
 }

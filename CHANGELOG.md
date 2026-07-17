@@ -7,8 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added signed-in Kimi account models to `/model`, `a3s model`, and
+  `a3s code models`. A3S prefers Kimi Desktop's local Daimon account and falls
+  back to Kimi Code OAuth, discovers account-enabled model/context metadata,
+  and keeps credentials in Kimi-owned state instead of A3S configuration,
+  output, or logs. OAuth refresh uses a file lock and atomic credential
+  rotation, while model responses preserve native A3S host-tool execution.
+- Added a cross-platform system-agent island to `a3s code`. Fresh per-user
+  heartbeats provide exact A3S parent/subagent lifecycle from cooperating
+  `a3s code` TUI processes; the shared `a3s top` process collector supplies
+  explicitly inferred fallbacks for Claude Code, Codex, Cursor, Gemini, and
+  WorkBuddy. Heartbeats persist only a sanitized workspace basename and redact
+  parent and child task descriptions unless
+  `A3S_AGENT_STATUS_SHARE_TASKS=1` explicitly enables local sharing. `Ctrl+G`
+  or a click expands the centered, ANSI-safe status overlay.
+
 ### Fixed
 
+- Deferred default-model validation from agent bootstrap to session creation so
+  hosts can start account-only sessions with an injected Claude, Codex, Kimi,
+  or WorkBuddy client while sessions lacking both sources still fail with an
+  actionable configuration error.
+- Installed the shared risk-aware permission policy and a real HITL manager for
+  `a3s code exec`. Auto mode now executes bounded workspace edits, unresolved
+  approvals terminate immediately with a nonzero `approval.required` result,
+  and a stream cannot report success without a terminal completion event.
 - Restored the Code TUI `/relay` picker for native A3S Code sessions and
   Claude Code or Codex task handoff, added WorkBuddy project transcripts as a
   fourth source, and preserved the selected native session's model, effort,

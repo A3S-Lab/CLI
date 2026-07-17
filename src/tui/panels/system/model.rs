@@ -44,6 +44,7 @@ fn selected_model_location(tabs: &[ModelTab], current: Option<&str>) -> (usize, 
 const A3S_COLOR: Color = ACCENT;
 const CLAUDE_COLOR: Color = TN_ORANGE;
 const CODEX_COLOR: Color = TN_CYAN;
+const KIMI_COLOR: Color = TN_GREEN;
 const CODEBUDDY_COLOR: Color = TN_PURPLE;
 const CODEX_MODEL_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
@@ -51,6 +52,7 @@ fn account_provider_color(provider: AccountProvider) -> Color {
     match provider {
         AccountProvider::Claude => CLAUDE_COLOR,
         AccountProvider::Codex => CODEX_COLOR,
+        AccountProvider::Kimi => KIMI_COLOR,
         AccountProvider::CodeBuddy => CODEBUDDY_COLOR,
     }
 }
@@ -529,6 +531,7 @@ impl App {
             ModelSelectionSource::Config => model.and_then(|model| self.switch_model(&model)),
             ModelSelectionSource::Claude
             | ModelSelectionSource::Codex
+            | ModelSelectionSource::Kimi
             | ModelSelectionSource::CodeBuddy => model.and_then(|model| {
                 let provider = tab.source.account_provider()?;
                 self.sign_in_account(provider, &model)
@@ -1047,6 +1050,7 @@ impl App {
                     ModelSelectionSource::Config => format!("switched to {model}"),
                     ModelSelectionSource::Claude => format!("Claude Code · {model}"),
                     ModelSelectionSource::Codex => format!("Codex · {model}"),
+                    ModelSelectionSource::Kimi => format!("Kimi · {model}"),
                     ModelSelectionSource::CodeBuddy => format!("WorkBuddy · {model}"),
                     ModelSelectionSource::OsGateway => format!("OS Gateway · {model}"),
                 };
@@ -1526,6 +1530,12 @@ mod tests {
             models: vec!["auto".into()],
             source: ModelSelectionSource::CodeBuddy,
         };
+        let kimi_tab = ModelTab {
+            label: "Kimi",
+            color: KIMI_COLOR,
+            models: vec!["k3-agent".into()],
+            source: ModelSelectionSource::Kimi,
+        };
         let codex_tab = ModelTab {
             label: "Codex",
             color: CODEX_COLOR,
@@ -1541,6 +1551,12 @@ mod tests {
         ));
         assert!(should_fetch_account_models(
             Some(&workbuddy_tab),
+            false,
+            false,
+            false
+        ));
+        assert!(should_fetch_account_models(
+            Some(&kimi_tab),
             false,
             false,
             false

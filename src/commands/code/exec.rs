@@ -1,12 +1,12 @@
 use std::io::IsTerminal;
 use std::sync::Arc;
 
-use a3s_code_core::{Agent, AgentEvent, PlanningMode, SessionOptions};
+use a3s_code_core::{Agent, AgentEvent};
 use anyhow::{bail, Context};
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
-use crate::cli::args::{CodeExecArgs, CodeMode, OutputMode};
+use crate::cli::args::{CodeExecArgs, OutputMode};
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, write_jsonl, CliError, ExitClass};
 
@@ -21,13 +21,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .await
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
-    let mut options = SessionOptions::new()
-        .with_session_id(&session_id)
-        .with_planning_mode(match args.mode {
-            CodeMode::Plan => PlanningMode::Enabled,
-            CodeMode::Default => PlanningMode::Disabled,
-            CodeMode::Auto => PlanningMode::Auto,
-        });
+    let workspace = &context.directory;
+    let mut options = super::exec_policy::session_options(args.mode, workspace, &session_id);
     if let Some(model) = args.model {
         options = options.with_model(model);
     }
@@ -35,9 +30,10 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         crate::session_llm::resolve_session_llm_client(&code_config, &options, &session_id)
             .map_err(anyhow::Error::msg)?;
     options = options.with_llm_client(Arc::clone(&client));
-    let workspace = &context.directory;
     let session = agent
-        .session_async(workspace.to_string_lossy().to_string(), Some(options))
+        .session_builder(workspace.to_string_lossy().to_string())
+        .options(options)
+        .build()
         .await?;
 
     let (mut receiver, worker) = session.stream(&prompt, None).await?;
@@ -46,6 +42,8 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
     let mut final_text = String::new();
     let mut usage = serde_json::Value::Null;
     let mut approval_required = None;
+    let mut runtime_error = None;
+    let mut completed = false;
     let mut cancelled = false;
     loop {
         let event = tokio::select! {
@@ -82,6 +80,7 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
                         ),
                     )
                     .await;
+                let _ = session.cancel().await;
                 if output == OutputMode::Human {
                     eprintln!("denied approval-required tool: {tool_name}");
                 }
@@ -93,9 +92,13 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
             } => {
                 final_text = text.clone();
                 usage = serde_json::to_value(event_usage)?;
+                completed = true;
             }
-            AgentEvent::Error { message } if output == OutputMode::Human => {
-                eprintln!("error: {message}");
+            AgentEvent::Error { message } => {
+                runtime_error = Some(message.clone());
+                if output == OutputMode::Human {
+                    eprintln!("error: {message}");
+                }
             }
             _ => {}
         }
@@ -120,14 +123,6 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .with_jsonl_sequence(sequence)
         .into());
     }
-    worker_result.map_err(|error| {
-        CliError::new(
-            "code.exec.failed",
-            format!("code execution failed: {error:#}"),
-            ExitClass::Failure,
-        )
-        .with_jsonl_sequence(sequence)
-    })?;
     if let Some(tool_name) = approval_required {
         return Err(CliError::new(
             "approval.required",
@@ -138,6 +133,32 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         )
         .with_suggestion("Run the task interactively with `a3s code` or adjust the configured permission policy.")
         .with_details(json!({"tool": tool_name}))
+        .with_jsonl_sequence(sequence)
+        .into());
+    }
+    worker_result.map_err(|error| {
+        CliError::new(
+            "code.exec.failed",
+            format!("code execution failed: {error:#}"),
+            ExitClass::Failure,
+        )
+        .with_jsonl_sequence(sequence)
+    })?;
+    if let Some(message) = runtime_error {
+        return Err(CliError::new(
+            "code.exec.failed",
+            format!("code execution failed: {message}"),
+            ExitClass::Failure,
+        )
+        .with_jsonl_sequence(sequence)
+        .into());
+    }
+    if !completed {
+        return Err(CliError::new(
+            "code.exec.incomplete",
+            "code execution ended without a terminal completion event",
+            ExitClass::Failure,
+        )
         .with_jsonl_sequence(sequence)
         .into());
     }

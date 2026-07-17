@@ -340,6 +340,19 @@ a3s code resume 018f-session-id  # resume a specific saved session
 a3s self update                  # update the a3s executable
 ```
 
+Run one non-interactive coding task:
+
+```sh
+a3s code exec --mode auto "Update the focused test and verify it"
+a3s --output json code exec --mode auto --prompt-file ./task.md
+```
+
+Auto mode runs bounded workspace reads and edits without hidden prompts while
+retaining the shared safety floor. Operations that still require human
+approval, such as unbounded shell commands, terminate immediately in this
+non-interactive surface with a nonzero `approval.required` result. Default and
+plan modes never silently approve workspace mutations.
+
 Start the local Web API and bundled 书小安 frontend:
 
 ```sh
@@ -419,13 +432,13 @@ credentials into `config.acl`:
 a3s auth list
 ```
 
-Claude Code, Codex, and WorkBuddy continue to own their login flows and local
-credential stores. The A3S CLI only reports whether those accounts are
+Claude Code, Codex, Kimi, and WorkBuddy continue to own their login flows and
+local credential stores. The A3S CLI only reports whether those accounts are
 available; `a3s auth login/logout` manages the configured A3S OS session.
 
 Model routes use one catalog shared by the root CLI and the Code TUI. Custom
-provider models come from `config.acl`; Claude Code, Codex, WorkBuddy, and A3S
-OS models remain bound to their product-owned credentials:
+provider models come from `config.acl`; Claude Code, Codex, Kimi, WorkBuddy,
+and A3S OS models remain bound to their product-owned credentials:
 
 ```sh
 a3s model list
@@ -433,6 +446,7 @@ a3s model current
 a3s model use openai/my-model
 a3s model use claude-code/claude-opus-4-6
 a3s model use codex/gpt-5.2-codex
+a3s model use kimi/k3-agent
 a3s model use workbuddy/glm-5.1
 a3s model use a3s-os/my-model
 a3s model use openai/gpt-5 --scope workspace
@@ -442,9 +456,9 @@ a3s model reset --scope user
 `a3s model use` validates the route and updates `default_model` in the selected
 A3S ACL layer while preserving unrelated ACL text. `--config` always targets
 that explicit file; otherwise `--scope user|workspace` selects the layer. No
-Claude, Codex, WorkBuddy, or A3S OS token is copied. Selecting a route probes
-only that credential source; `model list` refreshes independent account catalogs
-concurrently.
+Claude, Codex, Kimi, WorkBuddy, or A3S OS token is copied. Selecting a route
+probes only that credential source; `model list` refreshes independent account
+catalogs concurrently.
 
 List runtime-callable models:
 
@@ -453,9 +467,10 @@ a3s model list
 a3s model current
 ```
 
-The model commands list `config.acl` models, local Claude/Codex/WorkBuddy
+The model commands list `config.acl` models, local Claude/Codex/Kimi/WorkBuddy
 account models, and signed-in OS gateway models from the unified gateway.
 Codex uses its current account catalog with its cache as an offline fallback;
+Kimi discovers models from Kimi Desktop or Kimi Code account state, and
 WorkBuddy discovery uses its installed CodeBuddy CLI. These runtime routes are
 not digital asset repository entries whose category happens to be `model`.
 
@@ -733,6 +748,7 @@ transcript prefix instead of rebuilding the full viewport.
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
 | Approvals | Mutating tools pause in a confirmation overlay with arguments and result context. Default mode prompts, plan mode auto-approves read-only discovery, and auto mode approves later tool calls in the session. |
 | Footer | The footer shows model/provider, effort, mode, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
+| System agent island | The centered top island summarizes cooperating `a3s code` TUI publishers plus supported coding-agent processes visible to the current user on this host. Fresh TUI heartbeats show exact parent and child lifecycle; `a3s code exec`, `a3s web`, and third-party agents do not publish authoritative TUI lifecycle state. Recognized process-only discoveries are labeled `detected / process` because process existence alone cannot prove task execution. Click it or press `Ctrl+G` for the bounded detail view. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
@@ -751,8 +767,25 @@ Key interactions:
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
 | `Ctrl+T` | Open the complete live semantic session transcript, including full tool output and the current streaming tail. |
+| `Ctrl+G` | Expand or collapse the whole-system coding-agent island without changing the composer draft. |
 | `Esc` | Interrupt the running turn or close the active panel. |
 | `Ctrl+C` twice | Quit the TUI after session persistence runs. |
+
+The island refreshes every two seconds. Cooperating `a3s code` TUI instances
+write versioned heartbeats under the platform's per-user A3S state root and
+expire after ten seconds, so a crash cannot leave a permanently running agent.
+Only a sanitized, bounded workspace basename is persisted, never the full path.
+Parent and child task descriptions are omitted on disk by default, while the
+full text remains local to the owning process.
+`A3S_AGENT_STATUS_SHARE_TASKS=1` opts into sharing sanitized, single-line,
+bounded task labels with other local TUI instances. The island never displays
+or persists command arguments from inferred third-party processes.
+
+On Unix, the registry directory and heartbeat files are restricted to `0700`
+and `0600`. On Windows, the default registry is beneath the current user's
+`%LOCALAPPDATA%` tree and relies on inherited ACLs; A3S does not install a
+dedicated ACL. `A3S_AGENT_STATUS_DIR` can point diagnostics or hermetic tests at
+an isolated registry and should always identify a user-private directory.
 
 ### Startup, Sessions, And Safety
 
@@ -1213,6 +1246,28 @@ When Codex CLI is logged in (`codex login`), the Codex tab can switch the
 current session to Codex account models using `$CODEX_HOME/auth.json` or
 `~/.codex/auth.json`.
 
+Codex account requests start with the native Responses WebSocket transport.
+HTTP 403/426 during the upgrade switches the same request immediately to HTTPS
+SSE; other connection failures receive two bounded WebSocket retries before the
+same fallback. HTTPS retries only transient statuses, and the selected fallback
+remains sticky across turns in that session while a new or child session probes
+WebSocket again. A stream interruption replays the turn over HTTPS without
+committing its provisional deltas. Both transports honor `HTTP_PROXY`,
+`HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, macOS system/PAC proxy settings, platform
+root certificates, and `CODEX_CA_CERTIFICATE` (with `SSL_CERT_FILE` as the
+fallback). Only allowlisted Cloudflare infrastructure cookies are shared between
+the transports. On HTTP 401, A3S first reloads a token rotated by Codex CLI and
+then performs one OAuth refresh and one request retry if necessary.
+
+When Kimi Desktop or Kimi Code is signed in, the Kimi tab exposes the models
+enabled for that account as `kimi/<model>`. A3S prefers Kimi Desktop's local
+Daimon model configuration and coding API key, then falls back to Kimi Code
+OAuth state under `~/.kimi-code` or `~/.kimi`. Credentials are read only when
+needed to authenticate requests; they are never copied into A3S configuration,
+command output, or logs. Expired OAuth state is refreshed under a file lock and
+atomically rotated in Kimi's own credential store. Responses use Kimi's coding
+endpoint while tool calls continue through native A3S host tools.
+
 When WorkBuddy is installed and signed in, the WorkBuddy tab locates its
 bundled CodeBuddy CLI (or `codebuddy`/`cbc` on `PATH`), reuses the account state
 under `~/.workbuddy`, and refreshes the models entitled to that account. A3S
@@ -1222,8 +1277,8 @@ normalized into native A3S host-tool events so execution remains inside A3S.
 
 The A3S Web task Composer consumes the same account-model discovery and client
 routing as the TUI. Account-backed entries are source-qualified as
-`claude-code/<model>`, `codex/<model>`, or `workbuddy/<model>` and never expose
-local credentials to the browser.
+`claude-code/<model>`, `codex/<model>`, `kimi/<model>`, or
+`workbuddy/<model>` and never expose local credentials to the browser.
 
 Codex auth can also be used as a normal config provider:
 
@@ -1260,7 +1315,7 @@ on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard installation.
 Claude Code and WorkBuddy share the account-CLI stream and A3S host-tool bridge.
 Their own CLI tools are disabled, provider tool-call output is normalized into
 native A3S tool-use events, and tool results return as structured conversation
-history. Codex keeps its direct Responses transport but uses the same account
+history. Codex and Kimi keep direct account transports but use the same account
 provider registry for availability, model selection, persistence, and restore.
 
 ## Testing
@@ -1274,6 +1329,7 @@ A3S_BOX_E2E_BIN=../box/src/target/debug/a3s-box cargo test --test compose_acl_e2
 just use-hotplug-e2e
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
 A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
+A3S_TEST_KIMI_REAL=1 cargo test --bin a3s real_kimi_account_completes_an_a3s_tool_round
 ```
 
 The ignored soak test repeats `a3s box` after a fake first-use install and

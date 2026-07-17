@@ -14,6 +14,7 @@ mod config;
 mod model;
 mod runtime_tool;
 mod session_llm;
+mod system_agents;
 mod timeline;
 mod top;
 mod tui;

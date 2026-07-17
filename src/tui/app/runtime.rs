@@ -641,15 +641,36 @@ impl App {
             self.deep_research_journal_finalization_inflight = true;
             let workspace = PathBuf::from(&self.cwd);
             let artifacts = self.deep_research_terminal_artifacts.clone();
+            let workflow_output = self
+                .deep_research_workflow
+                .output
+                .clone()
+                .unwrap_or_default();
+            let workflow_metadata = self.deep_research_workflow.metadata.clone();
             return Some(cmd::cmd(move || async move {
-                let result = record_deep_research_run_terminal(
-                    &workspace,
-                    &run_id,
-                    outcome,
-                    artifacts.as_ref(),
-                )
-                .await
-                .map_err(|error| error.to_string());
+                let inquiry_result = match inquiry_projection_from_workflow(
+                    &workflow_output,
+                    workflow_metadata.as_ref(),
+                ) {
+                    Ok(Some((events, state))) => {
+                        record_deep_research_inquiry_state(&workspace, &run_id, &events, &state)
+                            .await
+                            .map_err(|error| error.to_string())
+                    }
+                    Ok(None) => Ok(()),
+                    Err(error) => Err(error),
+                };
+                let result = match inquiry_result {
+                    Ok(()) => record_deep_research_run_terminal(
+                        &workspace,
+                        &run_id,
+                        outcome,
+                        artifacts.as_ref(),
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
+                    Err(error) => Err(error),
+                };
                 Msg::DeepResearchJournalFinalized {
                     run_id,
                     exit,

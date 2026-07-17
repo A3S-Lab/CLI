@@ -11,7 +11,8 @@ use super::catalog::{self, ComponentKind, Distribution};
 use super::discovery::{discover, find_state};
 use super::id::ComponentId;
 use super::lifecycle::{
-    install_component, uninstall_component, InstallRequest, InstallSource, OperationRecord,
+    install_component, uninstall_component, InstallIntent, InstallRequest, InstallSource,
+    OperationRecord,
 };
 use super::paths::ComponentPaths;
 use super::state::{ComponentReport, Health, Presence, UpdateState};
@@ -76,6 +77,24 @@ pub async fn run_list_with(
     paths: &ComponentPaths,
     offline: bool,
 ) -> anyhow::Result<()> {
+    run_list_with_command(args, paths, offline, "component.list", false).await
+}
+
+pub async fn run_upgrade_list_with(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+) -> anyhow::Result<()> {
+    run_list_with_command(args, paths, offline, "component.upgrade", true).await
+}
+
+async fn run_list_with_command(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    command: &'static str,
+    managed_upgrades_only: bool,
+) -> anyhow::Result<()> {
     let options = ListOptions::parse(&args)?;
     let mut report = discover(paths)?;
     if options.check_updates {
@@ -89,9 +108,13 @@ pub async fn run_list_with(
             && (!options.available || component.presence == Presence::Missing)
             && (!options.check_updates || component.update == UpdateState::Available)
             && options.kind.is_none_or(|kind| component.kind == kind)
+            && (!managed_upgrades_only || is_upgrade_all_candidate(component))
     });
+    if managed_upgrades_only {
+        report.external_tools.clear();
+    }
     if options.json {
-        print_json("component.list", &report, true)?;
+        print_json(command, &report, true)?;
     } else {
         print_human_report(&report);
     }
@@ -120,6 +143,7 @@ pub async fn run_install_with(
     let request = InstallRequest {
         version: options.version.clone(),
         source: options.source,
+        intent: InstallIntent::Install,
         package: options.package.clone(),
         force: options.force,
         allow_unsigned: options.allow_unsigned,
@@ -210,9 +234,7 @@ pub async fn run_update_with(
         discover(paths)?
             .components
             .into_iter()
-            .filter(|component| {
-                component.presence == Presence::Managed && component.kind != ComponentKind::BuiltIn
-            })
+            .filter(is_upgrade_all_candidate)
             .map(|component| component.id)
             .collect::<Vec<_>>()
     } else {
@@ -242,6 +264,15 @@ pub async fn run_update_with(
                     component
                 );
             }
+            if state.provenance == Some(InstallProvenance::Delegated)
+                && catalog::find(&component).is_none()
+            {
+                bail!(
+                    "local extension '{}' has no recorded upgrade source; install the new package explicitly with 'a3s install {} --from <package> --force --allow-unsigned'",
+                    component,
+                    component
+                );
+            }
             let source = if state.provenance == Some(InstallProvenance::Homebrew) {
                 InstallSource::Homebrew
             } else {
@@ -249,6 +280,7 @@ pub async fn run_update_with(
             };
             let request = InstallRequest {
                 source,
+                intent: InstallIntent::Upgrade,
                 force: true,
                 progress,
                 ..InstallRequest::default()
@@ -271,6 +303,10 @@ pub async fn run_update_with(
         failures,
         options.json,
     )
+}
+
+fn is_upgrade_all_candidate(component: &super::state::ComponentState) -> bool {
+    component.presence == Presence::Managed && component.kind == ComponentKind::Product
 }
 
 pub async fn run_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -876,6 +912,12 @@ impl InstallScope {
 }
 
 fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result<()> {
+    if let Some(version) = options.version.as_deref() {
+        parse_version(version).with_context(|| format!("invalid component version '{version}'"))?;
+        if options.source == InstallSource::Homebrew {
+            bail!("--version requires --source release because Homebrew does not support exact component version selection");
+        }
+    }
     if options.version.is_some() && options.channel != ReleaseChannel::Stable {
         bail!("--version cannot be combined with a beta or nightly release channel");
     }
@@ -948,6 +990,7 @@ fn required_value<'a>(args: &'a [String], index: usize, option: &str) -> anyhow:
 
 #[cfg(test)]
 mod tests {
+    use super::super::state::{ComponentState, Trust};
     use super::*;
 
     #[test]
@@ -975,5 +1018,43 @@ mod tests {
             ListOptions::parse(&["--installed".to_string(), "--available".to_string()]).is_err()
         );
         assert!(UpdateOptions::parse(&["--all".to_string(), "use".to_string()]).is_err());
+    }
+
+    #[test]
+    fn upgrade_all_selects_only_managed_products() {
+        let state = |id: &str, kind, presence| ComponentState {
+            id: ComponentId::parse(id).unwrap(),
+            kind,
+            description: String::new(),
+            presence,
+            health: Health::Ready,
+            update: UpdateState::Unknown,
+            trust: Trust::FirstParty,
+            provenance: Some(InstallProvenance::GithubRelease),
+            version: Some("1.0.0".to_string()),
+            path: Some(PathBuf::from("/tmp/component")),
+            message: None,
+        };
+
+        assert!(is_upgrade_all_candidate(&state(
+            "use",
+            ComponentKind::Product,
+            Presence::Managed,
+        )));
+        assert!(!is_upgrade_all_candidate(&state(
+            "use/browser",
+            ComponentKind::Capability,
+            Presence::Managed,
+        )));
+        assert!(!is_upgrade_all_candidate(&state(
+            "use/acme/slack",
+            ComponentKind::Extension,
+            Presence::Managed,
+        )));
+        assert!(!is_upgrade_all_candidate(&state(
+            "search",
+            ComponentKind::Product,
+            Presence::External,
+        )));
     }
 }

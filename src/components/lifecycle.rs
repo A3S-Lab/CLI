@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use a3s_updater::{
-    uninstall_owned_files, ComponentReceipt, InstallProvenance, RECEIPT_SCHEMA_VERSION,
+    parse_version, uninstall_owned_files, ComponentReceipt, InstallProvenance,
+    RECEIPT_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -11,6 +12,7 @@ use serde::Serialize;
 use super::catalog::{self, ComponentSpec, Distribution, ReleaseSpec};
 use super::discovery::find_state;
 use super::id::ComponentId;
+use super::lock::ComponentOperationLock;
 use super::paths::ComponentPaths;
 use super::probe::probe_version;
 use super::release_install::install_release;
@@ -24,10 +26,27 @@ pub enum InstallSource {
     Release,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InstallIntent {
+    #[default]
+    Install,
+    Upgrade,
+}
+
+impl InstallIntent {
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Upgrade => "upgrade",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     pub version: Option<String>,
     pub source: InstallSource,
+    pub intent: InstallIntent,
     pub package: Option<PathBuf>,
     pub force: bool,
     pub allow_unsigned: bool,
@@ -39,6 +58,7 @@ impl Default for InstallRequest {
         Self {
             version: None,
             source: InstallSource::Auto,
+            intent: InstallIntent::Install,
             package: None,
             force: false,
             allow_unsigned: false,
@@ -63,6 +83,15 @@ pub struct OperationRecord {
 }
 
 pub async fn install_component(
+    id: &ComponentId,
+    request: &InstallRequest,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
+    let _lock = ComponentOperationLock::acquire(paths.operation_lock_path(id), id).await?;
+    install_component_locked(id, request, paths).await
+}
+
+async fn install_component_locked(
     id: &ComponentId,
     request: &InstallRequest,
     paths: &ComponentPaths,
@@ -99,6 +128,16 @@ pub async fn install_component(
 }
 
 pub fn uninstall_component(
+    id: &ComponentId,
+    cascade: bool,
+    purge: bool,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
+    let _lock = ComponentOperationLock::acquire_sync(&paths.operation_lock_path(id), id)?;
+    uninstall_component_locked(id, cascade, purge, paths)
+}
+
+fn uninstall_component_locked(
     id: &ComponentId,
     cascade: bool,
     purge: bool,
@@ -146,7 +185,7 @@ pub fn uninstall_component(
     if cascade {
         for child in children.into_iter().rev() {
             let child_id = ComponentId::parse(&child.component_id)?;
-            uninstall_component(&child_id, true, purge, paths)?;
+            uninstall_component_locked(&child_id, true, purge, paths)?;
         }
     }
 
@@ -228,7 +267,13 @@ async fn install_product(
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     let state = find_state(id, paths)?;
-    if state.is_ready() && !request.force {
+    let requested_version_is_ready = request.version.as_deref().is_none_or(|requested| {
+        state
+            .version
+            .as_deref()
+            .is_some_and(|installed| parse_version(installed).ok() == parse_version(requested).ok())
+    });
+    if state.is_ready() && requested_version_is_ready && !request.force {
         return Ok(OperationRecord {
             component: id.clone(),
             action: "install",
@@ -247,14 +292,18 @@ async fn install_product(
     }
 
     let source = match request.source {
-        InstallSource::Auto if release.homebrew_formula.is_some() && a3s_is_homebrew_managed() => {
+        InstallSource::Auto
+            if request.version.is_none()
+                && release.homebrew_formula.is_some()
+                && a3s_is_homebrew_managed() =>
+        {
             InstallSource::Homebrew
         }
         InstallSource::Auto => InstallSource::Release,
         explicit => explicit,
     };
     match source {
-        InstallSource::Homebrew => install_homebrew(id, release, paths, request.progress),
+        InstallSource::Homebrew => install_homebrew(id, release, request, paths),
         InstallSource::Release => install_release(id, release, request, paths).await,
         InstallSource::Auto => {
             bail!("automatic install source was not resolved")
@@ -265,22 +314,33 @@ async fn install_product(
 fn install_homebrew(
     id: &ComponentId,
     release: ReleaseSpec,
+    request: &InstallRequest,
     paths: &ComponentPaths,
-    progress: bool,
 ) -> anyhow::Result<OperationRecord> {
+    if request.version.is_some() {
+        bail!(
+            "component '{}' cannot select an exact version through Homebrew; use --source release",
+            id
+        );
+    }
     let formula = release
         .homebrew_formula
         .with_context(|| format!("component '{}' has no Homebrew formula", id))?;
+    let verb = match (request.intent, request.force) {
+        (InstallIntent::Upgrade, _) => "upgrade",
+        (InstallIntent::Install, true) => "reinstall",
+        (InstallIntent::Install, false) => "install",
+    };
     super::progress(
-        progress,
-        format!("a3s: installing '{}' with Homebrew...", id),
+        request.progress,
+        format!("a3s: {} '{}' with Homebrew...", verb, id),
     );
     let status = Command::new("brew")
-        .args(["install", formula])
+        .args([verb, formula])
         .status()
         .context("failed to run Homebrew")?;
     if !status.success() {
-        bail!("Homebrew failed to install '{}'", id);
+        bail!("Homebrew failed to {verb} '{}'", id);
     }
     let prefix_output = Command::new("brew")
         .args(["--prefix", formula])
@@ -307,12 +367,12 @@ fn install_homebrew(
     paths.receipt_store().write(&receipt)?;
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: true,
         version: Some(version),
         provenance: Some(InstallProvenance::Homebrew),
         path: Some(executable),
-        message: format!("Installed component '{}' with Homebrew.", id),
+        message: format!("Homebrew completed {verb} for component '{}'.", id),
     })
 }
 

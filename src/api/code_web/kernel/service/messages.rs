@@ -52,7 +52,7 @@ impl KernelService {
         let controls = self.session_controls_snapshot(session_id).await;
         let settings = self.session_settings_snapshot(session_id).await;
         let (new_session, llm_client) = self
-            .create_agent_session(&workspace, Some(session_id), &settings, &controls.effort)
+            .create_agent_session(&workspace, Some(session_id), &settings, &controls)
             .await?;
         new_session
             .save()
@@ -420,7 +420,7 @@ impl KernelService {
             &workspace,
             Some(session_id),
             self.effective_model(&settings),
-            &controls.effort,
+            &controls,
             &settings,
         )
         .await?;

@@ -18,6 +18,19 @@
     }
 
     if (localRounds.length > 0) {
+      if (collectOnly) {
+        return completeCollectionWave(
+          aggregateResearchRounds(
+            localRounds,
+            localRoundFailures.length > 0
+              ? "collection_wave_partial_evidence"
+              : "collection_wave_complete",
+            localRoundFailures
+          ),
+          directEvidence,
+          "Maker evidence collection completed; question resolution and convergence are host-managed."
+        );
+      }
       if (!engineeredLoopEnabled || input.engineered_loop_fixture === true) {
         if (shouldScheduleFollowUpRound(localRounds, localRoundFailures)) {
           const nextRound = localRounds.length + 1;

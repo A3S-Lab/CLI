@@ -20,7 +20,7 @@ a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.2"
-a3s-tui = "=0.1.10"
+a3s-tui = "=0.1.11"
 a3s-search = { version = "1.4.3", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
@@ -38,15 +38,28 @@ async-trait = "0.1"
 tokio-util = "0.7"
 base64 = "0.22"
 futures = "0.3"
+fs2 = "0.4"
 http-body-util = "0.1"
+httpdate = "1"
 rand = "0.8"
 regex = "1"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls", "socks", "stream"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+tokio-socks = "0.5"
+thiserror = "2"
+webpki-roots = "1"
 sha2 = "0.10"
+sysinfo = "0.36.1"
 axum = "0.8"
 comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

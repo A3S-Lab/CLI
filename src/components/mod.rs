@@ -5,6 +5,7 @@ mod command;
 mod discovery;
 mod id;
 mod lifecycle;
+mod lock;
 mod paths;
 mod probe;
 mod release_install;
@@ -14,7 +15,7 @@ pub use command::{
     find_ready_executable_with, resolve_or_install, resolve_or_install_with, run_doctor,
     run_doctor_with, run_info, run_info_with, run_install, run_install_with, run_list,
     run_list_with, run_proxy, run_uninstall, run_uninstall_with, run_update, run_update_with,
-    ComponentBatchFailure,
+    run_upgrade_list_with, ComponentBatchFailure,
 };
 pub use id::ComponentId;
 pub use paths::ComponentPaths;

@@ -3,6 +3,7 @@ pub(crate) mod asset_types;
 mod assets;
 mod context_history;
 mod exec;
+mod exec_policy;
 mod knowledge;
 mod memory;
 pub(crate) mod naming;

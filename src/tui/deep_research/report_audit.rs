@@ -1,5 +1,6 @@
 //! Deterministic claim/source audit for a materialized research report.
 
+use comrak::{nodes::NodeValue, parse_document, Arena, Options};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -44,9 +45,13 @@ pub(crate) fn audit_report(
     } else {
         ((matched_claims.saturating_mul(10_000) / claims.len()).min(10_000)) as u16
     };
+    let citation_targets = extract_citation_targets(markdown, html);
     let cited_sources = source_anchors
         .iter()
-        .filter(|anchor| markdown.contains(anchor.as_str()) || html.contains(anchor.as_str()))
+        .filter(|anchor| {
+            normalize_citation_target(anchor)
+                .is_some_and(|anchor| citation_targets.contains(&anchor))
+        })
         .count();
     let sources_pass = !source_anchors.is_empty() && cited_sources > 0;
     let claims_pass = claims.is_empty() || claim_coverage_basis_points >= 5_000;
@@ -67,6 +72,121 @@ pub(crate) fn audit_report(
         cited_sources,
         reason: reason.to_string(),
     }
+}
+
+pub(crate) fn cites_source_anchor(markdown: &str, html: &str, anchor: &str) -> bool {
+    let Some(anchor) = normalize_citation_target(anchor) else {
+        return false;
+    };
+    extract_citation_targets(markdown, html).contains(&anchor)
+}
+
+fn extract_citation_targets(markdown: &str, html: &str) -> HashSet<String> {
+    let arena = Arena::new();
+    let mut options = Options::default();
+    options.extension.autolink = true;
+    let root = parse_document(&arena, markdown, &options);
+    let mut targets = HashSet::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        match &data.value {
+            NodeValue::Link(link) => {
+                if let Some(target) = normalize_citation_target(&link.url) {
+                    targets.insert(target);
+                }
+            }
+            NodeValue::HtmlInline(fragment) => {
+                extract_html_href_targets(fragment, &mut targets);
+            }
+            NodeValue::HtmlBlock(block) => {
+                extract_html_href_targets(&block.literal, &mut targets);
+            }
+            _ => {}
+        }
+    }
+    extract_html_href_targets(html, &mut targets);
+    targets
+}
+
+fn extract_html_href_targets(document: &str, targets: &mut HashSet<String>) {
+    for captures in html_href_regex().captures_iter(document) {
+        let Some(target) = captures
+            .name("double")
+            .or_else(|| captures.name("single"))
+            .or_else(|| captures.name("bare"))
+            .map(|capture| decode_basic_html_entities(capture.as_str()))
+            .and_then(|target| normalize_citation_target(&target))
+        else {
+            continue;
+        };
+        targets.insert(target);
+    }
+}
+
+fn normalize_citation_target(target: &str) -> Option<String> {
+    let target = target.trim();
+    let target = target
+        .strip_prefix('<')
+        .and_then(|target| target.strip_suffix('>'))
+        .unwrap_or(target)
+        .trim();
+    if target.is_empty() {
+        return None;
+    }
+    if let Some(scheme_end) = target.find("://") {
+        let scheme = target[..scheme_end].to_ascii_lowercase();
+        let remainder = &target[scheme_end + 3..];
+        let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+        let authority = remainder[..authority_end].to_ascii_lowercase();
+        if authority.is_empty() {
+            return None;
+        }
+        let suffix = &remainder[authority_end..];
+        let suffix = if suffix.is_empty() { "/" } else { suffix };
+        return Some(format!("{scheme}://{authority}{suffix}"));
+    }
+    Some(normalize_local_target(target))
+}
+
+fn normalize_local_target(target: &str) -> String {
+    let target = target.replace('\\', "/");
+    let suffix_start = target.find(['?', '#']).unwrap_or(target.len());
+    let (path, suffix) = target.split_at(suffix_start);
+    let absolute = path.starts_with('/');
+    let mut components = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.last().is_some_and(|last| *last != "..") => {
+                components.pop();
+            }
+            ".." if !absolute => components.push(component),
+            ".." => {}
+            _ => components.push(component),
+        }
+    }
+    let mut normalized = if absolute {
+        format!("/{}", components.join("/"))
+    } else {
+        components.join("/")
+    };
+    if normalized.is_empty() && !absolute {
+        normalized.push('.');
+    }
+    normalized.push_str(suffix);
+    normalized
+}
+
+fn decode_basic_html_entities(target: &str) -> String {
+    target
+        .replace("&amp;", "&")
+        .replace("&#38;", "&")
+        .replace("&#x26;", "&")
+        .replace("&#X26;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&#x22;", "\"")
+        .replace("&#X22;", "\"")
 }
 
 /// Reject quantitative assertions that are absent from the closed evidence
@@ -352,6 +472,16 @@ fn ordered_prefix_regex() -> &'static Regex {
     })
 }
 
+fn html_href_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(
+            r#"(?is)\bhref\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>[^\s\"'=<>`]+))"#,
+        )
+        .expect("HTML href regex must compile")
+    })
+}
+
 fn claim_matches(report: &str, claim: &str) -> bool {
     let claim = normalize(claim);
     if claim.is_empty() || report.contains(&claim) {
@@ -412,6 +542,70 @@ mod tests {
         );
         assert!(!audit.passed);
         assert!(audit.reason.contains("less than half"));
+    }
+
+    #[test]
+    fn rejects_source_anchor_that_is_only_a_prefix_of_a_link_target() {
+        let audit = audit_report(
+            "The release date is July 12. [Source](https://example.gov/release-notes)",
+            "",
+            &["The release date is July 12.".to_string()],
+            &["https://example.gov/release".to_string()],
+        );
+        assert!(!audit.passed);
+        assert_eq!(audit.cited_sources, 0);
+        assert!(audit.reason.contains("cites none"));
+    }
+
+    #[test]
+    fn extracts_inline_autolink_and_reference_citation_targets() {
+        for markdown in [
+            "[Source](https://example.gov/release)",
+            "<https://example.gov/release>",
+            "https://example.gov/release",
+            "[Source][release]\n\n[release]: https://example.gov/release",
+        ] {
+            let audit = audit_report(
+                markdown,
+                "",
+                &[],
+                &["https://example.gov/release".to_string()],
+            );
+            assert!(audit.passed, "{markdown}: {}", audit.reason);
+            assert_eq!(audit.cited_sources, 1, "{markdown}");
+        }
+    }
+
+    #[test]
+    fn local_citation_targets_match_exact_normalized_paths() {
+        let accepted = audit_report(
+            "[Workspace source](docs/./research.md)",
+            "",
+            &[],
+            &["./docs/research.md".to_string()],
+        );
+        assert!(accepted.passed, "{}", accepted.reason);
+
+        let rejected = audit_report(
+            "[Nested readme](docs/README.md)",
+            "",
+            &[],
+            &["README.md".to_string()],
+        );
+        assert!(!rejected.passed);
+        assert_eq!(rejected.cited_sources, 0);
+    }
+
+    #[test]
+    fn link_like_text_inside_a_code_fence_is_not_a_citation() {
+        let audit = audit_report(
+            "```html\n<a href=\"https://example.gov/release\">not a citation</a>\n```",
+            "",
+            &[],
+            &["https://example.gov/release".to_string()],
+        );
+        assert!(!audit.passed);
+        assert_eq!(audit.cited_sources, 0);
     }
 
     #[test]

@@ -39,4 +39,13 @@ impl KernelControlsController {
             .update_session_controls(&session_id, request)
             .await
     }
+
+    #[post("/v1/kernel/sessions/{session_id}/goal/actions/{action}")]
+    async fn update_goal_action(
+        &self,
+        #[param("session_id")] session_id: String,
+        #[param("action")] action: String,
+    ) -> BootResult<serde_json::Value> {
+        self.service.update_goal_action(&session_id, &action).await
+    }
 }

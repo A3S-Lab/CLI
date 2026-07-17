@@ -20,10 +20,55 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
             .get("per_task_timeout_secs")
             .is_none()
     );
+    let planner_properties = &contract["planner"]["output_schema"]["properties"];
     assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["tracks"]["items"]["type"],
-        "string"
+        planner_properties["research_method"]["enum"],
+        serde_json::json!(["focused", "perspective_guided"])
     );
+    assert_eq!(planner_properties["tracks"]["items"]["type"], "object");
+    assert_eq!(
+        planner_properties["tracks"]["items"]["additionalProperties"],
+        false
+    );
+    let track_properties = &planner_properties["tracks"]["items"]["properties"];
+    for field in [
+        "id",
+        "title",
+        "focus",
+        "perspective",
+        "material",
+        "questions",
+        "completion_criteria",
+    ] {
+        assert!(track_properties[field].is_object(), "missing {field}");
+    }
+    assert_eq!(track_properties["questions"]["minItems"], 1);
+    assert_eq!(track_properties["questions"]["maxItems"], 3);
+    assert_eq!(
+        track_properties["id"]["pattern"],
+        "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    );
+    assert_eq!(track_properties["completion_criteria"]["minItems"], 1);
+    assert_eq!(track_properties["completion_criteria"]["maxItems"], 3);
+    assert!(track_properties["perspective"].get("minLength").is_none());
+    assert_eq!(track_properties["material"]["type"], "boolean");
+    let track_required = planner_properties["tracks"]["items"]["required"]
+        .as_array()
+        .expect("planner track required fields");
+    for field in [
+        "id",
+        "title",
+        "focus",
+        "perspective",
+        "material",
+        "questions",
+        "completion_criteria",
+    ] {
+        assert!(
+            track_required.contains(&serde_json::json!(field)),
+            "{field} must be required"
+        );
+    }
     assert!(contract["planner"]["output_schema"]["properties"]
         .get("plan_rationale")
         .is_none());
@@ -31,6 +76,13 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         contract["planner"]["output_schema"]["properties"]["tracks"]["maxItems"],
         4
     );
+    assert_eq!(planner_properties["scout_queries"]["maxItems"], 4);
+    assert!(contract["planner"]["output_schema"]["required"]
+        .as_array()
+        .is_some_and(|required| {
+            required.contains(&serde_json::json!("research_method"))
+                && required.contains(&serde_json::json!("scout_queries"))
+        }));
     assert_eq!(
         contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
             ["max_steps_per_task"]["maximum"],
@@ -41,6 +93,39 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         .as_str()
         .is_some_and(|prompt| prompt
             .contains("Never infer stages, depth, route, or budget from keyword counts")));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "Choose research_method from the meaning of this request, never from keywords, named entities, or a task template"
+        )));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "perspective_guided must scout first and derive its perspectives from the retrieved material"
+        )));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "focused skips the scout-and-perspective expansion and must return an empty scout_queries array"
+        )));
+    assert!(contract["planner"]["prompt"].as_str().is_some_and(
+        |prompt| prompt.contains("it must return one to four broad but targeted scout_queries")
+    ));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "The initial tracks are stable research obligations and initial questions, not final perspectives"
+        )));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "never claim that this initial plan has already discovered the final viewpoints"
+        )));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains(
+            "Set material=true only when failure to resolve that track would prevent a defensible answer"
+        )));
     assert!(contract["planner"]["output_schema"]["properties"]["phases"].is_object());
     assert_eq!(
         contract["planner"]["output_schema"]["properties"]["phases"]["items"]["type"],

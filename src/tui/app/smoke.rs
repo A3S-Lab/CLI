@@ -172,11 +172,53 @@ async fn generate_smoke_report(
     }
     let timeout_ms = remaining.as_millis().min(u128::from(u64::MAX)) as u64;
     let args = deep_research_report_generation_args(prompt, timeout_ms);
-    let result = tokio::time::timeout(remaining, session.tool("generate_object", args))
-        .await
-        .map_err(|_| deadline.timeout_message())?
-        .map_err(|error| error.to_string())?;
+    let result = match tokio::time::timeout(remaining, session.tool("generate_object", args)).await
+    {
+        Ok(result) => result.map_err(|error| error.to_string())?,
+        Err(_) => {
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            return Err(deadline.timeout_message());
+        }
+    };
     deep_research_report_from_generation(&result.output, result.exit_code)
+}
+
+async fn generate_smoke_sectioned_report(
+    session: &AgentSession,
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+    run_id: &str,
+    deadline: SmokePhaseDeadline,
+) -> Result<(GeneratedDeepResearchReport, Option<serde_json::Value>), String> {
+    let remaining = deadline.phase_remaining(Instant::now());
+    if remaining.is_zero() {
+        return Err(deadline.timeout_message());
+    }
+    let result = match tokio::time::timeout(
+        remaining,
+        generate_sectioned_report(session, query, workflow_output, workflow_metadata, run_id),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            return Err(deadline.timeout_message());
+        }
+    };
+    let report = deep_research_report_from_generation(&result.output, result.exit_code)?;
+    Ok((report, result.metadata))
 }
 
 async fn stream_smoke_prompt_inner(
@@ -422,7 +464,7 @@ async fn run_smoke_deep_research(
         deep_research_workflow_args_with_scope(&query, os_runtime, evidence_scope);
     ensure_deep_research_workflow_run_id(&mut workflow_args);
     let (mut progress_rx, mut workflow_join) =
-        session.tool_with_events("dynamic_workflow", workflow_args.clone());
+        spawn_deep_research_inquiry(Arc::clone(&session), workflow_args.clone());
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
@@ -473,7 +515,7 @@ async fn run_smoke_deep_research(
             }
         }
     });
-    let configured_timeout_ms = deep_research_workflow_host_timeout_ms(&workflow_args);
+    let configured_timeout_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
     let workflow_deadline = deep_research_smoke_phase_deadline(
         run_deadline,
         Instant::now(),
@@ -498,6 +540,12 @@ async fn run_smoke_deep_research(
             if !abort_grace.is_zero() {
                 let _ = tokio::time::timeout(abort_grace, &mut workflow_join).await;
             }
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
             let message = format!(
                 "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
             );
@@ -510,18 +558,27 @@ async fn run_smoke_deep_research(
     };
     progress_drain.abort();
 
-    let (workflow_output, exit_code, metadata) = match workflow {
+    let (mut workflow_output, exit_code, mut metadata) = match workflow {
         Ok(result) => (result.output, result.exit_code, result.metadata),
         Err(error) => (error, 1, None),
     };
+    workflow_output = deep_research_canonical_workflow_output(&workflow_output, metadata.as_ref());
     eprintln!("[smoke] deepresearch workflow exit: {exit_code}");
+    let accepted_evidence = accepted_evidence_ledger(&workflow_output, metadata.as_ref());
+    let inquiry_exhausted = inquiry_projection_from_workflow(&workflow_output, metadata.as_ref())
+        .ok()
+        .flatten()
+        .is_some_and(|(_, state)| state.phase == a3s::research::InquiryPhase::Exhausted);
     let evidence_outcome = deep_research_report_outcome_for_workflow(
         &query,
         evidence_scope,
         &workflow_output,
         metadata.as_ref(),
     );
-    if matches!(evidence_outcome, DeepResearchRunOutcome::Degraded) {
+    if accepted_evidence.is_empty()
+        || inquiry_exhausted
+        || matches!(evidence_outcome, DeepResearchRunOutcome::Degraded)
+    {
         deep_research_report_tool_gate.set_report_only(false);
         let artifacts = run_deep_research_smoke_artifact_step(
             run_deadline,
@@ -545,7 +602,6 @@ async fn run_smoke_deep_research(
         eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
         return DeepResearchRunOutcome::Degraded.ensure_smoke_success(&artifacts);
     }
-    let accepted_evidence = accepted_evidence_ledger(&workflow_output, metadata.as_ref());
     let prompt = if exit_code == 0 {
         let synthesis_evidence =
             accepted_evidence_synthesis_payload(&accepted_evidence, &workflow_output);
@@ -555,8 +611,19 @@ async fn run_smoke_deep_research(
     };
     eprintln!("[smoke] deepresearch synthesis");
     deep_research_report_tool_gate.set_synthesis_only();
-    let synthesis_timeout_ms = deep_research_planned_synthesis_timeout_ms(Some(&workflow_output))
-        .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS);
+    let use_sectioned_report =
+        exit_code == 0 && sectioned_report_available(&workflow_output, metadata.as_ref());
+    let synthesis_timeout_ms = if use_sectioned_report {
+        DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+    } else {
+        deep_research_planned_synthesis_timeout_ms(Some(&workflow_output))
+            .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS)
+    };
+    let run_id = workflow_args
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("deepresearch-smoke")
+        .to_string();
     let mut generated_report = None;
     let mut final_text = if let Some(synthesis_deadline) = deep_research_smoke_phase_deadline(
         run_deadline,
@@ -564,8 +631,31 @@ async fn run_smoke_deep_research(
         Duration::from_millis(synthesis_timeout_ms),
         "synthesis",
     ) {
-        match generate_smoke_report(session.as_ref(), prompt.as_str(), synthesis_deadline).await {
-            Ok(report) => {
+        let generated = if use_sectioned_report {
+            generate_smoke_sectioned_report(
+                session.as_ref(),
+                &query,
+                &workflow_output,
+                metadata.as_ref(),
+                &run_id,
+                synthesis_deadline,
+            )
+            .await
+        } else {
+            generate_smoke_report(session.as_ref(), prompt.as_str(), synthesis_deadline)
+                .await
+                .map(|report| (report, None))
+        };
+        match generated {
+            Ok((report, sectioned_metadata)) => {
+                if sectioned_metadata.is_some() {
+                    merge_sectioned_inquiry_projection(
+                        &mut workflow_output,
+                        metadata.as_mut(),
+                        sectioned_metadata.as_ref(),
+                    )
+                    .map_err(anyhow::Error::msg)?;
+                }
                 let markdown = report.markdown.clone();
                 generated_report = Some(report);
                 markdown

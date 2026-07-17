@@ -214,7 +214,39 @@ pub(crate) fn deep_research_loop_contract(
     max_parallel_tasks: usize,
     max_child_steps: usize,
 ) -> serde_json::Value {
-    let track_schema = serde_json::json!({
+    let planner_track_schema = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+            },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "focus": { "type": "string", "minLength": 1, "maxLength": 1200 },
+            "perspective": { "type": "string", "maxLength": 600 },
+            "material": { "type": "boolean" },
+            "questions": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+            },
+            "completion_criteria": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 3,
+                "items": { "type": "string", "minLength": 1, "maxLength": 400 }
+            }
+        },
+        "required": [
+            "id", "title", "focus", "perspective", "material", "questions",
+            "completion_criteria"
+        ]
+    });
+    let continuation_track_schema = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
@@ -234,6 +266,10 @@ pub(crate) fn deep_research_loop_contract(
             "report_title": { "type": "string", "maxLength": 100 },
             "freshness_required": { "type": "boolean" },
             "workspace_evidence_required": { "type": "boolean" },
+            "research_method": {
+                "type": "string",
+                "enum": ["focused", "perspective_guided"]
+            },
             "execution_route": {
                 "type": "string",
                 "enum": ["direct_only", "direct_then_review", "direct_then_maker", "maker_first"]
@@ -247,7 +283,12 @@ pub(crate) fn deep_research_loop_contract(
                 "type": "array",
                 "minItems": 1,
                 "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": { "type": "string", "maxLength": 140 }
+                "items": planner_track_schema
+            },
+            "scout_queries": {
+                "type": "array",
+                "maxItems": 4,
+                "items": { "type": "string", "minLength": 1, "maxLength": 180 }
             },
             "search_queries": {
                 "type": "array",
@@ -286,8 +327,9 @@ pub(crate) fn deep_research_loop_contract(
         },
         "required": [
             "answer_shape", "report_title", "freshness_required",
-            "workspace_evidence_required", "execution_route", "phases", "tracks",
-            "search_queries", "seed_urls", "budget", "stop_conditions"
+            "workspace_evidence_required", "research_method", "execution_route", "phases",
+            "tracks", "scout_queries", "search_queries", "seed_urls", "budget",
+            "stop_conditions"
         ]
     });
     let checker_assessment_schema = serde_json::json!({
@@ -362,7 +404,7 @@ pub(crate) fn deep_research_loop_contract(
             "next_tracks": {
                 "type": "array",
                 "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": track_schema
+                "items": continuation_track_schema
             },
             "reason": { "type": "string", "maxLength": 1600 }
         },
@@ -373,7 +415,7 @@ pub(crate) fn deep_research_loop_contract(
         ]
     });
     let planner_prompt = format!(
-        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Use the same language as the query for report_title, phases, tracks, and stop_conditions. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather all material evidence and one structured review can synthesize it across the planned tracks and check coverage; direct_then_maker when direct retrieval should seed sources but the planned tracks still require adaptive source reading or multi-step evidence collection before the independent checker; maker_first only when useful initial evidence requires workspace inspection, evidence production, or other work that direct retrieval cannot establish. A substantial public-source investigation with several independent evidence tracks normally needs direct_then_maker, while a narrow lookup normally needs direct_only, but make the decision from the requested work rather than labels or surface features. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question and give every consequential track a real chance to retrieve primary or authoritative evidence plus independent corroboration when available; generic comparison pages cannot substitute for official status, governance, or quantitative claims. For a comparison, cover both axes of the request: every consequential criterion and every explicitly requested alternative must have at least one targeted query or confident seed opportunity. Do not collapse all named alternatives into one broad comparison query when the available query budget can give them distinct discovery paths. Include seed URLs only when you confidently know a canonical, directly fetchable URL; otherwise use a targeted discovery query instead of guessing a page. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. `max_iterations` is the total number of evidence passes including initial collection, so reserve enough checked recovery passes for the source failures that are realistically likely in this plan. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; a timeout is a hard cancellation boundary, so budget enough time for a reasoning model to return the complete report rather than merely begin it. The execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
+        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nChoose research_method from the meaning of this request, never from keywords, named entities, or a task template. Do not use a fixed expert-role table, topic classifier, or domain-specific research recipe. focused skips the scout-and-perspective expansion and must return an empty scout_queries array. Choose perspective_guided only when useful investigative viewpoints cannot be responsibly fixed before seeing initial source material; it must return one to four broad but targeted scout_queries. perspective_guided must scout first and derive its perspectives from the retrieved material in a later independent planner step. The initial tracks are stable research obligations and initial questions, not final perspectives; keep perspective empty or clearly provisional for perspective_guided, and never claim that this initial plan has already discovered the final viewpoints. scout_queries discover the source landscape for perspective formation; search_queries retrieve evidence for the stable obligations.\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Every track must have a stable id, reader-facing title, bounded focus, zero or one provisional perspective string, a material flag, one to three focused questions, and one to three observable completion criteria. Set material=true only when failure to resolve that track would prevent a defensible answer to the user's core request; set material=false for useful supporting context whose bounded absence must qualify but not invalidate the report. At least one track must be material. Use the same language as the query for report_title, phases, track content, scout_queries, search_queries, and stop_conditions. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather all material evidence and one structured review can synthesize it across the planned tracks and check coverage; direct_then_maker when direct retrieval should seed sources but the planned tracks still require adaptive source reading or multi-step evidence collection before the independent checker; maker_first only when useful initial evidence requires workspace inspection, evidence production, or other work that direct retrieval cannot establish. A substantial public-source investigation with several independent evidence tracks normally needs direct_then_maker, while a narrow lookup normally needs direct_only, but make the decision from the requested work rather than labels or surface features. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question and give every consequential track a real chance to retrieve primary or authoritative evidence plus independent corroboration when available; generic comparison pages cannot substitute for official status, governance, or quantitative claims. For a comparison, cover both axes of the request: every consequential criterion and every explicitly requested alternative must have at least one targeted query or confident seed opportunity. Do not collapse all named alternatives into one broad comparison query when the available query budget can give them distinct discovery paths. Include seed URLs only when you confidently know a canonical, directly fetchable URL; otherwise use a targeted discovery query instead of guessing a page. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. `max_iterations` is the total number of evidence passes including initial collection, so reserve enough checked recovery passes for the source failures that are realistically likely in this plan. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; a timeout is a hard cancellation boundary, so budget enough time for a reasoning model to return the complete report rather than merely begin it. The execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
     );
 
     serde_json::json!({

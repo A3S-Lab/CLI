@@ -8,6 +8,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use a3s_updater::{extract_tar_gz_archive, verify_sha256};
+
 struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
@@ -49,6 +51,7 @@ const BREW_TAP_URL: &str = "https://github.com/A3S-Lab/homebrew-tap";
 const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
 const BREW_SHORT_FORMULA: &str = "a3s";
 const WEBVIEW_FORMULA: &str = "a3s-lab/tap/a3s-webview";
+const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
     "a3s-webview.exe"
 } else {
@@ -514,6 +517,8 @@ fn standalone_upgrade_with(
     let url = format!(
         "https://github.com/A3S-Lab/Cli/releases/download/v{latest}/a3s-v{latest}-{target}.tar.gz"
     );
+    let asset_name = format!("a3s-v{latest}-{target}.tar.gz");
+    let digest = release_asset_digest(runner, latest, &asset_name)?;
     let tmp = unique_update_dir();
     if std::fs::create_dir_all(&tmp).is_err() {
         return Err(format!(
@@ -521,39 +526,54 @@ fn standalone_upgrade_with(
             tmp.display()
         ));
     }
-    let tarball = tmp.join("a3s.tar.gz");
     println!("\n⬇  downloading a3s {latest}…\n");
-    let dl = runner.status(
+    let download = runner.output(
         OsStr::new("curl"),
         &[
             OsString::from("-fL"),
+            OsString::from("--silent"),
+            OsString::from("--show-error"),
             OsString::from("--retry"),
             OsString::from("3"),
             OsString::from("--connect-timeout"),
             OsString::from("10"),
             OsString::from("--max-time"),
             OsString::from("180"),
-            OsString::from("--progress-bar"),
-            OsString::from("-o"),
-            tarball.as_os_str().to_os_string(),
+            OsString::from("--max-filesize"),
+            OsString::from(MAX_SELF_UPDATE_ARCHIVE_BYTES.to_string()),
+            OsString::from("--proto"),
+            OsString::from("=https"),
+            OsString::from("--proto-redir"),
+            OsString::from("=https"),
             OsString::from(&url),
         ],
     );
-    if !dl {
+    let Some(download) = download else {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!("download failed: {url}"));
+    };
+    if !download.success {
+        let _ = std::fs::remove_dir_all(&tmp);
+        let detail = String::from_utf8_lossy(&download.stderr);
+        return Err(format!("download failed: {url}: {}", detail.trim()));
     }
-    let extracted = runner.status(
-        OsStr::new("tar"),
-        &[
-            OsString::from("xzf"),
-            tarball.as_os_str().to_os_string(),
-            OsString::from("-C"),
-            tmp.as_os_str().to_os_string(),
-        ],
-    );
+    if download.stdout.len() > MAX_SELF_UPDATE_ARCHIVE_BYTES {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!(
+            "downloaded archive exceeds the {} byte limit",
+            MAX_SELF_UPDATE_ARCHIVE_BYTES
+        ));
+    }
+    verify_sha256(&download.stdout, &digest).map_err(|error| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        format!("self-update checksum verification failed: {error:#}")
+    })?;
+    extract_tar_gz_archive(&download.stdout, &tmp).map_err(|error| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        format!("failed to safely extract release archive: {error:#}")
+    })?;
     let new_bin = find_downloaded_binary(&tmp);
-    if !extracted || new_bin.is_none() {
+    if new_bin.is_none() {
         let _ = std::fs::remove_dir_all(&tmp);
         return Err("release archive did not contain an a3s binary".to_string());
     }
@@ -580,6 +600,69 @@ fn standalone_upgrade_with(
     };
     let _ = std::fs::remove_dir_all(&tmp);
     result
+}
+
+fn release_asset_digest(
+    runner: &impl CommandRunner,
+    latest: &str,
+    asset_name: &str,
+) -> Result<String, String> {
+    let url = format!(
+        "https://api.github.com/repos/A3S-Lab/Cli/releases/tags/v{latest}"
+    );
+    let output = runner
+        .output(
+            OsStr::new("curl"),
+            &[
+                OsString::from("-fsSL"),
+                OsString::from("--retry"),
+                OsString::from("3"),
+                OsString::from("--connect-timeout"),
+                OsString::from("10"),
+                OsString::from("--max-time"),
+                OsString::from("30"),
+                OsString::from("--max-filesize"),
+                OsString::from((4 * 1024 * 1024).to_string()),
+                OsString::from("--proto"),
+                OsString::from("=https"),
+                OsString::from("--proto-redir"),
+                OsString::from("=https"),
+                OsString::from("-H"),
+                OsString::from("Accept: application/vnd.github+json"),
+                OsString::from("-H"),
+                OsString::from("User-Agent: a3s-self-update/1.0"),
+                OsString::from(&url),
+            ],
+        )
+        .ok_or_else(|| format!("failed to query release metadata from {url}"))?;
+    if !output.success {
+        return Err(format!(
+            "release metadata request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("release metadata is invalid JSON: {error}"))?;
+    let digest = value
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|assets| {
+            assets.iter().find(|asset| {
+                asset.get("name").and_then(serde_json::Value::as_str) == Some(asset_name)
+            })
+        })
+        .and_then(|asset| asset.get("digest"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            format!("release asset '{asset_name}' has no GitHub SHA-256 digest; refusing an unverified self-update")
+        })?;
+    let digest = digest.strip_prefix("sha256:").unwrap_or(digest);
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "release asset '{asset_name}' has an invalid SHA-256 digest"
+        ));
+    }
+    Ok(digest.to_ascii_lowercase())
 }
 
 fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
@@ -1213,13 +1296,24 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[derive(Default)]
     struct FakeStandaloneRunner {
         commands: Mutex<Vec<String>>,
+        archive: Vec<u8>,
+        digest: Option<String>,
     }
 
     #[cfg(unix)]
     impl FakeStandaloneRunner {
+        fn new(binary_path: &str) -> Self {
+            let archive = standalone_archive(binary_path, "9.9.9");
+            let digest = a3s_updater::sha256_hex(&archive);
+            Self {
+                commands: Mutex::new(Vec::new()),
+                archive,
+                digest: Some(digest),
+            }
+        }
+
         fn commands(&self) -> Vec<String> {
             self.commands.lock().unwrap().clone()
         }
@@ -1247,38 +1341,62 @@ mod tests {
                     stderr: Vec::new(),
                 });
             }
+            if program == OsStr::new("curl") {
+                let url = args.last()?.to_string_lossy();
+                if url.contains("api.github.com/repos/A3S-Lab/Cli/releases/tags/v9.9.9") {
+                    let target = release_target()?;
+                    let metadata = serde_json::to_vec(&serde_json::json!({
+                        "tag_name": "v9.9.9",
+                        "assets": [{
+                            "name": format!("a3s-v9.9.9-{target}.tar.gz"),
+                            "digest": self.digest,
+                        }]
+                    }))
+                    .ok()?;
+                    return Some(CommandOutput {
+                        success: true,
+                        stdout: metadata,
+                        stderr: Vec::new(),
+                    });
+                }
+                if url.contains("github.com/A3S-Lab/Cli/releases/download/v9.9.9/") {
+                    return Some(CommandOutput {
+                        success: true,
+                        stdout: self.archive.clone(),
+                        stderr: Vec::new(),
+                    });
+                }
+            }
             RealCommandRunner.output(program, args)
         }
 
         fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
             self.record(program, args);
-            match program.to_string_lossy().as_ref() {
-                "curl" => {
-                    let out = args
-                        .windows(2)
-                        .find(|pair| pair[0] == "-o")
-                        .map(|pair| PathBuf::from(&pair[1]));
-                    if let Some(out) = out {
-                        std::fs::write(out, "fake tarball\n").is_ok()
-                    } else {
-                        false
-                    }
-                }
-                "tar" => {
-                    let dest = args
-                        .windows(2)
-                        .find(|pair| pair[0] == "-C")
-                        .map(|pair| PathBuf::from(&pair[1]));
-                    if let Some(dest) = dest {
-                        write_executable(&dest.join("a3s"), "9.9.9");
-                        true
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            }
+            false
         }
+    }
+
+    #[cfg(unix)]
+    fn standalone_archive(binary_path: &str, version: &str) -> Vec<u8> {
+        let tmp = TempDir::new("standalone-archive");
+        let root = tmp.path("root");
+        let archive = tmp.path("release.tar.gz");
+        write_executable(&root.join(binary_path), version);
+        let top_level = Path::new(binary_path)
+            .components()
+            .next()
+            .unwrap()
+            .as_os_str();
+        let status = Command::new("tar")
+            .arg("czf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&root)
+            .arg(top_level)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::read(archive).unwrap()
     }
 
     #[test]
@@ -1292,7 +1410,7 @@ mod tests {
         let current = tmp.path("a3s");
         write_executable(&current, "0.1.0");
 
-        let runner = FakeStandaloneRunner::default();
+        let runner = FakeStandaloneRunner::new("a3s");
         let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
 
         assert_eq!(result.as_deref(), Ok(current.as_path()));
@@ -1303,7 +1421,8 @@ mod tests {
         assert!(commands
             .iter()
             .any(|c| c.contains(&format!("a3s-v9.9.9-{target}.tar.gz"))));
-        assert!(commands.iter().any(|c| c.starts_with("tar xzf ")));
+        assert!(commands.iter().any(|c| c.contains("api.github.com/repos/A3S-Lab/Cli/releases/tags/v9.9.9")));
+        assert!(!commands.iter().any(|c| c.starts_with("tar ")));
     }
 
     #[test]
@@ -1313,64 +1432,50 @@ mod tests {
         let current = tmp.path("a3s");
         write_executable(&current, "0.1.0");
 
-        #[derive(Default)]
-        struct NestedRunner {
-            commands: Mutex<Vec<String>>,
-        }
-
-        impl NestedRunner {
-            fn record(&self, program: &OsStr, args: &[OsString]) -> String {
-                let mut line = program.to_string_lossy().to_string();
-                for arg in args {
-                    line.push(' ');
-                    line.push_str(&arg.to_string_lossy());
-                }
-                self.commands.lock().unwrap().push(line.clone());
-                line
-            }
-        }
-
-        impl CommandRunner for NestedRunner {
-            fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
-                let line = self.record(program, args);
-                if line == "brew list --versions a3s"
-                    || line == "brew list --versions a3s-lab/tap/a3s"
-                {
-                    return Some(CommandOutput {
-                        success: false,
-                        stdout: Vec::new(),
-                        stderr: Vec::new(),
-                    });
-                }
-                RealCommandRunner.output(program, args)
-            }
-
-            fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
-                self.record(program, args);
-                match program.to_string_lossy().as_ref() {
-                    "curl" => args
-                        .windows(2)
-                        .find(|pair| pair[0] == "-o")
-                        .map(|pair| PathBuf::from(&pair[1]))
-                        .is_some_and(|out| std::fs::write(out, "fake tarball\n").is_ok()),
-                    "tar" => args
-                        .windows(2)
-                        .find(|pair| pair[0] == "-C")
-                        .map(|pair| PathBuf::from(&pair[1]))
-                        .is_some_and(|dest| {
-                            write_executable(&dest.join("pkg").join("bin").join("a3s"), "9.9.9");
-                            true
-                        }),
-                    _ => false,
-                }
-            }
-        }
-
-        let runner = NestedRunner::default();
+        let runner = FakeStandaloneRunner::new("pkg/bin/a3s");
         let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
 
         assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn standalone_upgrade_rejects_a_checksum_mismatch_without_replacing_the_binary() {
+        let tmp = TempDir::new("standalone-checksum-mismatch");
+        let current = tmp.path("a3s");
+        write_executable(&current, "0.1.0");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.digest = Some("0".repeat(64));
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("checksum verification failed"), "{error}");
+        let out = Command::new(&current).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn standalone_upgrade_refuses_release_metadata_without_a_digest() {
+        let tmp = TempDir::new("standalone-missing-digest");
+        let current = tmp.path("a3s");
+        write_executable(&current, "0.1.0");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.digest = None;
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("no GitHub SHA-256 digest"), "{error}");
+        let commands = runner.commands();
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| command.starts_with("curl "))
+                .count(),
+            1,
+            "the archive must not download before metadata is trusted: {commands:?}"
+        );
     }
 }

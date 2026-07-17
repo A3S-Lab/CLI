@@ -195,17 +195,6 @@ pub(super) fn deep_research_safety_envelope(
     }
 }
 
-pub(crate) fn deep_research_workflow_timeout_ms(args: &serde_json::Value) -> u64 {
-    args.pointer("/limits/timeoutMs")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|timeout_ms| *timeout_ms >= 1_000)
-        .unwrap_or(DEEP_RESEARCH_SCRIPT_TIMEOUT_MS)
-}
-
-pub(crate) fn deep_research_workflow_host_timeout_ms(args: &serde_json::Value) -> u64 {
-    deep_research_workflow_timeout_ms(args).saturating_add(DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS)
-}
-
 pub(crate) fn deep_research_workflow_timeout_tool_result(
     workspace: &Path,
     args: &serde_json::Value,

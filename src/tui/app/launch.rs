@@ -831,6 +831,7 @@ pub(crate) async fn run_in(
         deep_research_goal_restore: None,
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
+        system_agent_island: system_agent_island::SystemAgentIsland::new(),
         background_subagent_watches: HashSet::new(),
         subagent_snapshot_request_id: 0,
         deep_research_subagent_settlement_inflight: false,

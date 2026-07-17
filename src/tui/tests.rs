@@ -648,9 +648,8 @@ fn deep_research_smoke_remaining_budget_is_absolute() {
 
 #[test]
 fn deep_research_hard_fuse_does_not_shorten_independent_phase_clocks() {
-    let required = DEEP_RESEARCH_SCRIPT_TIMEOUT_MS
-        + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
-        + DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS
+    let required = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
+        + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
         + DEEP_RESEARCH_REPAIR_TIMEOUT_MS
         + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
         + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
@@ -4138,6 +4137,9 @@ async fn deep_research_workflow_preserves_unscheduled_follow_up_overflow() {
                 "input": {
                     "query": "recursive follow-up overflow regression",
                     "direct_web_enabled": false,
+                    "research_plan": {
+                        "execution_route": "maker_first"
+                    },
                     "local_research_rounds": 3,
                     "local_max_parallel_tasks": 2,
                     "tracks": [{
@@ -4441,6 +4443,9 @@ async fn deep_research_workflow_rejects_source_without_successful_tool_anchor() 
                 "input": {
                     "query": "reject a fabricated source",
                     "direct_web_enabled": false,
+                    "research_plan": {
+                        "execution_route": "maker_first"
+                    },
                     "local_research_rounds": 1,
                     "local_max_parallel_tasks": 1,
                     "tracks": [{
@@ -4645,10 +4650,6 @@ fn deep_research_workflow_args_force_local_even_when_runtime_requested() {
         "an explicit no-web instruction must win over quoted/topic language"
     );
     assert_eq!(args["limits"]["timeoutMs"], safety.workflow_timeout_ms);
-    assert_eq!(
-        deep_research_workflow_host_timeout_ms(&args),
-        safety.workflow_timeout_ms + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
-    );
     assert_eq!(
         args["limits"]["maxToolCalls"],
         safety.workflow_max_tool_calls

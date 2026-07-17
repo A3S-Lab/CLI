@@ -558,7 +558,7 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
             updates: true,
             ..ListArgs::default()
         };
-        a3s::components::run_list_with(
+        a3s::components::run_upgrade_list_with(
             list_argv(list, output)?,
             &context.component_paths,
             context.network.offline,

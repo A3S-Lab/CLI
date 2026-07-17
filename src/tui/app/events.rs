@@ -542,6 +542,9 @@ impl App {
             AgentEvent::End {
                 text, usage, meta, ..
             } => {
+                self.record_local_agent_terminal(
+                    crate::system_agents::AgentActivityState::Completed,
+                );
                 let mut review_text = if text.is_empty() {
                     self.turn_text.clone()
                 } else {
@@ -761,6 +764,7 @@ impl App {
                 };
             }
             AgentEvent::Error { message } => {
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 self.push_notice(NoticeKind::Error, &message);

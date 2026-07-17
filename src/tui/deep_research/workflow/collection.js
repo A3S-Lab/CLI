@@ -4,6 +4,10 @@ async function run(ctx, inputs) {
   const loopContract = input.loop_contract && typeof input.loop_contract === "object"
     ? input.loop_contract
     : {};
+  const executionMode = input.execution_mode === "collect_only"
+    ? "collect_only"
+    : "checked_loop";
+  const collectOnly = executionMode === "collect_only";
   // Preserve the engineered-loop marker across scheduled-step inputs.
   const engineeredLoopEnabled = input.engineered_loop_enabled === true ||
     Boolean(loopContract.planner && loopContract.checker);
@@ -368,16 +372,16 @@ async function run(ctx, inputs) {
       ? `\nObserved candidate URLs (use only a URL that directly matches Focus):\n${seedUrls.map((url) => `- ${url}`).join("\n")}`
       : "";
     const collectionStrategy = hasReusableEvidencePackage(previousEvidence)
-      ? "Existing evidence is already a schema-validated, traceable source package. Do not call any tool or refetch an observed URL. Analyze all evidence relevant to Focus, return the existing source-backed evidence without a tool call, and record any unsupported planned track as a precise gap for the checker to route."
+      ? "Existing evidence is schema-validated and traceable; return the existing source-backed evidence without a tool call, do not refetch, and record unsupported Focus obligations as gaps."
       : seedUrls.length > 0
-      ? `If Existing evidence already contains a traceable source and fact that directly supports Focus, return the existing source-backed evidence without a tool call. Otherwise, if one observed candidate URL directly matches Focus, use web_fetch on the best matching URL first. You may use the remaining part of the ${localEvidenceToolBudget}-round evidence budget for one focused search or one source-observed link only when the first page leaves a consequential gap. If no candidate matches Focus, make one focused web_search first and omit engines so the configured search service chooses healthy engines.`
+      ? `Reuse existing source-backed evidence without a tool call when it supports Focus. Otherwise use web_fetch on the best matching URL first. Use the remaining part of the ${localEvidenceToolBudget}-round evidence budget only for one consequential gap. If no URL matches, make one web_search and omit engines so the configured search service chooses healthy engines.`
       : `Use at most ${localEvidenceToolBudget} high-signal tool rounds and call at most one tool per round. For web_search, omit engines so the configured search service chooses healthy engines.`;
     return {
       agent: "deep-research",
       description: `${roundNumber}.${index + 1} · ${title}`,
       max_steps: localAgentTurnBudget,
       output_schema: evidenceSchema,
-      prompt: `Deep-research evidence track for: ${query}\nFocus: ${focus}${seedContext}${roundContext}\nStay strictly within Focus; other tracks own the other source families and questions.\n${evidenceScopeDirective}\nEvidence focus: gather evidence first. You are an evidence collector. Do not use bash, python, curl, wget, node, or custom scripts. For local evidence, use read/grep/glob/ls only when the authoritative scope permits workspace evidence. Omit cursor on the first glob/ls call; only reuse an exact cursor returned by that tool. ${collectionStrategy} A web_search query must target one source family and one question; do not combine sites or questions with semicolons. Stop after at most ${localEvidenceToolBudget} evidence-tool rounds and immediately return the best output_schema object. Write summary and key_evidence as reader-facing conclusions, never as collection-status narration. If a tool fails, return a transparent gap instead of retrying or broadening. Do not inspect .a3s/workflow logs. Return output_schema fields: summary, sources, key_evidence, contradictions, confidence, and gaps.`
+      prompt: `Deep-research evidence track: ${query}\nFocus: ${focus}${seedContext}${roundContext}\nStay strictly within Focus.\n${evidenceScopeDirective}\nEvidence focus: gather evidence first. You are an evidence collector. Do not use bash, python, curl, wget, node, or custom scripts. Use read/grep/glob/ls only when workspace evidence is allowed. ${collectionStrategy} Search one source family and question at a time. Stop within ${localEvidenceToolBudget} evidence-tool rounds. Return reader-facing conclusions and transparent gaps, never workflow narration. Do not inspect .a3s/workflow logs. Return output_schema fields: summary, sources, key_evidence, contradictions, confidence, and gaps.`
     };
   });
   const localParallelInput = (roundNumber, roundTracks, previousEvidence) => {
@@ -634,6 +638,33 @@ async function run(ctx, inputs) {
     }
     return `${compact.slice(0, limit)}…`;
   };
+  const unicodeSearchTerms = (value, maximum) => {
+    let normalized = String(value || "").toLowerCase();
+    try {
+      normalized = normalized.normalize("NFKC");
+    } catch (_err) {
+      // Continue with the original text when normalization tables are absent.
+    }
+    const ascii = normalized.match(/[a-z0-9][a-z0-9+_.-]{1,}/g) || [];
+    let runs;
+    try {
+      runs = normalized.match(new RegExp("[\\p{L}\\p{N}\\p{M}]{2,}", "gu")) || [];
+    } catch (_err) {
+      runs = normalized.match(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]{2,}/g) || [];
+    }
+    const nonAscii = [];
+    for (const run of runs) {
+      const characters = Array.from(run);
+      if (!characters.some((character) => character.codePointAt(0) > 0x7f)) {
+        continue;
+      }
+      nonAscii.push(run);
+      for (let index = 0; index < characters.length - 1; index += 1) {
+        nonAscii.push(characters.slice(index, index + 2).join(""));
+      }
+    }
+    return uniqueStrings([...ascii, ...nonAscii]).slice(0, maximum);
+  };
   const analyzeQueryTerms = () => {
     const maxQueryTerms = 48;
     const fullQuery = String(query || "");
@@ -646,34 +677,12 @@ async function run(ctx, inputs) {
       "sources", "stable", "summary", "the", "to", "using", "version", "versus", "vs",
       "what", "when", "where", "which", "who", "why", "with", "how"
     ]);
-    const normalized = rawQuery
-      .slice(0, 8192)
-      .toLowerCase()
-      .replace(/https?:\/\/\S+/g, " ");
-    const asciiTerms = normalized.match(/[a-z0-9][a-z0-9+_.-]{1,}/g) || [];
+    const normalized = rawQuery.slice(0, 8192).replace(/https?:\/\/\S+/g, " ");
     const cjkStopwords = new Set([
       "请", "请问", "全面", "调研", "研究", "报告", "来源", "证据", "最新", "当前",
       "什么", "如何", "比较", "对比", "以及"
     ]);
-    const cjkTerms = [];
-    for (const chunk of normalized.match(/[\u3400-\u9fff]{2,}/g) || []) {
-      let content = chunk;
-      for (const stopword of cjkStopwords) {
-        content = content.split(stopword).join(" ");
-      }
-      for (const segment of content.match(/[\u3400-\u9fff]{2,}/g) || []) {
-        if (segment.length === 2) {
-          if (cjkTerms.length <= maxQueryTerms) {
-            cjkTerms.push(segment);
-          }
-          continue;
-        }
-        for (let index = 0; index < segment.length - 1 && cjkTerms.length <= maxQueryTerms; index += 1) {
-          cjkTerms.push(segment.slice(index, index + 2));
-        }
-      }
-    }
-    const candidates = uniqueStrings([...asciiTerms, ...cjkTerms])
+    const candidates = unicodeSearchTerms(normalized, maxQueryTerms * 2)
       .filter((term) => !stopwords.has(term) && !cjkStopwords.has(term));
     return {
       terms: candidates.slice(0, maxQueryTerms),

@@ -167,7 +167,7 @@ impl KernelService {
         let target_settings = source_settings.clone();
         let source_controls = self.session_controls_snapshot(session_id).await;
         let (target_session, llm_client) = self
-            .create_agent_session(&workspace, None, &target_settings, &source_controls.effort)
+            .create_agent_session(&workspace, None, &target_settings, &source_controls)
             .await?;
         let target_session_id = target_session.session_id().to_string();
         let source_context = self.session_context_snapshot(session_id).await;
@@ -227,6 +227,10 @@ impl KernelService {
             .lock()
             .await
             .insert(target_session_id.clone(), target_settings.clone());
+        self.state.session_turn_queues.lock().await.insert(
+            target_session_id.clone(),
+            CodeWebSessionTurnQueue::default(),
+        );
         target_session
             .save()
             .await

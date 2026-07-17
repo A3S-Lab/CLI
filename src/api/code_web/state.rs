@@ -6,15 +6,58 @@ use a3s_code_core::{Agent, AgentSession, CodeConfig, LlmClient, WorkspaceService
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
+use super::kernel::turn_queue::CodeWebSessionTurnQueue;
 use super::session_store::{CodeWebSessionMetadata, CodeWebSessionRepository};
 use super::workspace_backend_cache::WorkspaceBackendCache;
 use crate::budget::DEFAULT_CODE_WEB_EFFORT_ID;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::api::code_web) enum CodeWebGoalStatus {
+    Active,
+    Paused,
+    Retrying,
+    Achieved,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub(in crate::api::code_web) struct CodeWebGoalRun {
+    pub(in crate::api::code_web) status: CodeWebGoalStatus,
+    pub(in crate::api::code_web) started_at: i64,
+    pub(in crate::api::code_web) updated_at: i64,
+    pub(in crate::api::code_web) completed_at: Option<i64>,
+    pub(in crate::api::code_web) attempts: u32,
+    pub(in crate::api::code_web) progress_percent: u8,
+    pub(in crate::api::code_web) completed_steps: usize,
+    pub(in crate::api::code_web) total_steps: usize,
+    pub(in crate::api::code_web) last_error: Option<String>,
+    pub(in crate::api::code_web) extracted_goal: Option<String>,
+}
+
+impl Default for CodeWebGoalRun {
+    fn default() -> Self {
+        Self {
+            status: CodeWebGoalStatus::Active,
+            started_at: 0,
+            updated_at: 0,
+            completed_at: None,
+            attempts: 0,
+            progress_percent: 0,
+            completed_steps: 0,
+            total_steps: 0,
+            last_error: None,
+            extracted_goal: None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(in crate::api::code_web) struct CodeWebSessionControls {
     pub(in crate::api::code_web) effort: String,
     pub(in crate::api::code_web) goal: Option<String>,
+    pub(in crate::api::code_web) goal_run: Option<CodeWebGoalRun>,
 }
 
 impl Default for CodeWebSessionControls {
@@ -22,6 +65,7 @@ impl Default for CodeWebSessionControls {
         Self {
             effort: DEFAULT_CODE_WEB_EFFORT_ID.to_string(),
             goal: None,
+            goal_run: None,
         }
     }
 }
@@ -80,6 +124,8 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) session_controls: Mutex<HashMap<String, CodeWebSessionControls>>,
     pub(in crate::api::code_web) session_contexts: Mutex<HashMap<String, CodeWebSessionContext>>,
     pub(in crate::api::code_web) session_settings: Mutex<HashMap<String, CodeWebSessionSettings>>,
+    pub(in crate::api::code_web) session_turn_queues:
+        Mutex<HashMap<String, CodeWebSessionTurnQueue>>,
     use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
     workspace_backends: WorkspaceBackendCache,
 }
@@ -107,6 +153,7 @@ impl CodeWebState {
             session_controls: Mutex::new(HashMap::new()),
             session_contexts: Mutex::new(HashMap::new()),
             session_settings: Mutex::new(HashMap::new()),
+            session_turn_queues: Mutex::new(HashMap::new()),
             use_registry: RwLock::new(None),
             workspace_backends: WorkspaceBackendCache::default(),
         }

@@ -201,6 +201,13 @@ pub(super) fn deep_research_evidence_package_is_complete_for_query(
 ) -> bool {
     let canonical_output =
         deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) {
+        match validated_inquiry_terminal_outcome(&value) {
+            Ok(Some(outcome)) => return outcome == InquiryTerminalOutcome::Completed,
+            Err(_) => return false,
+            Ok(None) => {}
+        }
+    }
     if deep_research_workflow_needs_recovery_report_with_metadata(
         &canonical_output,
         workflow_metadata,
@@ -259,12 +266,27 @@ pub(super) fn deep_research_report_outcome_for_workflow(
 ) -> DeepResearchRunOutcome {
     let canonical_output =
         deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) {
+        match validated_inquiry_terminal_outcome(&value) {
+            Ok(Some(outcome)) => {
+                return match outcome {
+                    InquiryTerminalOutcome::Completed => DeepResearchRunOutcome::Completed,
+                    InquiryTerminalOutcome::Qualified => DeepResearchRunOutcome::Qualified,
+                    InquiryTerminalOutcome::Exhausted => DeepResearchRunOutcome::Degraded,
+                }
+            }
+            Err(_) => return DeepResearchRunOutcome::Degraded,
+            Ok(None) => {}
+        }
+    }
     if deep_research_workflow_needs_recovery_report_with_metadata(
         &canonical_output,
         workflow_metadata,
     ) {
         return DeepResearchRunOutcome::Degraded;
     }
+    let supporting_gaps_qualified =
+        inquiry_has_only_supporting_gaps(&canonical_output, workflow_metadata);
     let explicitly_qualified = serde_json::from_str::<serde_json::Value>(canonical_output.trim())
         .ok()
         .is_some_and(|workflow| {
@@ -281,7 +303,7 @@ pub(super) fn deep_research_report_outcome_for_workflow(
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|mode| mode.contains("degraded"))
         });
-    if explicitly_qualified {
+    if explicitly_qualified || supporting_gaps_qualified {
         return DeepResearchRunOutcome::Qualified;
     }
     if deep_research_evidence_package_is_complete_for_query(
@@ -298,6 +320,36 @@ pub(super) fn deep_research_report_outcome_for_workflow(
         // a generic recovery artifact or claiming full completion.
         DeepResearchRunOutcome::Qualified
     }
+}
+
+fn inquiry_has_only_supporting_gaps(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let Ok(Some((_, state))) =
+        super::deep_research_inquiry_runtime::inquiry_projection_from_workflow(
+            workflow_output,
+            workflow_metadata,
+        )
+    else {
+        return false;
+    };
+    let material_questions = state
+        .questions
+        .iter()
+        .filter(|question| question.material)
+        .collect::<Vec<_>>();
+    !material_questions.is_empty()
+        && material_questions
+            .iter()
+            .all(|question| question.status == a3s::research::QuestionStatus::Answered)
+        && state
+            .questions
+            .iter()
+            .all(|question| question.status != a3s::research::QuestionStatus::Queued)
+        && state.questions.iter().any(|question| {
+            !question.material && question.status == a3s::research::QuestionStatus::Bounded
+        })
 }
 
 pub(super) struct DeepResearchConvergenceContext<'a> {

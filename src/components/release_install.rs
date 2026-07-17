@@ -112,12 +112,16 @@ pub async fn install_release(
     }
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: true,
         version: Some(version),
         provenance: Some(InstallProvenance::GithubRelease),
         path: Some(executable),
-        message: format!("Installed component '{}' from its verified release.", id),
+        message: format!(
+            "Completed {} for component '{}' from its verified release.",
+            request.intent.action(),
+            id
+        ),
     })
 }
 

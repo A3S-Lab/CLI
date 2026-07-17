@@ -24,6 +24,9 @@ struct PlannedLoopTaskTool {
 struct PlannedLoopSearchTool;
 struct NoisyPlannedLoopSearchTool;
 struct OversizedPlannedLoopSearchTool;
+struct UnicodeFocusPlannerTool;
+struct UnicodeFocusSearchTool;
+struct UnicodeFocusFetchTool;
 struct PlannedLoopFetchTool;
 struct TransientPlannedLoopFetchTool {
     calls: Arc<AtomicUsize>,
@@ -492,8 +495,9 @@ impl Tool for PlannedLoopTaskTool {
                 "maker prompt did not surface observed direct-evidence URLs"
             );
             anyhow::ensure!(
-                prompt.contains("Do not call any tool")
-                    && prompt.contains("return the existing source-backed evidence"),
+                prompt.contains("return the existing source-backed evidence")
+                    && prompt.contains("without a tool call")
+                    && prompt.contains("do not refetch"),
                 "prompt fallback maker did not reuse the existing evidence package"
             );
             if self.tool_name == "generate_object" {
@@ -636,6 +640,188 @@ impl Tool for PlannedLoopSearchTool {
             ])
             .to_string(),
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for UnicodeFocusPlannerTool {
+    fn name(&self) -> &str {
+        "generate_object"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a plan and checker decision with Unicode retrieval queries."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let schema_name = args
+            .get("schema_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if schema_name == "deep_research_plan" {
+            return Ok(generated_object_output(serde_json::json!({
+                "answer_shape": "lookup",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "execution_route": "direct_only",
+                "report_title": "Requested condition assessment",
+                "phases": [{
+                    "name": "retrieve and verify",
+                    "success_criterion": "The requested condition is independently corroborated."
+                }],
+                "tracks": [{
+                    "title": "Requested condition",
+                    "focus": "Retrieve and corroborate the requested condition."
+                }],
+                "search_queries": ["系统运行状态 官方记录", "系统运行状态 独立验证"],
+                "seed_urls": [],
+                "budget": {
+                    "retrieval_timeout_ms": 30000,
+                    "synthesis_timeout_ms": 15000,
+                    "max_iterations": 1,
+                    "max_parallel_tasks": 1,
+                    "max_steps_per_task": 2,
+                    "per_task_timeout_ms": 10000,
+                    "direct_searches": 2,
+                    "direct_fetches": 2
+                },
+                "stop_conditions": ["the requested condition is traceable to two sources"]
+            })));
+        }
+
+        anyhow::ensure!(
+            schema_name == "deep_research_check",
+            "unexpected structured call: {schema_name}"
+        );
+        let prompt = args
+            .get("prompt")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            prompt.contains("系统运行状态")
+                && prompt.contains("https://primary.example/record")
+                && prompt.contains("https://independent.example/review"),
+            "the checker did not receive both Unicode-focused sources"
+        );
+        Ok(generated_object_output(serde_json::json!({
+            "decision": "finalize",
+            "coverage_summary": "Two fetched sources corroborate the requested condition.",
+            "report_summary": "The requested operating condition is independently corroborated.",
+            "verified_findings": ["Two fetched records corroborate the requested condition."],
+            "track_assessments": [{
+                "plan_index": 0,
+                "status": "supported",
+                "finding": "Two fetched records corroborate the requested condition.",
+                "source_urls": [
+                    "https://primary.example/record",
+                    "https://independent.example/review"
+                ]
+            }],
+            "stop_condition_assessments": [{
+                "plan_index": 0,
+                "status": "supported",
+                "finding": "The requested condition is traceable to two sources.",
+                "source_urls": [
+                    "https://primary.example/record",
+                    "https://independent.example/review"
+                ]
+            }],
+            "unresolved_gaps": [],
+            "limitations": [],
+            "contradictions": [],
+            "next_action": "none",
+            "search_queries": [],
+            "seed_urls": [],
+            "next_tracks": [],
+            "reason": "The observable completion criterion is satisfied."
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for UnicodeFocusSearchTool {
+    fn name(&self) -> &str {
+        "unicode_focus_web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Returns candidates whose relevance signal exists only in Unicode text."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let query = args
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            query.contains("状态")
+                && !query
+                    .chars()
+                    .any(|character| character.is_ascii_alphabetic()),
+            "the regression fixture requires a pure CJK retrieval query"
+        );
+        Ok(ToolOutput::success(
+            serde_json::json!([
+                {
+                    "title": "状态条目甲",
+                    "url": "https://primary.example/record",
+                    "content": "可供后续抓取核验的候选页面。",
+                    "engines": ["fixture"]
+                },
+                {
+                    "title": "状态条目乙",
+                    "url": "https://independent.example/review",
+                    "content": "可供后续抓取核验的候选页面。",
+                    "engines": ["fixture"]
+                }
+            ])
+            .to_string(),
+        ))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for UnicodeFocusFetchTool {
+    fn name(&self) -> &str {
+        "unicode_focus_web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Returns substantive fetched text matching a Unicode retrieval query."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let url = args
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        Ok(ToolOutput::success(format!(
+            "# 系统运行状态核验记录\n\n官方记录与独立验证通过可追溯日志确认系统运行状态符合核验条件，并说明核验范围、观察时间与证据边界。来源：{url}"
+        )))
     }
 }
 

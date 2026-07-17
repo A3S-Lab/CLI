@@ -50,6 +50,7 @@ pub fn configure_component_env(command: &mut std::process::Command, workspace: &
         .env("A3S_DATA_HOME", workspace.path("data"))
         .env("A3S_STATE_HOME", workspace.path("state"))
         .env("A3S_CACHE_HOME", workspace.path("cache"))
+        .env("A3S_RUNTIME_HOME", workspace.path("runtime"))
         .env("HOME", workspace.path("home"))
         .env("PATH", "");
 }
@@ -149,6 +150,7 @@ impl FakeReleaseServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let asset_path = format!("/assets/{asset_name}");
+        let tag_path = format!("/repos/A3S-Lab/Box/releases/tags/v{version}");
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -163,10 +165,18 @@ impl FakeReleaseServer {
                             .expect("failed to configure release connection");
                         let release = release.clone();
                         let asset_path = asset_path.clone();
+                        let tag_path = tag_path.clone();
                         let archive = archive.clone();
                         let requests = Arc::clone(&thread_requests);
                         std::thread::spawn(move || {
-                            serve_request(stream, &release, &asset_path, &archive, &requests);
+                            serve_request(
+                                stream,
+                                &release,
+                                &asset_path,
+                                &tag_path,
+                                &archive,
+                                &requests,
+                            );
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -206,6 +216,7 @@ fn serve_request(
     mut stream: TcpStream,
     release: &[u8],
     asset_path: &str,
+    tag_path: &str,
     archive: &[u8],
     requests: &Arc<Mutex<Vec<String>>>,
 ) {
@@ -224,7 +235,7 @@ fn serve_request(
     requests.lock().unwrap().push(path.clone());
     let (status, content_type, body) = if path == asset_path {
         ("200 OK", "application/gzip", archive)
-    } else if path.ends_with("/repos/A3S-Lab/Box/releases/latest") {
+    } else if path.ends_with("/repos/A3S-Lab/Box/releases/latest") || path == tag_path {
         ("200 OK", "application/json", release)
     } else {
         ("404 Not Found", "text/plain", b"not found".as_slice())

@@ -184,7 +184,10 @@ a3s code session delete <session-id> [--yes]
 a prompt file, or piped stdin. Arbitrary trailing text after `a3s code` is never
 guessed to be a prompt. It emits a final result in JSON or an event stream in
 JSONL. Any approval that cannot be resolved in non-interactive mode fails
-instead of blocking on hidden input.
+instead of blocking on hidden input. `auto` uses the shared risk classifier to
+approve bounded workspace operations; high-risk or unknown operations still
+fail with `approval.required`. A successful result requires a terminal Code
+completion event rather than merely a closed event stream.
 
 `code resume` remains canonical because it is a frequent user action. The
 `session` group owns less frequent inspection and data lifecycle operations.

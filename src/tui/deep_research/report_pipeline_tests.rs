@@ -1,5 +1,9 @@
 use super::*;
 
+use a3s::research::{
+    replay, EvidenceRef, InquiryEvent, InquiryLimits, InquiryPhase, Question, ResearchMethod,
+};
+
 #[test]
 fn completed_event_snapshot_is_authoritative_when_tool_output_is_diagnostic_text() {
     let final_output = serde_json::json!({
@@ -75,6 +79,185 @@ fn completed_event_snapshot_is_authoritative_when_tool_output_is_diagnostic_text
         )
         .is_ok(),
         "CLI synthesis must consume the event-sourced result instead of generic recovery"
+    );
+}
+
+#[test]
+fn bounded_supporting_obligation_produces_a_qualified_reportable_inquiry() {
+    let mut supporting = Question::queued(
+        "question:supporting",
+        None,
+        "Which supporting context can be established?",
+    );
+    supporting.material = false;
+    let events = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![
+                Question::queued(
+                    "question:core",
+                    None,
+                    "What evidence determines the core conclusion?",
+                ),
+                supporting,
+            ],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:core",
+                vec!["claim:core".to_string()],
+                vec!["source:core".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:core".to_string(),
+            answer: "The retained source supports the core conclusion.".to_string(),
+            evidence_ids: vec!["evidence:core".to_string()],
+        },
+        InquiryEvent::QuestionBounded {
+            question_id: "question:supporting".to_string(),
+            reason: "The supporting context remains unavailable.".to_string(),
+        },
+    ];
+    let state = replay(&events, &InquiryLimits::default()).expect("qualified inquiry projection");
+    assert_eq!(state.phase, InquiryPhase::Outlining);
+
+    let output = serde_json::json!({
+        "mode": "direct_web",
+        "checker": {
+            "decision": "finalize",
+            "coverage_summary": "The core conclusion is supported. Supporting context remains bounded."
+        },
+        "research": {
+            "status": "success",
+            "results": [{
+                "success": true,
+                "structured": {
+                    "summary": "The accepted evidence establishes the core conclusion.",
+                    "sources": [{
+                        "title": "Core source",
+                        "url_or_path": "https://example.com/core",
+                        "quote_or_fact": "The source supports the core conclusion.",
+                        "reliability": "Authoritative source"
+                    }],
+                    "key_evidence": ["The core conclusion is source-backed."],
+                    "contradictions": [],
+                    "confidence": "high",
+                    "gaps": ["Supporting context remains unavailable."]
+                }
+            }]
+        },
+        "inquiry": {
+            "events": events,
+            "state": state
+        }
+    });
+
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Determine the core conclusion with useful supporting context",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &output.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Qualified,
+    );
+}
+
+#[test]
+fn collect_only_inquiry_projection_owns_completion_and_fails_closed() {
+    let events = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![Question::queued(
+                "question:core",
+                None,
+                "What evidence determines the conclusion?",
+            )],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:core",
+                vec!["claim:core".to_string()],
+                vec!["source:core".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:core".to_string(),
+            answer: "The retained source supports the conclusion.".to_string(),
+            evidence_ids: vec!["evidence:core".to_string()],
+        },
+    ];
+    let state = replay(&events, &InquiryLimits::default()).expect("completed inquiry projection");
+    assert_eq!(state.phase, InquiryPhase::Outlining);
+    let mut output = serde_json::json!({
+        "mode": "inquiry_collection_wave",
+        "execution": {
+            "mode": "collect_only",
+            "terminal_authority": "host_inquiry_reducer"
+        },
+        "research": {
+            "status": "success",
+            "results": [{
+                "success": true,
+                "structured": {
+                    "summary": "The accepted evidence establishes the conclusion.",
+                    "sources": [{
+                        "title": "Core source",
+                        "url_or_path": "https://example.com/core",
+                        "quote_or_fact": "The source supports the conclusion.",
+                        "reliability": "Authoritative source"
+                    }],
+                    "key_evidence": ["The conclusion is source-backed."],
+                    "contradictions": [],
+                    "confidence": "high",
+                    "gaps": []
+                }
+            }]
+        },
+        "inquiry": {
+            "events": events,
+            "state": state
+        }
+    });
+
+    assert_eq!(deep_research_collection_status(&output), "completed");
+    assert!(!deep_research_workflow_needs_recovery_report(
+        &output.to_string()
+    ));
+    assert!(deep_research_evidence_package_is_complete_for_query(
+        "Determine the conclusion",
+        DeepResearchEvidenceScope::WebAndWorkspace,
+        &output.to_string(),
+        None,
+    ));
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Determine the conclusion",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &output.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Completed,
+    );
+
+    output["inquiry"]["state"]["events_applied"] = serde_json::json!(999);
+    assert_eq!(deep_research_collection_status(&output), "degraded");
+    assert!(deep_research_workflow_needs_recovery_report(
+        &output.to_string()
+    ));
+    assert_eq!(
+        deep_research_report_outcome_for_workflow(
+            "Determine the conclusion",
+            DeepResearchEvidenceScope::WebAndWorkspace,
+            &output.to_string(),
+            None,
+        ),
+        DeepResearchRunOutcome::Degraded,
     );
 }
 

@@ -147,7 +147,7 @@ jobs:
             "a3s-boot 0.1.2"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
-            "a3s-tui 0.1.10"
+            "a3s-tui 0.1.11"
             "a3s-search 1.4.3"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"

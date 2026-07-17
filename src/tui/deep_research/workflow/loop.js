@@ -290,7 +290,7 @@
       schema: checker.output_schema,
       schema_name: "deep_research_check",
       schema_description: "Independent DeepResearch evidence coverage decision",
-      prompt: `Check evidence against the semantic plan; do not call tools. Judge every planned track and stop condition by its plan_index. Return exactly one track_assessments entry for every planned track and one stop_condition_assessments entry for every stop condition. Mark an entry supported only when its finding is present in retained relevant page text and source_urls contains the exact supporting source URL(s) or path(s) from the retained source list; bounded means partially supported, and uncovered means no retained support. A URL, title, or search snippet alone is a discovery lead, never evidence; only retained relevant page text supports a claim. Consequential status, quantitative, governance, comparison, and recommendation claims need primary or authoritative evidence plus independent corroboration when available. If a material track has only discovery leads, generic/SEO comparisons, failed primary fetches, or unsupported inference and another planned pass fits, continue that exact gap with direct_retrieval; maker is only for distinct evidence production or non-web work. Never repeat a failed URL or unchanged query. Finalize only when every track and stop condition is supported and unresolved_gaps is empty. Put only material plan obligations that prevent the requested answer in unresolved_gaps; put peripheral caveats that do not change the core answer in limitations. An exhausted clock or pass budget never turns insufficient core evidence into finalize. Choose degrade when a core comparison, requested recommendation, or material stop condition remains unsupported. Finalize/degrade require next_action=none.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Return concise schema fields in the query's language. report_summary directly answers the request and must not fill evidence gaps from prior knowledge. Each verified finding states a fact present in retained evidence, but the host will rebuild verified_findings from supported assessments. Findings state facts, never that sources, articles, comparisons, discussions, or collection exist. Put uncertainty only in gaps, limitations, or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
+      prompt: `Check retained evidence against the semantic plan without tools. Return one assessment per plan_index for every track and stop condition. Supported requires fetched page text; source_urls must contain each exact supporting source URL. Bounded is partial; uncovered has no support. A URL, title, or search snippet alone is a discovery lead, never evidence. Consequential claims need authoritative evidence and corroboration when available. Continue only a material gap another pass can close: direct_retrieval for web facts, maker for distinct production or non-web work. Never repeat a failed URL or query. Finalize only when every obligation is supported and unresolved_gaps is empty; budget exhaustion never makes weak evidence complete. Otherwise degrade with next_action=none.${repeatedDirectDirective}${capabilityDirective}${checkerBudgetDirective()} Answer in the query language only from retained evidence. Findings state facts, not collection activity; the host rebuilds verified_findings. Put uncertainty in gaps, limitations, or contradictions.\n\nPlan:\n${boundedPlan}\n\nEvidence (${kind}, iteration ${roundNumber}):\n${boundedEvidence}`,
       mode: "auto",
       max_repair_attempts: 1,
       timeout_ms: Math.min(configuredCheckerTimeoutMs, availableCheckerMs),
@@ -532,7 +532,10 @@
   };
   const makerFitsWorkflowBudget = () => {
     const remainingMs = workflowRemainingMs();
-    return remainingMs === null || remainingMs >= makerAndCheckerFloorMs;
+    const requiredMs = collectOnly
+      ? makerReserveMs + workflowClosureReserveMs
+      : makerAndCheckerFloorMs;
+    return remainingMs === null || remainingMs >= requiredMs;
   };
   const checkerFitsWorkflowBudget = () => {
     const remainingMs = workflowRemainingMs();
@@ -552,6 +555,44 @@
         ? "The previously finalized evidence remains reportable; no further checked pass fits the remaining workflow budget."
         : "The checker requested more evidence, but no further checked pass fits the remaining workflow budget; the run must remain degraded rather than claim completion.")
     });
+  };
+  const completeDirectOnly = (research, reason, checker, retrievalError) => {
+    const terminalReason = reason || "The direct-only route cannot start a maker task.";
+    const output = {
+      query,
+      mode: "direct_web_degraded",
+      plan: researchPlan,
+      research: research || {
+        status: "failed",
+        algorithm: "direct_only",
+        error: terminalReason
+      },
+      route_limited: true
+    };
+    if (checker) {
+      output.checker = budgetClosedChecker(checker, terminalReason);
+    }
+    if (retrievalError) {
+      output.retrieval_error = retrievalError;
+    }
+    return { type: "complete", output };
+  };
+  const completeCollectionWave = (research, seedResearch, note) => {
+    const output = {
+      query,
+      mode: "inquiry_collection_wave",
+      plan: researchPlan,
+      execution: {
+        mode: executionMode,
+        terminal_authority: "host_inquiry_reducer",
+        note: note || "The workflow completed one bounded evidence-collection wave."
+      },
+      research
+    };
+    if (seedResearch) {
+      output.seed_research = seedResearch;
+    }
+    return { type: "complete", output };
   };
   const failedRecheckFinalizedChecker = (decision) => {
     const gap = "Follow-up evidence was not independently rechecked; conclusions relying on it remain provisional.";
@@ -706,6 +747,32 @@
       localRounds.length === 0 &&
       localRoundFailures.length > 0;
 
+    if (executionRoute === "direct_only") {
+      if (directWebFailure) {
+        return completeDirectOnly(
+          directEvidence,
+          "Direct-only retrieval failed; maker fallback is disabled.",
+          null,
+          directWebFailure.error || "Direct retrieval failed."
+        );
+      }
+      if (localRounds.length > 0 || localRoundFailures.length > 0) {
+        return completeDirectOnly(
+          localRounds.length > 0
+            ? aggregateResearchRounds(
+                localRounds,
+                "direct_only_route_closed",
+                localRoundFailures
+              )
+            : directEvidence,
+          "Direct-only cannot schedule or resume maker work."
+        );
+      }
+      if (!directWebResearch && !directWebSeedEnabled) {
+        return completeDirectOnly(null, "No direct retrieval capability is available.");
+      }
+    }
+
     if (
       retrievalBudgetExhausted &&
       localRounds.length === 0 &&
@@ -724,6 +791,20 @@
           }
         }
       };
+    }
+
+    if (
+      executionRoute === "direct_only" &&
+      directWebResearch &&
+      !hasStructuredEvidence(directWebResearch) &&
+      !hasCandidateLeads(directWebResearch)
+    ) {
+      return completeDirectOnly(
+        directWebResearch,
+        "Direct-only retained no source candidate.",
+        null,
+        "No source candidate was retained."
+      );
     }
 
     if (
@@ -752,6 +833,12 @@
             output: { query, mode: "direct_web", plan: researchPlan, research: directWebResearch }
           };
         }
+        if (executionRoute === "direct_only") {
+          return completeDirectOnly(
+            directWebResearch,
+            "Direct-only did not satisfy its terminal fixture gate."
+          );
+        }
         return scheduleMakerStep(
           roundStepId("local_research", 1),
           1,
@@ -773,6 +860,13 @@
           tracks,
           makerEvidenceContext(directEvidence),
           true
+        );
+      }
+      if (collectOnly) {
+        return completeCollectionWave(
+          directEvidence,
+          null,
+          "Direct evidence collection completed; question resolution and convergence are host-managed."
         );
       }
       const checkerKind = directIteration === 0 ? "direct" : "direct_follow_up";
@@ -965,6 +1059,18 @@
         };
       }
       const nextTracks = checkerContinuationTracks(checkerDecision);
+      if (
+        executionRoute === "direct_only" &&
+        checkerDecision &&
+        checkerDecision.decision === "continue" &&
+        checkerDecision.next_action === "maker"
+      ) {
+        return completeDirectOnly(
+          directEvidence,
+          "Direct-only cannot escalate to maker; the gap remains bounded.",
+          checkerDecision
+        );
+      }
       if (
         checkerDecision &&
         checkerDecision.decision === "continue" &&

@@ -6,6 +6,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+#[path = "web_cli/web_turn_queue.rs"]
+mod web_turn_queue;
+
 #[test]
 fn web_help_is_top_level_and_documents_background_mode() {
     let output = Command::new(a3s_binary())

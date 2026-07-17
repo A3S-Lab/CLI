@@ -1,5 +1,5 @@
 #[tokio::test]
-async fn llm_plan_and_independent_checker_can_finish_a_narrow_query_without_maker_fanout() {
+async fn model_authored_retrieval_query_can_cross_the_original_query_language() {
     let workspace = std::env::temp_dir().join(format!(
         "a3s-planned-research-loop-{}-{}",
         std::process::id(),
@@ -36,7 +36,7 @@ async fn llm_plan_and_independent_checker_can_finish_a_narrow_query_without_make
     executor.register_dynamic_tool(Arc::new(PlannedLoopFetchTool));
     a3s_code_core::tools::register_dynamic_workflow(executor.registry());
 
-    let query = "adaptive loop current status";
+    let query = "自适应循环当前状态";
     let mut args = super::deep_research_workflow_args_with_scope(
         query,
         false,
@@ -80,6 +80,146 @@ async fn llm_plan_and_independent_checker_can_finish_a_narrow_query_without_make
     assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
     assert_eq!(checker_calls.load(Ordering::SeqCst), 1);
     assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn host_managed_inquiry_wave_collects_evidence_without_a_per_wave_checker() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-inquiry-collection-wave-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
+    executor.register_dynamic_tool(Arc::new(PlannedLoopFetchTool));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "adaptive loop current status",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "planned_web_search",
+        "planned_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["input"]["execution_mode"] = serde_json::json!("collect_only");
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(12);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("the host-managed inquiry wave should collect evidence");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+    assert_eq!(output["mode"], "inquiry_collection_wave", "{output:#}");
+    assert_eq!(
+        output["execution"]["terminal_authority"], "host_inquiry_reducer",
+        "{output:#}"
+    );
+    assert!(output.get("checker").is_none(), "{output:#}");
+    assert!(
+        output["research"]["results"]
+            .as_array()
+            .is_some_and(|results| !results.is_empty()),
+        "{output:#}"
+    );
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn pure_cjk_retrieval_queries_retain_single_term_candidate_matches() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-unicode-focus-retrieval-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(UnicodeFocusPlannerTool));
+    executor.register_dynamic_tool(Arc::new(UnicodeFocusSearchTool));
+    executor.register_dynamic_tool(Arc::new(UnicodeFocusFetchTool));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "Assess the requested operating condition",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "unicode_focus_web_search",
+        "unicode_focus_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(12);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("pure CJK retrieval queries should retain partial candidate matches");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(output["mode"], "direct_web", "{output:#}");
+    assert_eq!(
+        output["research"]["metadata"]["source_count"], 2,
+        "one matching Unicode focus term must admit each source for fetching: {output:#}"
+    );
+    let source_urls = output["research"]["results"][0]["structured"]["sources"]
+        .as_array()
+        .expect("direct evidence sources")
+        .iter()
+        .filter_map(|source| source["url_or_path"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        source_urls,
+        [
+            "https://independent.example/review",
+            "https://primary.example/record"
+        ]
+        .into_iter()
+        .collect()
+    );
 
     let _ = std::fs::remove_dir_all(&workspace);
 }
@@ -213,13 +353,11 @@ async fn transient_fetch_failures_receive_one_bounded_transport_retry() {
     let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
     assert_eq!(output["checker"]["decision"], "finalize", "{output:#}");
     assert_eq!(
-        output["research"]["metadata"]["transport_retry_count"],
-        2,
+        output["research"]["metadata"]["transport_retry_count"], 2,
         "{output:#}"
     );
     assert_eq!(
-        output["research"]["metadata"]["transport_retry_success_count"],
-        2,
+        output["research"]["metadata"]["transport_retry_success_count"], 2,
         "{output:#}"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 4);
@@ -659,7 +797,7 @@ async fn checker_routes_one_external_fact_gap_to_bounded_direct_retrieval() {
 }
 
 #[tokio::test]
-async fn partial_direct_gap_routes_to_maker_instead_of_another_search_loop() {
+async fn direct_only_degrades_when_the_checker_requests_a_maker() {
     let workspace = std::env::temp_dir().join(format!(
         "a3s-repeated-direct-convergence-{}-{}",
         std::process::id(),
@@ -713,14 +851,232 @@ async fn partial_direct_gap_routes_to_maker_instead_of_another_search_loop() {
     let result = executor
         .execute("dynamic_workflow", &args)
         .await
-        .expect("the repeated direct gap should converge through a maker");
+        .expect("the repeated direct gap should terminate without a maker");
     assert_eq!(result.exit_code, 0, "{}", result.output);
     let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
 
-    assert_eq!(output["checker"]["decision"], "finalize", "{output:#}");
+    assert_eq!(output["mode"], "direct_web_degraded", "{output:#}");
+    assert_eq!(output["checker"]["decision"], "degrade", "{output:#}");
+    assert_eq!(output["checker"]["next_action"], "none", "{output:#}");
     assert_eq!(output["plan"]["execution_route"], "direct_only");
-    assert_eq!(checker_calls.load(Ordering::SeqCst), 3);
-    assert_eq!(maker_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(output["route_limited"], true, "{output:#}");
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn direct_only_does_not_replace_a_failed_direct_step_with_a_maker() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-direct-only-step-failure-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "adaptive loop current status",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    let original_source = args["source"].as_str().unwrap();
+    let source = original_source.replace(
+        "return await collectDirectWebResearch();",
+        "throw new Error(\"simulated direct retrieval step failure\");",
+    );
+    assert_ne!(
+        source, original_source,
+        "the failure fixture must patch the direct step"
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(8);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("the failed direct step should close the direct-only route");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(output["mode"], "direct_web_degraded", "{output:#}");
+    assert_eq!(output["plan"]["execution_route"], "direct_only");
+    assert_eq!(output["route_limited"], true, "{output:#}");
+    assert!(
+        output["retrieval_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("simulated direct retrieval step failure")),
+        "{output:#}"
+    );
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn direct_only_fixture_miss_does_not_start_a_maker() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-direct-only-fixture-miss-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: true,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    executor.register_dynamic_tool(Arc::new(PlannedLoopSearchTool));
+    executor.register_dynamic_tool(Arc::new(PlannedLoopFetchTool));
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "adaptive loop current status",
+        false,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    args["input"]["engineered_loop_fixture"] = serde_json::json!(true);
+    let source = use_planned_web_tools(
+        args["source"].as_str().unwrap(),
+        "planned_web_search",
+        "planned_web_fetch",
+    );
+    args["source"] = serde_json::Value::String(source);
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(12);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("the fixture miss should close the direct-only route");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(output["mode"], "direct_web_degraded", "{output:#}");
+    assert_eq!(output["plan"]["execution_route"], "direct_only");
+    assert_eq!(output["route_limited"], true, "{output:#}");
+    assert!(
+        output["research"]["metadata"]["source_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0),
+        "the fixture must miss its terminal gate after retaining direct evidence: {output:#}"
+    );
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn direct_only_without_direct_capability_does_not_use_the_final_maker_fallback() {
+    let workspace = std::env::temp_dir().join(format!(
+        "a3s-direct-only-final-fallback-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let executor = ToolExecutor::new(workspace.to_string_lossy().to_string());
+    let planner_calls = Arc::new(AtomicUsize::new(0));
+    let checker_calls = Arc::new(AtomicUsize::new(0));
+    let maker_calls = Arc::new(AtomicUsize::new(0));
+    register_planned_loop_tools(
+        &executor,
+        PlannedLoopTaskTool {
+            tool_name: "parallel_task",
+            planner_calls: Arc::clone(&planner_calls),
+            checker_calls: Arc::clone(&checker_calls),
+            maker_calls: Arc::clone(&maker_calls),
+            investigation: false,
+            targeted_direct: false,
+            repeated_direct: false,
+            digest_regression: false,
+            linked_url_priority: false,
+            maker_failure: false,
+            maker_then_direct: false,
+            first_checker_delay_ms: 0,
+            retrieval_timeout_override_ms: 0,
+            checker_failure_at: None,
+        },
+    );
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let mut args = super::deep_research_workflow_args_with_scope(
+        "adaptive loop current status",
+        false,
+        super::DeepResearchEvidenceScope::LocalOnly,
+    );
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(8);
+
+    let result = executor
+        .execute("dynamic_workflow", &args)
+        .await
+        .expect("the unavailable direct route should close without a maker");
+    assert_eq!(result.exit_code, 0, "{}", result.output);
+    let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+
+    assert_eq!(output["mode"], "direct_web_degraded", "{output:#}");
+    assert_eq!(output["plan"]["execution_route"], "direct_only");
+    assert_eq!(output["route_limited"], true, "{output:#}");
+    assert_eq!(output["research"]["algorithm"], "direct_only", "{output:#}");
+    assert_eq!(planner_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(checker_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(maker_calls.load(Ordering::SeqCst), 0);
 
     let _ = std::fs::remove_dir_all(&workspace);
 }
@@ -817,8 +1173,8 @@ async fn checker_digest_keeps_maker_evidence_after_oversized_direct_evidence() {
             maker_then_direct: false,
             // The checker deliberately outlives the retrieval clock. Its wait must
             // not consume the independent evidence-retrieval budget.
-            first_checker_delay_ms: 600,
-            retrieval_timeout_override_ms: 500,
+            first_checker_delay_ms: 2_500,
+            retrieval_timeout_override_ms: 2_000,
             checker_failure_at: None,
         },
     );

@@ -3,12 +3,46 @@ use std::sync::Arc;
 use a3s_code_core::llm::{create_client_with_config, LlmConfig};
 use a3s_code_core::{CodeConfig, LlmClient, SessionOptions};
 
+use crate::model::route::{ModelRoute, ModelSource};
+
 pub(crate) fn resolve_config_llm_client(
     code_config: &CodeConfig,
     options: &SessionOptions,
     session_id: &str,
 ) -> Result<Arc<dyn LlmClient>, String> {
-    prepare_config_llm_config(code_config, options, session_id).map(create_client_with_config)
+    let model_ref = options
+        .model
+        .as_deref()
+        .or(code_config.default_model.as_deref())
+        .ok_or_else(|| "default_model must be set in 'provider/model' format".to_string())?;
+    let route = model_ref
+        .parse::<ModelRoute>()
+        .map_err(|error| format!("invalid model route `{model_ref}`: {error}"))?;
+    match route.source {
+        ModelSource::Config => {
+            if route.model == model_ref {
+                prepare_config_llm_config(code_config, options, session_id)
+                    .map(create_client_with_config)
+            } else {
+                let mut routed = options.clone();
+                routed.model = Some(route.model);
+                prepare_config_llm_config(code_config, &routed, session_id)
+                    .map(create_client_with_config)
+            }
+        }
+        ModelSource::Claude | ModelSource::Codex | ModelSource::Kimi | ModelSource::CodeBuddy => {
+            let provider = route
+                .source
+                .account_provider()
+                .ok_or_else(|| format!("{} is not an account provider", route.source.label()))?;
+            provider
+                .client(&route.model, session_id)
+                .map_err(|error| format!("{} account unavailable: {error}", provider.label()))
+        }
+        ModelSource::OsGateway => {
+            Err("A3S OS gateway routes require a signed-in interactive session".to_string())
+        }
+    }
 }
 
 pub(crate) fn resolve_session_llm_client(

@@ -339,6 +339,12 @@ impl DeepResearchStateJournal {
                 }
             }
         }
+        inquiry::append_accepted_evidence_relations(
+            &self.runtime,
+            &self.run_id,
+            evidence,
+            &mut operations,
+        )?;
         let expected_head = graph_event_head(self.runtime.events()).map(str::to_string);
         self.runtime.project_external(
             external_event(&self.run_id, &event),
@@ -415,6 +421,15 @@ impl DeepResearchStateJournal {
             let _ = tokio::fs::remove_file(temp).await;
         }
     }
+}
+
+pub(crate) async fn record_inquiry_state(
+    workspace: &Path,
+    run_id: &str,
+    events: &[a3s::research::InquiryEvent],
+    state: &a3s::research::InquiryState,
+) -> Result<()> {
+    inquiry::record_inquiry_state(workspace, run_id, events, state).await
 }
 
 pub(crate) async fn record_workflow_started(
@@ -924,6 +939,8 @@ fn bounded_string(value: &str, max_chars: usize) -> String {
 
 #[path = "state_journal_diagnostics.rs"]
 mod diagnostics;
+#[path = "state_journal/inquiry.rs"]
+mod inquiry;
 pub(crate) use diagnostics::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run, research_diagnostic,
     research_diff, ResearchDiagnosticKind,

@@ -99,33 +99,56 @@ impl App {
         };
         let args = deep_research_report_generation_args(&prompt, timeout_ms);
         let session = Arc::clone(&self.session);
+        let workflow_output = self
+            .deep_research_workflow
+            .output
+            .clone()
+            .unwrap_or_default();
+        let workflow_metadata = self.deep_research_workflow.metadata.clone();
+        let run_id = self
+            .deep_research_workflow
+            .args
+            .as_ref()
+            .and_then(|args| args.get("run_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("deepresearch-report")
+            .to_string();
+        let use_sectioned_report = !phase.is_repair()
+            && sectioned_report_available(&workflow_output, workflow_metadata.as_ref());
 
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
-                let timeout = Duration::from_millis(timeout_ms);
-                let result = match tokio::time::timeout(
-                    timeout,
-                    session.tool("generate_object", args),
-                )
-                .await
-                {
-                    Ok(Ok(result)) => Ok(result),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => {
-                        let _ = session
-                            .cancel_and_settle(
-                                Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                            )
-                            .await;
-                        Err(format!(
-                            "DeepResearch {} model call timed out after {timeout_ms} ms",
-                            if phase.is_repair() {
-                                "repair"
-                            } else {
-                                "synthesis"
-                            }
-                        ))
+                let result = if use_sectioned_report {
+                    generate_sectioned_report(
+                        &session,
+                        &query,
+                        &workflow_output,
+                        workflow_metadata.as_ref(),
+                        &run_id,
+                    )
+                    .await
+                } else {
+                    let timeout = Duration::from_millis(timeout_ms);
+                    match tokio::time::timeout(timeout, session.tool("generate_object", args)).await
+                    {
+                        Ok(Ok(result)) => Ok(result),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => {
+                            let _ = session
+                                .cancel_and_settle(
+                                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                                )
+                                .await;
+                            Err(format!(
+                                "DeepResearch {} model call timed out after {timeout_ms} ms",
+                                if phase.is_repair() {
+                                    "repair"
+                                } else {
+                                    "synthesis"
+                                }
+                            ))
+                        }
                     }
                 };
                 Msg::DeepResearchReportGenerated {
@@ -160,9 +183,27 @@ impl App {
         }
         self.host_progress_inflight = false;
 
-        let generated = result.and_then(|result| {
-            deep_research_report_from_generation(&result.output, result.exit_code)
-        });
+        let mut projection_merge_error = None;
+        if let Ok(generated) = result.as_ref() {
+            if let Some(workflow_output) = self.deep_research_workflow.output.as_mut() {
+                if let Err(error) = merge_sectioned_inquiry_projection(
+                    workflow_output,
+                    self.deep_research_workflow.metadata.as_mut(),
+                    generated.metadata.as_ref(),
+                ) {
+                    projection_merge_error = Some(format!(
+                        "DeepResearch sectioned report projection merge failed: {error}"
+                    ));
+                }
+            }
+        }
+
+        let generated = match projection_merge_error {
+            Some(error) => Err(error),
+            None => result.and_then(|result| {
+                deep_research_report_from_generation(&result.output, result.exit_code)
+            }),
+        };
         let (generated_report, mut generation_error) = match generated {
             Ok(report) => (Some(report), None),
             Err(error) => (None, Some(error)),
@@ -303,398 +344,6 @@ impl App {
         self.loop_remaining = 0;
         self.deep_research_report_repair_used = true;
         self.complete_turn()
-    }
-
-    pub(super) fn start_deep_research_workflow(
-        &mut self,
-        query: String,
-        _os_runtime: bool,
-        evidence_scope: DeepResearchEvidenceScope,
-        runtime_expectation: Option<RuntimeExpectation>,
-    ) -> Option<Cmd<Msg>> {
-        self.auto_review.on_user_turn();
-        self.last_activity = Instant::now();
-        let os_runtime = false;
-        self.streaming.clear();
-        self.got_delta = false;
-        self.turn_text.clear();
-        self.turn_had_agent_activity = false;
-        self.turn_text_after_activity = false;
-        if self.deep_research_goal_restore.is_none() {
-            self.deep_research_goal_restore = Some((self.goal.clone(), self.goal_since));
-        }
-        self.goal = Some(deep_research_goal(&query));
-        self.goal_since = Some(Instant::now());
-        self.engage_single_turn_autonomy();
-        let run_started_at = Instant::now();
-        self.deep_research_loop = Some(DeepResearchLoop {
-            query: query.clone(),
-            total_layers: 1,
-            os_runtime,
-            evidence_scope,
-            started_at: run_started_at,
-            phase_started_at: None,
-        });
-        self.deep_research_report_repair_used = false;
-        self.deep_research_workflow
-            .reset_for_run(snapshot_deep_research_report_artifacts(
-                Path::new(&self.cwd),
-                &query,
-            ));
-        self.deep_research_outcome = DeepResearchRunOutcome::Active;
-        self.deep_research_subagent_settlement_inflight = false;
-        self.deep_research_journal_finalization_inflight = false;
-        self.deep_research_terminal_artifacts = None;
-        self.deep_research_agent_event_sequence = 0;
-        self.deep_research_projection = None;
-        self.pending_deep_research_report_repair_prompt = None;
-        self.pending_deep_research_synthesis = None;
-        self.pending_deep_research_report_view = None;
-        self.deep_research_report_tools.clear();
-        self.deep_research_report_tool_gate
-            .set_report_target(Path::new(&self.cwd), &query);
-        self.deep_research_report_tool_gate
-            .set_evidence_scope(evidence_scope);
-        if let Some(expectation) = runtime_expectation {
-            self.runtime_expectation = Some(expectation);
-        }
-        self.ultracode_synthesis_inflight = false;
-        self.ultracode_synthesis_used = false;
-        self.last_paint = None;
-        self.viewport.set_auto_scroll(true);
-        self.plan.clear();
-        self.runtime.clear_turn_entities();
-        let display_task = format!("✦\u{200A}{query}");
-        self.runtime.set_subagent_task(display_task.clone());
-        self.running_task = Some(display_task);
-        self.state = State::Streaming;
-        self.relayout();
-        self.stream_started = Some(Instant::now());
-        self.spinner.start();
-        self.push_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render("  ⇉ gathering evidence with bounded recursive DynamicWorkflowRuntime…"),
-        );
-        self.rebuild_viewport();
-
-        let budget = deep_research_budget_for_effort_index(self.effort, self.context_limit);
-        let mut args =
-            deep_research_workflow_args_for_budget(&query, os_runtime, evidence_scope, budget);
-        ensure_deep_research_workflow_run_id(&mut args);
-        self.deep_research_workflow.args = Some(args.clone());
-        let (progress_rx, workflow_join) = self
-            .session
-            .tool_with_events("dynamic_workflow", args.clone());
-        let progress_rx = Arc::new(Mutex::new(progress_rx));
-        self.rx = Some(progress_rx.clone());
-        self.stream_join = None;
-        self.host_tool_abort = Some(workflow_join.abort_handle());
-        self.host_progress_inflight = true;
-        self.host_tool_call_id = None;
-        self.interrupting = false;
-        let workflow_abort = workflow_join.abort_handle();
-        let configured_timeout_ms = deep_research_workflow_host_timeout_ms(&args);
-        let timeout = Duration::from_millis(configured_timeout_ms).min(
-            Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
-                .saturating_sub(run_started_at.elapsed()),
-        );
-        let timeout_ms = timeout.as_millis().min(u128::from(u64::MAX)) as u64;
-        let workflow_workspace = PathBuf::from(&self.cwd);
-        let args_for_timeout = args.clone();
-        let journal_run_id = args
-            .get("run_id")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let journal_spec = ResearchSpec {
-            query: query.clone(),
-            current_date: chrono::Local::now().date_naive().to_string(),
-            evidence_scope: evidence_scope.label().to_string(),
-            required_claims: Vec::new(),
-            total_budget_ms: timeout_ms,
-            finalization_reserve_ms: timeout_ms.saturating_mul(15) / 100,
-            host_pid: std::process::id(),
-        };
-        let finalization_reserve_ms = journal_spec.finalization_reserve_ms;
-        Some(cmd::batch(vec![
-            cmd::cmd(move || async move {
-                if let Some(run_id) = journal_run_id.as_deref() {
-                    let _ = record_deep_research_workflow_started(
-                        &workflow_workspace,
-                        run_id,
-                        journal_spec,
-                    )
-                    .await;
-                }
-                let mut workflow_join = workflow_join;
-                let result = match tokio::time::timeout(timeout, &mut workflow_join).await {
-                    Ok(Ok(result)) => result.map_err(|err| err.to_string()),
-                    Ok(Err(err)) => Err(err.to_string()),
-                    Err(_) => {
-                        workflow_abort.abort();
-                        let _ = tokio::time::timeout(
-                            Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                            &mut workflow_join,
-                        )
-                        .await;
-                        let message = format!(
-                            "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
-                        );
-                        deep_research_workflow_timeout_tool_result(
-                            &workflow_workspace,
-                            &args_for_timeout,
-                            message,
-                        )
-                    }
-                };
-                let result = result.map(|mut result| {
-                    result.output = deep_research_canonical_workflow_output(
-                        &result.output,
-                        result.metadata.as_ref(),
-                    );
-                    result
-                });
-                let (workflow_output, workflow_metadata) = match &result {
-                    Ok(result) => (result.output.as_str(), result.metadata.as_ref()),
-                    Err(error) => (error.as_str(), None),
-                };
-                let convergence = evaluate_convergence(deep_research_convergence_input(
-                    DeepResearchConvergenceContext {
-                        query: &query,
-                        evidence_scope,
-                        workflow_output,
-                        workflow_metadata,
-                        args: &args,
-                        elapsed: run_started_at.elapsed(),
-                        total_budget_ms: timeout_ms,
-                        finalization_reserve_ms,
-                    },
-                ));
-                let accepted_evidence =
-                    accepted_evidence_ledger(workflow_output, workflow_metadata);
-                if let Some(run_id) = journal_run_id.as_deref() {
-                    let _ = record_deep_research_workflow_completed(
-                        &workflow_workspace,
-                        run_id,
-                        result.is_ok(),
-                    )
-                    .await;
-                    let contradictory_evidence = accepted_evidence
-                        .iter()
-                        .filter(|item| !item.contradictions.is_empty())
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    if !contradictory_evidence.is_empty() {
-                        let _ = fork_current_for_contradiction_review(
-                            &workflow_workspace,
-                            run_id,
-                            &contradictory_evidence,
-                        )
-                        .await;
-                    }
-                    let _ = record_deep_research_evidence_ledger(
-                        &workflow_workspace,
-                        run_id,
-                        &accepted_evidence,
-                    )
-                    .await;
-                    let _ =
-                        record_deep_research_convergence(&workflow_workspace, run_id, &convergence)
-                            .await;
-                }
-                Msg::DeepResearchWorkflowCompleted {
-                    query,
-                    os_runtime,
-                    args,
-                    result,
-                    convergence,
-                    accepted_evidence,
-                }
-            }),
-            pump(progress_rx),
-            spinner_tick(),
-            stream_commit_tick(),
-        ]))
-    }
-
-    pub(super) fn on_deep_research_workflow_completed(
-        &mut self,
-        query: String,
-        os_runtime: bool,
-        args: serde_json::Value,
-        result: Result<ToolCallResult, String>,
-        convergence: ConvergenceDecision,
-        accepted_evidence: Vec<AcceptedEvidence>,
-    ) -> Option<Cmd<Msg>> {
-        let current_run_id = self
-            .deep_research_workflow
-            .args
-            .as_ref()
-            .and_then(|value| value.get("run_id"))
-            .and_then(serde_json::Value::as_str);
-        let completed_run_id = args.get("run_id").and_then(serde_json::Value::as_str);
-        let current_query = self
-            .deep_research_loop
-            .as_ref()
-            .map(|state| state.query.as_str());
-        if self.state != State::Streaming
-            || self.interrupting
-            || current_query != Some(query.as_str())
-            || current_run_id.is_none()
-            || current_run_id != completed_run_id
-        {
-            return None;
-        }
-        self.host_tool_abort = None;
-        self.host_progress_inflight = false;
-        self.rx = None;
-        let tool_id = self.host_tool_call_id.take().unwrap_or_else(|| {
-            format!(
-                "host-dynamic_workflow-{}",
-                completed_run_id.unwrap_or("unknown")
-            )
-        });
-
-        let (output, exit_code, metadata) = match result {
-            Ok(result) => (result.output, result.exit_code, result.metadata),
-            Err(error) => (error, 1, None),
-        };
-        self.deep_research_workflow.output = Some(output.clone());
-        self.deep_research_workflow.metadata = metadata.clone();
-        self.deep_research_workflow.args = Some(args.clone());
-        let display_output = deep_research_tool_card_output(&output);
-        let completed = self.runtime.end_tool(
-            &tool_id,
-            "dynamic_workflow".to_string(),
-            Some(args.clone()),
-            display_output.clone(),
-            exit_code,
-        );
-        self.messages.finish_tool_with_state(
-            &tool_id,
-            "dynamic_workflow".to_string(),
-            completed.args.clone(),
-            completed.output.clone(),
-            completed.exit_code,
-            metadata.clone(),
-            completed.state,
-            true,
-        );
-        self.rebuild_viewport();
-        self.record_runtime_tool_evidence("dynamic_workflow");
-        if metadata
-            .as_ref()
-            .is_some_and(|value| json_contains_tool_evidence(value, "runtime"))
-        {
-            self.record_runtime_tool_evidence("runtime");
-        }
-        if metadata
-            .as_ref()
-            .is_some_and(|value| json_contains_tool_evidence(value, "parallel_task"))
-        {
-            self.record_runtime_parallel_evidence();
-        }
-        self.backfill_parallel_subagents_from_workflow_metadata(metadata.as_ref());
-        if completed.first_terminal {
-            self.capture_workflow("dynamic_workflow", completed.args.as_ref());
-        }
-        if let Some(spec) = self.find_remote_view_spec(&output) {
-            self.remember_remote_view(spec);
-        }
-        let evidence_scope = deep_research_evidence_scope_from_args(&args, &query);
-        if let Some(status) = deep_research_plan_status(&output) {
-            self.push_line(&Style::new().fg(TN_GRAY).render(&status));
-        }
-
-        let report_outcome = deep_research_report_outcome_for_workflow(
-            &query,
-            evidence_scope,
-            &output,
-            metadata.as_ref(),
-        );
-        if accepted_evidence.is_empty()
-            || matches!(report_outcome, DeepResearchRunOutcome::Degraded)
-        {
-            self.loop_remaining = 0;
-            self.deep_research_outcome = DeepResearchRunOutcome::Degraded;
-            let status = match materialize_deep_research_recovery_report(
-                Path::new(&self.cwd),
-                &query,
-                &format!(
-                    "Evidence collection ended without a validated evidence package. Convergence decision: {}.",
-                    convergence.reason
-                ),
-                &output,
-                metadata.as_ref(),
-            ) {
-                Ok(artifacts) => {
-                    self.stage_deep_research_report(
-                        &artifacts,
-                        DeepResearchRunOutcome::Degraded,
-                    );
-                    format!(
-                        "DeepResearch stopped after bounded evidence collection because {}. A low-confidence recovery report was written to `{}`.",
-                        convergence.reason,
-                        artifacts.html.display()
-                    )
-                }
-                Err(error) => format!(
-                    "DeepResearch stopped after bounded evidence collection and could not write its recovery report: {error}"
-                ),
-            };
-            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {status}")));
-            self.mark_assistant_text(&status);
-            self.turn_text.clear();
-            self.turn_text.push_str(&status);
-            self.messages
-                .push(TranscriptEntry::assistant_markdown(status));
-            self.rebuild_viewport();
-            return self.complete_turn();
-        }
-
-        let synthesis_evidence = accepted_evidence_synthesis_payload(&accepted_evidence, &output);
-        let prompt = if exit_code == 0 {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  ⇉ evidence gathered · synthesizing source-backed report…"),
-            );
-            deep_research_synthesis_prompt_with_scope(
-                &query,
-                os_runtime,
-                &synthesis_evidence,
-                None,
-                evidence_scope,
-            )
-        } else {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render("  ⚠ dynamic workflow failed; starting recovery synthesis…"),
-            );
-            deep_research_recovery_prompt_with_scope(
-                &query,
-                os_runtime,
-                &synthesis_evidence,
-                None,
-                evidence_scope,
-            )
-        };
-        self.deep_research_report_tool_gate.set_synthesis_only();
-        if !self.queue.is_empty() {
-            // Treat messages submitted during evidence collection as user
-            // follow-ups. Run them before report synthesis, then resume this
-            // exact synthesis once the user queue is empty.
-            let display = format!("✦\u{200A}synthesize {query}");
-            self.pending_deep_research_synthesis = Some((prompt, display));
-            self.finish();
-            return self.drain_queue();
-        }
-        self.start_deep_research_report_generation(
-            prompt,
-            format!("✦\u{200A}synthesize {query}"),
-            DeepResearchReportGenerationPhase::Synthesis,
-        )
     }
 
     pub(super) fn on_deep_research_synthesis_timed_out(&mut self, token: u64) -> Option<Cmd<Msg>> {

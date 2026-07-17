@@ -25,10 +25,9 @@
       "and", "comparison", "design", "for", "from", "official", "results", "source",
       "the", "to", "versus", "vs", "with"
     ]);
-    return uniqueStrings(
-      (String(value || "").toLowerCase().match(/[a-z0-9][a-z0-9+_.-]{2,}/g) || [])
-        .filter((term) => !stopwords.has(term))
-    ).slice(0, 16);
+    return unicodeSearchTerms(value, 32)
+      .filter((term) => !stopwords.has(term))
+      .slice(0, 16);
   };
   const researchContextText = () => {
     const planValues = (value) => {
@@ -103,17 +102,21 @@
       ...queryTerms()
     ]).slice(0, 24);
   };
-  const sourceMatchesEvidenceFocus = (item) => {
+  const evidenceFocusRelevanceScore = (item) => {
     const focus = Array.isArray(item && item.evidence_queries)
       ? item.evidence_queries.join(" ")
       : "";
     const terms = evidenceFocusTerms(focus);
     if (terms.length === 0) {
-      return true;
+      return 0;
     }
-    const text = `${item.title || ""} ${item.url || ""} ${item.content || ""}`;
-    const matched = terms.filter((term) => queryTermMatches(text, term)).length;
-    return matched >= Math.min(2, terms.length);
+    const title = String(item.title || "");
+    const url = String(item.url || "");
+    const content = String(item.content || "");
+    return terms.reduce((score, term) => score +
+      (queryTermMatches(title, term) ? 5 : 0) +
+      (queryTermMatches(url, term) ? 4 : 0) +
+      (queryTermMatches(content, term) ? 1 : 0), 0);
   };
   const evidenceSnippet = (text, fallback, limit, focus) => {
     const compactFallback = compactText(fallback || "", limit);
@@ -316,12 +319,23 @@
   const uniqueSearchResults = (items) => {
     const seen = new Map();
     const out = [];
-    const minimumScore = queryTerms().length <= 1 ? 1 : 3;
     const ranked = items
-      .map((item) => Object.assign({}, item, { relevance_score: sourceRelevanceScore(item) }))
-      .filter((item) => item.planned_seed === true || (
-        item.relevance_score >= minimumScore && sourceMatchesEvidenceFocus(item)
-      ))
+      .map((item) => {
+        const globalScore = sourceRelevanceScore(item);
+        const focusScore = evidenceFocusRelevanceScore(item);
+        return Object.assign({}, item, {
+          relevance_score: (Number.isFinite(globalScore) ? globalScore : 0) + focusScore,
+          evidence_focus_score: focusScore
+        });
+      })
+      // Retrieval queries are authored semantically by the planner or inquiry
+      // model and may be in a different language from the user's request.
+      // Candidate admission therefore follows the query that produced the
+      // result; the later fetch/checker gates still decide evidentiary value.
+      // A model-authored retrieval query may expose one high-value signal in a
+      // partial search result. Admit that lead for fetching; substantive page
+      // text and the independent checker remain authoritative for evidence.
+      .filter((item) => item.planned_seed === true || item.evidence_focus_score > 0)
       .sort((a, b) => b.relevance_score - a.relevance_score);
     for (const item of ranked) {
       const url = isNonEmptyString(item.url) ? item.url.trim() : "";

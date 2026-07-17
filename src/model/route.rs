@@ -9,6 +9,7 @@ pub(crate) enum ModelSource {
     Config,
     Claude,
     Codex,
+    Kimi,
     #[serde(rename = "codebuddy", alias = "code_buddy", alias = "workbuddy")]
     CodeBuddy,
     OsGateway,
@@ -20,6 +21,7 @@ impl ModelSource {
             Self::Config => "config.acl",
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::Kimi => "Kimi",
             Self::CodeBuddy => "WorkBuddy",
             Self::OsGateway => "A3S OS",
         }
@@ -30,6 +32,7 @@ impl ModelSource {
             Self::Config => None,
             Self::Claude => Some("claude-code"),
             Self::Codex => Some("codex"),
+            Self::Kimi => Some("kimi"),
             Self::CodeBuddy => Some("workbuddy"),
             Self::OsGateway => Some("a3s-os"),
         }
@@ -41,6 +44,7 @@ impl ModelSource {
         match provider {
             crate::account_providers::AccountProvider::Claude => Self::Claude,
             crate::account_providers::AccountProvider::Codex => Self::Codex,
+            crate::account_providers::AccountProvider::Kimi => Self::Kimi,
             crate::account_providers::AccountProvider::CodeBuddy => Self::CodeBuddy,
         }
     }
@@ -51,6 +55,7 @@ impl ModelSource {
         match self {
             Self::Claude => Some(crate::account_providers::AccountProvider::Claude),
             Self::Codex => Some(crate::account_providers::AccountProvider::Codex),
+            Self::Kimi => Some(crate::account_providers::AccountProvider::Kimi),
             Self::CodeBuddy => Some(crate::account_providers::AccountProvider::CodeBuddy),
             Self::Config | Self::OsGateway => None,
         }
@@ -97,6 +102,7 @@ impl FromStr for ModelRoute {
         for (prefix, source) in [
             ("claude-code/", ModelSource::Claude),
             ("codex/", ModelSource::Codex),
+            ("kimi/", ModelSource::Kimi),
             ("workbuddy/", ModelSource::CodeBuddy),
             ("codebuddy/", ModelSource::CodeBuddy),
             ("a3s-os/", ModelSource::OsGateway),
@@ -114,6 +120,7 @@ fn has_reserved_prefix(model: &str) -> bool {
         "config",
         "claude-code",
         "codex",
+        "kimi",
         "workbuddy",
         "codebuddy",
         "a3s-os",
@@ -150,6 +157,7 @@ mod tests {
                 "claude-opus-4-6",
             ),
             ("codex/gpt-5.2-codex", ModelSource::Codex, "gpt-5.2-codex"),
+            ("kimi/kimi-for-coding", ModelSource::Kimi, "kimi-for-coding"),
             ("workbuddy/glm-5.1", ModelSource::CodeBuddy, "glm-5.1"),
             ("a3s-os/team/model", ModelSource::OsGateway, "team/model"),
             ("config/codex/custom", ModelSource::Config, "codex/custom"),

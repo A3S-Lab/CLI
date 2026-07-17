@@ -7,6 +7,7 @@ struct RestoredSessionInstall {
     metadata: CodeWebSessionMetadata,
     controls: CodeWebSessionControls,
     context: CodeWebSessionContext,
+    turn_queue: CodeWebStoredTurnQueue,
     settings: CodeWebSessionSettings,
     llm_client: Arc<dyn a3s_code_core::LlmClient>,
 }
@@ -76,6 +77,10 @@ impl KernelService {
             .as_ref()
             .map(|stored| stored.context.clone())
             .unwrap_or_default();
+        let stored_turn_queue = stored
+            .as_ref()
+            .map(|stored| stored.turn_queue.clone())
+            .unwrap_or_default();
         let messages = stored
             .as_ref()
             .map(|stored| stored.messages.clone())
@@ -126,7 +131,7 @@ impl KernelService {
             &workspace,
             Some(session_id),
             self.effective_model(&settings),
-            &controls.effort,
+            &controls,
             &settings,
         )
         .await?;
@@ -175,6 +180,7 @@ impl KernelService {
                     compact_summary: stored_context.compact_summary.clone(),
                     ..CodeWebSessionContext::default()
                 },
+                turn_queue: stored_turn_queue.clone(),
                 settings: settings.clone(),
                 llm_client,
             },
@@ -194,6 +200,7 @@ impl KernelService {
                 messages,
                 controls,
                 stored_context,
+                stored_turn_queue,
                 settings,
             ))
             .await
@@ -267,7 +274,7 @@ impl KernelService {
                 &workspace,
                 Some(&session_id),
                 self.effective_model(&settings),
-                &controls.effort,
+                &controls,
                 &settings,
             )
             .await
@@ -302,6 +309,7 @@ impl KernelService {
                     metadata,
                     controls,
                     context: CodeWebSessionContext::default(),
+                    turn_queue: CodeWebStoredTurnQueue::default(),
                     settings,
                     llm_client,
                 },
@@ -334,6 +342,7 @@ impl KernelService {
             metadata,
             controls,
             mut context,
+            turn_queue,
             settings,
             llm_client,
         } = restored;
@@ -368,7 +377,12 @@ impl KernelService {
             .session_settings
             .lock()
             .await
-            .insert(session_id, settings);
+            .insert(session_id.clone(), settings);
+        self.state
+            .session_turn_queues
+            .lock()
+            .await
+            .insert(session_id, CodeWebSessionTurnQueue::restore(turn_queue));
     }
 
     pub(super) async fn persist_session_state(&self, session_id: &str) -> BootResult<()> {
@@ -399,6 +413,7 @@ impl KernelService {
         let controls = self.session_controls_snapshot(session_id).await;
         let context = self.session_context_snapshot(session_id).await;
         let settings = self.session_settings_snapshot(session_id).await;
+        let turn_queue = self.session_turn_queue_snapshot(session_id).await;
         let stored = CodeWebStoredSession::new(
             session_id.to_string(),
             metadata,
@@ -407,6 +422,7 @@ impl KernelService {
             CodeWebStoredContext {
                 compact_summary: context.compact_summary,
             },
+            turn_queue,
             settings,
         );
         self.state

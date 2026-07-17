@@ -67,13 +67,16 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     workspace: &Path,
     session_id: Option<&str>,
     model: Option<String>,
-    effort: &str,
+    controls: &CodeWebSessionControls,
     settings: &CodeWebSessionSettings,
 ) -> BootResult<(SessionOptions, CodeWebSessionRuntime, Arc<dyn LlmClient>)> {
     let runtime = code_web_session_runtime_for_workspace(state, workspace).await;
     let context_limit = code_web_context_limit_for_model(state, model.as_deref());
-    let budget =
-        budget::budget_plan_for_effort_id(effort, Some(context_limit), BudgetWorkload::Interactive);
+    let budget = budget::budget_plan_for_effort_id(
+        &controls.effort,
+        Some(context_limit),
+        BudgetWorkload::Interactive,
+    );
     let permission_policy = permission_policy_for_mode(&settings.permission_mode);
     let permission_checker = permission_checker_for_mode(&settings.permission_mode, workspace);
     let mut options = SessionOptions::new()
@@ -96,8 +99,8 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_confirmation_policy(confirmation_policy_for_mode(&settings.permission_mode))
         .with_permission_policy(permission_policy)
         .with_permission_checker(Arc::new(permission_checker))
-        .with_planning_mode(planning_mode(settings.planning_mode.as_deref()))
-        .with_goal_tracking(settings.goal_tracking.unwrap_or(false));
+        .with_planning_mode(effective_planning_mode(controls, settings))
+        .with_goal_tracking(effective_goal_tracking(controls, settings));
 
     let session_id = session_id
         .map(ToOwned::to_owned)
@@ -177,7 +180,7 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
             &workspace,
             Some(&session_id),
             model,
-            &controls.effort,
+            &controls,
             &settings,
         )
         .await?;
@@ -212,6 +215,23 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
     }
 
     Ok(rebuilt)
+}
+
+fn effective_planning_mode(
+    controls: &CodeWebSessionControls,
+    settings: &CodeWebSessionSettings,
+) -> PlanningMode {
+    if controls.goal.is_some() {
+        return PlanningMode::Enabled;
+    }
+    planning_mode(settings.planning_mode.as_deref())
+}
+
+fn effective_goal_tracking(
+    controls: &CodeWebSessionControls,
+    settings: &CodeWebSessionSettings,
+) -> bool {
+    controls.goal.is_some() || settings.goal_tracking.unwrap_or(false)
 }
 
 fn planning_mode(value: Option<&str>) -> PlanningMode {
@@ -356,6 +376,41 @@ mod tests {
     use super::*;
     use a3s_code_core::config::{ModelConfig, ModelLimit, ProviderConfig};
     use std::collections::HashMap;
+
+    #[test]
+    fn active_goal_forces_planning_and_goal_tracking() {
+        let controls = CodeWebSessionControls {
+            goal: Some("Ship verified queue semantics".to_string()),
+            ..CodeWebSessionControls::default()
+        };
+        let settings = CodeWebSessionSettings {
+            planning_mode: Some("disabled".to_string()),
+            goal_tracking: Some(false),
+            ..CodeWebSessionSettings::default()
+        };
+
+        assert_eq!(
+            effective_planning_mode(&controls, &settings),
+            PlanningMode::Enabled
+        );
+        assert!(effective_goal_tracking(&controls, &settings));
+    }
+
+    #[test]
+    fn sessions_without_a_goal_keep_their_selected_execution_modes() {
+        let controls = CodeWebSessionControls::default();
+        let settings = CodeWebSessionSettings {
+            planning_mode: Some("disabled".to_string()),
+            goal_tracking: Some(false),
+            ..CodeWebSessionSettings::default()
+        };
+
+        assert_eq!(
+            effective_planning_mode(&controls, &settings),
+            PlanningMode::Disabled
+        );
+        assert!(!effective_goal_tracking(&controls, &settings));
+    }
 
     #[test]
     fn os_status_does_not_expose_tokens() {
