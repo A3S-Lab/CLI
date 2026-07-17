@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.9.4"
+version = "0.9.5"
 dependencies = [
  "a3s-acl",
  "a3s-boot",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "comrak",
  "crossterm",
@@ -244,6 +244,7 @@ dependencies = [
  "syntect",
  "taffy",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 

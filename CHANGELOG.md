@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-07-17
+
+### Fixed
+
+- Kept emoji presentation and joined grapheme sequences intact when fitting
+  terminal rows, so the Code TUI scrollbar remains in one continuous final
+  column instead of soft-wrapping on affected assistant headings.
+
 ## [0.9.4] - 2026-07-17
 
 ### Added
