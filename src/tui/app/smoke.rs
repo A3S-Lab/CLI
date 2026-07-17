@@ -157,6 +157,68 @@ pub(super) fn run_deep_research_smoke_artifact_step<T>(
     Ok(result)
 }
 
+pub(super) async fn finalize_deep_research_smoke_journal(
+    workspace: &Path,
+    run_id: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+    requested_outcome: DeepResearchRunOutcome,
+    artifacts: &ResearchReportArtifacts,
+) -> anyhow::Result<DeepResearchRunOutcome> {
+    let successful_report = requested_outcome.report_ready();
+    match inquiry_projection_from_workflow(workflow_output, workflow_metadata) {
+        Ok(Some((events, state))) => {
+            if successful_report && state.phase != a3s::research::InquiryPhase::Completed {
+                anyhow::bail!(
+                    "DeepResearch smoke cannot publish from non-completed Inquiry phase {:?}",
+                    state.phase
+                );
+            }
+            record_deep_research_inquiry_state(workspace, run_id, &events, &state).await?;
+        }
+        Ok(None) if successful_report => {
+            anyhow::bail!(
+                "host-managed DeepResearch smoke cannot publish without an Inquiry projection"
+            )
+        }
+        Err(error) if successful_report => return Err(anyhow::Error::msg(error)),
+        Ok(None) | Err(_) => {
+            // A planner or collection failure can precede the first complete
+            // Inquiry projection. The run journal still has to become terminal
+            // so smoke diagnostics never leave an active workflow behind.
+        }
+    }
+
+    let requested_outcome = match requested_outcome {
+        DeepResearchRunOutcome::Completed => ResearchOutcome::Completed,
+        DeepResearchRunOutcome::Qualified => ResearchOutcome::Qualified,
+        DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
+        DeepResearchRunOutcome::Active => {
+            anyhow::bail!("DeepResearch smoke cannot journal an active terminal outcome")
+        }
+    };
+    let projection =
+        record_deep_research_run_terminal(workspace, run_id, requested_outcome, Some(artifacts))
+            .await?;
+    if !projection.outcome.is_terminal()
+        || !projection.active_steps.is_empty()
+        || !projection.active_children.is_empty()
+    {
+        anyhow::bail!(
+            "DeepResearch smoke journal did not settle: outcome={:?}, active_steps={}, active_children={}",
+            projection.outcome,
+            projection.active_steps.len(),
+            projection.active_children.len()
+        );
+    }
+    Ok(match projection.outcome {
+        ResearchOutcome::Completed => DeepResearchRunOutcome::Completed,
+        ResearchOutcome::Qualified => DeepResearchRunOutcome::Qualified,
+        ResearchOutcome::Degraded | ResearchOutcome::Failed => DeepResearchRunOutcome::Degraded,
+        ResearchOutcome::Active => unreachable!("terminal projection cannot remain active"),
+    })
+}
+
 async fn stream_smoke_prompt(session: &AgentSession, prompt: &str) -> anyhow::Result<String> {
     stream_smoke_prompt_inner(session, prompt, None, None).await
 }
@@ -202,7 +264,14 @@ async fn generate_smoke_sectioned_report(
     }
     let result = match tokio::time::timeout(
         remaining,
-        generate_sectioned_report(session, query, workflow_output, workflow_metadata, run_id),
+        generate_sectioned_report(
+            session,
+            query,
+            workflow_output,
+            workflow_metadata,
+            run_id,
+            deadline.phase_deadline,
+        ),
     )
     .await
     {
@@ -463,6 +532,30 @@ async fn run_smoke_deep_research(
     let mut workflow_args =
         deep_research_workflow_args_with_scope(&query, os_runtime, evidence_scope);
     ensure_deep_research_workflow_run_id(&mut workflow_args);
+    let run_id = workflow_args
+        .get("run_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("DeepResearch smoke workflow has no run_id"))?
+        .to_string();
+    let total_budget_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
+    record_deep_research_workflow_started(
+        workspace,
+        &run_id,
+        ResearchSpec {
+            query: query.clone(),
+            current_date: workflow_args
+                .pointer("/input/current_date")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| chrono::Local::now().date_naive().to_string()),
+            evidence_scope: evidence_scope.label().to_string(),
+            required_claims: Vec::new(),
+            total_budget_ms,
+            finalization_reserve_ms: total_budget_ms.saturating_mul(15) / 100,
+            host_pid: std::process::id(),
+        },
+    )
+    .await?;
     let (mut progress_rx, mut workflow_join) =
         spawn_deep_research_inquiry(Arc::clone(&session), workflow_args.clone());
     let workflow_abort = workflow_join.abort_handle();
@@ -558,6 +651,7 @@ async fn run_smoke_deep_research(
     };
     progress_drain.abort();
 
+    let workflow_succeeded = workflow.is_ok();
     let (mut workflow_output, exit_code, mut metadata) = match workflow {
         Ok(result) => (result.output, result.exit_code, result.metadata),
         Err(error) => (error, 1, None),
@@ -565,6 +659,8 @@ async fn run_smoke_deep_research(
     workflow_output = deep_research_canonical_workflow_output(&workflow_output, metadata.as_ref());
     eprintln!("[smoke] deepresearch workflow exit: {exit_code}");
     let accepted_evidence = accepted_evidence_ledger(&workflow_output, metadata.as_ref());
+    record_deep_research_workflow_completed(workspace, &run_id, workflow_succeeded).await?;
+    record_deep_research_evidence_ledger(workspace, &run_id, &accepted_evidence).await?;
     let inquiry_exhausted = inquiry_projection_from_workflow(&workflow_output, metadata.as_ref())
         .ok()
         .flatten()
@@ -600,7 +696,16 @@ async fn run_smoke_deep_research(
             artifacts.markdown.display()
         );
         eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
-        return DeepResearchRunOutcome::Degraded.ensure_smoke_success(&artifacts);
+        let outcome = finalize_deep_research_smoke_journal(
+            workspace,
+            &run_id,
+            &workflow_output,
+            metadata.as_ref(),
+            DeepResearchRunOutcome::Degraded,
+            &artifacts,
+        )
+        .await?;
+        return outcome.ensure_smoke_success(&artifacts);
     }
     let prompt = if exit_code == 0 {
         let synthesis_evidence =
@@ -619,11 +724,6 @@ async fn run_smoke_deep_research(
         deep_research_planned_synthesis_timeout_ms(Some(&workflow_output))
             .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS)
     };
-    let run_id = workflow_args
-        .get("run_id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("deepresearch-smoke")
-        .to_string();
     let mut generated_report = None;
     let mut final_text = if let Some(synthesis_deadline) = deep_research_smoke_phase_deadline(
         run_deadline,
@@ -1011,6 +1111,15 @@ async fn run_smoke_deep_research(
     }
     eprintln!("[smoke] report.md: {}", artifacts.markdown.display());
     eprintln!("[smoke] index.html: {}", artifacts.html.display());
+    let outcome = finalize_deep_research_smoke_journal(
+        workspace,
+        &run_id,
+        &workflow_output,
+        metadata.as_ref(),
+        outcome,
+        &artifacts,
+    )
+    .await?;
     run_deep_research_smoke_artifact_step(run_deadline, "final report validation", || {
         outcome.ensure_smoke_success(&artifacts)
     })?

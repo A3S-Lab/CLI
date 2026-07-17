@@ -4,11 +4,12 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use a3s::research::{
-    InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput, Question,
-    ResearchMethod, ResearchObligation,
+    EvidenceQualityRequirements, InquiryEvent, InquiryLimits, InquiryState,
+    PerspectiveDiscoveryOutput, Question, ResearchMethod, ResearchObligation,
 };
 use a3s_code_core::{AgentEvent, AgentSession};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 
 use super::execution::{call_tool_with_progress, generated_object};
@@ -97,7 +98,7 @@ pub(super) fn validate_plan(value: Value) -> Result<PlannedInquiry, String> {
     let tracks = object
         .get("tracks")
         .and_then(Value::as_array)
-        .expect("research contract validation requires tracks");
+        .ok_or_else(|| "DeepResearch plan did not contain stable research tracks".to_string())?;
     for track in tracks {
         let track = track
             .as_object()
@@ -169,13 +170,33 @@ pub(super) fn research_contract_from_plan(
                 "DeepResearch track `{id}` has no completion criterion"
             ));
         }
-        obligations.push(ResearchObligation::new(
-            id,
-            title,
-            focus,
-            material,
-            completion_criteria,
-        ));
+        let evidence_requirements = track
+            .get("evidence_requirements")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                format!("DeepResearch track `{id}` omitted object `evidence_requirements`")
+            })?;
+        let primary_source_required = evidence_requirements
+            .get("primary_source_required")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                format!("DeepResearch track `{id}` omitted boolean `primary_source_required`")
+            })?;
+        let independent_corroboration_required = evidence_requirements
+            .get("independent_corroboration_required")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                format!(
+                    "DeepResearch track `{id}` omitted boolean `independent_corroboration_required`"
+                )
+            })?;
+        obligations.push(
+            ResearchObligation::new(id, title, focus, material, completion_criteria)
+                .with_evidence_requirements(EvidenceQualityRequirements {
+                    primary_source_required,
+                    independent_corroboration_required,
+                }),
+        );
     }
     if !obligations.iter().any(|obligation| obligation.material) {
         return Err("DeepResearch plan must contain at least one material track".to_string());
@@ -250,7 +271,11 @@ pub(super) fn scout_plan(base: &Value, scout_queries: &[String]) -> Result<Value
                         "perspective": "",
                         "material": false,
                         "questions": [query],
-                        "completion_criteria": ["Retain a traceable source-backed fact or explicitly record the evidence gap"]
+                        "completion_criteria": ["Retain a traceable source-backed fact or explicitly record the evidence gap"],
+                        "evidence_requirements": {
+                            "primary_source_required": false,
+                            "independent_corroboration_required": false
+                        }
                     })
                 })
                 .collect(),
@@ -293,6 +318,13 @@ pub(super) fn perspective_research_plan(
                 .questions
                 .iter()
                 .any(|question| question.material);
+            let evidence_requirements = merged_evidence_requirements(
+                base,
+                perspective
+                    .questions
+                    .iter()
+                    .flat_map(|question| question.obligation_ids.iter().map(String::as_str)),
+            );
             serde_json::json!({
                 "id": perspective.id,
                 "title": title,
@@ -300,7 +332,8 @@ pub(super) fn perspective_research_plan(
                 "perspective": title,
                 "material": material,
                 "questions": perspective.questions.iter().map(|question| question.prompt.as_str()).collect::<Vec<_>>(),
-                "completion_criteria": ["Resolve every material question with traceable evidence or an explicit bounded gap"]
+                "completion_criteria": ["Resolve each linked question with traceable evidence or an explicit bounded gap"],
+                "evidence_requirements": evidence_requirements
             })
         })
         .collect::<Vec<_>>();
@@ -311,23 +344,25 @@ pub(super) fn perspective_research_plan(
     let maximum_questions = discovery
         .perspectives
         .iter()
-        .map(|perspective| {
-            perspective
-                .questions
-                .iter()
-                .filter(|question| question.material)
-                .count()
-        })
+        .map(|perspective| perspective.questions.len())
         .max()
         .unwrap_or_default();
     for question_index in 0..maximum_questions {
         for perspective in &discovery.perspectives {
-            if let Some(question) = perspective
+            // Material questions lead within a perspective, but every
+            // supporting-only perspective still receives a retrieval
+            // opportunity before a second question is scheduled elsewhere.
+            let ordered = perspective
                 .questions
                 .iter()
                 .filter(|question| question.material)
-                .nth(question_index)
-            {
+                .chain(
+                    perspective
+                        .questions
+                        .iter()
+                        .filter(|question| !question.material),
+                );
+            if let Some(question) = ordered.into_iter().nth(question_index) {
                 search_queries.push(question.retrieval_query.clone());
                 if search_queries.len() == 4 {
                     break;
@@ -339,7 +374,7 @@ pub(super) fn perspective_research_plan(
         }
     }
     if search_queries.is_empty() {
-        return Err("perspective discovery produced no material retrieval question".to_string());
+        return Err("perspective discovery produced no retrieval question".to_string());
     }
     let search_count = search_queries.len();
     let track_count = tracks.len();
@@ -386,13 +421,16 @@ pub(super) fn single_wave_research_plan(base: &Value) -> Result<Value, String> {
 pub(super) fn follow_up_research_plan(
     base: &Value,
     questions: &[Question],
+    obligations: &[ResearchObligation],
 ) -> Result<Value, String> {
     let mut plan = base
         .as_object()
         .cloned()
         .ok_or_else(|| "DeepResearch follow-up plan base is not an object".to_string())?;
+    let mut unique_frontiers = BTreeSet::new();
     let bounded = questions
         .iter()
+        .filter(|question| unique_frontiers.insert(question_frontier_key(question)))
         .take(MAX_FOLLOW_UP_QUESTIONS_PER_WAVE)
         .collect::<Vec<_>>();
     if bounded.is_empty() {
@@ -421,6 +459,10 @@ pub(super) fn follow_up_research_plan(
             bounded
                 .iter()
                 .map(|question| {
+                    let evidence_requirements = merged_typed_evidence_requirements(
+                        obligations,
+                        question.obligation_ids.iter().map(String::as_str),
+                    );
                     serde_json::json!({
                         "id": question.id,
                         "title": question.prompt,
@@ -428,7 +470,8 @@ pub(super) fn follow_up_research_plan(
                         "perspective": question.perspective_id.clone().unwrap_or_default(),
                         "material": question.material,
                         "questions": [question.prompt],
-                        "completion_criteria": ["Return traceable evidence or an explicit bounded gap"]
+                        "completion_criteria": ["Return traceable evidence or an explicit bounded gap"],
+                        "evidence_requirements": evidence_requirements
                     })
                 })
                 .collect(),
@@ -447,6 +490,72 @@ pub(super) fn follow_up_research_plan(
         raise_budget_floor(budget, "direct_fetches", bounded.len().saturating_mul(2), 8);
     }
     Ok(Value::Object(plan))
+}
+
+fn merged_typed_evidence_requirements<'a>(
+    obligations: &[ResearchObligation],
+    obligation_ids: impl Iterator<Item = &'a str>,
+) -> Value {
+    let obligation_ids = obligation_ids.collect::<BTreeSet<_>>();
+    let mut primary_source_required = false;
+    let mut independent_corroboration_required = false;
+    for obligation in obligations {
+        if !obligation_ids.contains(obligation.id.as_str()) {
+            continue;
+        }
+        primary_source_required |= obligation.evidence_requirements.primary_source_required;
+        independent_corroboration_required |= obligation
+            .evidence_requirements
+            .independent_corroboration_required;
+    }
+    serde_json::json!({
+        "primary_source_required": primary_source_required,
+        "independent_corroboration_required": independent_corroboration_required,
+    })
+}
+
+/// Preserve the strongest planner-authored evidence contract when a host
+/// wave groups stable obligations into source-derived or follow-up tracks.
+/// This is an ID join over model-authored obligations, not semantic routing.
+fn merged_evidence_requirements<'a>(
+    base: &Value,
+    obligation_ids: impl Iterator<Item = &'a str>,
+) -> Value {
+    let obligation_ids = obligation_ids.collect::<BTreeSet<_>>();
+    let mut primary_source_required = false;
+    let mut independent_corroboration_required = false;
+    for track in base
+        .get("tracks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+    {
+        let Some(id) = track.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if !obligation_ids.contains(id) {
+            continue;
+        }
+        let Some(requirements) = track
+            .get("evidence_requirements")
+            .and_then(Value::as_object)
+        else {
+            continue;
+        };
+        primary_source_required |= requirements
+            .get("primary_source_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        independent_corroboration_required |= requirements
+            .get("independent_corroboration_required")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    }
+    serde_json::json!({
+        "primary_source_required": primary_source_required,
+        "independent_corroboration_required": independent_corroboration_required,
+    })
 }
 
 fn raise_budget_floor(
@@ -481,6 +590,7 @@ pub(super) fn questions_scheduled_for_retrieval(
 ) -> Result<Vec<Question>, String> {
     let mut scheduled_queries = string_array(plan.get("search_queries"), "search_queries", 4)?
         .into_iter()
+        .map(|query| normalize_retrieval_query(&query))
         .collect::<BTreeSet<_>>();
     if scheduled_queries.is_empty() {
         let tracks = plan
@@ -489,7 +599,11 @@ pub(super) fn questions_scheduled_for_retrieval(
             .ok_or_else(|| "DeepResearch plan has no tracks".to_string())?;
         for track in tracks {
             let questions = string_array(track.get("questions"), "track questions", 3)?;
-            scheduled_queries.extend(questions);
+            scheduled_queries.extend(
+                questions
+                    .into_iter()
+                    .map(|query| normalize_retrieval_query(&query)),
+            );
         }
     }
     let mut scheduled_ids = state
@@ -500,8 +614,8 @@ pub(super) fn questions_scheduled_for_retrieval(
             question
                 .retrieval_query
                 .as_deref()
-                .map(str::trim)
-                .is_some_and(|query| scheduled_queries.contains(query))
+                .map(normalize_retrieval_query)
+                .is_some_and(|query| scheduled_queries.contains(&query))
         })
         .map(|question| question.id.clone())
         .collect::<BTreeSet<_>>();
@@ -542,21 +656,211 @@ pub(super) fn questions_scheduled_for_retrieval(
         .collect())
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct RetrievalFrontierFingerprint {
+    normalized_query: String,
+    obligation_ids: Vec<String>,
+    evidence_head: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct RetrievalWaveSelection {
+    pub(super) novel: Vec<Question>,
+    pub(super) already_attempted: Vec<Question>,
+}
+
+/// Select only retrieval frontiers that have not already completed an
+/// opportunity in this replayable Inquiry prefix. Question IDs are excluded
+/// deliberately: a model cannot buy another identical search by renaming a
+/// follow-up question.
 pub(super) fn queued_questions_for_next_wave(
     state: &InquiryState,
-    retrieval_opportunities: &BTreeSet<String>,
-) -> Vec<Question> {
-    let queued = queued_questions(state);
-    let unseen = queued
+    events: &[InquiryEvent],
+    limits: &InquiryLimits,
+) -> Result<RetrievalWaveSelection, String> {
+    let attempted = attempted_retrieval_frontiers(events, limits)?;
+    let attempted_query_frontiers = attempted
         .iter()
-        .filter(|question| !retrieval_opportunities.contains(&question.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    if unseen.is_empty() {
-        queued
-    } else {
-        unseen
+        .map(|fingerprint| {
+            (
+                fingerprint.normalized_query.clone(),
+                fingerprint.obligation_ids.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let mut selection = RetrievalWaveSelection::default();
+    let mut fresh = Vec::new();
+    let mut advanced = Vec::new();
+    for question in queued_questions(state) {
+        let fingerprint = retrieval_frontier_fingerprint(state, &question)?;
+        if attempted.contains(&fingerprint) {
+            selection.already_attempted.push(question);
+        } else if attempted_query_frontiers.contains(&question_frontier_key(&question)) {
+            advanced.push(question);
+        } else {
+            fresh.push(question);
+        }
     }
+    // Cover every never-attempted query/obligation frontier before revisiting
+    // one whose evidence head advanced because another wave made progress.
+    // This preserves breadth without forbidding a bounded, evidence-justified
+    // revisit after the fresh frontier is exhausted.
+    selection.novel = if fresh.is_empty() { advanced } else { fresh };
+    // A genuinely novel child query is allowed to close an already-attempted
+    // ancestor's gap. Keep that ancestor queued so the resolver can address it
+    // from the child's evidence, without putting the ancestor's old query back
+    // into the retrieval plan.
+    let mut carried_ancestor_ids = BTreeSet::new();
+    let mut frontier = selection
+        .novel
+        .iter()
+        .filter_map(|question| question.parent_question_id.clone())
+        .collect::<Vec<_>>();
+    while let Some(question_id) = frontier.pop() {
+        if !carried_ancestor_ids.insert(question_id.clone()) {
+            continue;
+        }
+        if let Some(parent_id) = state
+            .question(&question_id)
+            .and_then(|question| question.parent_question_id.clone())
+        {
+            frontier.push(parent_id);
+        }
+    }
+    selection
+        .already_attempted
+        .retain(|question| !carried_ancestor_ids.contains(&question.id));
+    Ok(selection)
+}
+
+/// Reconstruct attempted retrieval frontiers solely from the durable event
+/// prefix. Resolution events are the host-owned completion boundary for a
+/// retrieval opportunity. The evidence head is taken after the event so any
+/// evidence accepted immediately before resolution belongs to that completed
+/// frontier on both live execution and strict replay.
+pub(super) fn attempted_retrieval_frontiers(
+    events: &[InquiryEvent],
+    limits: &InquiryLimits,
+) -> Result<BTreeSet<RetrievalFrontierFingerprint>, String> {
+    let mut state = InquiryState::default();
+    let mut attempted = BTreeSet::new();
+    for (event_index, event) in events.iter().enumerate() {
+        let resolved_question = match event {
+            InquiryEvent::QuestionAnswered { question_id, .. }
+            | InquiryEvent::QuestionDeferred { question_id, .. }
+            | InquiryEvent::QuestionBounded { question_id, .. } => {
+                state.question(question_id).cloned()
+            }
+            _ => None,
+        };
+        state.apply(event, limits).map_err(|error| {
+            format!(
+                "derive attempted retrieval frontiers from inquiry event {event_index}: {error}"
+            )
+        })?;
+        if let Some(question) = resolved_question {
+            attempted.insert(retrieval_frontier_fingerprint(&state, &question)?);
+        }
+    }
+    Ok(attempted)
+}
+
+pub(super) fn retrieval_frontier_fingerprint(
+    state: &InquiryState,
+    question: &Question,
+) -> Result<RetrievalFrontierFingerprint, String> {
+    let query = question
+        .retrieval_query
+        .as_deref()
+        .map(normalize_retrieval_query)
+        .filter(|query| !query.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "DeepResearch question `{}` has no normalized retrieval query",
+                question.id
+            )
+        })?;
+    Ok(RetrievalFrontierFingerprint {
+        normalized_query: query,
+        obligation_ids: normalized_obligation_ids(question),
+        evidence_head: retrieval_evidence_head(state)?,
+    })
+}
+
+fn question_frontier_key(question: &Question) -> (String, Vec<String>) {
+    (
+        question
+            .retrieval_query
+            .as_deref()
+            .map(normalize_retrieval_query)
+            .unwrap_or_default(),
+        normalized_obligation_ids(question),
+    )
+}
+
+fn normalized_obligation_ids(question: &Question) -> Vec<String> {
+    question
+        .obligation_ids
+        .iter()
+        .map(|id| id.trim())
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn normalize_retrieval_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| {
+            token
+                .chars()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn retrieval_evidence_head(state: &InquiryState) -> Result<String, String> {
+    // BTree collections and typed evidence make this encoding stable across
+    // process replay. Only the typed resolution relation for a contradiction
+    // is included, not model-authored rationale prose.
+    let resolved_diagnostics = state
+        .contract_assessment
+        .iter()
+        .flat_map(|assessment| assessment.diagnostics.iter())
+        .filter(|diagnostic| {
+            diagnostic.disposition == a3s::research::DiagnosticDisposition::Resolved
+        })
+        .map(|diagnostic| {
+            let obligation_ids = diagnostic
+                .obligation_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let evidence_ids = diagnostic
+                .evidence_ids
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            (
+                diagnostic.diagnostic_id.clone(),
+                obligation_ids,
+                evidence_ids,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let encoded = serde_json::to_vec(&(
+        &state.evidence_catalog,
+        &state.source_catalog,
+        resolved_diagnostics,
+    ))
+    .map_err(|error| format!("encode DeepResearch evidence head: {error}"))?;
+    let mut digest = Sha256::new();
+    digest.update(encoded);
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 pub(super) fn bound_questions(

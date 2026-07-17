@@ -35,10 +35,17 @@ async fn write_raw_presence(directory: &Path, presence: &AgentPresence) -> PathB
     path
 }
 
+fn write_raw_presence_sync(directory: &Path, presence: &AgentPresence) -> PathBuf {
+    let path = directory.join(format!("{}.json", presence.instance_id));
+    std::fs::write(&path, serde_json::to_vec(presence).unwrap()).unwrap();
+    path
+}
+
 #[test]
 fn exact_presence_replaces_same_process_and_keeps_inferred_agents() {
     let now = epoch_ms();
-    let exact = presence("local", 10, AgentActivityState::Working);
+    let mut exact = presence("local", 10, AgentActivityState::Working);
+    exact.updated_at_ms = now.saturating_sub(9_000);
     let rows = aggregate_activities(
         &[exact],
         &[
@@ -52,7 +59,9 @@ fn exact_presence_replaces_same_process_and_keeps_inferred_agents() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].confidence, AgentActivityConfidence::Exact);
     assert!(rows[0].local);
+    assert_eq!(rows[0].expires_at_ms, now.saturating_add(1_000));
     assert_eq!(rows[1].confidence, AgentActivityConfidence::Process);
+    assert_eq!(rows[1].expires_at_ms, now.saturating_add(PRESENCE_TTL_MS));
     assert_eq!(rows[1].task.as_deref(), Some("active process"));
     assert!(!rows[1]
         .task
@@ -258,6 +267,7 @@ async fn unrelated_json_does_not_consume_the_protocol_scan_budget() {
 
 #[tokio::test]
 async fn registry_directory_overflow_is_reported_instead_of_returning_partial_evidence() {
+    let _process_probe_guard = agent_island_process_test_lock().lock().await;
     let temp = tempfile::tempdir().unwrap();
     let now = epoch_ms();
     // Every entry is valid so an implementation that stops at the 256-record
@@ -270,7 +280,7 @@ async fn registry_directory_overflow_is_reported_instead_of_returning_partial_ev
             AgentActivityState::Working,
         );
         item.updated_at_ms = now;
-        write_raw_presence(temp.path(), &item).await;
+        write_raw_presence_sync(temp.path(), &item);
     }
     let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
 
@@ -294,7 +304,7 @@ async fn live_publisher_cap_marks_the_exported_snapshot_degraded() {
         write_raw_presence(temp.path(), &item).await;
     }
     let publisher = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
-    let scan = publisher.scan_presences(now).await.unwrap();
+    let scan = publisher.scan_presences(now, None).await.unwrap();
     assert_eq!(scan.presences.len(), MAX_PRESENCE_FILES);
     assert!(scan.truncated);
 
@@ -344,6 +354,120 @@ async fn newer_live_presence_is_not_hidden_by_crash_leftovers() {
 }
 
 #[tokio::test]
+async fn expired_crashed_presences_are_compacted_with_a_per_scan_cap() {
+    let temp = tempfile::tempdir().unwrap();
+    let now = epoch_ms();
+    for index in 1..=(MAX_STALE_REMOVALS_PER_SCAN + 1) {
+        let pid = (50_000 + index) as u32;
+        let mut stale = presence(
+            &format!("{pid}-{index:016x}"),
+            pid,
+            AgentActivityState::Working,
+        );
+        stale.updated_at_ms = now.saturating_sub(PRESENCE_TTL_MS + 1);
+        write_raw_presence(temp.path(), &stale).await;
+    }
+    let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let observed_pids = HashSet::new();
+
+    reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap();
+    let remaining = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| parse_presence_file_name(&entry.file_name()).is_some())
+        .count();
+    assert_eq!(remaining, 1);
+
+    reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap();
+    let remaining = std::fs::read_dir(temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| parse_presence_file_name(&entry.file_name()).is_some())
+        .count();
+    assert_eq!(remaining, 0);
+}
+
+#[tokio::test]
+async fn observed_or_unknown_process_state_disables_stale_compaction() {
+    let temp = tempfile::tempdir().unwrap();
+    let now = epoch_ms();
+    let pid = std::process::id();
+    let mut stale = presence(
+        &format!("{pid}-00000000000000aa"),
+        pid,
+        AgentActivityState::Working,
+    );
+    stale.updated_at_ms = now.saturating_sub(PRESENCE_TTL_MS + 1);
+    let path = write_raw_presence(temp.path(), &stale).await;
+    let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+
+    let observed_pids = HashSet::from([pid]);
+    reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap();
+    assert!(path.exists());
+
+    reader.scan_presences(now, None).await.unwrap();
+    assert!(path.exists());
+}
+
+#[tokio::test]
+async fn future_skewed_crashed_presence_is_compacted_when_its_pid_is_absent() {
+    let temp = tempfile::tempdir().unwrap();
+    let now = epoch_ms();
+    let pid = 61_001;
+    let mut stale = presence(
+        &format!("{pid}-00000000000000ab"),
+        pid,
+        AgentActivityState::Working,
+    );
+    stale.updated_at_ms = now.saturating_add(PRESENCE_FUTURE_SKEW_MS + 1);
+    let path = write_raw_presence(temp.path(), &stale).await;
+    let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let observed_pids = HashSet::new();
+
+    let scan = reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap();
+
+    assert!(scan.presences.is_empty());
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn future_skewed_presence_is_preserved_for_an_observed_or_unknown_pid() {
+    let temp = tempfile::tempdir().unwrap();
+    let now = epoch_ms();
+    let pid = 61_002;
+    let mut stale = presence(
+        &format!("{pid}-00000000000000ac"),
+        pid,
+        AgentActivityState::Working,
+    );
+    stale.updated_at_ms = now.saturating_add(PRESENCE_FUTURE_SKEW_MS + 1);
+    let path = write_raw_presence(temp.path(), &stale).await;
+    let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+
+    let observed_pids = HashSet::from([pid]);
+    reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap();
+    assert!(path.exists());
+
+    reader.scan_presences(now, None).await.unwrap();
+    assert!(path.exists());
+}
+
+#[tokio::test]
 async fn canonical_malformed_flood_does_not_consume_the_valid_presence_limit() {
     let temp = tempfile::tempdir().unwrap();
     let live = presence("98-0000000000000008", 98, AgentActivityState::Working);
@@ -370,11 +494,20 @@ async fn registry_ignores_symlinks_even_with_protocol_file_names() {
 
     let temp = tempfile::tempdir().unwrap();
     let outside = tempfile::NamedTempFile::new().unwrap();
+    let now = epoch_ms();
+    let mut stale = presence("82-0000000000000005", 82, AgentActivityState::Working);
+    stale.updated_at_ms = now.saturating_sub(PRESENCE_TTL_MS + 1);
+    std::fs::write(outside.path(), serde_json::to_vec(&stale).unwrap()).unwrap();
     let link = temp.path().join("82-0000000000000005.json");
     symlink(outside.path(), &link).unwrap();
     let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let observed_pids = HashSet::new();
 
-    let stored = reader.read_presences(epoch_ms()).await.unwrap();
+    let stored = reader
+        .scan_presences(now, Some(&observed_pids))
+        .await
+        .unwrap()
+        .presences;
 
     assert!(stored.is_empty());
     assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
@@ -600,6 +733,7 @@ async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
             state: AgentActivityState::Unknown,
             confidence: AgentActivityConfidence::Process,
             started_at_ms: None,
+            expires_at_ms: epoch_ms().saturating_add(PRESENCE_TTL_MS),
             local: false,
         })
         .collect();
@@ -608,9 +742,14 @@ async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
         warnings: Vec::new(),
     };
 
-    let path = publisher.write_system_snapshot(&first).await.unwrap();
+    let first_evidence_at_ms = 1_234;
+    let path = publisher
+        .write_system_snapshot(&first, first_evidence_at_ms)
+        .await
+        .unwrap();
     let bytes = tokio::fs::read(&path).await.unwrap();
     let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(snapshot.updated_at_ms, first_evidence_at_ms);
     assert!(snapshot.degraded);
     assert_eq!(snapshot.activities.len(), MAX_SYSTEM_ACTIVITIES);
     assert!(bytes.len() as u64 <= MAX_SYSTEM_SNAPSHOT_BYTES);
@@ -631,7 +770,10 @@ async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
         activities: Vec::new(),
         warnings: Vec::new(),
     };
-    publisher.write_system_snapshot(&replacement).await.unwrap();
+    publisher
+        .write_system_snapshot(&replacement, 5_678)
+        .await
+        .unwrap();
     let bytes = tokio::fs::read(&path).await.unwrap();
     let snapshot: SystemAgentProtocolSnapshot = serde_json::from_slice(&bytes).unwrap();
     assert!(!snapshot.degraded);

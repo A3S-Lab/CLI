@@ -211,6 +211,15 @@ impl DeepResearchStateJournal {
         serde_json::from_value(object.data.clone()).context("decode DeepResearch run projection")
     }
 
+    fn spec(&self) -> Result<ResearchSpec> {
+        let object = self
+            .runtime
+            .graph()
+            .object(&spec_object_id(&self.run_id))
+            .context("DeepResearch graph is missing its research spec object")?;
+        serde_json::from_value(object.data.clone()).context("decode DeepResearch research spec")
+    }
+
     pub(crate) async fn append(&mut self, event: ResearchDomainEvent) -> Result<bool> {
         if self
             .runtime
@@ -432,13 +441,30 @@ pub(crate) async fn record_inquiry_state(
     inquiry::record_inquiry_state(workspace, run_id, events, state).await
 }
 
+/// Restore the latest durable typed Inquiry prefix from the run event stream.
+pub(crate) async fn load_inquiry_state(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<
+    Option<(
+        Vec<a3s::research::InquiryEvent>,
+        a3s::research::InquiryState,
+    )>,
+> {
+    inquiry::load_inquiry_state(workspace, run_id).await
+}
+
 pub(crate) async fn record_workflow_started(
     workspace: &Path,
     run_id: &str,
     spec: ResearchSpec,
 ) -> Result<()> {
+    let spec = bounded_spec(spec);
     let mut journal = match DeepResearchStateJournal::open(workspace, run_id).await? {
-        Some(journal) => journal,
+        Some(journal) => {
+            validate_reopened_spec(run_id, &journal.spec()?, &spec)?;
+            journal
+        }
         None => DeepResearchStateJournal::create(workspace, run_id, spec).await?,
     };
     journal
@@ -451,6 +477,39 @@ pub(crate) async fn record_workflow_started(
         })
         .await?;
     Ok(())
+}
+
+fn validate_reopened_spec(
+    run_id: &str,
+    persisted: &ResearchSpec,
+    requested: &ResearchSpec,
+) -> Result<()> {
+    let mut changed = Vec::new();
+    if persisted.query != requested.query {
+        changed.push("query");
+    }
+    if persisted.current_date != requested.current_date {
+        changed.push("current_date");
+    }
+    if persisted.evidence_scope != requested.evidence_scope {
+        changed.push("evidence_scope");
+    }
+    if persisted.required_claims != requested.required_claims {
+        changed.push("required_claims");
+    }
+    if persisted.total_budget_ms != requested.total_budget_ms {
+        changed.push("total_budget_ms");
+    }
+    if persisted.finalization_reserve_ms != requested.finalization_reserve_ms {
+        changed.push("finalization_reserve_ms");
+    }
+    if changed.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "DeepResearch run `{run_id}` cannot be reopened with a different ResearchSpec identity (changed: {})",
+        changed.join(", ")
+    )
 }
 
 pub(crate) async fn record_workflow_completed(
@@ -674,9 +733,10 @@ pub(crate) async fn record_evidence_ledger(
             }
         }
     }
-    Err(last_error
-        .expect("bounded retry loop always records an error")
-        .context("append DeepResearch evidence after concurrent-head retries"))
+    let Some(last_error) = last_error else {
+        anyhow::bail!("append DeepResearch evidence exhausted without a result");
+    };
+    Err(last_error.context("append DeepResearch evidence after concurrent-head retries"))
 }
 
 async fn append_event_with_retry(
@@ -698,9 +758,10 @@ async fn append_event_with_retry(
             }
         }
     }
-    Err(last_error
-        .expect("bounded retry loop always records an error")
-        .context("append DeepResearch event after concurrent-head retries"))
+    let Some(last_error) = last_error else {
+        anyhow::bail!("append DeepResearch event exhausted without a result");
+    };
+    Err(last_error.context("append DeepResearch event after concurrent-head retries"))
 }
 
 fn validate_transition(run: &ResearchRunProjection, event: &ResearchDomainEvent) -> Result<()> {

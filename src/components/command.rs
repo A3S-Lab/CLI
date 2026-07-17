@@ -4,6 +4,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use crate::registry::RegistryStore;
 use a3s_updater::{fetch_latest_release, parse_version, InstallProvenance};
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -11,6 +12,7 @@ use serde::Serialize;
 use super::catalog::{self, ComponentKind, Distribution};
 use super::discovery::{discover, find_state};
 use super::id::ComponentId;
+use super::journal::{validate_batch_components, BatchJournal};
 use super::lifecycle::{
     install_component, install_component_locked, uninstall_component_locked, InstallIntent,
     InstallRequest, InstallSource, OperationRecord,
@@ -83,7 +85,24 @@ pub async fn run_list_with(
     paths: &ComponentPaths,
     offline: bool,
 ) -> anyhow::Result<()> {
-    run_list_with_command(args, paths, offline, "component.list", false).await
+    run_list_with_command(args, paths, offline, "component.list", false, None).await
+}
+
+pub async fn run_list_with_registries(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    registries: &RegistryStore,
+) -> anyhow::Result<()> {
+    run_list_with_command(
+        args,
+        paths,
+        offline,
+        "component.list",
+        false,
+        Some(registries),
+    )
+    .await
 }
 
 pub async fn run_upgrade_list_with(
@@ -91,7 +110,24 @@ pub async fn run_upgrade_list_with(
     paths: &ComponentPaths,
     offline: bool,
 ) -> anyhow::Result<()> {
-    run_list_with_command(args, paths, offline, "component.upgrade", true).await
+    run_list_with_command(args, paths, offline, "component.upgrade", true, None).await
+}
+
+pub async fn run_upgrade_list_with_registries(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    registries: &RegistryStore,
+) -> anyhow::Result<()> {
+    run_list_with_command(
+        args,
+        paths,
+        offline,
+        "component.upgrade",
+        true,
+        Some(registries),
+    )
+    .await
 }
 
 async fn run_list_with_command(
@@ -100,6 +136,7 @@ async fn run_list_with_command(
     offline: bool,
     command: &'static str,
     managed_upgrades_only: bool,
+    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<()> {
     let options = ListOptions::parse(&args)?;
     let mut report = discover(paths)?;
@@ -107,7 +144,7 @@ async fn run_list_with_command(
         if offline {
             bail!("component update checks are unavailable in offline mode");
         }
-        populate_updates(&mut report).await;
+        populate_updates(&mut report, paths, registries).await;
     }
     report.components.retain(|component| {
         (!options.installed || component.presence != Presence::Missing)
@@ -140,10 +177,31 @@ pub async fn run_install_with(
     offline: bool,
     progress: bool,
 ) -> anyhow::Result<()> {
+    run_install_with_registry(args, paths, offline, progress, None).await
+}
+
+pub async fn run_install_with_registries(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    progress: bool,
+    registries: &RegistryStore,
+) -> anyhow::Result<()> {
+    run_install_with_registry(args, paths, offline, progress, Some(registries)).await
+}
+
+async fn run_install_with_registry(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    progress: bool,
+    registries: Option<&RegistryStore>,
+) -> anyhow::Result<()> {
     let options = InstallOptions::parse(&args)?;
     if options.components.is_empty() {
         return print_available(options.json);
     }
+    validate_batch_components(&options.components)?;
     validate_supported_install_policy(&options)?;
     enforce_provenance_policy(&options, paths)?;
     let request = InstallRequest {
@@ -156,10 +214,12 @@ pub async fn run_install_with(
         progress,
         resolved_releases: Default::default(),
         resolved_sources: Default::default(),
+        resolved_registry_packages: Default::default(),
     };
     for component in &options.components {
         validate_install_plan(component, &request)?;
     }
+    validate_registry_preflight(&options.components, &request, registries)?;
     enforce_install_network_policy(&options.components, &request, paths, offline)?;
     let _locks = acquire_operation_locks(&options.components, paths).await?;
     let mut prepared = Vec::with_capacity(options.components.len());
@@ -172,6 +232,7 @@ pub async fn run_install_with(
                 options.scope.as_str(),
                 options.migrate,
                 paths,
+                registries,
             )
             .await?,
         );
@@ -187,20 +248,37 @@ pub async fn run_install_with(
         return print_plans("component.install", &plan_set, options.json);
     }
     plan_set.verify_expected(options.plan_digest.as_deref())?;
+    let mut journal = BatchJournal::begin(
+        paths,
+        "component.install",
+        "install",
+        plan_set.digest(),
+        &options.components,
+    )?;
     let mut operations = Vec::new();
     let mut failures = Vec::new();
     for (component, prepared) in options.components.into_iter().zip(prepared) {
+        if let Some(operation) = journal.take_recovered(&component) {
+            operations.push(operation);
+            continue;
+        }
         let mut prepared_request = request.clone();
         prepared_request.resolved_releases = prepared.resolved_releases;
         prepared_request.resolved_sources = prepared.resolved_sources;
+        prepared_request.resolved_registry_packages = prepared.resolved_registry_packages;
         match install_component_locked(&component, &prepared_request, paths).await {
-            Ok(operation) => operations.push(operation),
-            Err(error) => failures.push(ComponentFailure {
-                component,
-                message: format!("{error:#}"),
-            }),
+            Ok(operation) => {
+                journal.record_success(&operation)?;
+                operations.push(operation);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                journal.record_failure(&component, &message)?;
+                failures.push(ComponentFailure { component, message });
+            }
         }
     }
+    journal.finish(failures.is_empty())?;
     finish_batch(
         "component.install",
         "install",
@@ -221,6 +299,7 @@ pub fn run_uninstall_with(args: Vec<String>, paths: &ComponentPaths) -> anyhow::
     if options.components.is_empty() {
         bail!("usage: a3s uninstall <component>... [--cascade] [--purge]");
     }
+    validate_batch_components(&options.components)?;
     let _locks = acquire_operation_locks_sync(&options.components, paths)?;
     let plans = options
         .components
@@ -232,17 +311,33 @@ pub fn run_uninstall_with(args: Vec<String>, paths: &ComponentPaths) -> anyhow::
         return print_plans("component.uninstall", &plan_set, options.json);
     }
     plan_set.verify_expected(options.plan_digest.as_deref())?;
+    let mut journal = BatchJournal::begin(
+        paths,
+        "component.uninstall",
+        "uninstall",
+        plan_set.digest(),
+        &options.components,
+    )?;
     let mut operations = Vec::new();
     let mut failures = Vec::new();
     for component in options.components {
+        if let Some(operation) = journal.take_recovered(&component) {
+            operations.push(operation);
+            continue;
+        }
         match uninstall_component_locked(&component, options.cascade, options.purge, paths) {
-            Ok(operation) => operations.push(operation),
-            Err(error) => failures.push(ComponentFailure {
-                component,
-                message: format!("{error:#}"),
-            }),
+            Ok(operation) => {
+                journal.record_success(&operation)?;
+                operations.push(operation);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                journal.record_failure(&component, &message)?;
+                failures.push(ComponentFailure { component, message });
+            }
         }
     }
+    journal.finish(failures.is_empty())?;
     finish_batch(
         "component.uninstall",
         "uninstall",
@@ -266,6 +361,26 @@ pub async fn run_update_with(
     offline: bool,
     progress: bool,
 ) -> anyhow::Result<()> {
+    run_update_with_registry(args, paths, offline, progress, None).await
+}
+
+pub async fn run_update_with_registries(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    progress: bool,
+    registries: &RegistryStore,
+) -> anyhow::Result<()> {
+    run_update_with_registry(args, paths, offline, progress, Some(registries)).await
+}
+
+async fn run_update_with_registry(
+    args: Vec<String>,
+    paths: &ComponentPaths,
+    offline: bool,
+    progress: bool,
+    registries: Option<&RegistryStore>,
+) -> anyhow::Result<()> {
     let options = UpdateOptions::parse(&args)?;
     let components = if options.all {
         discover(paths)?
@@ -280,13 +395,14 @@ pub async fn run_update_with(
     if components.is_empty() {
         bail!("no managed components were selected for update");
     }
+    validate_batch_components(&components)?;
     if offline {
         bail!("component upgrades require network access and are unavailable in offline mode");
     }
     let _locks = acquire_operation_locks(&components, paths).await?;
     let mut prepared = Vec::with_capacity(components.len());
     for component in &components {
-        prepared.push(upgrade_plan(component, paths).await?);
+        prepared.push(upgrade_plan(component, paths, registries).await?);
     }
     let plan_set = OperationPlanSet::new(
         "component.upgrade",
@@ -299,9 +415,20 @@ pub async fn run_update_with(
         return print_plans("component.upgrade", &plan_set, options.json);
     }
     plan_set.verify_expected(options.plan_digest.as_deref())?;
+    let mut journal = BatchJournal::begin(
+        paths,
+        "component.upgrade",
+        "upgrade",
+        plan_set.digest(),
+        &components,
+    )?;
     let mut operations = Vec::new();
     let mut failures = Vec::new();
     for (component, prepared) in components.into_iter().zip(prepared) {
+        if let Some(operation) = journal.take_recovered(&component) {
+            operations.push(operation);
+            continue;
+        }
         let operation = async {
             let state = find_state(&component, paths)?;
             if state.presence != Presence::Managed {
@@ -312,6 +439,7 @@ pub async fn run_update_with(
             }
             if state.provenance == Some(InstallProvenance::Delegated)
                 && catalog::find(&component).is_none()
+                && prepared.resolved_registry_packages.is_empty()
             {
                 bail!(
                     "local extension '{}' has no recorded upgrade source; install the new package explicitly with 'a3s install {} --from <package> --force --allow-unsigned'",
@@ -322,23 +450,29 @@ pub async fn run_update_with(
             let request = InstallRequest {
                 source: InstallSource::Auto,
                 intent: InstallIntent::Upgrade,
-                force: true,
+                force: prepared.apply_force,
                 progress,
                 resolved_releases: prepared.resolved_releases,
                 resolved_sources: prepared.resolved_sources,
+                resolved_registry_packages: prepared.resolved_registry_packages,
                 ..InstallRequest::default()
             };
             install_component_locked(&component, &request, paths).await
         }
         .await;
         match operation {
-            Ok(operation) => operations.push(operation),
-            Err(error) => failures.push(ComponentFailure {
-                component,
-                message: format!("{error:#}"),
-            }),
+            Ok(operation) => {
+                journal.record_success(&operation)?;
+                operations.push(operation);
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                journal.record_failure(&component, &message)?;
+                failures.push(ComponentFailure { component, message });
+            }
         }
     }
+    journal.finish(failures.is_empty())?;
     finish_batch(
         "component.upgrade",
         "upgrade",
@@ -350,7 +484,10 @@ pub async fn run_update_with(
 }
 
 fn is_upgrade_all_candidate(component: &super::state::ComponentState) -> bool {
-    component.presence == Presence::Managed && component.kind == ComponentKind::Product
+    component.presence == Presence::Managed
+        && (component.kind == ComponentKind::Product
+            || (component.kind == ComponentKind::Extension
+                && component.trust == super::state::Trust::RegistryTuf))
 }
 
 pub async fn run_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -568,8 +705,54 @@ pub async fn resolve_or_install_with(
         .context("resolved component has no executable path")
 }
 
-async fn populate_updates(report: &mut ComponentReport) {
+async fn populate_updates(
+    report: &mut ComponentReport,
+    paths: &ComponentPaths,
+    registries: Option<&RegistryStore>,
+) {
     for component in &mut report.components {
+        if component.presence != Presence::Managed {
+            continue;
+        }
+        if component.kind == ComponentKind::Extension
+            && component.trust == super::state::Trust::RegistryTuf
+        {
+            let result = async {
+                let registries = registries.context(
+                    "signed extension update checks require the umbrella registry configuration",
+                )?;
+                let installed =
+                    super::discovery::extension_registry_provenance(&component.id, paths)?
+                        .context("signed extension has no registry provenance")?;
+                let resolved = registries
+                    .resolve_upgrade(&paths.state_root, &installed)
+                    .await?;
+                let current = parse_version(&installed.version)?;
+                let latest = parse_version(&resolved.package.version)?;
+                if latest < current {
+                    bail!(
+                        "registry '{}' attempted to downgrade from {} to {}",
+                        installed.registry_name,
+                        installed.version,
+                        resolved.package.version
+                    );
+                }
+                Ok::<_, anyhow::Error>(
+                    if latest > current || resolved.package.sha256 != installed.sha256 {
+                        UpdateState::Available
+                    } else {
+                        UpdateState::Current
+                    },
+                )
+            }
+            .await;
+            match result {
+                Ok(update) => component.update = update,
+                Err(error) => component.message = Some(format!("Update check failed: {error:#}")),
+            }
+            continue;
+        }
+
         let Some(spec) = catalog::find(&component.id) else {
             continue;
         };
@@ -774,10 +957,13 @@ fn enforce_install_network_policy(
         return Ok(());
     }
     for component in components {
-        if request.package.is_some()
-            && component.as_str().starts_with("use/")
-            && component.as_str().split('/').count() == 3
-        {
+        if request.package.is_none() && is_external_use_extension(component) {
+            bail!(
+                "signed registry package '{}' cannot be resolved in offline mode",
+                component
+            );
+        }
+        if request.package.is_some() && is_external_use_extension(component) {
             let parent = ComponentId::parse("use")?;
             if find_state(&parent, paths)?.is_ready() {
                 continue;
@@ -798,12 +984,37 @@ fn enforce_install_network_policy(
     Ok(())
 }
 
+fn validate_registry_preflight(
+    components: &[ComponentId],
+    request: &InstallRequest,
+    registries: Option<&RegistryStore>,
+) -> anyhow::Result<()> {
+    if request.package.is_some() || !components.iter().any(is_external_use_extension) {
+        return Ok(());
+    }
+    let registries = registries
+        .context("signed extension installation requires the umbrella registry configuration")?;
+    if registries
+        .list()?
+        .iter()
+        .any(|registry| registry.configured)
+    {
+        Ok(())
+    } else {
+        bail!(
+            "no package registry has a production TUF trust root; add one with 'a3s registry add'"
+        )
+    }
+}
+
 async fn acquire_operation_locks(
     components: &[ComponentId],
     paths: &ComponentPaths,
 ) -> anyhow::Result<Vec<ComponentOperationLock>> {
     let targets = operation_lock_targets(components, paths);
-    let mut locks = Vec::with_capacity(targets.len());
+    let mut locks = Vec::with_capacity(targets.len() + 1);
+    let batch = ComponentId::parse("component-batch")?;
+    locks.push(ComponentOperationLock::acquire(paths.batch_operation_lock_path(), &batch).await?);
     for (path, component) in targets {
         locks.push(ComponentOperationLock::acquire(path, &component).await?);
     }
@@ -815,7 +1026,12 @@ fn acquire_operation_locks_sync(
     paths: &ComponentPaths,
 ) -> anyhow::Result<Vec<ComponentOperationLock>> {
     let targets = operation_lock_targets(components, paths);
-    let mut locks = Vec::with_capacity(targets.len());
+    let mut locks = Vec::with_capacity(targets.len() + 1);
+    let batch = ComponentId::parse("component-batch")?;
+    locks.push(ComponentOperationLock::acquire_sync(
+        &paths.batch_operation_lock_path(),
+        &batch,
+    )?);
     for (path, component) in targets {
         locks.push(ComponentOperationLock::acquire_sync(&path, &component)?);
     }
@@ -882,16 +1098,21 @@ impl InstallScope {
 }
 
 fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result<()> {
+    let signed_registry_only =
+        options.package.is_none() && options.components.iter().all(is_external_use_extension);
     if let Some(version) = options.version.as_deref() {
         parse_version(version).with_context(|| format!("invalid component version '{version}'"))?;
         if options.source == InstallSource::Homebrew {
             bail!("--version requires --source release because Homebrew does not support exact component version selection");
         }
     }
-    if options.version.is_some() && options.channel != ReleaseChannel::Stable {
+    if options.version.is_some()
+        && options.channel != ReleaseChannel::Stable
+        && !signed_registry_only
+    {
         bail!("--version cannot be combined with a beta or nightly release channel");
     }
-    if options.channel != ReleaseChannel::Stable {
+    if options.channel != ReleaseChannel::Stable && !signed_registry_only {
         bail!(
             "the '{}' channel is not declared by the selected component sources",
             options.channel.as_str()
@@ -903,6 +1124,19 @@ fn validate_supported_install_policy(options: &InstallOptions) -> anyhow::Result
         );
     }
     Ok(())
+}
+
+fn is_external_use_extension(id: &ComponentId) -> bool {
+    let mut segments = id.as_str().split('/');
+    matches!(
+        (
+            segments.next(),
+            segments.next(),
+            segments.next(),
+            segments.next()
+        ),
+        (Some("use"), Some(_), Some(_), None)
+    )
 }
 
 fn enforce_provenance_policy(
@@ -1027,11 +1261,19 @@ mod tests {
             ComponentKind::Capability,
             Presence::Managed,
         )));
-        assert!(!is_upgrade_all_candidate(&state(
+        let mut registry_extension = state(
             "use/acme/slack",
             ComponentKind::Extension,
             Presence::Managed,
-        )));
+        );
+        registry_extension.trust = Trust::RegistryTuf;
+        assert!(is_upgrade_all_candidate(&registry_extension));
+        let local_extension = state(
+            "use/acme/local",
+            ComponentKind::Extension,
+            Presence::Managed,
+        );
+        assert!(!is_upgrade_all_candidate(&local_extension));
         assert!(!is_upgrade_all_candidate(&state(
             "search",
             ComponentKind::Product,

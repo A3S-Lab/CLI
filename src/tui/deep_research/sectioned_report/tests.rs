@@ -9,6 +9,55 @@ fn ids(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| (*value).to_string()).collect()
 }
 
+#[test]
+fn report_budget_covers_the_unrevised_pipeline_and_bounds_revision_time() {
+    let unrevised_local_caps =
+        OUTLINE_TIMEOUT_MS + SECTION_WORKFLOW_TIMEOUT_MS + FRAME_WORKFLOW_TIMEOUT_MS;
+
+    assert_eq!(
+        SECTIONED_REPORT_BUDGET_MS,
+        unrevised_local_caps + REPORT_FINALIZATION_RESERVE_MS
+    );
+    assert!(SECTIONED_REPORT_BUDGET_MS < 11 * 60 * 1000);
+}
+
+#[test]
+fn report_deadline_caps_each_tool_to_the_shared_remaining_budget() {
+    let started_at = Instant::now();
+    let deadline =
+        ReportDeadline::new(started_at + Duration::from_millis(SECTIONED_REPORT_BUDGET_MS));
+
+    assert_eq!(
+        deadline
+            .tool_timeout_ms(started_at, OUTLINE_TIMEOUT_MS, "outline")
+            .unwrap(),
+        OUTLINE_TIMEOUT_MS
+    );
+
+    let ten_seconds_of_active_budget = started_at
+        + Duration::from_millis(
+            SECTIONED_REPORT_BUDGET_MS - REPORT_FINALIZATION_RESERVE_MS - 10_000,
+        );
+    assert_eq!(
+        deadline
+            .tool_timeout_ms(
+                ten_seconds_of_active_budget,
+                FRAME_WORKFLOW_TIMEOUT_MS,
+                "frame",
+            )
+            .unwrap(),
+        10_000
+    );
+
+    let finalization_window = started_at
+        + Duration::from_millis(SECTIONED_REPORT_BUDGET_MS - REPORT_FINALIZATION_RESERVE_MS);
+    let error = deadline
+        .tool_timeout_ms(finalization_window, SECTION_WORKFLOW_TIMEOUT_MS, "revision")
+        .unwrap_err();
+    assert!(error.contains("budget exhausted before revision"));
+    assert!(error.contains("reserving"));
+}
+
 fn sample_evidence() -> AcceptedEvidence {
     AcceptedEvidence {
         id: "evidence:one".to_string(),
@@ -61,16 +110,24 @@ fn sectioned_inquiry_snapshots() -> (
     Vec<InquiryEvent>,
     InquiryState,
 ) {
+    let mut question = Question::queued("question:one", None, "What does the evidence establish?");
+    question.obligation_ids = vec!["obligation:one".to_string()];
     let mut collected = vec![
         InquiryEvent::StrategySelected {
             method: ResearchMethod::Focused,
         },
-        InquiryEvent::QuestionsQueued {
-            questions: vec![Question::queued(
-                "question:one",
-                None,
-                "What does the evidence establish?",
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations: vec![a3s::research::ResearchObligation::new(
+                "obligation:one",
+                "Evidence-backed answer",
+                "Establish what the accepted evidence supports",
+                true,
+                vec!["The answer is supported by traceable evidence".to_string()],
             )],
+            stop_conditions: vec!["The answer is traceable to accepted evidence".to_string()],
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![question],
         },
         InquiryEvent::EvidenceAccepted {
             evidence: EvidenceRef::new(
@@ -84,8 +141,31 @@ fn sectioned_inquiry_snapshots() -> (
             answer: "The evidence establishes the accepted claim.".to_string(),
             evidence_ids: vec!["evidence:one".to_string()],
         },
+        InquiryEvent::ResearchContractAssessed {
+            assessment: a3s::research::ResearchContractAssessment {
+                obligations: vec![a3s::research::ResearchObligationAssessment {
+                    obligation_id: "obligation:one".to_string(),
+                    criteria: vec![a3s::research::CompletionCriterionAssessment {
+                        criterion_index: 0,
+                        status: a3s::research::ContractAssessmentStatus::Satisfied,
+                        rationale: "The accepted evidence satisfies the criterion.".to_string(),
+                        evidence_ids: vec!["evidence:one".to_string()],
+                    }],
+                    primary_source: None,
+                    independent_corroboration: None,
+                }],
+                stop_conditions: vec![a3s::research::StopConditionAssessment {
+                    condition_index: 0,
+                    status: a3s::research::ContractAssessmentStatus::Satisfied,
+                    rationale: "The answer is traceable.".to_string(),
+                    evidence_ids: vec!["evidence:one".to_string()],
+                }],
+                diagnostics: Vec::new(),
+            },
+        },
     ];
     let collected_state = replay(&collected, &InquiryLimits::default()).unwrap();
+    let collected_len = collected.len();
     collected.extend([
         InquiryEvent::OutlineCommitted {
             outline: ResearchOutline {
@@ -113,7 +193,7 @@ fn sectioned_inquiry_snapshots() -> (
     ]);
     let completed_state = replay(&collected, &InquiryLimits::default()).unwrap();
     (
-        collected[..4].to_vec(),
+        collected[..collected_len].to_vec(),
         collected_state,
         collected,
         completed_state,
@@ -348,6 +428,41 @@ fn section_packet_keeps_claims_and_sources_grouped_by_evidence() {
 }
 
 #[test]
+fn section_packet_preserves_question_status_and_bound_reason() {
+    let mut question = Question::queued(
+        "question:bounded",
+        None,
+        "Which supporting detail remains unavailable?",
+    );
+    question.material = false;
+    question.status = QuestionStatus::Bounded;
+    question.bound_reason = Some("The closed evidence does not establish this detail.".to_string());
+    let state = InquiryState {
+        questions: vec![question],
+        ..InquiryState::default()
+    };
+    let section = OutlineSection {
+        id: "section:answer".to_string(),
+        heading: "Answer".to_string(),
+        purpose: "Answer with the bounded uncertainty".to_string(),
+        perspective_ids: Vec::new(),
+        question_ids: vec!["question:bounded".to_string()],
+        claim_ids: vec!["claim:one".to_string()],
+        source_ids: vec!["source:one".to_string()],
+        composition_hint: "State the supported answer and its bounded uncertainty".to_string(),
+    };
+
+    let packet = section_generation_packet("query", &section, &state, &[sample_evidence()])
+        .expect("section packet");
+
+    assert_eq!(packet["questions"][0]["status"], "bounded");
+    assert_eq!(
+        packet["questions"][0]["bound_reason"],
+        "The closed evidence does not establish this detail."
+    );
+}
+
+#[test]
 fn section_cannot_omit_a_committed_outline_claim_or_source() {
     let planned = OutlineSection {
         id: "section:answer".to_string(),
@@ -573,4 +688,262 @@ fn report_generation_uses_a_small_execution_adapter() {
     assert!(SECTION_WORKFLOW_SOURCE.contains("generate_object"));
     assert!(SECTION_WORKFLOW_SOURCE.len() < 4_000);
     assert!(!SECTION_WORKFLOW_SOURCE.contains("research_method"));
+}
+
+#[test]
+fn durable_projection_must_extend_the_collected_workflow_prefix() {
+    let workflow_events = vec![InquiryEvent::StrategySelected {
+        method: ResearchMethod::Focused,
+    }];
+    let workflow_state = replay(&workflow_events, &InquiryLimits::default()).unwrap();
+    let mut journal_events = workflow_events.clone();
+    journal_events.push(InquiryEvent::BudgetExhausted {
+        reason: "test terminal boundary".to_string(),
+    });
+    let journal_state = replay(&journal_events, &InquiryLimits::default()).unwrap();
+
+    let (selected_events, selected_state) = recovery::select_projection(
+        workflow_events.clone(),
+        workflow_state.clone(),
+        Some((journal_events.clone(), journal_state.clone())),
+    )
+    .unwrap();
+    assert_eq!(selected_events, journal_events);
+    assert_eq!(selected_state, journal_state);
+
+    let stale = recovery::select_projection(
+        workflow_events.clone(),
+        workflow_state.clone(),
+        Some((Vec::new(), InquiryState::default())),
+    )
+    .unwrap_err();
+    assert!(stale.contains("does not extend"), "{stale}");
+
+    let divergent_events = vec![InquiryEvent::StrategySelected {
+        method: ResearchMethod::PerspectiveGuided,
+    }];
+    let divergent_state = replay(&divergent_events, &InquiryLimits::default()).unwrap();
+    let divergent = recovery::select_projection(
+        workflow_events,
+        workflow_state,
+        Some((divergent_events, divergent_state)),
+    )
+    .unwrap_err();
+    assert!(divergent.contains("does not extend"), "{divergent}");
+}
+
+#[test]
+fn partial_drafts_restore_without_reinventing_section_evidence_bindings() {
+    let outline = ResearchOutline {
+        sections: vec![
+            OutlineSection {
+                id: "section:one".to_string(),
+                heading: "One".to_string(),
+                purpose: "First answer".to_string(),
+                perspective_ids: Vec::new(),
+                question_ids: Vec::new(),
+                claim_ids: vec!["claim:one".to_string()],
+                source_ids: vec!["source:one".to_string()],
+                composition_hint: "Lead with one".to_string(),
+            },
+            OutlineSection {
+                id: "section:two".to_string(),
+                heading: "Two".to_string(),
+                purpose: "Second answer".to_string(),
+                perspective_ids: Vec::new(),
+                question_ids: Vec::new(),
+                claim_ids: vec!["claim:two".to_string()],
+                source_ids: vec!["source:two".to_string()],
+                composition_hint: "Lead with two".to_string(),
+            },
+        ],
+    };
+    let mut state = InquiryState::default();
+    state.drafts.insert(
+        "section:one".to_string(),
+        SectionDraft {
+            section_id: "section:one".to_string(),
+            content: "A durable first section.".to_string(),
+            citation_ids: vec!["claim:one".to_string(), "source:one".to_string()],
+        },
+    );
+
+    let restored = recovery::sections_from_drafts(&outline, &state).unwrap();
+    assert_eq!(restored.len(), 1);
+    let section = &restored["section:one"];
+    assert_eq!(section.markdown, "A durable first section.");
+    assert_eq!(section.claim_ids, vec!["claim:one"]);
+    assert_eq!(section.source_ids, vec!["source:one"]);
+    assert!(!restored.contains_key("section:two"));
+    assert_eq!(
+        recovery::missing_section_ids(&outline, &restored),
+        vec!["section:two"]
+    );
+}
+
+#[test]
+fn failed_audit_and_redraft_form_one_replayable_revision_boundary() {
+    let (_, _, mut events, completed_state) = sectioned_inquiry_snapshots();
+    events.pop();
+    let mut state = replay(&events, &InquiryLimits::default()).unwrap();
+    assert_eq!(state.phase, InquiryPhase::Auditing);
+
+    apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::AuditCompleted {
+            passed: false,
+            issues: vec!["structured audit failure".to_string()],
+        },
+    )
+    .unwrap();
+    assert_eq!(state.phase, InquiryPhase::Drafting);
+    assert_eq!(
+        recovery::resume_mode(&state).unwrap(),
+        recovery::ReportResumeMode::RecoverFailedAudit
+    );
+    assert_eq!(recovery::restored_revision_rounds(&state), 0);
+    apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::SectionRevisionStarted {
+            round: 1,
+            section_ids: vec!["section:answer".to_string()],
+            input_digest: "revision-input-one".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(recovery::restored_revision_rounds(&state), 1);
+    apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::SectionDrafted {
+            section_id: "section:answer".to_string(),
+            content: "The revised accepted claim is supported by the source.".to_string(),
+            citation_ids: vec!["claim:one".to_string(), "source:one".to_string()],
+        },
+    )
+    .unwrap();
+    apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::SectionRevisionCommitted {
+            round: 1,
+            input_digest: "revision-input-one".to_string(),
+        },
+    )
+    .unwrap();
+    assert_eq!(state.phase, InquiryPhase::Auditing);
+    assert_eq!(recovery::restored_revision_rounds(&state), 1);
+    assert_eq!(replay(&events, &InquiryLimits::default()).unwrap(), state);
+
+    assert_eq!(
+        recovery::resume_mode(&completed_state).unwrap(),
+        recovery::ReportResumeMode::VerifyCompleted
+    );
+    assert_eq!(recovery::restored_revision_rounds(&completed_state), 0);
+}
+
+#[test]
+fn active_revision_reuses_identical_input_and_rejects_conflicts() {
+    let (_, _, mut events, _) = sectioned_inquiry_snapshots();
+    events.pop();
+    events.pop();
+    let mut state = replay(&events, &InquiryLimits::default()).unwrap();
+    let targets = vec!["section:answer".to_string()];
+    let start = revision::revision_start_event(
+        &state,
+        1,
+        &targets,
+        "stable-input-digest",
+        "host validation failed",
+    )
+    .unwrap()
+    .unwrap();
+    apply_event(&mut state, &mut events, start).unwrap();
+
+    assert_eq!(
+        revision::revision_start_event(
+            &state,
+            1,
+            &targets,
+            "stable-input-digest",
+            "host validation failed",
+        )
+        .unwrap(),
+        None
+    );
+    let conflict = revision::revision_start_event(
+        &state,
+        1,
+        &targets,
+        "different-input-digest",
+        "host validation failed",
+    )
+    .unwrap_err();
+    assert!(
+        conflict.contains("conflicts with recovered input"),
+        "{conflict}"
+    );
+    assert_eq!(replay(&events, &InquiryLimits::default()).unwrap(), state);
+}
+
+#[test]
+fn initial_validation_repairs_share_the_global_two_round_budget() {
+    let (_, _, mut events, _) = sectioned_inquiry_snapshots();
+    events.pop();
+    events.pop();
+    let mut state = replay(&events, &InquiryLimits::default()).unwrap();
+    let targets = vec!["section:answer".to_string()];
+
+    for round in 1..=2 {
+        let digest = format!("validation-repair-{round}");
+        let start = revision::revision_start_event(
+            &state,
+            round,
+            &targets,
+            &digest,
+            "host validation failed",
+        )
+        .unwrap()
+        .unwrap();
+        apply_event(&mut state, &mut events, start).unwrap();
+        apply_event(
+            &mut state,
+            &mut events,
+            InquiryEvent::SectionDrafted {
+                section_id: "section:answer".to_string(),
+                content: format!(
+                    "The accepted claim remains supported after validation repair {round}."
+                ),
+                citation_ids: vec!["claim:one".to_string(), "source:one".to_string()],
+            },
+        )
+        .unwrap();
+        apply_event(
+            &mut state,
+            &mut events,
+            InquiryEvent::SectionRevisionCommitted {
+                round,
+                input_digest: digest,
+            },
+        )
+        .unwrap();
+    }
+
+    assert_eq!(state.audit_attempts, 0);
+    assert_eq!(recovery::restored_revision_rounds(&state), 2);
+    assert_eq!(replay(&events, &InquiryLimits::default()).unwrap(), state);
+    let exhausted = revision::revision_start_event(
+        &state,
+        3,
+        &targets,
+        "validation-repair-3",
+        "host validation still failed",
+    )
+    .unwrap_err();
+    assert!(
+        exhausted.contains("after 2 targeted revision rounds"),
+        "{exhausted}"
+    );
 }

@@ -799,6 +799,126 @@ fn deep_research_smoke_reserved_budget_can_publish_degraded_artifacts() {
     let _ = std::fs::remove_dir_all(workspace);
 }
 
+#[tokio::test]
+async fn deep_research_smoke_terminalization_closes_the_event_journal() {
+    let workspace = tempfile::tempdir().expect("create smoke journal workspace");
+    let run_id = "smoke-terminal-journal";
+    let events = vec![
+        a3s::research::InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        a3s::research::InquiryEvent::BudgetExhausted {
+            reason: "the bounded smoke fixture intentionally stopped before synthesis".to_string(),
+        },
+    ];
+    let state = a3s::research::replay(&events, &a3s::research::InquiryLimits::default())
+        .expect("replay terminal smoke Inquiry");
+    assert!(state.phase.is_terminal());
+    let workflow_output = serde_json::json!({
+        "inquiry": {
+            "events": events,
+            "state": state,
+        }
+    })
+    .to_string();
+    let markdown = workspace.path().join("report.md");
+    let html = workspace.path().join("index.html");
+    std::fs::write(&markdown, "# Bounded smoke report").expect("write smoke Markdown");
+    std::fs::write(&html, "<!doctype html><h1>Bounded smoke report</h1>")
+        .expect("write smoke HTML");
+    let artifacts = ResearchReportArtifacts { markdown, html };
+
+    record_deep_research_workflow_started(
+        workspace.path(),
+        run_id,
+        ResearchSpec {
+            query: "bounded smoke fixture".to_string(),
+            current_date: "2026-07-17".to_string(),
+            evidence_scope: "web_and_workspace".to_string(),
+            required_claims: Vec::new(),
+            total_budget_ms: 60_000,
+            finalization_reserve_ms: 9_000,
+            host_pid: std::process::id(),
+        },
+    )
+    .await
+    .expect("start smoke journal");
+    record_deep_research_workflow_completed(workspace.path(), run_id, false)
+        .await
+        .expect("close smoke evidence track");
+
+    let outcome = finalize_deep_research_smoke_journal(
+        workspace.path(),
+        run_id,
+        &workflow_output,
+        None,
+        DeepResearchRunOutcome::Degraded,
+        &artifacts,
+    )
+    .await
+    .expect("terminalize smoke journal");
+    assert_eq!(outcome, DeepResearchRunOutcome::Degraded);
+
+    let journal =
+        deep_research_state_journal::DeepResearchStateJournal::open(workspace.path(), run_id)
+            .await
+            .expect("open smoke journal")
+            .expect("smoke journal exists");
+    let projection = journal.projection().expect("project smoke journal");
+    assert_eq!(projection.outcome, ResearchOutcome::Degraded);
+    assert!(projection.active_steps.is_empty());
+    assert!(projection.active_children.is_empty());
+}
+
+#[tokio::test]
+async fn failed_smoke_terminalizes_before_an_inquiry_projection_exists() {
+    let workspace = tempfile::tempdir().expect("create failed smoke journal workspace");
+    let run_id = "smoke-planner-failure";
+    let markdown = workspace.path().join("report.md");
+    let html = workspace.path().join("index.html");
+    std::fs::write(&markdown, "# Planner failure recovery").expect("write recovery Markdown");
+    std::fs::write(&html, "<!doctype html><h1>Planner failure recovery</h1>")
+        .expect("write recovery HTML");
+    let artifacts = ResearchReportArtifacts { markdown, html };
+    let spec = ResearchSpec {
+        query: "planner failure fixture".to_string(),
+        current_date: "2026-07-17".to_string(),
+        evidence_scope: "web_and_workspace".to_string(),
+        required_claims: Vec::new(),
+        total_budget_ms: 60_000,
+        finalization_reserve_ms: 9_000,
+        host_pid: std::process::id(),
+    };
+    record_deep_research_workflow_started(workspace.path(), run_id, spec)
+        .await
+        .expect("start failed smoke journal");
+    record_deep_research_workflow_completed(workspace.path(), run_id, false)
+        .await
+        .expect("close failed smoke evidence track");
+
+    let outcome = finalize_deep_research_smoke_journal(
+        workspace.path(),
+        run_id,
+        "planner failed before producing structured output",
+        None,
+        DeepResearchRunOutcome::Degraded,
+        &artifacts,
+    )
+    .await
+    .expect("terminalize failed smoke journal");
+    assert_eq!(outcome, DeepResearchRunOutcome::Degraded);
+
+    let journal =
+        deep_research_state_journal::DeepResearchStateJournal::open(workspace.path(), run_id)
+            .await
+            .expect("open failed smoke journal")
+            .expect("failed smoke journal exists");
+    let projection = journal.projection().expect("project failed smoke journal");
+    assert_eq!(projection.outcome, ResearchOutcome::Degraded);
+    assert!(projection.active_steps.is_empty());
+    assert!(projection.active_children.is_empty());
+}
+
 #[test]
 fn dynamic_workflow_event_and_completion_share_one_terminal_card() {
     let call_id = "host-dynamic_workflow-stable";

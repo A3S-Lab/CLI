@@ -54,6 +54,9 @@ pub enum InquiryError {
     InvalidOutline {
         reason: String,
     },
+    InvalidSectionRevision {
+        reason: String,
+    },
 }
 
 impl fmt::Display for InquiryError {
@@ -111,6 +114,9 @@ impl fmt::Display for InquiryError {
             }
             Self::InvalidOutline { reason } => {
                 write!(formatter, "invalid research outline: {reason}")
+            }
+            Self::InvalidSectionRevision { reason } => {
+                write!(formatter, "invalid section revision: {reason}")
             }
         }
     }

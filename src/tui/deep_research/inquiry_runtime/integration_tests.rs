@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a3s::research::{
-    perspective_discovery_events, DiscoveredPerspective, DiscoveredQuestion, InquiryEvent,
-    InquiryLimits, InquiryPhase, InquiryState, PerspectiveDiscoveryOutput, QuestionStatus,
-    ResearchMethod, ResearchObligation,
+    perspective_discovery_events, research_contract_outcome, DiscoveredPerspective,
+    DiscoveredQuestion, InquiryEvent, InquiryLimits, InquiryPhase, InquiryState,
+    PerspectiveDiscoveryOutput, QuestionStatus, ResearchContractOutcome, ResearchMethod,
+    ResearchObligation,
 };
 use a3s_code_core::llm::{
     LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
@@ -52,7 +53,11 @@ pub(super) fn inquiry_plan() -> serde_json::Value {
             "perspective": "",
             "material": true,
             "questions": ["What does the retained evidence establish?"],
-            "completion_criteria": ["A traceable answer or a bounded gap"]
+            "completion_criteria": ["A traceable answer or a bounded gap"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": false
+            }
         }],
         "scout_queries": [],
         "search_queries": ["fixture evidence"],
@@ -623,6 +628,200 @@ fn maximum_perspective_discovery() -> PerspectiveDiscoveryOutput {
 }
 
 #[tokio::test]
+async fn inquiry_initialization_refuses_to_replay_a_durable_partial_prefix() {
+    let (_agent, session, _temp) = test_session(
+        "partial-prefix",
+        Arc::new(NoModelCalls) as Arc<dyn LlmClient>,
+    )
+    .await;
+    let args = workflow_args();
+    let checkpoint = super::InquiryCheckpointWriter::initialize(&session, &args)
+        .await
+        .expect("initial journal");
+    let limits = InquiryLimits::default();
+    let events = vec![InquiryEvent::StrategySelected {
+        method: ResearchMethod::Focused,
+    }];
+    let state = a3s::research::replay(&events, &limits).expect("partial inquiry prefix");
+    checkpoint
+        .checkpoint(&events, &state)
+        .await
+        .expect("durable partial inquiry prefix");
+
+    let error = super::InquiryCheckpointWriter::initialize(&session, &args)
+        .await
+        .expect_err("a partial prefix has no resumable execution payload");
+    assert!(error.contains("durable 1-event prefix"), "{error}");
+    assert!(error.contains("cannot be resumed"), "{error}");
+    let restored = super::super::deep_research_state_journal::load_inquiry_state(
+        session.workspace(),
+        "inquiry-integration",
+    )
+    .await
+    .expect("load durable prefix")
+    .expect("persisted inquiry");
+    assert_eq!(restored.0, events);
+    assert_eq!(restored.1, state);
+    session.close().await;
+}
+
+#[tokio::test]
+async fn deadline_exhaustion_durably_bounds_questions_before_terminalizing() {
+    let (_agent, session, _temp) = test_session(
+        "deadline-bound",
+        Arc::new(NoModelCalls) as Arc<dyn LlmClient>,
+    )
+    .await;
+    let args = workflow_args();
+    let checkpoint = super::InquiryCheckpointWriter::initialize(&session, &args)
+        .await
+        .expect("initial journal");
+    let limits = InquiryLimits::default();
+    let plan = inquiry_plan();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
+        .expect("research contract");
+    queue_plan_questions(&plan, None, &mut state, &mut events, &limits).expect("material question");
+
+    super::terminalize_budget_exhaustion(
+        Some(&checkpoint),
+        &mut state,
+        &mut events,
+        &limits,
+        "shared deadline exhausted",
+    )
+    .await
+    .expect("deadline terminal state");
+
+    assert_eq!(state.phase, InquiryPhase::Exhausted);
+    assert_eq!(state.questions[0].status, QuestionStatus::Bounded);
+    assert!(matches!(
+        events.get(events.len().saturating_sub(2)),
+        Some(InquiryEvent::QuestionBounded { .. })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(InquiryEvent::BudgetExhausted { .. })
+    ));
+    let restored = super::super::deep_research_state_journal::load_inquiry_state(
+        session.workspace(),
+        "inquiry-integration",
+    )
+    .await
+    .expect("load terminal prefix")
+    .expect("persisted inquiry");
+    assert_eq!(restored.0, events);
+    assert_eq!(restored.1, state);
+    session.close().await;
+}
+
+#[tokio::test]
+async fn deadline_exhaustion_records_a_conservative_contract_assessment() {
+    let (_agent, session, _temp) = test_session(
+        "deadline-assessment",
+        Arc::new(NoModelCalls) as Arc<dyn LlmClient>,
+    )
+    .await;
+    let args = workflow_args();
+    let checkpoint = super::InquiryCheckpointWriter::initialize(&session, &args)
+        .await
+        .expect("initial journal");
+    let limits = InquiryLimits::default();
+    let evidence = super::super::accepted_evidence_ledger(&evidence_output("deadline"), None);
+    let accepted = evidence.first().expect("accepted evidence");
+    let evidence_ref = a3s::research::EvidenceRef::new(
+        accepted.id.clone(),
+        accepted
+            .claims
+            .iter()
+            .map(|claim| claim.id.clone())
+            .collect(),
+        accepted
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect(),
+    );
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    for event in [
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations: inquiry_obligations(),
+            stop_conditions: vec!["The material obligation is resolved".to_string()],
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: {
+                let mut question = a3s::research::Question::queued(
+                    "question:plan-1-1",
+                    None,
+                    "What does the retained evidence establish?",
+                );
+                question.obligation_ids = vec!["track:material.v2".to_string()];
+                vec![question]
+            },
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: evidence_ref,
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:plan-1-1".to_string(),
+            answer: "The retained evidence answers the material question.".to_string(),
+            evidence_ids: vec![accepted.id.clone()],
+        },
+    ] {
+        super::apply_event(&mut state, &mut events, event, &limits).expect("inquiry event");
+    }
+    assert_eq!(state.phase, InquiryPhase::Outlining);
+
+    super::terminalize_budget_exhaustion(
+        Some(&checkpoint),
+        &mut state,
+        &mut events,
+        &limits,
+        "shared deadline exhausted before assessment",
+    )
+    .await
+    .expect("deadline assessment terminal state");
+
+    assert_eq!(
+        research_contract_outcome(&state),
+        Some(ResearchContractOutcome::Unsatisfied)
+    );
+    assert_eq!(state.phase, InquiryPhase::Exhausted);
+    assert!(matches!(
+        events.get(events.len().saturating_sub(2)),
+        Some(InquiryEvent::ResearchContractAssessed { .. })
+    ));
+    assert!(matches!(
+        events.last(),
+        Some(InquiryEvent::BudgetExhausted { .. })
+    ));
+    let restored = super::super::deep_research_state_journal::load_inquiry_state(
+        session.workspace(),
+        "inquiry-integration",
+    )
+    .await
+    .expect("load terminal assessment")
+    .expect("persisted inquiry");
+    assert_eq!(restored.0, events);
+    assert_eq!(restored.1, state);
+    session.close().await;
+}
+
+#[tokio::test]
 async fn closed_progress_channel_still_awaits_the_tool_join() {
     let (inner_tx, inner_rx) = mpsc::channel(1);
     drop(inner_tx);
@@ -681,8 +880,7 @@ async fn completed_questions_require_a_traceable_contract_assessment_before_repo
     let plan = inquiry_plan();
     commit_plan_research_contract(&plan, &mut state, &mut events, &limits)
         .expect("stable research contract");
-    queue_plan_questions(&plan, None, &mut state, &mut events, &limits)
-        .expect("material question");
+    queue_plan_questions(&plan, None, &mut state, &mut events, &limits).expect("material question");
     super::apply_event(
         &mut state,
         &mut events,
@@ -721,8 +919,7 @@ async fn completed_questions_require_a_traceable_contract_assessment_before_repo
     let execution = InquiryExecution {
         result: successful_tool_result("dynamic_workflow", output),
         retrieval_plan: plan.clone(),
-        workflow_args: workflow_args_with_plan(workflow_args(), plan, None)
-            .expect("workflow args"),
+        workflow_args: workflow_args_with_plan(workflow_args(), plan, None).expect("workflow args"),
         follow_up_waves_remaining: 0,
     };
     let (progress_tx, _progress_rx) = mpsc::channel(16);
@@ -733,13 +930,11 @@ async fn completed_questions_require_a_traceable_contract_assessment_before_repo
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
     .expect("contract assessment");
-    assert_eq!(
-        outcome,
-        a3s::research::ResearchContractOutcome::Satisfied
-    );
+    assert_eq!(outcome, a3s::research::ResearchContractOutcome::Satisfied);
     assert!(state.contract_assessment.is_some());
     assert!(matches!(
         events.last(),
@@ -801,6 +996,7 @@ async fn inquiry_executes_the_llm_selected_follow_up_wave_budget() {
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
     .expect("bounded follow-up resolution");
@@ -917,6 +1113,7 @@ async fn initial_material_questions_receive_retrieval_waves_before_deferred_ques
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
     .expect("coverage-aware wave resolution");
@@ -993,6 +1190,7 @@ async fn follow_up_wave_can_recover_a_previously_bounded_material_question() {
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
     .expect("follow-up recovery");
@@ -1060,6 +1258,7 @@ async fn all_bounded_material_questions_exhaust_the_inquiry() {
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
     .expect("bounded terminal inquiry");

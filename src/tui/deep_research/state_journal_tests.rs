@@ -63,6 +63,72 @@ async fn duplicate_external_event_is_idempotent() {
 }
 
 #[tokio::test]
+async fn reopening_workflow_requires_the_same_research_spec_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-spec-identity";
+    let original = spec();
+    record_workflow_started(temp.path(), run_id, original.clone())
+        .await
+        .unwrap();
+
+    let mut same_identity = original.clone();
+    same_identity.host_pid = 42;
+    record_workflow_started(temp.path(), run_id, same_identity)
+        .await
+        .expect("host process identity is not part of the research request");
+
+    let cases = [
+        ("query", {
+            let mut changed = original.clone();
+            changed.query = "different research question".to_string();
+            changed
+        }),
+        ("current_date", {
+            let mut changed = original.clone();
+            changed.current_date = "2026-07-13".to_string();
+            changed
+        }),
+        ("evidence_scope", {
+            let mut changed = original.clone();
+            changed.evidence_scope = "local_only".to_string();
+            changed
+        }),
+        ("required_claims", {
+            let mut changed = original.clone();
+            changed.required_claims = vec!["different claim".to_string()];
+            changed
+        }),
+        ("total_budget_ms", {
+            let mut changed = original.clone();
+            changed.total_budget_ms += 1;
+            changed
+        }),
+        ("finalization_reserve_ms", {
+            let mut changed = original;
+            changed.finalization_reserve_ms += 1;
+            changed
+        }),
+    ];
+    for (field, changed) in cases {
+        let error = record_workflow_started(temp.path(), run_id, changed)
+            .await
+            .expect_err("a changed research identity must fail closed");
+        let detail = format!("{error:#}");
+        assert!(detail.contains(field), "{field}: {detail}");
+    }
+
+    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.spec().unwrap(), spec());
+    assert_eq!(
+        journal.projection().unwrap().active_steps,
+        ["evidence-collection"]
+    );
+}
+
+#[tokio::test]
 async fn terminal_event_clears_activity_and_blocks_more_work() {
     let temp = tempfile::tempdir().unwrap();
     let mut journal = DeepResearchStateJournal::create(temp.path(), "run-3", spec())

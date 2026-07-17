@@ -315,10 +315,12 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::List(args) => {
-            a3s::components::run_list_with(
+            let registries = crate::commands::registry::store(context)?;
+            a3s::components::run_list_with_registries(
                 list_argv(args, output)?,
                 &context.component_paths,
                 context.network.offline,
+                &registries,
             )
             .await?;
             Ok(ExitCode::SUCCESS)
@@ -333,11 +335,13 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
             Ok(ExitCode::SUCCESS)
         }
         RootCommand::Install(args) => {
-            a3s::components::run_install_with(
+            let registries = crate::commands::registry::store(context)?;
+            a3s::components::run_install_with_registries(
                 install_argv(args, output)?,
                 &context.component_paths,
                 context.network.offline,
                 context.output.progress,
+                &registries,
             )
             .await?;
             Ok(ExitCode::SUCCESS)
@@ -558,10 +562,12 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
             updates: true,
             ..ListArgs::default()
         };
-        a3s::components::run_upgrade_list_with(
+        let registries = crate::commands::registry::store(context)?;
+        a3s::components::run_upgrade_list_with_registries(
             list_argv(list, output)?,
             &context.component_paths,
             context.network.offline,
+            &registries,
         )
         .await?;
         return Ok(ExitCode::SUCCESS);
@@ -584,11 +590,13 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
         argv.push(format!("--plan-digest={plan_digest}"));
     }
     append_json_flag(&mut argv, output)?;
-    a3s::components::run_update_with(
+    let registries = crate::commands::registry::store(context)?;
+    a3s::components::run_update_with_registries(
         argv,
         &context.component_paths,
         context.network.offline,
         context.output.progress,
+        &registries,
     )
     .await?;
     Ok(ExitCode::SUCCESS)
@@ -619,11 +627,13 @@ async fn run_legacy_update(
         }
         let mut args = args;
         append_json_flag(&mut args, output)?;
-        a3s::components::run_update_with(
+        let registries = crate::commands::registry::store(context)?;
+        a3s::components::run_update_with_registries(
             args,
             &context.component_paths,
             context.network.offline,
             output == OutputMode::Human && context.output.progress,
+            &registries,
         )
         .await?;
         Ok(ExitCode::SUCCESS)

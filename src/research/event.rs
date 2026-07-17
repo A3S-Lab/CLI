@@ -55,6 +55,15 @@ pub enum InquiryEvent {
         content: String,
         citation_ids: Vec<String>,
     },
+    SectionRevisionStarted {
+        round: usize,
+        section_ids: Vec<String>,
+        input_digest: String,
+    },
+    SectionRevisionCommitted {
+        round: usize,
+        input_digest: String,
+    },
     AuditCompleted {
         passed: bool,
         issues: Vec<String>,
@@ -79,6 +88,8 @@ impl InquiryEvent {
             Self::ResearchContractAssessed { .. } => "research_contract_assessed",
             Self::OutlineCommitted { .. } => "outline_committed",
             Self::SectionDrafted { .. } => "section_drafted",
+            Self::SectionRevisionStarted { .. } => "section_revision_started",
+            Self::SectionRevisionCommitted { .. } => "section_revision_committed",
             Self::AuditCompleted { .. } => "audit_completed",
             Self::BudgetExhausted { .. } => "budget_exhausted",
         }

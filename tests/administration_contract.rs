@@ -112,6 +112,55 @@ fn registry_rejects_urls_that_can_leak_secrets_or_change_identity() {
 }
 
 #[test]
+fn registry_file_trust_root_is_copied_into_owned_configuration() {
+    let temp = TempWorkspace::new("registry-root-copy");
+    let config = temp.path("config/config.acl");
+    let source = temp.path("bootstrap-root.json");
+    let root_bytes = br#"{"signed":{"_type":"root","version":1}}"#;
+    std::fs::write(&source, root_bytes).unwrap();
+
+    let mut add = Command::new(a3s_bin());
+    configure_component_env(&mut add, &temp);
+    let output = add
+        .arg("--config")
+        .arg(&config)
+        .args([
+            "--output",
+            "json",
+            "registry",
+            "add",
+            "https://files.example/components/",
+            "--trust-root",
+            source.to_str().unwrap(),
+            "--yes",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let owned = temp.path("config/registries/files/root.json");
+    assert_eq!(std::fs::read(&owned).unwrap(), root_bytes);
+    std::fs::write(&source, b"changed outside registry ownership").unwrap();
+    assert_eq!(std::fs::read(&owned).unwrap(), root_bytes);
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["data"]["registry"]["trustedRootPath"],
+        owned.to_string_lossy().to_string()
+    );
+
+    let mut remove = Command::new(a3s_bin());
+    configure_component_env(&mut remove, &temp);
+    let output = remove
+        .arg("--config")
+        .arg(&config)
+        .args(["registry", "remove", "files", "--yes"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(!owned.exists());
+}
+
+#[test]
 fn cache_dry_run_and_clean_stay_inside_the_owned_root() {
     let temp = TempWorkspace::new("cache-boundary");
     let cache = temp.path("cache");

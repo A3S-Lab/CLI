@@ -32,6 +32,19 @@ impl InquiryPhase {
 
 /// A stable, planner-authored coverage contract that must remain traceable
 /// through questions, accepted evidence, and the final report.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceQualityRequirements {
+    /// The obligation needs at least one direct, original, or first-party
+    /// source rather than only derivative commentary.
+    #[serde(default)]
+    pub primary_source_required: bool,
+    /// The obligation needs corroboration by separately attributable sources
+    /// rather than support from only one source identity.
+    #[serde(default)]
+    pub independent_corroboration_required: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchObligation {
@@ -40,6 +53,10 @@ pub struct ResearchObligation {
     pub focus: String,
     pub material: bool,
     pub completion_criteria: Vec<String>,
+    /// Semantic evidence-quality constraints selected per obligation by the
+    /// planner. Legacy journals default to no additional quality constraint.
+    #[serde(default, skip_serializing_if = "EvidenceQualityRequirements::is_empty")]
+    pub evidence_requirements: EvidenceQualityRequirements,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -59,11 +76,30 @@ pub struct CompletionCriterionAssessment {
     pub evidence_ids: Vec<String>,
 }
 
+/// Closed-evidence assessment of one planner-declared source-quality
+/// requirement. Source roles are judged semantically by the assessment model;
+/// the Host validates that every cited source belongs to the cited accepted
+/// evidence on this obligation's question path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceRequirementAssessment {
+    pub status: ContractAssessmentStatus,
+    pub rationale: String,
+    pub evidence_ids: Vec<String>,
+    pub source_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResearchObligationAssessment {
     pub obligation_id: String,
     pub criteria: Vec<CompletionCriterionAssessment>,
+    /// Present exactly when the planner required a primary source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_source: Option<EvidenceRequirementAssessment>,
+    /// Present exactly when the planner required independent corroboration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub independent_corroboration: Option<EvidenceRequirementAssessment>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -123,7 +159,22 @@ impl ResearchObligation {
             focus: focus.into(),
             material,
             completion_criteria,
+            evidence_requirements: EvidenceQualityRequirements::default(),
         }
+    }
+
+    pub fn with_evidence_requirements(
+        mut self,
+        evidence_requirements: EvidenceQualityRequirements,
+    ) -> Self {
+        self.evidence_requirements = evidence_requirements;
+        self
+    }
+}
+
+impl EvidenceQualityRequirements {
+    pub fn is_empty(&self) -> bool {
+        !self.primary_source_required && !self.independent_corroboration_required
     }
 }
 
@@ -229,6 +280,20 @@ pub struct SectionDraft {
     pub citation_ids: Vec<String>,
 }
 
+/// A durable, replayable section-revision attempt.
+///
+/// The attempt is counted when it starts, not when a model call happens to
+/// return. This keeps the global repair budget stable across process restarts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SectionRevision {
+    pub round: usize,
+    pub section_ids: Vec<String>,
+    pub input_digest: String,
+    pub drafted_section_ids: Vec<String>,
+    pub committed: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct InquiryAudit {
@@ -256,6 +321,7 @@ pub struct InquiryLimits {
     pub max_total_answer_chars: usize,
     pub max_section_chars: usize,
     pub max_total_draft_chars: usize,
+    pub max_section_revision_rounds: usize,
     pub max_audit_issues: usize,
     pub max_audit_attempts: usize,
 }
@@ -280,6 +346,7 @@ impl Default for InquiryLimits {
             max_total_answer_chars: 64_000,
             max_section_chars: 30_000,
             max_total_draft_chars: 120_000,
+            max_section_revision_rounds: 2,
             max_audit_issues: 32,
             max_audit_attempts: 4,
         }

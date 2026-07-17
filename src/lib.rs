@@ -1,6 +1,7 @@
 //! Reusable infrastructure for the umbrella A3S CLI.
 
 pub mod components;
+pub mod registry;
 pub mod research;
 
 // Compile the process adapter in the library test target as well, so its

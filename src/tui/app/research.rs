@@ -131,12 +131,14 @@ impl App {
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 let result = if use_sectioned_report {
+                    let report_deadline = Instant::now() + Duration::from_millis(timeout_ms);
                     generate_sectioned_report(
                         &session,
                         &query,
                         &workflow_output,
                         workflow_metadata.as_ref(),
                         &run_id,
+                        report_deadline,
                     )
                     .await
                 } else {

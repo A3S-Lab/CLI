@@ -17,6 +17,7 @@ use super::paths::ComponentPaths;
 use super::probe::probe_version;
 use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
+use crate::registry::ResolvedRegistryPackage;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InstallSource {
@@ -53,6 +54,7 @@ pub struct InstallRequest {
     pub progress: bool,
     pub resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub resolved_sources: BTreeMap<String, InstallSource>,
+    pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
 }
 
 impl Default for InstallRequest {
@@ -67,6 +69,7 @@ impl Default for InstallRequest {
             progress: true,
             resolved_releases: BTreeMap::new(),
             resolved_sources: BTreeMap::new(),
+            resolved_registry_packages: BTreeMap::new(),
         }
     }
 }
@@ -77,6 +80,8 @@ pub struct OperationRecord {
     pub component: ComponentId,
     pub action: &'static str,
     pub changed: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub recovered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +89,10 @@ pub struct OperationRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     pub message: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub async fn install_component(
@@ -122,7 +131,7 @@ pub(super) async fn install_component_locked(
             );
         }
         return match spec.distribution {
-            Distribution::Bundled => install_bundled(id, spec, paths),
+            Distribution::Bundled => install_bundled(id, spec, request, paths),
             Distribution::Release(release) => {
                 if request.package.is_some() {
                     bail!("--from is valid only for external Use extensions");
@@ -141,29 +150,39 @@ pub(super) async fn install_component_locked(
     if !id.is_child_of(&use_id) || id.as_str().split('/').count() < 3 {
         bail!("component '{}' is not registered", id);
     }
-    if request.package.is_none() {
-        bail!(
-            "external component '{}' requires an explicit --from package",
-            id
-        );
-    }
-    if !request.allow_unsigned {
-        bail!(
-            "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
-            id
-        );
-    }
-    if request.version.is_some() {
-        bail!(
-            "external component '{}' derives its version from the package manifest; --version is not supported",
-            id
-        );
-    }
     if request.source != InstallSource::Auto {
         bail!(
-            "external component '{}' uses its explicit --from package; --source is not supported",
+            "external component '{}' is resolved through its package source; --source is not supported",
             id
         );
+    }
+    if request.package.is_some() {
+        if !request.allow_unsigned {
+            bail!(
+                "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
+                id
+            );
+        }
+        if request.version.is_some() {
+            bail!(
+                "external component '{}' derives its version from the local package manifest; --version is not supported",
+                id
+            );
+        }
+    } else {
+        if request.allow_unsigned {
+            bail!("--allow-unsigned is valid only with an explicit local --from package");
+        }
+        let resolved = request
+            .resolved_registry_packages
+            .get(id.as_str())
+            .with_context(|| {
+                format!(
+                    "external component '{}' has no reviewed signed-registry resolution",
+                    id
+                )
+            })?;
+        validate_registry_resolution(id, resolved)?;
     }
     let parent_path = ensure_parent(&use_id, paths, request).await?;
     delegate_install(id, &use_id, &parent_path, request)
@@ -252,6 +271,7 @@ pub(super) fn uninstall_component_locked(
         component: id.clone(),
         action: "uninstall",
         changed: true,
+        recovered: false,
         version: Some(receipt.version),
         provenance: Some(receipt.provenance),
         path: receipt.executable_path,
@@ -287,6 +307,7 @@ async fn ensure_parent(
 fn install_bundled(
     id: &ComponentId,
     spec: &ComponentSpec,
+    request: &InstallRequest,
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     let state = find_state(id, paths)?;
@@ -295,8 +316,9 @@ fn install_bundled(
     }
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: false,
+        recovered: false,
         version: state.version,
         provenance: state.provenance,
         path: state.path,
@@ -321,8 +343,9 @@ async fn install_product(
     if state.is_ready() && requested_version_is_ready && !request.force {
         return Ok(OperationRecord {
             component: id.clone(),
-            action: "install",
+            action: request.intent.action(),
             changed: false,
+            recovered: false,
             version: state.version,
             provenance: state.provenance,
             path: state.path,
@@ -441,6 +464,7 @@ fn install_homebrew(
         component: id.clone(),
         action: request.intent.action(),
         changed: true,
+        recovered: false,
         version: Some(version),
         provenance: Some(InstallProvenance::Homebrew),
         path: Some(executable),
@@ -468,6 +492,26 @@ fn delegate_install(
     if request.allow_unsigned {
         command.arg("--allow-unsigned");
     }
+    if let Some(resolved) = request.resolved_registry_packages.get(id.as_str()) {
+        validate_registry_resolution(id, resolved)?;
+        let plan_digest = resolved.package.plan_digest().map_err(anyhow::Error::new)?;
+        command
+            .arg("--registry-name")
+            .arg(&resolved.registry.name)
+            .arg("--registry-url")
+            .arg(&resolved.registry.url)
+            .arg("--trust-root")
+            .arg(&resolved.registry.trust_root)
+            .arg("--version")
+            .arg(&resolved.package.version)
+            .arg("--channel")
+            .arg(&resolved.package.channel)
+            .arg("--registry-plan-digest")
+            .arg(plan_digest);
+        if let Some(path) = &resolved.registry.trusted_root_path {
+            command.arg("--trusted-root").arg(path);
+        }
+    }
     let output = command.output().with_context(|| {
         format!(
             "failed to delegate install to parent component '{}'",
@@ -484,11 +528,12 @@ fn delegate_install(
     let component = data.get("component");
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: data
             .get("changed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        recovered: false,
         version: component
             .and_then(|value| value.get("version"))
             .and_then(serde_json::Value::as_str)
@@ -500,6 +545,31 @@ fn delegate_install(
             .map(PathBuf::from),
         message: format!("Parent component '{}' installed '{}'.", parent, id),
     })
+}
+
+fn validate_registry_resolution(
+    id: &ComponentId,
+    resolved: &ResolvedRegistryPackage,
+) -> anyhow::Result<()> {
+    let parent = ComponentId::parse("use")?;
+    let package_id = id
+        .relative_to(&parent)
+        .context("signed registry package is outside the Use namespace")?;
+    if resolved.package.package_id != package_id {
+        bail!(
+            "reviewed registry package '{}' does not match component '{}'",
+            resolved.package.package_id,
+            id
+        );
+    }
+    if resolved.package.registry_name != resolved.registry.name
+        || resolved.package.registry_url != resolved.registry.url
+        || resolved.package.root_sha256
+            != resolved.registry.trust_root.trim_start_matches("sha256:")
+    {
+        bail!("reviewed registry package provenance is internally inconsistent");
+    }
+    Ok(())
 }
 
 fn delegate_uninstall(
@@ -533,6 +603,7 @@ fn delegate_uninstall(
             .get("changed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        recovered: false,
         version: None,
         provenance: Some(InstallProvenance::Delegated),
         path: None,

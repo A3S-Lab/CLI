@@ -131,18 +131,6 @@ impl Tool for RetryWorkflowTool {
     }
 }
 
-fn answered(question_ids: &[&str], evidence_id: &str) -> serde_json::Value {
-    serde_json::json!({
-        "resolutions": question_ids.iter().map(|question_id| serde_json::json!({
-            "status": "answered",
-            "question_id": question_id,
-            "answer": "The retained retry evidence resolves this question.",
-            "evidence_ids": [evidence_id]
-        })).collect::<Vec<_>>(),
-        "follow_up_questions": []
-    })
-}
-
 fn inquiry_state(plan: &serde_json::Value) -> (InquiryState, Vec<InquiryEvent>, InquiryLimits) {
     let limits = InquiryLimits::default();
     let mut state = InquiryState::default();
@@ -174,15 +162,10 @@ fn empty_workflow_result() -> ToolCallResult {
 }
 
 #[tokio::test]
-async fn empty_evidence_defers_the_question_and_uses_the_remaining_wave() {
-    let retry_output = evidence_output("retry-1");
-    let evidence_id = super::super::accepted_evidence_ledger(&retry_output, None)[0]
-        .id
-        .clone();
-    let client = Arc::new(SequenceResolutionClient::new([answered(
-        &["question:plan-1-1"],
-        &evidence_id,
-    )]));
+async fn empty_evidence_bounds_the_same_frontier_without_an_identical_retry() {
+    let client = Arc::new(SequenceResolutionClient::new(std::iter::empty::<
+        serde_json::Value,
+    >()));
     let (_agent, session, _temp) = test_session(
         "empty-evidence-retry",
         Arc::clone(&client) as Arc<dyn LlmClient>,
@@ -214,50 +197,44 @@ async fn empty_evidence_defers_the_question_and_uses_the_remaining_wave() {
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
-    .expect("retry after empty evidence");
+    .expect("converge after empty evidence");
 
-    assert_eq!(workflow_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(state.questions[0].status, QuestionStatus::Answered);
+    assert_eq!(workflow_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(client.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(state.questions[0].status, QuestionStatus::Bounded);
     assert!(events.iter().any(|event| matches!(
         event,
         InquiryEvent::QuestionDeferred { reason, .. }
             if reason.contains("no accepted evidence")
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, InquiryEvent::QuestionBounded { .. })));
+    assert!(events.iter().any(
+        |event| matches!(event, InquiryEvent::QuestionBounded { reason, .. }
+            if reason.contains("equivalent normalized query"))
+    ));
     session.close().await;
 }
 
 #[tokio::test]
-async fn follow_up_workflow_failure_defers_and_uses_the_next_remaining_wave() {
+async fn failed_follow_up_frontier_is_not_retried_under_the_same_question() {
     let initial_output = evidence_output("initial");
-    let evidence_id = super::super::accepted_evidence_ledger(&initial_output, None)[0]
-        .id
-        .clone();
-    let client = Arc::new(SequenceResolutionClient::new([
-        serde_json::json!({
-            "resolutions": [{
-                "status": "bounded",
-                "question_id": "question:plan-1-1",
-                "reason": "The first packet exposes a consequential evidence gap."
-            }],
-            "follow_up_questions": [{
-                "id": "question:retry-follow-up",
-                "parent_question_id": "question:plan-1-1",
-                "prompt": "Which retry evidence closes the consequential gap?",
-                "retrieval_query": "retry evidence consequential gap",
-                "material": true,
-                "round": 1
-            }]
-        }),
-        answered(
-            &["question:plan-1-1", "question:retry-follow-up"],
-            &evidence_id,
-        ),
-    ]));
+    let client = Arc::new(SequenceResolutionClient::new([serde_json::json!({
+        "resolutions": [{
+            "status": "bounded",
+            "question_id": "question:plan-1-1",
+            "reason": "The first packet exposes a consequential evidence gap."
+        }],
+        "follow_up_questions": [{
+            "id": "question:retry-follow-up",
+            "parent_question_id": "question:plan-1-1",
+            "prompt": "Which retry evidence closes the consequential gap?",
+            "retrieval_query": "retry evidence consequential gap",
+            "material": true,
+            "round": 1
+        }]
+    })]));
     let (_agent, session, _temp) = test_session(
         "workflow-failure-retry",
         Arc::clone(&client) as Arc<dyn LlmClient>,
@@ -289,23 +266,25 @@ async fn follow_up_workflow_failure_defers_and_uses_the_next_remaining_wave() {
         &mut state,
         &mut events,
         &limits,
+        None,
     )
     .await
-    .expect("retry after follow-up workflow failure");
+    .expect("converge after follow-up workflow failure");
 
-    assert_eq!(workflow_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(client.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(workflow_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(client.calls.load(Ordering::SeqCst), 1);
     assert!(state
         .questions
         .iter()
-        .all(|question| question.status == QuestionStatus::Answered));
+        .all(|question| question.status == QuestionStatus::Bounded));
     assert!(events.iter().any(|event| matches!(
         event,
         InquiryEvent::QuestionDeferred { reason, .. }
             if reason.contains("follow-up retrieval wave 1")
     )));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, InquiryEvent::QuestionBounded { .. })));
+    assert!(events.iter().any(
+        |event| matches!(event, InquiryEvent::QuestionBounded { reason, .. }
+            if reason.contains("equivalent normalized query"))
+    ));
     session.close().await;
 }

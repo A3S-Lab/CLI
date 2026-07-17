@@ -177,10 +177,9 @@ fn island_binary_override_is_honored_without_silent_fallback() {
         ..AgentIslandEnvironment::default()
     };
 
-    assert_eq!(
-        resolve_agent_island_binary(&environment).unwrap(),
-        override_path
-    );
+    let (explicit, candidates) = resolve_agent_island_binaries(&environment).unwrap();
+    assert!(explicit);
+    assert_eq!(candidates, vec![override_path]);
 }
 
 #[test]
@@ -232,7 +231,7 @@ fn failed_export_leaves_the_island_waiting_for_a_snapshot() {
 }
 
 #[test]
-fn retry_backoff_is_tick_driven_and_stops_after_four_consecutive_failures() {
+fn retry_backoff_is_tick_driven_and_cools_down_after_four_consecutive_failures() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
@@ -257,13 +256,20 @@ fn retry_backoff_is_tick_driven_and_stops_after_four_consecutive_failures() {
     supervisor.apply_launch_result(Err("final failure".to_string()), now);
     assert!(matches!(
         supervisor.lifecycle,
-        AgentIslandLifecycle::Stopped
+        AgentIslandLifecycle::Backoff { .. }
     ));
-    assert!(supervisor.poll(now + Duration::from_secs(60)).is_none());
+    assert_eq!(supervisor.consecutive_failures, 0);
+    assert!(supervisor
+        .poll(now + AGENT_ISLAND_RECOVERY_RECHECK - Duration::from_millis(1))
+        .is_none());
+    assert_eq!(
+        supervisor.poll(now + AGENT_ISLAND_RECOVERY_RECHECK),
+        Some(request)
+    );
 }
 
 #[test]
-fn obsolete_helper_is_a_permanent_stop_instead_of_a_crash_loop() {
+fn obsolete_helper_rechecks_after_a_bounded_recovery_cooldown() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
@@ -271,18 +277,25 @@ fn obsolete_helper_is_a_permanent_stop_instead_of_a_crash_loop() {
     let mut supervisor = AgentIslandSupervisor::default();
     assert!(supervisor.observe_snapshot(request).is_some());
 
+    let now = Instant::now();
     supervisor.apply_launch_result(
         Ok(AgentIslandLaunchOutcome::Unsupported(
             "RemoteUI-only helper".to_string(),
         )),
-        Instant::now(),
+        now,
     );
 
     assert!(matches!(
         supervisor.lifecycle,
-        AgentIslandLifecycle::Stopped
+        AgentIslandLifecycle::Backoff { .. }
     ));
     assert_eq!(supervisor.consecutive_failures, 0);
+    assert!(supervisor
+        .poll(now + AGENT_ISLAND_RECOVERY_RECHECK - Duration::from_millis(1))
+        .is_none());
+    assert!(supervisor
+        .poll(now + AGENT_ISLAND_RECOVERY_RECHECK)
+        .is_some());
 }
 
 #[test]
@@ -374,4 +387,244 @@ async fn helper_monitor_reaps_a_failed_child_and_reports_its_exit() {
 
     assert!(!exit.success);
     assert!(!exit.status.is_empty());
+}
+
+#[tokio::test]
+async fn bounded_reader_retains_the_prefix_while_draining_to_eof() {
+    use tokio::io::AsyncWriteExt;
+
+    let payload = vec![b'x'; 64 * 1024];
+    let (mut writer, reader) = tokio::io::duplex(16);
+    let write = tokio::spawn(async move {
+        writer.write_all(&payload).await.unwrap();
+    });
+
+    let retained = tokio::time::timeout(Duration::from_secs(1), read_bounded(Some(reader), 17))
+        .await
+        .expect("bounded reader stopped draining after reaching its retention limit");
+    write.await.unwrap();
+
+    assert_eq!(retained, vec![b'x'; 17]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn incompatible_preferred_helper_falls_back_to_a_compatible_candidate() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _process_probe_guard = crate::system_agents::agent_island_process_test_lock()
+        .lock()
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    let stale = temp.path().join("stale-webview");
+    let compatible = temp.path().join("compatible-webview");
+    std::fs::write(
+        &stale,
+        "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --url <http(s)://...>' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &compatible,
+        "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\nexit 2\n",
+    )
+    .unwrap();
+    for helper in [&stale, &compatible] {
+        std::fs::set_permissions(helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let (selected, rejected) =
+        find_compatible_agent_island_binary(vec![stale.clone(), compatible.clone()], temp.path())
+            .await;
+
+    assert_eq!(
+        selected,
+        Some(compatible.canonicalize().unwrap()),
+        "rejected candidates: {rejected:?}"
+    );
+    assert_eq!(rejected.len(), 1);
+    assert!(rejected[0].contains(&stale.display().to_string()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn helper_runs_from_the_private_snapshot_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _process_probe_guard = crate::system_agents::agent_island_process_test_lock()
+        .lock()
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("private-state");
+    std::fs::create_dir(&state).unwrap();
+    let helper = temp.path().join("a3s-webview-test");
+    std::fs::write(
+        &helper,
+        r#"#!/bin/sh
+if [ "$2" = "--help" ]; then
+  pwd > observed-probe-cwd
+  printf '%s\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2
+  exit 2
+fi
+pwd > observed-cwd
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let request = AgentIslandLaunchRequest {
+        snapshot_path: state.join("system-snapshot.json"),
+        lock_path: state.join("island.lock"),
+    };
+    let environment = AgentIslandEnvironment {
+        binary_override: Some(helper),
+        ..AgentIslandEnvironment::default()
+    };
+
+    let outcome = launch_agent_island_with_environment(request, environment)
+        .await
+        .unwrap();
+    let AgentIslandLaunchOutcome::Spawned(mut monitor) = outcome else {
+        panic!("compatible helper should be spawned, got {outcome:?}");
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while monitor.try_take_exit().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("test helper did not exit");
+
+    let expected = state.canonicalize().unwrap();
+    for observation in ["observed-probe-cwd", "observed-cwd"] {
+        let observed = std::fs::read_to_string(state.join(observation)).unwrap();
+        assert_eq!(Path::new(observed.trim()).canonicalize().unwrap(), expected);
+    }
+}
+
+#[cfg(unix)]
+struct ProbeDescendantCleanup {
+    pid: Option<libc::pid_t>,
+}
+
+#[cfg(unix)]
+impl ProbeDescendantCleanup {
+    fn new(pid_file: &Path) -> Self {
+        let pid = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        Self { pid: Some(pid) }
+    }
+
+    fn is_running(&self) -> bool {
+        let Some(pid) = self.pid else {
+            return false;
+        };
+        // SAFETY: signal 0 performs existence/permission checking only.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    async fn assert_terminated(mut self) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.is_running() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if self.is_running() {
+            let pid = self.pid.unwrap();
+            // Ensure a failed containment assertion cannot leak the test child.
+            // SAFETY: this guard owns the pid recorded by the test helper.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            self.pid = None;
+            panic!("capability-probe descendant {pid} was still running");
+        }
+        self.pid = None;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ProbeDescendantCleanup {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            // SAFETY: this guard owns the pid recorded by the test helper.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capability_probe_reaps_a_descendant_that_holds_output_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _process_probe_guard = crate::system_agents::agent_island_process_test_lock()
+        .lock()
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    let helper = temp.path().join("a3s-webview-probe-test");
+    std::fs::write(
+        &helper,
+        r#"#!/bin/sh
+sleep 30 &
+printf '%s\n' "$!" > descendant.pid
+printf '%s\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2
+exit 0
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe_agent_island_capability(&helper, temp.path()),
+    )
+    .await;
+    let descendant = ProbeDescendantCleanup::new(&temp.path().join("descendant.pid"));
+    let supported = result
+        .expect("descendant-held output pipes exceeded the probe bound")
+        .unwrap();
+
+    assert!(supported);
+    descendant.assert_terminated().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn capability_probe_timeout_terminates_its_descendant() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _process_probe_guard = crate::system_agents::agent_island_process_test_lock()
+        .lock()
+        .await;
+    let temp = tempfile::tempdir().unwrap();
+    let helper = temp.path().join("a3s-webview-probe-timeout-test");
+    std::fs::write(
+        &helper,
+        r#"#!/bin/sh
+sleep 30 &
+printf '%s\n' "$!" > descendant.pid
+sleep 30
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe_agent_island_capability(&helper, temp.path()),
+    )
+    .await;
+    let descendant = ProbeDescendantCleanup::new(&temp.path().join("descendant.pid"));
+    let error = result
+        .expect("hanging helper exceeded the probe's termination bound")
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    descendant.assert_terminated().await;
 }

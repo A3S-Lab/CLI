@@ -9,6 +9,7 @@ use super::{
     InquiryConvergenceInput, InquiryError, InquiryEvent, InquiryLimits, InquiryPhase,
     InquiryReplayError, OutlineValidationContext, Perspective, Question, QuestionStatus,
     ResearchContractAssessment, ResearchMethod, ResearchObligation, ResearchOutline, SectionDraft,
+    SectionRevision,
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -31,6 +32,8 @@ pub struct InquiryState {
     pub source_catalog: BTreeSet<String>,
     pub outline: Option<ResearchOutline>,
     pub drafts: BTreeMap<String, SectionDraft>,
+    #[serde(default)]
+    pub section_revisions: Vec<SectionRevision>,
     pub audit: Option<InquiryAudit>,
     pub audit_attempts: usize,
     pub budget_exhausted_reason: Option<String>,
@@ -53,6 +56,12 @@ impl InquiryState {
 
     pub fn evidence(&self, id: &str) -> Option<&EvidenceRef> {
         self.evidence_catalog.get(id)
+    }
+
+    pub fn active_section_revision(&self) -> Option<&SectionRevision> {
+        self.section_revisions
+            .last()
+            .filter(|revision| !revision.committed)
     }
 
     pub fn outline_validation_context(&self) -> OutlineValidationContext {

@@ -2,9 +2,9 @@ name: Release
 # One tag → all channels, so they never drift. Requires two repo secrets:
 #   CARGO_REGISTRY_TOKEN  — crates.io publish
 #   HOMEBREW_TAP_TOKEN    — write access to A3S-Lab/homebrew-tap
-# Every publishing job waits for the pinned native helper release preflight.
-# Missing helper assets fail before GitHub or crates.io release mutations;
-# missing publish credentials or dependency crates still fail the workflow.
+# Every publishing job waits for immutable release-input and native-helper
+# preflights. GitHub assets remain in an owned draft until the crate and every
+# target archive have been published and independently verified.
 on:
   push:
     tags: ["v*"]
@@ -16,6 +16,84 @@ env:
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.2
 jobs:
+  release-preflight:
+    name: Verify CLI release inputs
+    runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ steps.release-context.outputs.release_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate tag, credentials, and published dependencies
+        id: release-context
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
+            echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"
+            exit 1
+          fi
+          if [[ -z "${TAP_TOKEN:-}" ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN not set — cannot publish the a3s Homebrew channel"
+            exit 1
+          fi
+          if [[ "$(GH_TOKEN="$TAP_TOKEN" gh api repos/A3S-Lab/homebrew-tap \
+            --jq '.permissions.push // false')" != true ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN cannot write A3S-Lab/homebrew-tap"
+            exit 1
+          fi
+
+          version="$(awk '
+            /^\[package\]$/ { in_package = 1; next }
+            in_package && /^\[/ { exit }
+            in_package && /^[[:space:]]*version[[:space:]]*=/ {
+              value = $0
+              sub(/^[^=]*=[[:space:]]*"/, "", value)
+              sub(/".*$/, "", value)
+              print value
+              exit
+            }
+          ' Cargo.toml)"
+          if [[ -z "$version" || "$GITHUB_REF_NAME" != "v${version}" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match a3s ${version:-<unknown>}"
+            exit 1
+          fi
+          release_sha="$(git rev-list -n 1 "refs/tags/${GITHUB_REF_NAME}")"
+          checkout_sha="$(git rev-parse HEAD)"
+          if [[ -z "$release_sha" || "$release_sha" != "$checkout_sha" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not resolve to the checked-out release commit"
+            exit 1
+          fi
+          echo "release_sha=${release_sha}" >> "$GITHUB_OUTPUT"
+
+          crate_exists() {
+            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+              -A "a3s-release-check/1.0" \
+              "https://crates.io/api/v1/crates/$1/$2" >/dev/null
+          }
+          required_crates=(
+            "a3s-code-core 5.3.2"
+            "a3s-boot 0.1.2"
+            "a3s-lane 0.5.1"
+            "a3s-memory 0.1.2"
+            "a3s-tui 0.1.12"
+            "a3s-search 1.4.3"
+            "a3s-acl 0.2.2"
+            "a3s-updater 0.3.0"
+            "a3s-use-extension 0.1.1"
+          )
+          for requirement in "${required_crates[@]}"; do
+            read -r crate dependency_version <<<"$requirement"
+            if ! crate_exists "$crate" "$dependency_version"; then
+              echo "::error::$crate $dependency_version is not on crates.io yet — cannot publish a3s"
+              exit 1
+            fi
+          done
+
   webview-helper-preflight:
     name: Verify Agent Island helper (${{ matrix.target }})
     runs-on: ubuntu-latest
@@ -69,30 +147,62 @@ jobs:
             echo "::error::Pinned helper release ${tag} is missing exactly one ${archive} asset"
             exit 1
           fi
+          asset_names=("$archive")
+          asset_urls=("$archive_url")
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            windows_zip="${base}.zip"
+            if ! windows_zip_url="$(asset_url "$windows_zip")"; then
+              echo "::error::Pinned helper release ${tag} is missing exactly one ${windows_zip} asset"
+              exit 1
+            fi
+            asset_names+=("$windows_zip")
+            asset_urls+=("$windows_zip_url")
+          fi
           if ! checksum_url="$(asset_url "$checksum")"; then
             echo "::error::Pinned helper release ${tag} is missing exactly one ${checksum} asset"
             exit 1
           fi
 
-          curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
-            "$archive_url" -o "$archive"
+          for index in "${!asset_names[@]}"; do
+            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
+              "${asset_urls[$index]}" -o "${asset_names[$index]}"
+          done
           curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
             "$checksum_url" -o "$checksum"
 
-          checksum_lines="$(awk 'END { print NR }' "$checksum")"
-          expected="$(awk 'NR == 1 && NF == 2 { print $1 }' "$checksum")"
-          listed_archive="$(awk 'NR == 1 && NF == 2 { print $2 }' "$checksum")"
-          if [[ "$checksum_lines" != 1 \
-            || ! "$expected" =~ ^[0-9a-f]{64}$ \
-            || "$listed_archive" != "$archive" ]]; then
-            echo "::error::${checksum} must contain one SHA-256 entry for ${archive}"
+          declare -A published_digests=()
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            read -r digest listed_asset extra <<<"$line"
+            # sha256sum marks binary-mode entries as `*filename` on Windows.
+            # Normalize that one transport marker before duplicate/name checks.
+            if [[ "${listed_asset:-}" == \** ]]; then
+              listed_asset="${listed_asset#\*}"
+            fi
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ \
+              || -z "${listed_asset:-}" \
+              || -n "${extra:-}" \
+              || -n "${published_digests[$listed_asset]+present}" ]]; then
+              echo "::error::${checksum} contains an invalid or duplicate SHA-256 entry"
+              exit 1
+            fi
+            published_digests["$listed_asset"]="$digest"
+          done < "$checksum"
+          if [[ "${#published_digests[@]}" -ne "${#asset_names[@]}" ]]; then
+            echo "::error::${checksum} does not describe exactly the published archives for ${RELEASE_TARGET}"
             exit 1
           fi
-          actual="$(sha256sum "$archive" | awk '{ print $1 }')"
-          if [[ "$actual" != "$expected" ]]; then
-            echo "::error::SHA-256 mismatch for ${archive}"
-            exit 1
-          fi
+          for asset_name in "${asset_names[@]}"; do
+            expected="${published_digests[$asset_name]:-}"
+            if [[ -z "$expected" ]]; then
+              echo "::error::${checksum} has no SHA-256 entry for ${asset_name}"
+              exit 1
+            fi
+            actual="$(sha256sum "$asset_name" | awk '{ print $1 }')"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::SHA-256 mismatch for ${asset_name}"
+              exit 1
+            fi
+          done
 
           tar -tzf "$archive" > archive-contents.txt
           while IFS= read -r entry; do
@@ -113,8 +223,42 @@ jobs:
             echo "::error::${archive} must contain only the ${HELPER_NAME} executable"
             exit 1
           fi
-          if ! grep -aFq -- "--agent-island" "$payload"; then
-            echo "::error::${archive} does not support the required --agent-island mode"
+          if [[ "$RELEASE_TARGET" != "x86_64-pc-windows-msvc" && ! -x "$payload" ]]; then
+            echo "::error::${archive} does not mark ${HELPER_NAME} executable"
+            exit 1
+          fi
+          file_description="$(file -b "$payload")"
+          case "$RELEASE_TARGET" in
+            aarch64-apple-darwin)
+              [[ "$file_description" == Mach-O\ 64-bit\ arm64* ]] || format_error=1
+              ;;
+            x86_64-apple-darwin)
+              [[ "$file_description" == Mach-O\ 64-bit\ x86_64* ]] || format_error=1
+              ;;
+            aarch64-unknown-linux-gnu)
+              [[ "$file_description" == ELF\ 64-bit* && "$file_description" == *"ARM aarch64"* ]] \
+                || format_error=1
+              ;;
+            x86_64-unknown-linux-gnu)
+              [[ "$file_description" == ELF\ 64-bit* && "$file_description" == *"x86-64"* ]] \
+                || format_error=1
+              ;;
+            x86_64-pc-windows-msvc)
+              [[ "$file_description" == PE32+\ executable* && "$file_description" == *"x86-64"* ]] \
+                || format_error=1
+              ;;
+            *)
+              format_error=1
+              ;;
+          esac
+          if [[ "${format_error:-0}" == 1 ]]; then
+            echo "::error::${archive} contains the wrong executable format: ${file_description}"
+            exit 1
+          fi
+          island_usage="usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>"
+          if ! grep -aFq -- "$island_usage" "$payload" \
+            || ! grep -aFq -- "a3s.system_agent_snapshot.v1" "$payload"; then
+            echo "::error::${archive} does not expose the required Agent Island snapshot-v1 contract"
             exit 1
           fi
       - name: Preserve verified helper archive
@@ -127,11 +271,43 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  create-release:
-    needs: webview-helper-preflight
+  webview-homebrew-preflight:
+    name: Verify Agent Island Homebrew formula
     runs-on: ubuntu-latest
     steps:
+      - name: Verify the standalone helper formula owns the pinned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v${A3S_WEBVIEW_VERSION}"
+          gh api \
+            -H "Accept: application/vnd.github.raw+json" \
+            repos/A3S-Lab/homebrew-tap/contents/Formula/a3s-webview.rb \
+            > a3s-webview.rb
+          grep -Fqx "  version \"${A3S_WEBVIEW_VERSION}\"" a3s-webview.rb
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-gnu; do
+            asset="a3s-webview-${tag}-${target}.tar.gz"
+            if ! grep -Fq "/${tag}/${asset}" a3s-webview.rb; then
+              echo "::error::Homebrew formula does not reference ${asset}"
+              exit 1
+            fi
+          done
+
+  create-release:
+    needs: [release-preflight, webview-helper-preflight, webview-homebrew-preflight]
+    runs-on: ubuntu-latest
+    outputs:
+      release_sha: ${{ needs.release-preflight.outputs.release_sha }}
+    steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Prepare release notes
         run: |
           set -euo pipefail
@@ -144,13 +320,37 @@ jobs:
           if [ ! -s release-notes.md ]; then
             echo "a3s ${GITHUB_REF_NAME}" > release-notes.md
           fi
-      - name: Create GitHub release
+      - name: Create or resume owned draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.release-preflight.outputs.release_sha }}
         run: |
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" \
-                 --notes-file release-notes.md --verify-tag
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
+          if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Tag ${tag} no longer resolves to the preflighted release commit"
+            exit 1
+          fi
+          marker="<!-- a3s-cli-release-workflow:v1 sha:${RELEASE_SHA} -->"
+          if release_json="$(gh release view "$tag" \
+            --json body,isDraft,isPrerelease,name,tagName 2>/dev/null)"; then
+            if ! jq -e \
+              --arg tag "$tag" \
+              --arg marker "$marker" \
+              '.isDraft == true and .isPrerelease == false and .tagName == $tag
+               and .name == $tag and (.body | contains($marker))' \
+              <<<"$release_json" >/dev/null; then
+              echo "::error::Release ${tag} already exists but is not this workflow's owned draft"
+              exit 1
+            fi
+          else
+            printf '\n%s\n' "$marker" >> release-notes.md
+            gh release create "$tag" --draft --prerelease=false --title "$tag" \
+              --notes-file release-notes.md --verify-tag
+          fi
 
   web-assets:
     runs-on: ubuntu-latest
@@ -205,7 +405,7 @@ jobs:
           retention-days: 1
 
   binaries:
-    needs: [webview-helper-preflight, create-release, crate, web-assets]
+    needs: [webview-helper-preflight, create-release, web-assets]
     strategy:
       fail-fast: false
       matrix:
@@ -218,6 +418,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Use published A3S crates
         shell: bash
@@ -244,9 +446,13 @@ jobs:
           set -euo pipefail
           tag="v${A3S_WEBVIEW_VERSION}"
           base="a3s-webview-${tag}-${RELEASE_TARGET}"
-          archive="webview-release/${base}.tar.gz"
+          archive_name="${base}.tar.gz"
+          archive="webview-release/${archive_name}"
           checksum="webview-release/${base}.sha256"
-          expected="$(awk 'NR == 1 { print $1 }' "$checksum")"
+          expected="$(awk -v asset="$archive_name" \
+            '($2 == asset || $2 == "*" asset) \
+             { digest = $1; count += 1 } END { if (count == 1) print digest }' \
+            "$checksum")"
           if command -v sha256sum >/dev/null 2>&1; then
             actual="$(sha256sum "$archive" | awk '{ print $1 }')"
           else
@@ -259,60 +465,236 @@ jobs:
           test -n "$helper"
           cp "$helper" "$HELPER_NAME"
           if [[ "$HELPER_NAME" != *.exe ]]; then chmod 0755 "$HELPER_NAME"; fi
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - name: Build release archives
+        uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: a3s
           target: ${{ matrix.target }}
           archive: a3s-$tag-$target
           include: web,${{ matrix.helper }}
           tar: all
-          zip: none
+          zip: windows
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: true
+          dry-run-intended: true
+      - name: Verify owned draft and upload release archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
+          if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Tag ${tag} no longer resolves to the preflighted release commit"
+            exit 1
+          fi
+          marker="<!-- a3s-cli-release-workflow:v1 sha:${RELEASE_SHA} -->"
+          release_json="$(gh release view "$tag" \
+            --json body,isDraft,isPrerelease,name,tagName)"
+          if ! jq -e \
+            --arg tag "$tag" \
+            --arg marker "$marker" \
+            '.isDraft == true and .isPrerelease == false and .tagName == $tag
+             and .name == $tag and (.body | contains($marker))' \
+            <<<"$release_json" >/dev/null; then
+            echo "::error::Release ${tag} is not this workflow's owned draft"
+            exit 1
+          fi
+
+          base="a3s-${tag}-${RELEASE_TARGET}"
+          assets=("${base}.tar.gz" "${base}.sha256")
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            assets+=("${base}.zip")
+          fi
+          for asset in "${assets[@]}"; do
+            if [[ ! -f "$asset" ]]; then
+              echo "::error::Release build did not produce ${asset}"
+              exit 1
+            fi
+          done
+          gh release upload "$tag" "${assets[@]}" --clobber
 
   crate:
-    needs: [webview-helper-preflight, create-release]
+    needs: [create-release, binaries]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
         run: |
+          set -euo pipefail
           if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
             echo "::error::CARGO_REGISTRY_TOKEN not set — cannot publish a3s to crates.io"; exit 1
           fi
-          crate_exists() {
-            curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL \
-              -A "a3s-release-check/1.0" \
-              "https://crates.io/api/v1/crates/$1/$2" >/dev/null
-          }
-          required_crates=(
-            "a3s-code-core 5.3.2"
-            "a3s-boot 0.1.2"
-            "a3s-lane 0.5.1"
-            "a3s-memory 0.1.2"
-            "a3s-tui 0.1.12"
-            "a3s-search 1.4.3"
-            "a3s-acl 0.2.2"
-            "a3s-updater 0.3.0"
-          )
-          for requirement in "${required_crates[@]}"; do
-            read -r crate version <<<"$requirement"
-            if ! crate_exists "$crate" "$version"; then
-              echo "::error::$crate $version is not on crates.io yet — cannot publish a3s"
-              exit 1
-            fi
-          done
           publish_dir="$(mktemp -d)"
           trap 'rm -rf "$publish_dir"' EXIT
           git archive HEAD | tar -x -C "$publish_dir"
           bash .github/scripts/use-published-a3s-crates.sh "$publish_dir/Cargo.toml"
-          cargo publish --locked --manifest-path "$publish_dir/Cargo.toml"
+
+          tag="$GITHUB_REF_NAME"
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
+          if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Tag ${tag} no longer resolves to the preflighted release commit"
+            exit 1
+          fi
+          marker="<!-- a3s-cli-release-workflow:v1 sha:${RELEASE_SHA} -->"
+          release_json="$(gh release view "$tag" \
+            --json body,isDraft,isPrerelease,name,tagName)"
+          if ! jq -e \
+            --arg tag "$tag" \
+            --arg marker "$marker" \
+            '.isDraft == true and .isPrerelease == false and .tagName == $tag
+             and .name == $tag and (.body | contains($marker))' \
+            <<<"$release_json" >/dev/null; then
+            echo "::error::Release ${tag} is not this workflow's owned draft"
+            exit 1
+          fi
+
+          version="${tag#v}"
+          crate_version_exists() {
+            curl --connect-timeout 5 --max-time 15 -fsSL \
+              -A "a3s-release-check/1.0" \
+              "https://crates.io/api/v1/crates/a3s/${version}" >/dev/null
+          }
+          if crate_version_exists; then
+            echo "a3s ${version} is already published; continuing the owned draft release"
+            exit 0
+          fi
+
+          set +e
+          publish_output="$(cargo publish --locked \
+            --manifest-path "$publish_dir/Cargo.toml" 2>&1)"
+          publish_status=$?
+          set -e
+          printf '%s\n' "$publish_output"
+          if [[ "$publish_status" -eq 0 ]]; then
+            exit 0
+          fi
+          for attempt in {1..12}; do
+            if crate_version_exists; then
+              echo "a3s ${version} is visible on crates.io; treating this as a resumed release"
+              exit 0
+            fi
+            if [[ "$attempt" -lt 12 ]]; then
+              sleep 5
+            fi
+          done
+          exit "$publish_status"
+
+  publish-release:
+    needs: [create-release, binaries, crate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify complete assets and publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ needs.create-release.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-pc-windows-msvc; do
+            base="a3s-${tag}-${target}"
+            printf '%s\n' "${base}.tar.gz" "${base}.sha256"
+            if [[ "$target" == x86_64-pc-windows-msvc ]]; then
+              printf '%s\n' "${base}.zip"
+            fi
+          done | sort > expected-assets.txt
+          gh release view "$tag" --json assets \
+            --jq '.assets[].name' | sort > actual-assets.txt
+          if ! diff -u expected-assets.txt actual-assets.txt; then
+            echo "::error::Release ${tag} does not contain the exact expected asset set"
+            exit 1
+          fi
+
+          mkdir release-assets
+          gh release download "$tag" --dir release-assets --pattern 'a3s-*'
+          for target in \
+            aarch64-apple-darwin \
+            x86_64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-pc-windows-msvc; do
+            base="a3s-${tag}-${target}"
+            archives=("${base}.tar.gz")
+            if [[ "$target" == x86_64-pc-windows-msvc ]]; then
+              archives+=("${base}.zip")
+            fi
+            checksum="release-assets/${base}.sha256"
+            checksum_lines="$(awk 'END { print NR }' "$checksum")"
+            checksum_entries="$(awk 'NF == 2 { count += 1 } END { print count + 0 }' "$checksum")"
+            if [[ "$checksum_lines" -ne "${#archives[@]}" \
+              || "$checksum_entries" -ne "${#archives[@]}" ]]; then
+              echo "::error::${base}.sha256 does not contain exactly one entry per archive"
+              exit 1
+            fi
+            for archive in "${archives[@]}"; do
+              expected="$(awk -v asset="$archive" \
+                '($2 == asset || $2 == "*" asset) \
+                 && length($1) == 64 && $1 !~ /[^0-9a-f]/ \
+                 { digest = $1; count += 1 } \
+                 END { if (count == 1) print digest }' "$checksum")"
+              if [[ -z "$expected" ]]; then
+                echo "::error::${base}.sha256 has no unique valid digest for ${archive}"
+                exit 1
+              fi
+              actual="$(sha256sum "release-assets/${archive}" | awk '{ print $1 }')"
+              if [[ "$actual" != "$expected" ]]; then
+                echo "::error::SHA-256 mismatch for ${archive}"
+                exit 1
+              fi
+            done
+          done
+
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
+          if [[ -z "$RELEASE_SHA" || "$current_tag_sha" != "$RELEASE_SHA" ]]; then
+            echo "::error::Tag ${tag} no longer resolves to the preflighted release commit"
+            exit 1
+          fi
+          marker="<!-- a3s-cli-release-workflow:v1 sha:${RELEASE_SHA} -->"
+          release_json="$(gh release view "$tag" \
+            --json body,isDraft,isPrerelease,name,tagName)"
+          if ! jq -e \
+            --arg tag "$tag" \
+            --arg marker "$marker" \
+            '(.isDraft == true or .isDraft == false) and .isPrerelease == false
+             and .tagName == $tag
+             and .name == $tag and (.body | contains($marker))' \
+            <<<"$release_json" >/dev/null; then
+            echo "::error::Release ${tag} is not this workflow's owned non-prerelease release"
+            exit 1
+          fi
+          if jq -e '.isDraft == true' <<<"$release_json" >/dev/null; then
+            gh release edit "$tag" --draft=false --prerelease=false
+          else
+            echo "Release ${tag} is already public; continuing the interrupted publication"
+          fi
 
   homebrew:
-    needs: binaries
+    needs: publish-release
     runs-on: ubuntu-latest
     steps:
       - name: Update Homebrew tap formula
@@ -337,6 +719,7 @@ jobs:
             homepage "https://github.com/A3S-Lab/CLI"
             version "${v}"
             license "MIT"
+            depends_on "a3s-lab/tap/a3s-webview"
 
             on_macos do
               on_arm do
@@ -350,7 +733,6 @@ jobs:
             end
 
             on_linux do
-              depends_on "webkitgtk"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${lin_arm}"
@@ -362,7 +744,7 @@ jobs:
             end
 
             def install
-              bin.install "a3s", "a3s-webview"
+              bin.install "a3s"
               pkgshare.install "web"
             end
 
@@ -371,6 +753,7 @@ jobs:
             end
           end
           RB
+          ruby -c tap/Formula/a3s.rb
           cd tap
           git config user.email "ci@a3s.dev"
           git config user.name "A3S CI"

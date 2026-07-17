@@ -1,13 +1,15 @@
 use a3s::research::{InquiryEvent, InquiryLimits, InquiryState, PerspectiveDiscoveryOutput};
 use serde_json::Value;
+use std::time::{Duration, Instant};
 
 use super::super::deep_research_evidence_ledger::{
     AcceptedClaim, AcceptedEvidence, AcceptedSource, SourceTier,
 };
 use super::execution::balanced_evidence_packet;
 use super::plan::{
-    commit_plan_research_contract, defer_or_bound_question_batch, perspective_research_plan,
-    questions_scheduled_for_retrieval, queue_plan_questions, scout_plan, single_wave_research_plan,
+    attempted_retrieval_frontiers, commit_plan_research_contract, defer_or_bound_question_batch,
+    follow_up_research_plan, perspective_research_plan, questions_scheduled_for_retrieval,
+    queue_plan_questions, queued_questions_for_next_wave, scout_plan, single_wave_research_plan,
     validate_plan, workflow_args_with_plan,
 };
 
@@ -27,7 +29,11 @@ fn production_planner_plan(method: &str, scouts: &[&str]) -> Value {
             "perspective": "",
             "material": true,
             "questions": ["What does the evidence establish?"],
-            "completion_criteria": ["A traceable answer or bounded gap"]
+            "completion_criteria": ["A traceable answer or bounded gap"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": false
+            }
         }],
         "scout_queries": scouts,
         "search_queries": ["targeted evidence query"],
@@ -66,6 +72,37 @@ fn evidence_fixture(index: usize) -> AcceptedEvidence {
         contradictions: Vec::new(),
         gaps: Vec::new(),
     }
+}
+
+#[test]
+fn shared_inquiry_deadline_clamps_each_stage_and_preserves_finalization() {
+    let now = Instant::now();
+    let deadline = super::InquiryDeadline::from_elapsed(now, 720_000, 108_000, 500_000);
+
+    assert_eq!(
+        deadline.stage_timeout_ms_at(now, 180_000),
+        Some(112_000),
+        "a stage may use only the work budget before the finalization reserve"
+    );
+    assert_eq!(
+        deadline.stage_timeout_ms_at(now + Duration::from_millis(111_000), 90_000),
+        Some(1_000)
+    );
+    assert_eq!(
+        deadline.stage_timeout_ms_at(now + Duration::from_millis(111_001), 90_000),
+        None,
+        "sub-second work must not start a model or retrieval operation"
+    );
+}
+
+#[test]
+fn shared_inquiry_deadline_accounts_for_time_spent_before_initialization() {
+    let now = Instant::now();
+    let exhausted = super::InquiryDeadline::from_elapsed(now, 720_000, 108_000, 620_000);
+    let bounded = super::InquiryDeadline::from_elapsed(now, 720_000, 108_000, 600_000);
+
+    assert_eq!(exhausted.stage_timeout_ms_at(now, 90_000), None);
+    assert_eq!(bounded.stage_timeout_ms_at(now, 90_000), Some(12_000));
 }
 
 #[test]
@@ -125,6 +162,49 @@ fn planner_must_define_bounded_completion_and_stop_conditions() {
 }
 
 #[test]
+fn planner_must_explicitly_select_per_obligation_evidence_requirements() {
+    let mut missing = production_planner_plan("focused", &[]);
+    missing["tracks"][0]
+        .as_object_mut()
+        .expect("track")
+        .remove("evidence_requirements");
+    let error = validate_plan(missing)
+        .expect_err("a new plan must explicitly select evidence requirements per obligation");
+    assert!(error.contains("evidence_requirements"), "{error}");
+
+    let mut focused = plan("focused", &[]);
+    focused["tracks"][0]["evidence_requirements"] = serde_json::json!({
+        "primary_source_required": true,
+        "independent_corroboration_required": true
+    });
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("typed research contract");
+
+    assert!(
+        state.obligations[0]
+            .evidence_requirements
+            .primary_source_required
+    );
+    assert!(
+        state.obligations[0]
+            .evidence_requirements
+            .independent_corroboration_required
+    );
+}
+
+#[test]
 fn focused_questions_inherit_the_model_selected_track_materiality() {
     let mut mixed = plan("focused", &[]);
     mixed["tracks"]
@@ -137,7 +217,11 @@ fn focused_questions_inherit_the_model_selected_track_materiality() {
             "perspective": "",
             "material": false,
             "questions": ["Which supporting context remains available?"],
-            "completion_criteria": ["Retain evidence or an explicit bounded limitation"]
+            "completion_criteria": ["Retain evidence or an explicit bounded limitation"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": false
+            }
         }));
 
     let limits = InquiryLimits::default();
@@ -374,6 +458,319 @@ fn focused_question_identity_is_owned_by_the_host() {
 }
 
 #[test]
+fn renamed_equivalent_query_cannot_repeat_an_attempted_frontier() {
+    let focused = plan("focused", &[]);
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    queue_plan_questions(&focused, None, &mut state, &mut events, &limits)
+        .expect("initial question");
+    let root = state.questions[0].clone();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionDeferred {
+            question_id: root.id.clone(),
+            reason: "the completed wave retained no new material evidence".to_string(),
+        },
+        &limits,
+    )
+    .expect("completed retrieval opportunity");
+
+    let mut renamed = a3s::research::Question::follow_up(
+        "question:model-renamed",
+        None,
+        root.id.clone(),
+        1,
+        "Can the same search be tried under another question id?",
+    );
+    renamed.retrieval_query = Some("  TARGETED   evidence QUERY  ".to_string());
+    renamed.obligation_ids.clone_from(&root.obligation_ids);
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionsQueued {
+            questions: vec![renamed],
+        },
+        &limits,
+    )
+    .expect("renamed follow-up");
+
+    let selection = queued_questions_for_next_wave(&state, &events, &limits)
+        .expect("stable frontier selection");
+    assert!(selection.novel.is_empty());
+    assert_eq!(
+        selection
+            .already_attempted
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["question:plan-1-1", "question:model-renamed"]
+    );
+}
+
+#[test]
+fn one_follow_up_wave_coalesces_equivalent_normalized_frontiers() {
+    let focused = plan("focused", &[]);
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    let mut first = a3s::research::Question::queued(
+        "question:first-equivalent",
+        None,
+        "First equivalent question",
+    );
+    first.retrieval_query = Some("Targeted evidence QUERY".to_string());
+    first.obligation_ids = vec!["track:material".to_string()];
+    let mut renamed = a3s::research::Question::queued(
+        "question:second-equivalent",
+        None,
+        "Renamed equivalent question",
+    );
+    renamed.retrieval_query = Some("  targeted   EVIDENCE query ".to_string());
+    renamed.obligation_ids = vec!["track:material".to_string()];
+
+    let wave = follow_up_research_plan(&focused, &[first, renamed], state.obligations.as_slice())
+        .expect("coalesced follow-up plan");
+    assert_eq!(wave["search_queries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(wave["tracks"].as_array().map(Vec::len), Some(1));
+    assert_eq!(wave["budget"]["max_parallel_tasks"], 1);
+}
+
+#[test]
+fn new_query_or_obligation_remains_a_novel_retrieval_frontier() {
+    let mut focused = plan("focused", &[]);
+    focused["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .push(serde_json::json!({
+            "id": "track:independent",
+            "title": "Independent obligation",
+            "focus": "Resolve an independent evidence obligation",
+            "perspective": "",
+            "material": false,
+            "questions": ["Which independent evidence is available?"],
+            "completion_criteria": ["Retain independent evidence or a bounded gap"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": false
+            }
+        }));
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    queue_plan_questions(&focused, None, &mut state, &mut events, &limits)
+        .expect("planned questions");
+    let root = state.questions[0].clone();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionDeferred {
+            question_id: root.id.clone(),
+            reason: "retrieval opportunity completed".to_string(),
+        },
+        &limits,
+    )
+    .expect("attempt root");
+
+    let mut new_query = a3s::research::Question::follow_up(
+        "question:new-query",
+        None,
+        root.id.clone(),
+        1,
+        "Which different query can close the same obligation?",
+    );
+    new_query.retrieval_query = Some("independent source for material claim".to_string());
+    new_query.obligation_ids.clone_from(&root.obligation_ids);
+    let mut new_obligation = a3s::research::Question::queued(
+        "question:new-obligation",
+        None,
+        "Can the same query address an independent obligation?",
+    );
+    new_obligation.retrieval_query = root.retrieval_query.clone();
+    new_obligation.obligation_ids = vec!["track:independent".to_string()];
+    new_obligation.material = false;
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionsQueued {
+            questions: vec![new_query, new_obligation],
+        },
+        &limits,
+    )
+    .expect("novel frontiers");
+
+    let selection = queued_questions_for_next_wave(&state, &events, &limits)
+        .expect("stable frontier selection");
+    let novel_ids = selection
+        .novel
+        .iter()
+        .map(|question| question.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(novel_ids.contains(&"question:new-query"));
+    assert!(novel_ids.contains(&"question:new-obligation"));
+    assert!(!novel_ids.contains(&"question:plan-1-1"));
+}
+
+#[test]
+fn accepted_evidence_advances_the_replayable_frontier_head() {
+    let focused = plan("focused", &[]);
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    queue_plan_questions(&focused, None, &mut state, &mut events, &limits)
+        .expect("initial question");
+    let root = state.questions[0].clone();
+    let mut independent = a3s::research::Question::queued(
+        "question:independent",
+        None,
+        "Which independent source changes the evidence frontier?",
+    );
+    independent.retrieval_query = Some("independent evidence frontier".to_string());
+    independent.obligation_ids.clone_from(&root.obligation_ids);
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionsQueued {
+            questions: vec![independent],
+        },
+        &limits,
+    )
+    .expect("independent question");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionDeferred {
+            question_id: root.id.clone(),
+            reason: "first frontier completed without gain".to_string(),
+        },
+        &limits,
+    )
+    .expect("first frontier completion");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::EvidenceAccepted {
+            evidence: a3s::research::EvidenceRef::new(
+                "evidence:independent",
+                vec!["claim:independent".to_string()],
+                vec!["source:independent".to_string()],
+            ),
+        },
+        &limits,
+    )
+    .expect("new accepted evidence");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:independent".to_string(),
+            answer: "The independent evidence advances the retained frontier.".to_string(),
+            evidence_ids: vec!["evidence:independent".to_string()],
+        },
+        &limits,
+    )
+    .expect("independent coverage");
+
+    let selection = queued_questions_for_next_wave(&state, &events, &limits)
+        .expect("advanced frontier selection");
+    assert_eq!(
+        selection
+            .novel
+            .iter()
+            .map(|question| question.id.as_str())
+            .collect::<Vec<_>>(),
+        ["question:plan-1-1"]
+    );
+    assert!(selection.already_attempted.is_empty());
+}
+
+#[test]
+fn attempted_frontiers_are_derived_identically_after_event_replay() {
+    let focused = plan("focused", &[]);
+    let limits = InquiryLimits::default();
+    let mut state = InquiryState::default();
+    let mut events = Vec::new();
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::StrategySelected {
+            method: a3s::research::ResearchMethod::Focused,
+        },
+        &limits,
+    )
+    .expect("strategy");
+    commit_plan_research_contract(&focused, &mut state, &mut events, &limits)
+        .expect("stable research contract");
+    queue_plan_questions(&focused, None, &mut state, &mut events, &limits).expect("question");
+    super::apply_event(
+        &mut state,
+        &mut events,
+        InquiryEvent::QuestionDeferred {
+            question_id: "question:plan-1-1".to_string(),
+            reason: "completed without evidence gain".to_string(),
+        },
+        &limits,
+    )
+    .expect("retrieval completion");
+
+    let encoded = serde_json::to_vec(&events).expect("serialize event prefix");
+    let restored_events: Vec<InquiryEvent> =
+        serde_json::from_slice(&encoded).expect("restore event prefix");
+    let restored_state = a3s::research::replay(&restored_events, &limits).expect("strict replay");
+
+    assert_eq!(restored_state, state);
+    assert_eq!(
+        attempted_retrieval_frontiers(&events, &limits).expect("live fingerprints"),
+        attempted_retrieval_frontiers(&restored_events, &limits).expect("replayed fingerprints")
+    );
+}
+
+#[test]
 fn scout_pass_is_bounded_and_does_not_replace_the_stable_plan() {
     let mut base = plan("perspective_guided", &["landscape one", "landscape two"]);
     base["budget"]["direct_searches"] = Value::from(0);
@@ -411,6 +808,10 @@ fn perspective_questions_become_the_retrieval_plan() {
         }],
     };
     let mut base = plan("perspective_guided", &["source landscape"]);
+    base["tracks"][0]["evidence_requirements"] = serde_json::json!({
+        "primary_source_required": true,
+        "independent_corroboration_required": true
+    });
     base["budget"]["direct_searches"] = Value::from(0);
     base["budget"]["direct_fetches"] = Value::from(0);
     let enriched = perspective_research_plan(&base, &discovery).expect("enriched plan");
@@ -422,6 +823,13 @@ fn perspective_questions_become_the_retrieval_plan() {
     assert_eq!(enriched["scout_queries"], serde_json::json!([]));
     assert_eq!(enriched["budget"]["direct_searches"], 1);
     assert_eq!(enriched["budget"]["direct_fetches"], 2);
+    assert_eq!(
+        enriched["tracks"][0]["evidence_requirements"],
+        serde_json::json!({
+            "primary_source_required": true,
+            "independent_corroboration_required": true
+        })
+    );
 }
 
 #[test]
@@ -466,4 +874,64 @@ fn perspective_retrieval_budget_covers_each_lens_before_extra_queries() {
             "one secondary"
         ])
     );
+}
+
+#[test]
+fn supporting_only_perspective_receives_a_non_blocking_retrieval_opportunity() {
+    let discovery = PerspectiveDiscoveryOutput {
+        perspectives: vec![
+            a3s::research::DiscoveredPerspective {
+                id: "perspective:core".to_string(),
+                title: "Core lens".to_string(),
+                focus: "Resolve the core obligation".to_string(),
+                source_ids: vec!["source:core".to_string()],
+                questions: vec![a3s::research::DiscoveredQuestion {
+                    id: "question:core".to_string(),
+                    prompt: "What closes the core obligation?".to_string(),
+                    retrieval_query: "core obligation evidence".to_string(),
+                    obligation_ids: vec!["track:material".to_string()],
+                    material: true,
+                    round: 0,
+                }],
+            },
+            a3s::research::DiscoveredPerspective {
+                id: "perspective:context".to_string(),
+                title: "Supporting context".to_string(),
+                focus: "Collect useful non-gating context".to_string(),
+                source_ids: vec!["source:context".to_string()],
+                questions: vec![a3s::research::DiscoveredQuestion {
+                    id: "question:context".to_string(),
+                    prompt: "Which context helps qualify the answer?".to_string(),
+                    retrieval_query: "supporting context evidence".to_string(),
+                    obligation_ids: vec!["track:supporting".to_string()],
+                    material: false,
+                    round: 0,
+                }],
+            },
+        ],
+    };
+    let mut base = plan("perspective_guided", &["source landscape"]);
+    base["tracks"]
+        .as_array_mut()
+        .expect("tracks")
+        .push(serde_json::json!({
+            "id": "track:supporting",
+            "title": "Supporting context",
+            "focus": "Collect useful non-gating context",
+            "perspective": "",
+            "material": false,
+            "questions": ["Which context helps qualify the answer?"],
+            "completion_criteria": ["Context is retained or explicitly bounded"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": false
+            }
+        }));
+
+    let enriched = perspective_research_plan(&base, &discovery).expect("perspective plan");
+    assert_eq!(
+        enriched["search_queries"],
+        serde_json::json!(["core obligation evidence", "supporting context evidence"])
+    );
+    assert_eq!(enriched["tracks"][1]["material"], false);
 }

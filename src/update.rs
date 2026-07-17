@@ -5,8 +5,18 @@
 //! never be blocked again by a stale tap clone or a broken `brew upgrade`.
 
 use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
+use std::process::Stdio;
+#[cfg(not(windows))]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(windows))]
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
+#[cfg(not(windows))]
+use std::time::Instant;
 
 use a3s_updater::{extract_tar_gz_archive, verify_sha256};
 
@@ -18,6 +28,14 @@ struct CommandOutput {
 
 trait CommandRunner {
     fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput>;
+    fn output_bounded(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        _timeout: Duration,
+    ) -> Option<CommandOutput> {
+        self.output(program, args)
+    }
     fn status(&self, program: &OsStr, args: &[OsString]) -> bool;
 }
 
@@ -31,6 +49,15 @@ impl CommandRunner for RealCommandRunner {
             stdout: out.stdout,
             stderr: out.stderr,
         })
+    }
+
+    fn output_bounded(
+        &self,
+        program: &OsStr,
+        args: &[OsString],
+        timeout: Duration,
+    ) -> Option<CommandOutput> {
+        bounded_command_output(program, args, timeout)
     }
 
     fn status(&self, program: &OsStr, args: &[OsString]) -> bool {
@@ -51,7 +78,23 @@ const BREW_TAP_URL: &str = "https://github.com/A3S-Lab/homebrew-tap";
 const BREW_FORMULA: &str = "a3s-lab/tap/a3s";
 const BREW_SHORT_FORMULA: &str = "a3s";
 const WEBVIEW_FORMULA: &str = "a3s-lab/tap/a3s-webview";
+const AGENT_ISLAND_BIN_ENV: &str = "A3S_AGENT_ISLAND_BIN";
+const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
+const AGENT_ISLAND_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_AGENT_ISLAND_HELPER_PROBE_BYTES: u64 = 8 * 1024;
+const AGENT_ISLAND_HELPER_USAGE: &[u8] =
+    b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>";
+const SYSTEM_AGENT_SNAPSHOT_MARKER: &[u8] = b"a3s.system_agent_snapshot.v1";
+#[cfg(windows)]
+const MAX_AGENT_ISLAND_HELPER_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
+// A normal PE header follows a short DOS stub. Bound the pointer independently
+// of the overall helper size before using it as a slice offset.
+const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
+const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
+const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
 const A3S_BINARY: &str = if cfg!(windows) { "a3s.exe" } else { "a3s" };
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
     "a3s-webview.exe"
@@ -78,6 +121,287 @@ const LATEST_RELEASE_API_ARGS: &[&str] = &[
     "12",
     "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
 ];
+
+#[cfg(not(windows))]
+fn spawn_probe_reader<R>(
+    mut reader: R,
+    exceeded: Arc<AtomicBool>,
+) -> mpsc::Receiver<Option<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let limit = usize::try_from(MAX_AGENT_ISLAND_HELPER_PROBE_BYTES).unwrap_or(usize::MAX);
+        let mut retained = Vec::with_capacity(limit);
+        let mut total = 0_u64;
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let read = match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => read,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    let _ = sender.send(None);
+                    return;
+                }
+            };
+            total = total.saturating_add(read as u64);
+            if total > MAX_AGENT_ISLAND_HELPER_PROBE_BYTES {
+                exceeded.store(true, Ordering::Release);
+            }
+            let keep = limit.saturating_sub(retained.len()).min(read);
+            retained.extend_from_slice(&chunk[..keep]);
+        }
+        let _ = sender.send(Some(retained));
+    });
+    receiver
+}
+
+#[cfg(unix)]
+fn configure_probe_command(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.process_group(0);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_probe_command(_command: &mut Command) {}
+
+#[cfg(unix)]
+struct ProbeProcessTree {
+    process_group: libc::pid_t,
+}
+
+#[cfg(unix)]
+impl ProbeProcessTree {
+    fn attach(child: &mut std::process::Child) -> Option<Self> {
+        Some(Self {
+            process_group: libc::pid_t::try_from(child.id()).ok()?,
+        })
+    }
+
+    fn terminate(&self) {
+        // SAFETY: the child was spawned into a new process group whose id is
+        // its pid. A negative pid targets that group, including descendants
+        // that inherited the capability probe's stdout or stderr handles.
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ProbeProcessTree;
+
+#[cfg(not(any(unix, windows)))]
+impl ProbeProcessTree {
+    fn attach(_child: &mut std::process::Child) -> Option<Self> {
+        Some(Self)
+    }
+
+    fn terminate(&self) {}
+}
+
+#[cfg(not(windows))]
+fn terminate_probe_child(child: &mut std::process::Child, tree: &ProbeProcessTree) {
+    tree.terminate();
+    let _ = child.kill();
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) if started.elapsed() < AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => return,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn bounded_command_output(
+    program: &OsStr,
+    args: &[OsString],
+    timeout: Duration,
+) -> Option<CommandOutput> {
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_probe_command(&mut command);
+    let mut child = command.spawn().ok()?;
+    let tree = match ProbeProcessTree::attach(&mut child) {
+        Some(tree) => tree,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+    };
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let stdout = spawn_probe_reader(child.stdout.take()?, Arc::clone(&exceeded));
+    let stderr = spawn_probe_reader(child.stderr.take()?, Arc::clone(&exceeded));
+    let started = Instant::now();
+    let status = loop {
+        if exceeded.load(Ordering::Acquire) {
+            terminate_probe_child(&mut child, &tree);
+            return None;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() < timeout => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) | Err(_) => {
+                terminate_probe_child(&mut child, &tree);
+                return None;
+            }
+        }
+    };
+    // A capability command has no reason to leave descendants running. Stop
+    // its process tree so inherited pipe handles cannot outlive the bound.
+    tree.terminate();
+    let stdout = stdout
+        .recv_timeout(AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT)
+        .ok()??;
+    let stderr = stderr
+        .recv_timeout(AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT)
+        .ok()??;
+    if exceeded.load(Ordering::Acquire) {
+        return None;
+    }
+    Some(CommandOutput {
+        success: status.success(),
+        stdout,
+        stderr,
+    })
+}
+
+#[cfg(windows)]
+fn bounded_command_output(
+    program: &OsStr,
+    args: &[OsString],
+    _timeout: Duration,
+) -> Option<CommandOutput> {
+    let expected_args = [OsString::from("--agent-island"), OsString::from("--help")];
+    if args != expected_args {
+        return None;
+    }
+    if !webview_binary_supports_agent_island(Path::new(program)).ok()? {
+        return None;
+    }
+    Some(CommandOutput {
+        success: false,
+        stdout: Vec::new(),
+        stderr: AGENT_ISLAND_HELPER_USAGE.to_vec(),
+    })
+}
+
+/// Validate the Windows helper contract without executing the candidate.
+///
+/// The runtime island launcher shares this check so an incompatible or hostile
+/// helper cannot escape a capability-probe timeout by leaving descendants.
+#[cfg(windows)]
+pub(crate) fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Result<bool> {
+    let binary = resolve_probe_binary(binary.as_os_str()).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("could not resolve native helper {}", binary.display()),
+        )
+    })?;
+    let file = std::fs::File::open(&binary)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
+        return Ok(false);
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_AGENT_ISLAND_HELPER_BINARY_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
+        return Ok(false);
+    }
+    Ok(webview_binary_contains_agent_island_contract(&bytes))
+}
+
+fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
+    if !webview_binary_has_target_pe_header(bytes) {
+        return false;
+    }
+    [AGENT_ISLAND_HELPER_USAGE, SYSTEM_AGENT_SNAPSHOT_MARKER]
+        .into_iter()
+        .all(|needle| {
+            bytes
+                .windows(needle.len())
+                .any(|candidate| candidate == needle)
+        })
+}
+
+fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
+    if bytes.get(..2) != Some(b"MZ") {
+        return false;
+    }
+    let Some(pe_offset_bytes) = bytes.get(0x3c..0x40) else {
+        return false;
+    };
+    let pe_offset = u32::from_le_bytes([
+        pe_offset_bytes[0],
+        pe_offset_bytes[1],
+        pe_offset_bytes[2],
+        pe_offset_bytes[3],
+    ]);
+    let Ok(pe_offset) = usize::try_from(pe_offset) else {
+        return false;
+    };
+    if !(MIN_WINDOWS_PE_HEADER_OFFSET..=MAX_WINDOWS_PE_HEADER_OFFSET).contains(&pe_offset) {
+        return false;
+    }
+    let Some(machine_offset) = pe_offset.checked_add(4) else {
+        return false;
+    };
+    if bytes.get(pe_offset..machine_offset) != Some(b"PE\0\0") {
+        return false;
+    }
+    let Some(machine_end) = machine_offset.checked_add(2) else {
+        return false;
+    };
+    let Some(machine_bytes) = bytes.get(machine_offset..machine_end) else {
+        return false;
+    };
+    let machine = u16::from_le_bytes([machine_bytes[0], machine_bytes[1]]);
+    target_windows_pe_machine().is_some_and(|target| machine == target)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn target_windows_pe_machine() -> Option<u16> {
+    Some(WINDOWS_PE_MACHINE_AMD64)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn target_windows_pe_machine() -> Option<u16> {
+    Some(WINDOWS_PE_MACHINE_ARM64)
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn target_windows_pe_machine() -> Option<u16> {
+    None
+}
+
+#[cfg(windows)]
+fn resolve_probe_binary(program: &OsStr) -> Option<PathBuf> {
+    let candidate = PathBuf::from(program);
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    if candidate.components().count() != 1 {
+        return None;
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|directory| directory.join(&candidate))
+        .find(|path| path.is_file())
+}
 
 fn numeric_version_parts(s: &str) -> Vec<u32> {
     let trimmed = s.trim().trim_start_matches('v');
@@ -363,9 +687,10 @@ pub(crate) fn webview_supports_agent_island_output(stdout: &[u8], stderr: &[u8])
 
 fn webview_supports_agent_island(runner: &impl CommandRunner, binary: &Path) -> bool {
     runner
-        .output(
+        .output_bounded(
             binary.as_os_str(),
             &[OsString::from("--agent-island"), OsString::from("--help")],
+            AGENT_ISLAND_HELPER_PROBE_TIMEOUT,
         )
         .is_some_and(|output| webview_supports_agent_island_output(&output.stdout, &output.stderr))
 }
@@ -381,22 +706,42 @@ fn webview_helper_path(runner: &impl CommandRunner, current_exe: &Path) -> Optio
         .or_else(|| path_webview_helper(runner))
 }
 
-fn ensure_remoteui_helper_with(
+fn configured_webview_helper() -> Option<(&'static str, PathBuf)> {
+    [AGENT_ISLAND_BIN_ENV, WEBVIEW_BIN_ENV]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var_os(name)
+                .filter(|value| !value.is_empty())
+                .map(|value| (name, PathBuf::from(value)))
+        })
+}
+
+fn ensure_webview_helper_with(
     runner: &impl CommandRunner,
     current_exe: &Path,
-    macos: bool,
-) -> Result<Option<PathBuf>, String> {
-    if !macos {
-        return Ok(None);
+) -> Result<PathBuf, String> {
+    if let Some((name, path)) = configured_webview_helper() {
+        if webview_supports_agent_island(runner, &path) {
+            return Ok(path);
+        }
+        return Err(format!(
+            "{name} points to {}, which does not expose the required Agent Island contract; update or unset the override",
+            path.display()
+        ));
     }
     if let Some(path) = webview_helper_path(runner, current_exe) {
-        return Ok(Some(path));
+        return Ok(path);
+    }
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        return Err(format!(
+            "{WEBVIEW_BINARY} is missing or obsolete and no automatic helper repair is available on this platform"
+        ));
     }
 
     let _ = runner.status(OsStr::new("brew"), &args(&["tap", BREW_TAP, BREW_TAP_URL]));
     let installed = runner.status(OsStr::new("brew"), &args(&["install", WEBVIEW_FORMULA]));
     if let Some(path) = webview_helper_path(runner, current_exe) {
-        return Ok(Some(path));
+        return Ok(path);
     }
     if installed {
         Err(
@@ -405,13 +750,6 @@ fn ensure_remoteui_helper_with(
         )
     } else {
         Err("a3s-webview is missing or obsolete and Homebrew could not install it".to_string())
-    }
-}
-
-fn ensure_remoteui_helper_best_effort(runner: &impl CommandRunner, current_exe: &Path) {
-    if let Err(error) = ensure_remoteui_helper_with(runner, current_exe, cfg!(target_os = "macos"))
-    {
-        eprintln!("\n⚠  RemoteUI helper repair skipped: {error}");
     }
 }
 
@@ -428,9 +766,8 @@ pub(crate) fn repair_installation() -> Result<Vec<String>, String> {
             repaired.push(format!("Homebrew command ready: {}", bin.display()));
         }
     }
-    if let Some(path) = ensure_remoteui_helper_with(&runner, &exe, cfg!(target_os = "macos"))? {
-        repaired.push(format!("Native window helper ready: {}", path.display()));
-    }
+    let path = ensure_webview_helper_with(&runner, &exe)?;
+    repaired.push(format!("Native window helper ready: {}", path.display()));
     Ok(repaired)
 }
 
@@ -487,40 +824,44 @@ fn perform_upgrade_with(
         }
         println!("\n⬇  upgrading a3s {latest} via Homebrew…\n");
         let upgrade_ok = runner.status(OsStr::new("brew"), &args(&["upgrade", formula]));
-        if let Some(bin) = verify_brew_binary(runner, formula, &current_exe, latest) {
-            ensure_remoteui_helper_best_effort(runner, &current_exe);
-            return Ok(bin);
+        let mut brew_binary = verify_brew_binary(runner, formula, &current_exe, latest);
+        if brew_binary.is_none() {
+            // Homebrew metadata can claim the new version while PATH still runs
+            // an older binary (stale link, failed pour, or partial tap refresh).
+            // Reinstall once before falling back to the standalone updater.
+            let metadata_has_latest = brew_has_version(runner, formula, latest);
+            let reason = if metadata_has_latest {
+                format!("Homebrew metadata says {latest}, but `a3s --version` did not")
+            } else if upgrade_ok {
+                "Homebrew upgrade finished, but the installed binary is still old".to_string()
+            } else {
+                "Homebrew upgrade failed".to_string()
+            };
+            eprintln!("\n⚠  {reason} — reinstalling…");
+            let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", formula]));
+            brew_binary = verify_brew_binary(runner, formula, &current_exe, latest);
         }
 
-        // Homebrew metadata can claim the new version while PATH still runs an
-        // older binary (stale link, failed pour, or partial tap refresh). Reinstall
-        // once before falling back to the standalone updater.
-        let metadata_has_latest = brew_has_version(runner, formula, latest);
-        let reason = if metadata_has_latest {
-            format!("Homebrew metadata says {latest}, but `a3s --version` did not")
-        } else if upgrade_ok {
-            "Homebrew upgrade finished, but the installed binary is still old".to_string()
+        if let Some(bin) = brew_binary {
+            match ensure_webview_helper_with(runner, &current_exe) {
+                Ok(_) => return Ok(bin),
+                Err(error) => failures.push(format!(
+                    "Homebrew installed a3s {latest}, but its required native helper is not ready: {error}"
+                )),
+            }
         } else {
-            "Homebrew upgrade failed".to_string()
-        };
-        eprintln!("\n⚠  {reason} — reinstalling…");
-        let _ = runner.status(OsStr::new("brew"), &args(&["reinstall", formula]));
-        if let Some(bin) = verify_brew_binary(runner, formula, &current_exe, latest) {
-            ensure_remoteui_helper_best_effort(runner, &current_exe);
-            return Ok(bin);
+            failures.push(format!(
+                "Homebrew formula {formula} did not install a3s {latest}"
+            ));
         }
-
-        let failure = format!("Homebrew formula {formula} did not install a3s {latest}");
-        failures.push(failure);
-        eprintln!("\n⚠  Homebrew didn't install a3s {latest} — falling back to a direct download…");
+        eprintln!(
+            "\n⚠  Homebrew did not produce a complete a3s {latest} installation — falling back to a direct download…"
+        );
     }
     let result = standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
         failures.push(e);
         failures.join("; ")
     });
-    if let Ok(bin) = &result {
-        ensure_remoteui_helper_best_effort(runner, bin);
-    }
     result
 }
 
@@ -600,11 +941,17 @@ fn standalone_upgrade_with(
         return Err("release archive did not contain an a3s binary".to_string());
     }
     let new_bin = new_bin.unwrap();
-    let new_webview = find_downloaded_webview_helper(&tmp);
+    let Some(new_webview) = find_downloaded_webview_helper(&tmp) else {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!(
+            "release archive did not contain the required {WEBVIEW_BINARY} companion"
+        ));
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&new_bin, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::set_permissions(&new_webview, std::fs::Permissions::from_mode(0o755));
     }
     if verify_binary_version(runner, new_bin.as_os_str(), latest).is_none() {
         eprintln!("\n✗ downloaded a3s did not report version {latest}");
@@ -614,24 +961,67 @@ fn standalone_upgrade_with(
             new_bin.display()
         ));
     }
+    if !webview_supports_agent_island(runner, &new_webview) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!(
+            "downloaded helper {} does not expose the required Agent Island contract",
+            new_webview.display()
+        ));
+    }
+
+    let installed_helper = exe
+        .parent()
+        .ok_or_else(|| format!("cannot locate the install directory for {}", exe.display()))?
+        .join(WEBVIEW_BINARY);
+    let helper_existed = installed_helper.is_file();
+    let helper_backup = tmp.join(format!(
+        ".previous-{WEBVIEW_BINARY}-{:016x}",
+        rand::random::<u64>()
+    ));
+    if helper_existed {
+        copy_executable(&installed_helper, &helper_backup).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&tmp);
+            format!(
+                "preserve existing helper {} before update: {error}",
+                installed_helper.display()
+            )
+        })?;
+    }
+    if let Err(error) = install_sibling_companion(&new_webview, &exe, WEBVIEW_BINARY) {
+        let _ = std::fs::remove_dir_all(&tmp);
+        return Err(format!(
+            "native window helper validation passed but installation failed before updating a3s: {error}"
+        ));
+    }
+
     let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => {
-            if let Some(helper) = new_webview {
-                if let Err(error) = install_sibling_companion(&helper, &exe, WEBVIEW_BINARY) {
-                    eprintln!(
-                        "\n⚠  a3s was updated, but its native window helper could not be installed: {error}"
-                    );
-                }
-            } else {
-                eprintln!(
-                    "\n⚠  the a3s release archive did not contain {WEBVIEW_BINARY}; native RemoteUI and Agent Island windows may be unavailable"
-                );
-            }
-            Ok(exe)
-        }
+        Ok(()) => Ok(exe),
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
-            Err(err)
+            let rollback = if helper_existed {
+                install_sibling_companion(&helper_backup, &exe, WEBVIEW_BINARY).map(|_| ())
+            } else {
+                std::fs::remove_file(&installed_helper).map_err(|error| {
+                    format!(
+                        "remove newly installed helper {}: {error}",
+                        installed_helper.display()
+                    )
+                })
+            };
+            match rollback {
+                Ok(()) => Err(err),
+                Err(rollback_error) => {
+                    if helper_existed && helper_backup.is_file() {
+                        return Err(format!(
+                            "{err}; additionally failed to restore the previous native helper: {rollback_error}; its recovery copy remains at {}",
+                            helper_backup.display()
+                        ));
+                    }
+                    Err(format!(
+                        "{err}; additionally failed to restore the previous native helper: {rollback_error}"
+                    ))
+                }
+            }
         }
     };
     let _ = std::fs::remove_dir_all(&tmp);
@@ -966,7 +1356,16 @@ fn swap_binary_and_verify(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
+
+    static REAL_PROCESS_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    async fn lock_real_process_tests() -> tokio::sync::MutexGuard<'static, ()> {
+        REAL_PROCESS_TEST_LOCK
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
 
     #[test]
     fn version_ordering() {
@@ -1010,6 +1409,7 @@ mod tests {
     async fn cancelling_async_output_terminates_the_child() {
         use std::time::Duration;
 
+        let _process_guard = lock_real_process_tests().await;
         let temp = tempfile::tempdir().unwrap();
         let started = temp.path().join("started");
         let finished = temp.path().join("finished");
@@ -1064,6 +1464,17 @@ mod tests {
         }
     }
 
+    fn compatible_helper_probe() -> CommandOutput {
+        CommandOutput {
+            // The real helper intentionally exits non-zero after printing its
+            // mode-specific usage for this capability probe.
+            success: false,
+            stdout: Vec::new(),
+            stderr: b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
+                .to_vec(),
+        }
+    }
+
     #[derive(Default)]
     struct FakeRunner {
         commands: Mutex<Vec<String>>,
@@ -1089,6 +1500,9 @@ mod tests {
     impl CommandRunner for FakeRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
+            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+                return Some(compatible_helper_probe());
+            }
             let stdout = match line.as_str() {
                 "brew list --versions a3s" => b"a3s 9.9.9\n".to_vec(),
                 "brew --repo a3s-lab/tap" => b"/tmp/a3s-tap\n".to_vec(),
@@ -1168,6 +1582,9 @@ mod tests {
     impl CommandRunner for ShadowedBrewRunner {
         fn output(&self, program: &OsStr, args: &[OsString]) -> Option<CommandOutput> {
             let line = self.record(program, args);
+            if line == format!("{WEBVIEW_BINARY} --agent-island --help") {
+                return Some(compatible_helper_probe());
+            }
             let prefix_line = format!("brew --prefix {BREW_FORMULA}");
             let prefix_bin = self.prefix_bin();
             let stdout = if line == "brew list --versions a3s" {
@@ -1261,6 +1678,23 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_webview_executable(path: &Path, version: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(
+            path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"--agent-island\" ]; then\n  printf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n  exit 2\nfi\nprintf 'a3s {version}\\n'\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
     struct LinkFailingBrewRunner {
         commands: Mutex<Vec<String>>,
         prefix: PathBuf,
@@ -1342,9 +1776,10 @@ mod tests {
         }
     }
 
-    #[test]
     #[cfg(unix)]
-    fn brew_upgrade_repairs_current_exe_when_link_stays_shadowed() {
+    #[tokio::test]
+    async fn brew_upgrade_does_not_report_success_without_the_required_helper() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("brew-shadowed-current");
         let current_exe = tmp.path("shadowed-a3s");
         let prefix = tmp.path("prefix");
@@ -1355,7 +1790,8 @@ mod tests {
 
         let result = perform_upgrade_with("9.9.9", &runner, current_exe.clone());
 
-        assert_eq!(result.as_deref(), Ok(current_exe.as_path()));
+        let error = result.unwrap_err();
+        assert!(error.contains("required native helper"), "{error}");
         let out = Command::new(&current_exe)
             .arg("--version")
             .output()
@@ -1435,9 +1871,9 @@ mod tests {
         let tmp = TempDir::new("helper-path");
         let runner = HelperRunner::with_helper_available();
 
-        let result = ensure_remoteui_helper_with(&runner, &tmp.path("a3s"), true).unwrap();
+        let result = ensure_webview_helper_with(&runner, &tmp.path("a3s")).unwrap();
 
-        assert_eq!(result.as_deref(), Some(Path::new(WEBVIEW_BINARY)));
+        assert_eq!(result, PathBuf::from(WEBVIEW_BINARY));
         assert_eq!(
             runner.commands(),
             vec![format!("{WEBVIEW_BINARY} --agent-island --help")]
@@ -1450,9 +1886,9 @@ mod tests {
         let tmp = TempDir::new("helper-install");
         let runner = HelperRunner::default();
 
-        let result = ensure_remoteui_helper_with(&runner, &tmp.path("a3s"), true).unwrap();
+        let result = ensure_webview_helper_with(&runner, &tmp.path("a3s")).unwrap();
 
-        assert_eq!(result.as_deref(), Some(Path::new(WEBVIEW_BINARY)));
+        assert_eq!(result, PathBuf::from(WEBVIEW_BINARY));
         let commands = runner.commands();
         assert!(commands
             .iter()
@@ -1481,9 +1917,156 @@ mod tests {
         ));
     }
 
+    fn synthetic_target_pe() -> Vec<u8> {
+        const PE_OFFSET: usize = 0x80;
+
+        let mut binary = vec![0_u8; PE_OFFSET + 24];
+        binary[..2].copy_from_slice(b"MZ");
+        binary[0x3c..0x40].copy_from_slice(&(PE_OFFSET as u32).to_le_bytes());
+        binary[PE_OFFSET..PE_OFFSET + 4].copy_from_slice(b"PE\0\0");
+        binary[PE_OFFSET + 4..PE_OFFSET + 6].copy_from_slice(
+            &target_windows_pe_machine()
+                .expect("tests require an x86_64 or aarch64 target")
+                .to_le_bytes(),
+        );
+        binary
+    }
+
+    fn synthetic_target_pe_with_agent_island_contract() -> Vec<u8> {
+        let mut binary = synthetic_target_pe();
+        binary.extend_from_slice(AGENT_ISLAND_HELPER_USAGE);
+        binary.extend_from_slice(b"\0other embedded data\0");
+        binary.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
+        binary
+    }
+
     #[test]
+    fn static_windows_contract_accepts_target_pe_with_full_markers() {
+        assert!(webview_binary_contains_agent_island_contract(
+            &synthetic_target_pe_with_agent_island_contract()
+        ));
+    }
+
+    #[test]
+    fn static_windows_contract_rejects_non_pe_and_truncated_headers() {
+        let mut marker_blob = AGENT_ISLAND_HELPER_USAGE.to_vec();
+        marker_blob.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
+        assert!(!webview_binary_contains_agent_island_contract(&marker_blob));
+        assert!(!webview_binary_has_target_pe_header(b"MZ"));
+
+        let mut truncated = vec![0_u8; 0x84];
+        truncated[..2].copy_from_slice(b"MZ");
+        truncated[0x3c..0x40].copy_from_slice(&0x80_u32.to_le_bytes());
+        truncated[0x80..0x84].copy_from_slice(b"PE\0\0");
+        assert!(!webview_binary_has_target_pe_header(&truncated));
+    }
+
+    #[test]
+    fn static_windows_contract_rejects_invalid_or_unbounded_pe_offsets() {
+        let mut overlapping = synthetic_target_pe_with_agent_island_contract();
+        overlapping[0x3c..0x40].copy_from_slice(&0x20_u32.to_le_bytes());
+        assert!(!webview_binary_contains_agent_island_contract(&overlapping));
+
+        let pe_offset = MAX_WINDOWS_PE_HEADER_OFFSET + 1;
+        let mut unbounded = vec![0_u8; pe_offset + 6];
+        unbounded[..2].copy_from_slice(b"MZ");
+        unbounded[0x3c..0x40].copy_from_slice(&(pe_offset as u32).to_le_bytes());
+        unbounded[pe_offset..pe_offset + 4].copy_from_slice(b"PE\0\0");
+        unbounded[pe_offset + 4..pe_offset + 6].copy_from_slice(
+            &target_windows_pe_machine()
+                .expect("tests require an x86_64 or aarch64 target")
+                .to_le_bytes(),
+        );
+        assert!(!webview_binary_has_target_pe_header(&unbounded));
+    }
+
+    #[test]
+    fn static_windows_contract_rejects_bad_signature_and_wrong_machine() {
+        let mut bad_signature = synthetic_target_pe_with_agent_island_contract();
+        bad_signature[0x80..0x84].copy_from_slice(b"PX\0\0");
+        assert!(!webview_binary_contains_agent_island_contract(
+            &bad_signature
+        ));
+
+        let mut wrong_machine = synthetic_target_pe_with_agent_island_contract();
+        let machine = match target_windows_pe_machine() {
+            Some(WINDOWS_PE_MACHINE_AMD64) => WINDOWS_PE_MACHINE_ARM64,
+            Some(WINDOWS_PE_MACHINE_ARM64) => WINDOWS_PE_MACHINE_AMD64,
+            _ => panic!("tests require an x86_64 or aarch64 target"),
+        };
+        wrong_machine[0x84..0x86].copy_from_slice(&machine.to_le_bytes());
+        assert!(!webview_binary_contains_agent_island_contract(
+            &wrong_machine
+        ));
+    }
+
+    #[test]
+    fn static_windows_contract_still_requires_usage_and_snapshot_schema() {
+        let mut usage_only = synthetic_target_pe();
+        usage_only.extend_from_slice(AGENT_ISLAND_HELPER_USAGE);
+        assert!(!webview_binary_contains_agent_island_contract(&usage_only));
+
+        let mut schema_only = synthetic_target_pe();
+        schema_only.extend_from_slice(SYSTEM_AGENT_SNAPSHOT_MARKER);
+        assert!(!webview_binary_contains_agent_island_contract(&schema_only));
+    }
+
     #[cfg(unix)]
-    fn standalone_swap_replaces_target_and_verifies_new_version() {
+    #[tokio::test]
+    async fn bounded_helper_probe_rejects_oversized_output_without_waiting_for_exit() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("bounded-helper-output");
+        let helper = tmp.path("a3s-webview-noisy");
+        std::fs::write(&helper, "#!/bin/sh\nhead -c 65536 /dev/zero\nsleep 5\n").unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+
+        let output = bounded_command_output(
+            helper.as_os_str(),
+            &[OsString::from("--agent-island"), OsString::from("--help")],
+            Duration::from_secs(2),
+        );
+
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bounded_helper_probe_closes_descendant_held_pipes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("bounded-helper-descendant");
+        let helper = tmp.path("a3s-webview-descendant");
+        std::fs::write(
+            &helper,
+            "#!/bin/sh\nprintf '%s\\n' 'usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>' >&2\n(sleep 5) &\nexit 2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+
+        let output = bounded_command_output(
+            helper.as_os_str(),
+            &[OsString::from("--agent-island"), OsString::from("--help")],
+            Duration::from_secs(2),
+        )
+        .expect("descendant-held output pipes should be closed with the probe process tree");
+
+        assert!(webview_supports_agent_island_output(
+            &output.stdout,
+            &output.stderr
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_swap_replaces_target_and_verifies_new_version() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("swap-success");
         let target = tmp.path("a3s");
         let new_bin = tmp.path("downloaded-a3s");
@@ -1499,9 +2082,10 @@ mod tests {
         assert!(!sibling_temp_path(&target, "bak").unwrap().exists());
     }
 
-    #[test]
     #[cfg(unix)]
-    fn standalone_swap_restores_target_when_new_binary_reports_wrong_version() {
+    #[tokio::test]
+    async fn standalone_swap_restores_target_when_new_binary_reports_wrong_version() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("swap-restore");
         let target = tmp.path("a3s");
         let new_bin = tmp.path("downloaded-a3s");
@@ -1516,9 +2100,10 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
     }
 
-    #[test]
     #[cfg(unix)]
-    fn sibling_companion_install_replaces_an_existing_helper_atomically() {
+    #[tokio::test]
+    async fn sibling_companion_install_replaces_an_existing_helper_atomically() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("companion-replace");
         let current = tmp.path("a3s");
         let downloaded = tmp.path("downloaded-webview");
@@ -1541,6 +2126,7 @@ mod tests {
         commands: Mutex<Vec<String>>,
         archive: Vec<u8>,
         digest: Option<String>,
+        rejected_version_path: Option<PathBuf>,
     }
 
     #[cfg(unix)]
@@ -1552,6 +2138,7 @@ mod tests {
                 commands: Mutex::new(Vec::new()),
                 archive,
                 digest: Some(digest),
+                rejected_version_path: None,
             }
         }
 
@@ -1608,6 +2195,15 @@ mod tests {
                     });
                 }
             }
+            if self.rejected_version_path.as_deref() == Some(Path::new(program))
+                && args == [OsString::from("--version")]
+            {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: b"a3s 0.1.0\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             RealCommandRunner.output(program, args)
         }
 
@@ -1619,32 +2215,48 @@ mod tests {
 
     #[cfg(unix)]
     fn standalone_archive(binary_path: &str, version: &str) -> Vec<u8> {
+        standalone_archive_with_helper(binary_path, version, Some(true))
+    }
+
+    #[cfg(unix)]
+    fn standalone_archive_with_helper(
+        binary_path: &str,
+        version: &str,
+        helper_compatible: Option<bool>,
+    ) -> Vec<u8> {
         let tmp = TempDir::new("standalone-archive");
         let root = tmp.path("root");
         let archive = tmp.path("release.tar.gz");
         write_executable(&root.join(binary_path), version);
-        write_executable(&root.join(WEBVIEW_BINARY), "0.1.2");
+        match helper_compatible {
+            Some(true) => write_webview_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
+            Some(false) => write_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
+            None => {}
+        }
         let top_level = Path::new(binary_path)
             .components()
             .next()
             .unwrap()
             .as_os_str();
-        let status = Command::new("tar")
+        let mut command = Command::new("tar");
+        command
             .arg("czf")
             .arg(&archive)
             .arg("-C")
             .arg(&root)
-            .arg(top_level)
-            .arg(WEBVIEW_BINARY)
-            .status()
-            .unwrap();
+            .arg(top_level);
+        if helper_compatible.is_some() {
+            command.arg(WEBVIEW_BINARY);
+        }
+        let status = command.status().unwrap();
         assert!(status.success());
         std::fs::read(archive).unwrap()
     }
 
-    #[test]
     #[cfg(unix)]
-    fn standalone_upgrade_fallback_downloads_installs_and_verifies() {
+    #[tokio::test]
+    async fn standalone_upgrade_fallback_downloads_installs_and_verifies() {
+        let _process_guard = lock_real_process_tests().await;
         let Some(target) = release_target() else {
             return;
         };
@@ -1671,9 +2283,10 @@ mod tests {
         assert!(!commands.iter().any(|c| c.starts_with("tar ")));
     }
 
-    #[test]
     #[cfg(unix)]
-    fn standalone_upgrade_accepts_nested_archive_binary() {
+    #[tokio::test]
+    async fn standalone_upgrade_accepts_nested_archive_binary() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("standalone-nested");
         let current = tmp.path("a3s");
         write_executable(&current, "0.1.0");
@@ -1687,9 +2300,10 @@ mod tests {
         assert!(tmp.path(WEBVIEW_BINARY).is_file());
     }
 
-    #[test]
     #[cfg(unix)]
-    fn standalone_upgrade_rejects_a_checksum_mismatch_without_replacing_the_binary() {
+    #[tokio::test]
+    async fn standalone_upgrade_rejects_a_checksum_mismatch_without_replacing_the_binary() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("standalone-checksum-mismatch");
         let current = tmp.path("a3s");
         write_executable(&current, "0.1.0");
@@ -1703,9 +2317,10 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
     }
 
-    #[test]
     #[cfg(unix)]
-    fn standalone_upgrade_refuses_release_metadata_without_a_digest() {
+    #[tokio::test]
+    async fn standalone_upgrade_refuses_release_metadata_without_a_digest() {
+        let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("standalone-missing-digest");
         let current = tmp.path("a3s");
         write_executable(&current, "0.1.0");
@@ -1724,5 +2339,73 @@ mod tests {
             1,
             "the archive must not download before metadata is trusted: {commands:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_upgrade_rejects_a_missing_helper_before_replacing_a3s() {
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("standalone-missing-helper");
+        let current = tmp.path("a3s");
+        write_executable(&current, "0.1.0");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.archive = standalone_archive_with_helper("a3s", "9.9.9", None);
+        runner.digest = Some(a3s_updater::sha256_hex(&runner.archive));
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("required"), "{error}");
+        let out = Command::new(&current).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
+        assert!(!tmp.path(WEBVIEW_BINARY).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_upgrade_rejects_an_incompatible_helper_before_mutation() {
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("standalone-incompatible-helper");
+        let current = tmp.path("a3s");
+        let installed_helper = tmp.path(WEBVIEW_BINARY);
+        write_executable(&current, "0.1.0");
+        write_webview_executable(&installed_helper, "0.1.1");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.archive = standalone_archive_with_helper("a3s", "9.9.9", Some(false));
+        runner.digest = Some(a3s_updater::sha256_hex(&runner.archive));
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("Agent Island contract"), "{error}");
+        let cli = Command::new(&current).arg("--version").output().unwrap();
+        let helper = Command::new(&installed_helper)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
+        assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn standalone_upgrade_restores_the_previous_helper_when_the_cli_swap_fails() {
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("standalone-helper-rollback");
+        let current = tmp.path("a3s");
+        let installed_helper = tmp.path(WEBVIEW_BINARY);
+        write_executable(&current, "0.1.0");
+        write_webview_executable(&installed_helper, "0.1.1");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.rejected_version_path = Some(current.clone());
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("did not report version 9.9.9"), "{error}");
+        let cli = Command::new(&current).arg("--version").output().unwrap();
+        let helper = Command::new(&installed_helper)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
+        assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
     }
 }

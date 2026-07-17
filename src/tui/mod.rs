@@ -150,6 +150,7 @@ use deep_research_report_phase::{
 };
 use deep_research_sectioned_report::{
     generate_sectioned_report, merge_sectioned_inquiry_projection, sectioned_report_available,
+    SECTIONED_REPORT_BUDGET_MS,
 };
 use deep_research_state_journal::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run,
@@ -390,7 +391,7 @@ use app_smoke::{
     deep_research_smoke_execution_deadline, deep_research_smoke_exhausted_phase_message,
     deep_research_smoke_finalization_phase_deadline, deep_research_smoke_phase_deadline,
     deep_research_smoke_remaining_budget, deep_research_smoke_run_deadline,
-    run_deep_research_smoke_artifact_step,
+    finalize_deep_research_smoke_journal, run_deep_research_smoke_artifact_step,
 };
 use app_types::*;
 use app_update::*;
@@ -428,7 +429,7 @@ const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
 const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 180 * 1000;
-const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = (75 + 90 + 75 + 15) * 1000;
+const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = SECTIONED_REPORT_BUDGET_MS;
 const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 120 * 1000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 // Planning/retrieval/checking, synthesis, and the single repair pass keep
@@ -444,6 +445,7 @@ const STREAM_START_TIMEOUT_MS: u64 = 10_000;
 const STREAM_JOIN_SETTLE_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
+const GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS: u64 = 500;
 const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
@@ -913,9 +915,17 @@ impl App {
 
         Some(cmd::cmd(move || async move {
             // Remove the exact heartbeat before potentially waiting on model
-            // cleanup. Other TUI instances immediately stop advertising this
-            // process; crashes are still covered by the heartbeat TTL.
-            agent_presence.remove().await;
+            // cleanup. A blocked filesystem must not wedge quit; if bounded
+            // removal times out, the normal heartbeat TTL retires the row.
+            if tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS),
+                agent_presence.remove(),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!("timed out removing the local agent-presence heartbeat");
+            }
             if let Some(abort) = host_tool_abort {
                 abort.abort();
             }

@@ -10,7 +10,7 @@ use super::validation::{
 use super::{
     research_contract_outcome, validate_research_contract_assessment, validate_research_outline,
     InquiryAudit, InquiryError, InquiryEvent, InquiryLimits, InquiryPhase, InquiryState,
-    QuestionStatus, ResearchContractOutcome, ResearchMethod, SectionDraft,
+    QuestionStatus, ResearchContractOutcome, ResearchMethod, SectionDraft, SectionRevision,
 };
 
 pub fn reduce(
@@ -380,6 +380,16 @@ pub fn reduce(
                     resource: "outline section",
                     id: section_id.clone(),
                 })?;
+            if let Some(revision) = state.active_section_revision() {
+                if !revision.section_ids.contains(section_id) {
+                    return Err(InquiryError::InvalidSectionRevision {
+                        reason: format!(
+                            "round {} cannot draft untargeted section `{section_id}`",
+                            revision.round
+                        ),
+                    });
+                }
+            }
             validate_section_citations(section, citation_ids, limits)?;
             next.drafts.insert(
                 section_id.clone(),
@@ -400,14 +410,144 @@ pub fn reduce(
                 limits.max_total_draft_chars,
             )?;
             next.audit = None;
+            if let Some(revision) = next
+                .section_revisions
+                .last_mut()
+                .filter(|revision| !revision.committed)
+            {
+                if !revision.drafted_section_ids.contains(section_id) {
+                    revision.drafted_section_ids.push(section_id.clone());
+                }
+            }
             next.phase = if next.drafts.len() == outline.sections.len() {
                 InquiryPhase::Auditing
             } else {
                 InquiryPhase::Drafting
             };
         }
+        InquiryEvent::SectionRevisionStarted {
+            round,
+            section_ids,
+            input_digest,
+        } => {
+            require_phase(
+                state,
+                event,
+                &[InquiryPhase::Drafting, InquiryPhase::Auditing],
+            )?;
+            if let Some(active) = state.active_section_revision() {
+                return Err(InquiryError::InvalidSectionRevision {
+                    reason: format!(
+                        "round {} is still active for input `{}`",
+                        active.round, active.input_digest
+                    ),
+                });
+            }
+            let expected_round = state.section_revisions.len().saturating_add(1);
+            if *round != expected_round {
+                return Err(InquiryError::InvalidSectionRevision {
+                    reason: format!("expected round {expected_round}, received {round}"),
+                });
+            }
+            ensure_limit(
+                "section revision rounds",
+                *round,
+                limits.max_section_revision_rounds,
+            )?;
+            ensure_nonempty(section_ids, "section revision targets")?;
+            ensure_limit(
+                "section revision targets",
+                section_ids.len(),
+                limits.max_outline_sections,
+            )?;
+            ensure_unique_ids(
+                section_ids.iter().map(String::as_str),
+                "section revision target",
+            )?;
+            ensure_strings(
+                section_ids,
+                "section revision target",
+                limits.max_identifier_chars,
+            )?;
+            ensure_string(
+                input_digest,
+                "section revision input digest",
+                limits.max_identifier_chars,
+            )?;
+            let outline = state
+                .outline
+                .as_ref()
+                .ok_or_else(|| invalid_transition(state, event))?;
+            for section_id in section_ids {
+                if !outline
+                    .sections
+                    .iter()
+                    .any(|section| section.id == *section_id)
+                {
+                    return Err(InquiryError::UnknownId {
+                        resource: "outline section",
+                        id: section_id.clone(),
+                    });
+                }
+            }
+            next.section_revisions.push(SectionRevision {
+                round: *round,
+                section_ids: section_ids.clone(),
+                input_digest: input_digest.clone(),
+                drafted_section_ids: Vec::new(),
+                committed: false,
+            });
+        }
+        InquiryEvent::SectionRevisionCommitted {
+            round,
+            input_digest,
+        } => {
+            require_phase(
+                state,
+                event,
+                &[InquiryPhase::Drafting, InquiryPhase::Auditing],
+            )?;
+            let active = state.active_section_revision().ok_or_else(|| {
+                InquiryError::InvalidSectionRevision {
+                    reason: "no section revision is active".to_string(),
+                }
+            })?;
+            if active.round != *round || active.input_digest != *input_digest {
+                return Err(InquiryError::InvalidSectionRevision {
+                    reason: format!(
+                        "active round {} input `{}` does not match round {round} input `{input_digest}`",
+                        active.round, active.input_digest
+                    ),
+                });
+            }
+            let missing = active
+                .section_ids
+                .iter()
+                .filter(|section_id| !active.drafted_section_ids.contains(section_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                return Err(InquiryError::InvalidSectionRevision {
+                    reason: format!(
+                        "round {round} has no replacement draft for {}",
+                        missing.join(", ")
+                    ),
+                });
+            }
+            if let Some(revision) = next.section_revisions.last_mut() {
+                revision.committed = true;
+            }
+        }
         InquiryEvent::AuditCompleted { passed, issues } => {
             require_phase(state, event, &[InquiryPhase::Auditing])?;
+            if let Some(active) = state.active_section_revision() {
+                return Err(InquiryError::InvalidSectionRevision {
+                    reason: format!(
+                        "round {} must be committed before report audit",
+                        active.round
+                    ),
+                });
+            }
             let missing = state.outline.as_ref().map_or(0, |outline| {
                 outline.sections.len().saturating_sub(state.drafts.len())
             });

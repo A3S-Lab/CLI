@@ -20,14 +20,16 @@ use super::super::{
     deep_research_canonical_workflow_output, AcceptedEvidence,
 };
 use super::plan::{
-    bound_questions, bound_workflow_timeout, defer_or_bound_question_batch,
+    bound_question_batch, bound_questions, bound_workflow_timeout, defer_or_bound_question_batch,
     follow_up_research_plan, perspective_research_plan, plan_max_iterations,
     questions_scheduled_for_retrieval, queued_questions_for_next_wave, scout_plan,
     workflow_args_with_plan, PlannedInquiry,
 };
 use super::{
-    apply_event, FOLLOW_UP_WORKFLOW_TIMEOUT_MS, MAX_FOLLOW_UP_QUESTIONS_PER_WAVE,
-    MAX_QUESTION_EVIDENCE_ITEMS, PERSPECTIVE_DISCOVERY_TIMEOUT_MS, QUESTION_RESOLUTION_TIMEOUT_MS,
+    apply_event, apply_event_and_checkpoint, budget_terminal_result, checkpoint_inquiry,
+    configured_workflow_timeout_ms, terminalize_budget_exhaustion, InquiryCheckpointWriter,
+    FOLLOW_UP_WORKFLOW_TIMEOUT_MS, MAX_FOLLOW_UP_QUESTIONS_PER_WAVE, MAX_QUESTION_EVIDENCE_ITEMS,
+    PERSPECTIVE_DISCOVERY_TIMEOUT_MS, QUESTION_RESOLUTION_TIMEOUT_MS,
     RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS, SCOUT_WORKFLOW_TIMEOUT_MS,
 };
 
@@ -63,6 +65,7 @@ pub(super) async fn run_perspective_guided(
     state: &mut InquiryState,
     inquiry_events: &mut Vec<InquiryEvent>,
     limits: &InquiryLimits,
+    checkpoint: &InquiryCheckpointWriter,
 ) -> Result<InquiryExecution, String> {
     let scout_plan = scout_plan(&plan.value, &plan.scout_queries)?;
     let scout_run_id = args
@@ -71,7 +74,19 @@ pub(super) async fn run_perspective_guided(
         .map(|run_id| format!("{run_id}-scout"));
     let mut scout_args =
         workflow_args_with_plan(args.clone(), scout_plan, scout_run_id.as_deref())?;
-    bound_workflow_timeout(&mut scout_args, SCOUT_WORKFLOW_TIMEOUT_MS)?;
+    let Some(scout_timeout_ms) = checkpoint.stage_timeout_ms(SCOUT_WORKFLOW_TIMEOUT_MS) else {
+        let reason =
+            "the shared inquiry deadline left no scout budget after reserving finalization time";
+        terminalize_budget_exhaustion(Some(checkpoint), state, inquiry_events, limits, reason)
+            .await?;
+        return Ok(InquiryExecution {
+            result: budget_terminal_result(&args, reason),
+            retrieval_plan: plan.value,
+            workflow_args: args,
+            follow_up_waves_remaining: 0,
+        });
+    };
+    bound_workflow_timeout(&mut scout_args, scout_timeout_ms)?;
     let scout_result = run_dynamic_workflow(session, scout_args, progress_tx).await?;
     let scout_output = deep_research_canonical_workflow_output(
         &scout_result.output,
@@ -93,8 +108,21 @@ pub(super) async fn run_perspective_guided(
         },
         limits,
     )?;
+    checkpoint_inquiry(Some(checkpoint), inquiry_events, state).await?;
 
     let scout_packet = accepted_evidence_synthesis_payload(&scout_evidence, &scout_output);
+    let Some(discovery_timeout_ms) = checkpoint.stage_timeout_ms(PERSPECTIVE_DISCOVERY_TIMEOUT_MS)
+    else {
+        let reason = "the shared inquiry deadline left no perspective-discovery budget after reserving finalization time";
+        terminalize_budget_exhaustion(Some(checkpoint), state, inquiry_events, limits, reason)
+            .await?;
+        return Ok(InquiryExecution {
+            result: scout_result,
+            retrieval_plan: plan.value,
+            workflow_args: args,
+            follow_up_waves_remaining: 0,
+        });
+    };
     let discovery_args = perspective_discovery_generation_params(
         args.pointer("/input/query")
             .and_then(Value::as_str)
@@ -102,7 +130,7 @@ pub(super) async fn run_perspective_guided(
         &state.obligations,
         &scout_packet,
         &allowed_source_ids,
-        PERSPECTIVE_DISCOVERY_TIMEOUT_MS,
+        discovery_timeout_ms,
     )
     .map_err(|error| error.to_string())?;
     let generated = call_tool_with_progress(
@@ -121,12 +149,27 @@ pub(super) async fn run_perspective_guided(
     for event in discovered_events {
         apply_event(state, inquiry_events, event, limits)?;
     }
+    checkpoint_inquiry(Some(checkpoint), inquiry_events, state).await?;
 
     let follow_up_waves_remaining = plan_max_iterations(&plan.value)
         .saturating_sub(1)
         .min(limits.max_question_round as u64) as usize;
     let research_plan = perspective_research_plan(&plan.value, &discovery)?;
-    let research_args = workflow_args_with_plan(args, research_plan.clone(), None)?;
+    let mut research_args = workflow_args_with_plan(args.clone(), research_plan.clone(), None)?;
+    let requested_timeout =
+        configured_workflow_timeout_ms(&research_args, FOLLOW_UP_WORKFLOW_TIMEOUT_MS);
+    let Some(research_timeout_ms) = checkpoint.stage_timeout_ms(requested_timeout) else {
+        let reason = "the shared inquiry deadline left no perspective retrieval budget after reserving finalization time";
+        terminalize_budget_exhaustion(Some(checkpoint), state, inquiry_events, limits, reason)
+            .await?;
+        return Ok(InquiryExecution {
+            result: scout_result,
+            retrieval_plan: research_plan,
+            workflow_args: args,
+            follow_up_waves_remaining: 0,
+        });
+    };
+    bound_workflow_timeout(&mut research_args, research_timeout_ms)?;
     let research_result = run_dynamic_workflow(session, research_args.clone(), progress_tx).await?;
     let result = combine_workflow_results(
         research_result,
@@ -150,15 +193,33 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
     state: &mut InquiryState,
     events: &mut Vec<InquiryEvent>,
     limits: &InquiryLimits,
+    checkpoint: Option<&InquiryCheckpointWriter>,
 ) -> Result<(), String> {
     let planned_follow_up_waves = execution.follow_up_waves_remaining;
-    let mut retrieval_opportunities = BTreeSet::new();
     let mut resolution_plan = execution.retrieval_plan.clone();
     let mut resolve_current_wave = true;
     loop {
         if resolve_current_wave {
+            let resolution_timeout_ms = match checkpoint {
+                Some(checkpoint) => {
+                    let Some(timeout_ms) =
+                        checkpoint.stage_timeout_ms(QUESTION_RESOLUTION_TIMEOUT_MS)
+                    else {
+                        terminalize_budget_exhaustion(
+                            Some(checkpoint),
+                            state,
+                            events,
+                            limits,
+                            "the shared inquiry deadline left no question-resolution budget after reserving finalization time",
+                        )
+                        .await?;
+                        return Ok(());
+                    };
+                    timeout_ms
+                }
+                None => QUESTION_RESOLUTION_TIMEOUT_MS,
+            };
             let scheduled = questions_scheduled_for_retrieval(state, &resolution_plan)?;
-            retrieval_opportunities.extend(scheduled.iter().map(|question| question.id.clone()));
             resolve_queued_questions(
                 session,
                 progress_tx,
@@ -168,12 +229,27 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
                 events,
                 limits,
                 execution.follow_up_waves_remaining > 0,
+                checkpoint,
+                resolution_timeout_ms,
             )
             .await?;
         }
-        let follow_ups = queued_questions_for_next_wave(state, &retrieval_opportunities);
+        let next_wave = queued_questions_for_next_wave(state, events, limits)?;
+        if !next_wave.already_attempted.is_empty() {
+            bound_question_batch(
+                state,
+                events,
+                limits,
+                &next_wave.already_attempted,
+                "an equivalent normalized query, obligation frontier, and evidence head was already attempted without a material frontier change",
+            )?;
+            checkpoint_inquiry(checkpoint, events, state).await?;
+        }
+        let follow_ups = next_wave.novel;
         if follow_ups.is_empty() {
-            return exhaust_if_material_inquiry_unresolved(state, events, limits);
+            exhaust_if_material_inquiry_unresolved(state, events, limits)?;
+            checkpoint_inquiry(checkpoint, events, state).await?;
+            return Ok(());
         }
 
         if execution.follow_up_waves_remaining == 0 {
@@ -183,13 +259,16 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
                 limits,
                 "the LLM-selected retrieval-wave budget was exhausted",
             )?;
-            return exhaust_if_material_inquiry_unresolved(state, events, limits);
+            exhaust_if_material_inquiry_unresolved(state, events, limits)?;
+            checkpoint_inquiry(checkpoint, events, state).await?;
+            return Ok(());
         }
 
         let wave_number = planned_follow_up_waves
             .saturating_sub(execution.follow_up_waves_remaining)
             .saturating_add(1);
-        let follow_up_plan = follow_up_research_plan(&execution.retrieval_plan, &follow_ups)?;
+        let follow_up_plan =
+            follow_up_research_plan(&execution.retrieval_plan, &follow_ups, &state.obligations)?;
         let scheduled = questions_scheduled_for_retrieval(state, &follow_up_plan)?;
         let follow_up_run_id = execution
             .workflow_args
@@ -201,15 +280,31 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
             follow_up_plan.clone(),
             follow_up_run_id.as_deref(),
         )?;
-        bound_workflow_timeout(&mut follow_up_args, FOLLOW_UP_WORKFLOW_TIMEOUT_MS)?;
+        let follow_up_timeout_ms = match checkpoint {
+            Some(checkpoint) => {
+                let Some(timeout_ms) = checkpoint.stage_timeout_ms(FOLLOW_UP_WORKFLOW_TIMEOUT_MS)
+                else {
+                    terminalize_budget_exhaustion(
+                        Some(checkpoint),
+                        state,
+                        events,
+                        limits,
+                        "the shared inquiry deadline left no follow-up retrieval budget after reserving finalization time",
+                    )
+                    .await?;
+                    return Ok(());
+                };
+                timeout_ms
+            }
+            None => FOLLOW_UP_WORKFLOW_TIMEOUT_MS,
+        };
+        bound_workflow_timeout(&mut follow_up_args, follow_up_timeout_ms)?;
         execution.follow_up_waves_remaining -= 1;
         let follow_up_result = match run_dynamic_workflow(session, follow_up_args, progress_tx)
             .await
         {
             Ok(result) => result,
             Err(error) => {
-                retrieval_opportunities
-                    .extend(scheduled.iter().map(|question| question.id.clone()));
                 defer_or_bound_question_batch(
                     state,
                     events,
@@ -220,6 +315,7 @@ pub(super) async fn resolve_questions_with_bounded_follow_up_waves(
                         "follow-up retrieval wave {wave_number} ended before evidence was retained: {error}"
                     ),
                 )?;
+                checkpoint_inquiry(checkpoint, events, state).await?;
                 resolve_current_wave = false;
                 continue;
             }
@@ -241,6 +337,7 @@ pub(super) async fn assess_completed_research_contract(
     state: &mut InquiryState,
     events: &mut Vec<InquiryEvent>,
     limits: &InquiryLimits,
+    checkpoint: Option<&InquiryCheckpointWriter>,
 ) -> Result<ResearchContractOutcome, String> {
     if state.phase != a3s::research::InquiryPhase::Outlining {
         return Err(format!(
@@ -248,6 +345,25 @@ pub(super) async fn assess_completed_research_contract(
             state.phase
         ));
     }
+    let assessment_timeout_ms = match checkpoint {
+        Some(checkpoint) => {
+            let Some(timeout_ms) =
+                checkpoint.stage_timeout_ms(RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS)
+            else {
+                terminalize_budget_exhaustion(
+                    Some(checkpoint),
+                    state,
+                    events,
+                    limits,
+                    "the shared inquiry deadline left no contract-assessment budget after reserving finalization time",
+                )
+                .await?;
+                return Ok(ResearchContractOutcome::Unsatisfied);
+            };
+            timeout_ms
+        }
+        None => RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS,
+    };
     let canonical = deep_research_canonical_workflow_output(
         &execution.result.output,
         execution.result.metadata.as_ref(),
@@ -260,10 +376,10 @@ pub(super) async fn assess_completed_research_contract(
             .unwrap_or("DeepResearch inquiry"),
         state,
         &bounded_chars(&packet, 60_000),
-        RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS,
+        assessment_timeout_ms,
     )
     .map_err(|error| error.to_string())?;
-    let generated = call_tool_with_progress(
+    let generated = match call_tool_with_progress(
         session,
         "generate_object",
         serde_json::to_value(generation_args)
@@ -271,11 +387,41 @@ pub(super) async fn assess_completed_research_contract(
         progress_tx,
         false,
     )
-    .await?;
-    let assessment: ResearchContractAssessment = generated_object(&generated)?;
-    let event =
-        research_contract_assessment_event(state, assessment).map_err(|error| error.to_string())?;
-    apply_event(state, events, event, limits)?;
+    .await
+    {
+        Ok(generated) => generated,
+        Err(error) => {
+            let reason = format!(
+                "closed-evidence contract assessment ended before completion: {}",
+                bounded_chars(&error, 1_000)
+            );
+            terminalize_budget_exhaustion(checkpoint, state, events, limits, &reason).await?;
+            return Ok(ResearchContractOutcome::Unsatisfied);
+        }
+    };
+    let assessment: ResearchContractAssessment = match generated_object(&generated) {
+        Ok(assessment) => assessment,
+        Err(error) => {
+            let reason = format!(
+                "closed-evidence contract assessment was invalid: {}",
+                bounded_chars(&error, 1_000)
+            );
+            terminalize_budget_exhaustion(checkpoint, state, events, limits, &reason).await?;
+            return Ok(ResearchContractOutcome::Unsatisfied);
+        }
+    };
+    let event = match research_contract_assessment_event(state, assessment) {
+        Ok(event) => event,
+        Err(error) => {
+            let reason = format!(
+                "closed-evidence contract assessment violated its host contract: {}",
+                bounded_chars(&error.to_string(), 1_000)
+            );
+            terminalize_budget_exhaustion(checkpoint, state, events, limits, &reason).await?;
+            return Ok(ResearchContractOutcome::Unsatisfied);
+        }
+    };
+    apply_event_and_checkpoint(checkpoint, state, events, event, limits).await?;
     research_contract_outcome(state)
         .ok_or_else(|| "research contract assessment produced no terminal outcome".to_string())
 }
@@ -317,6 +463,8 @@ async fn resolve_queued_questions(
     events: &mut Vec<InquiryEvent>,
     limits: &InquiryLimits,
     allow_follow_ups: bool,
+    checkpoint: Option<&InquiryCheckpointWriter>,
+    resolution_timeout_ms: u64,
 ) -> Result<(), String> {
     if queued.is_empty() {
         return Err("DeepResearch retrieval wave has no scheduled questions".to_string());
@@ -324,18 +472,20 @@ async fn resolve_queued_questions(
     let canonical =
         deep_research_canonical_workflow_output(&result.output, result.metadata.as_ref());
     let evidence = accepted_evidence_ledger(&canonical, result.metadata.as_ref());
-    let addressable_evidence = accept_evidence_catalog(state, events, limits, &evidence)?;
+    let evidence_catalog = prepare_evidence_catalog(state, &evidence)?;
     let packet_evidence =
-        balanced_evidence_packet(&addressable_evidence, MAX_QUESTION_EVIDENCE_ITEMS);
+        balanced_evidence_packet(&evidence_catalog.addressable, MAX_QUESTION_EVIDENCE_ITEMS);
     if packet_evidence.is_empty() {
-        return defer_or_bound_question_batch(
+        defer_or_bound_question_batch(
             state,
             events,
             limits,
             queued,
             allow_follow_ups,
             "no accepted evidence was retained for this question",
-        );
+        )?;
+        checkpoint_inquiry(checkpoint, events, state).await?;
+        return Ok(());
     }
     let allowed_evidence_ids = accepted_evidence_ids(&packet_evidence);
     let packet = accepted_evidence_synthesis_payload(&packet_evidence, &canonical);
@@ -347,7 +497,7 @@ async fn resolve_queued_questions(
         &state.stop_conditions,
         &allowed_evidence_ids,
         &bounded_chars(&packet, 60_000),
-        QUESTION_RESOLUTION_TIMEOUT_MS,
+        resolution_timeout_ms,
     )
     .map_err(|error| error.to_string())?;
     let generated = match call_tool_with_progress(
@@ -362,27 +512,33 @@ async fn resolve_queued_questions(
     {
         Ok(result) => result,
         Err(error) => {
-            return defer_or_bound_question_batch(
+            apply_pending_evidence(state, events, limits, evidence_catalog.pending)?;
+            defer_or_bound_question_batch(
                 state,
                 events,
                 limits,
                 queued,
                 allow_follow_ups,
                 &format!("closed-evidence question assessment failed: {error}"),
-            )
+            )?;
+            checkpoint_inquiry(checkpoint, events, state).await?;
+            return Ok(());
         }
     };
     let mut resolution: QuestionResolutionOutput = match generated_object(&generated) {
         Ok(output) => output,
         Err(error) => {
-            return defer_or_bound_question_batch(
+            apply_pending_evidence(state, events, limits, evidence_catalog.pending)?;
+            defer_or_bound_question_batch(
                 state,
                 events,
                 limits,
                 queued,
                 allow_follow_ups,
                 &format!("closed-evidence question assessment was invalid: {error}"),
-            )
+            )?;
+            checkpoint_inquiry(checkpoint, events, state).await?;
+            return Ok(());
         }
     };
     if allow_follow_ups {
@@ -392,11 +548,28 @@ async fn resolve_queued_questions(
     } else {
         resolution.follow_up_questions.clear();
     }
-    let resolution_events = question_resolution_events(&resolution, queued, &allowed_evidence_ids)
-        .map_err(|error| error.to_string())?;
+    let resolution_events =
+        match question_resolution_events(&resolution, queued, &allowed_evidence_ids) {
+            Ok(events) => events,
+            Err(error) => {
+                apply_pending_evidence(state, events, limits, evidence_catalog.pending)?;
+                defer_or_bound_question_batch(
+                    state,
+                    events,
+                    limits,
+                    queued,
+                    allow_follow_ups,
+                    &format!("closed-evidence question assessment was invalid: {error}"),
+                )?;
+                checkpoint_inquiry(checkpoint, events, state).await?;
+                return Ok(());
+            }
+        };
+    apply_pending_evidence(state, events, limits, evidence_catalog.pending)?;
     for event in resolution_events {
         apply_event(state, events, event, limits)?;
     }
+    checkpoint_inquiry(checkpoint, events, state).await?;
     Ok(())
 }
 
@@ -558,13 +731,20 @@ fn accepted_evidence_ids(evidence: &[AcceptedEvidence]) -> BTreeSet<String> {
     evidence.iter().map(|item| item.id.clone()).collect()
 }
 
-fn accept_evidence_catalog(
-    state: &mut InquiryState,
-    events: &mut Vec<InquiryEvent>,
-    limits: &InquiryLimits,
+struct PreparedEvidenceCatalog {
+    addressable: Vec<AcceptedEvidence>,
+    pending: Vec<EvidenceRef>,
+}
+
+/// Stage accepted evidence until the wave has a validated resolution outcome.
+/// Evidence and answer/defer events then become one durable logical batch,
+/// avoiding an fsync per evidence item and preventing half-applied waves.
+fn prepare_evidence_catalog(
+    state: &InquiryState,
     evidence: &[AcceptedEvidence],
-) -> Result<Vec<AcceptedEvidence>, String> {
+) -> Result<PreparedEvidenceCatalog, String> {
     let mut addressable = Vec::new();
+    let mut pending = Vec::new();
     for item in evidence {
         let claim_ids = item
             .claims
@@ -612,16 +792,31 @@ fn accept_evidence_catalog(
                 ));
             }
             Some(_) => {}
-            None => apply_event(
-                state,
-                events,
-                InquiryEvent::EvidenceAccepted { evidence: accepted },
-                limits,
-            )?,
+            None => pending.push(accepted),
         }
         addressable.push(item.clone());
     }
-    Ok(addressable)
+    Ok(PreparedEvidenceCatalog {
+        addressable,
+        pending,
+    })
+}
+
+fn apply_pending_evidence(
+    state: &mut InquiryState,
+    events: &mut Vec<InquiryEvent>,
+    limits: &InquiryLimits,
+    pending: Vec<EvidenceRef>,
+) -> Result<(), String> {
+    for evidence in pending {
+        apply_event(
+            state,
+            events,
+            InquiryEvent::EvidenceAccepted { evidence },
+            limits,
+        )?;
+    }
+    Ok(())
 }
 
 fn canonical_query(workflow_output: &str) -> Option<String> {

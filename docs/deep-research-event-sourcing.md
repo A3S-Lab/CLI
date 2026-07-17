@@ -7,6 +7,9 @@ convergence, report publication, and TUI cleanup replayable.
 
 - A3S Flow events are authoritative for workflow and step execution.
 - `AgentEvent` is authoritative for tools, child agents, and session lifecycle.
+- The typed Inquiry event stream is authoritative for research strategy,
+  obligations, questions, evidence acceptance, contract assessment, outline,
+  drafts, and report audit state.
 - The DeepResearch journal normalizes references to those events.
 - `GraphRuntime` materializes research-domain objects and relations.
 - The TUI, Markdown, and HTML reports are disposable projections.
@@ -49,6 +52,12 @@ The graph additionally materializes:
 - `deep_research.source`
 - `deep_research.evidence`
 - `deep_research.claim`
+- `deep_research.obligation`
+- `deep_research.stop_condition`
+- `deep_research.perspective`
+- `deep_research.question`
+- `deep_research.outline_section`
+- `deep_research.section_draft`
 - `deep_research.observed_in`
 - `deep_research.supports`
 
@@ -76,6 +85,12 @@ tool output.
     small corroborated evidence set, while a broad investigation must satisfy
     the LLM plan's independent coverage criteria. No subject-specific gate or
     report template may replace that semantic decision.
+11. A host-managed Inquiry contains exactly one stable research-contract event
+    and exactly one contract assessment before outlining. Removing both an
+    event and its projected state never restores legacy completion authority.
+12. Report recovery accepts only a journal that extends the workflow's exact
+    Inquiry prefix. Outline, section, failed-audit revision, and completed
+    boundaries are replayed strictly; stale or divergent prefixes fail closed.
 
 ## Diagnostics
 
@@ -119,6 +134,14 @@ missing children are classified as orphaned. The reconciliation and its reason
 are appended before the old run is terminalized as failed. Completed tool calls
 are not replayed or executed again.
 
+Within an active run, Inquiry checkpoints are committed after logical
+transactions rather than after each evidence item. Report generation reloads
+that prefix before doing model work: a committed outline is never regenerated,
+existing section drafts are reused, and A3S Flow journals resume stable
+parallel section and frame runs. A failed full-report audit and its replacement
+section drafts are persisted as one authoritative prefix, so interruption
+cannot expose a half-revised report state.
+
 ## Migration rule
 
 New DeepResearch state must be added as a domain event and a projection field.
@@ -128,12 +151,22 @@ explicit gaps into a bounded follow-up step, but terminal convergence and
 publication policy belong in typed Rust code.
 
 The planner first owns one explicit semantic execution route:
-`direct_only`, `direct_then_review`, or `maker_first`. The route is part of the
+`direct_only`, `direct_then_review`, `direct_then_maker`, or `maker_first`. The route is part of the
 validated plan event and is never reconstructed from the topic, query length,
 answer shape, or track count. `direct_then_review` lets bounded multi-query
 retrieval feed one structured synthesis-and-coverage review, so a substantive
 public investigation does not pay for separate no-tool maker and checker model
-turns. Historical `direct_then_maker` events remain executable for replay.
+turns. `direct_then_maker` is reserved for investigations that need adaptive
+source reading or multi-step evidence collection after direct retrieval has
+seeded the source set.
+
+The same semantic plan chooses `focused` or `perspective_guided` research.
+Focused work avoids a perspective-discovery tax for bounded questions.
+Perspective-guided work first scouts the source landscape, derives two to four
+viewpoints only from retained scout sources, and then asks bounded follow-up
+questions linked to stable obligations. This preserves the useful
+perspective-guided inquiry mechanism without a fixed expert roster, topic
+classifier, or domain-specific template.
 
 The checker owns the semantic routing decision for each unresolved gap after
 the planned route. A
@@ -154,7 +187,7 @@ independent verification as a limitation. Recovery remains reserved for runs
 that do not retain reportable evidence.
 
 For public evidence, the initial direct step is itself a Loop maker. It uses the
-A3S Code 5.2.2 capability contract and `batch` tool to run independent searches,
+A3S Code 5.3.2 capability contract and `batch` tool to run independent searches,
 then independent fetches, concurrently while retaining nested source anchors
 and typed partial failures. Query-specific candidates receive fetch capacity
 before seed URLs; an unconfigured zero-result search has one bounded Brave

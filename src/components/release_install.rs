@@ -161,6 +161,7 @@ pub async fn install_release(
         component: id.clone(),
         action: request.intent.action(),
         changed: true,
+        recovered: false,
         version: Some(resolved.version),
         provenance: Some(InstallProvenance::GithubRelease),
         path: Some(executable),

@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added pinned-root TUF registries for external Use packages, including full
+  metadata refresh, review/apply-bound install plans, signed provenance
+  receipts, and source-preserving upgrades. Registry upgrades query only the
+  recorded registry and channel, reject identity drift and version downgrades,
+  and converge without downloading an already installed target.
+- Added durable journals for multi-component install, upgrade, and uninstall
+  batches. A global cross-process lock protects the active journal, successful
+  checkpoints resume only while their receipt and health state still match,
+  interrupted records remain inspectable, and recovered JSON operations are
+  marked explicitly without changing partial-success semantics.
+- Added a source-grounded, perspective-guided DeepResearch inquiry path. An
+  LLM-authored semantic plan now selects focused or perspective-guided
+  research, commits stable research obligations and observable stop
+  conditions, scouts the source landscape before deriving perspectives, and
+  asks bounded evidence-driven follow-up questions without topic rules or
+  fixed expert templates.
+- Added typed DeepResearch contract assessment and report-stage Inquiry
+  events. Obligations, questions, accepted evidence, outline sections, drafts,
+  audit results, and their graph relations are strictly replayable through the
+  A3S Code state-graph runtime.
 - Added signed-in Kimi account models to `/model`, `a3s model`, and
   `a3s code models`. A3S prefers Kimi Desktop's local Daimon account and falls
   back to Kimi Code OAuth, discovers account-enabled model/context metadata,
@@ -30,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Checkpointed DeepResearch Inquiry prefixes after logical transactions and
+  made report synthesis resume from a committed outline, existing drafts, or
+  an audit boundary. Parallel A3S Flow section work uses stable run IDs;
+  deterministic audit failures revise only affected sections for at most two
+  rounds instead of restarting the full investigation or looping indefinitely.
+- Required host-managed DeepResearch output to carry exactly one committed
+  research contract and one contract assessment before reporting, preventing
+  missing event/state pairs from falling back to legacy completion authority.
 - Deferred default-model validation from agent bootstrap to session creation so
   hosts can start account-only sessions with an injected Claude, Codex, Kimi,
   or WorkBuddy client while sessions lacking both sources still fail with an

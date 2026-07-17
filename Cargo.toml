@@ -24,8 +24,10 @@ a3s-tui = "=0.1.12"
 a3s-search = { version = "1.4.3", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
+a3s-use-extension = "=0.1.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
@@ -62,9 +64,15 @@ tracing = "0.1"
 system-configuration = "0.7"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
+flate2 = "1"
+olpc-cjson = "0.1"
+ring = "0.17"
+tar = "0.4"
 tempfile = "3"
 
 [profile.release]
@@ -84,3 +92,4 @@ a3s-memory = { path = "../memory" }
 a3s-search = { path = "../search" }
 a3s-tui = { path = "../tui" }
 a3s-updater = { path = "../updater" }
+a3s-use-extension = { path = "../use/crates/extension" }

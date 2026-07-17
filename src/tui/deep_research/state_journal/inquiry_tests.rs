@@ -80,6 +80,8 @@ fn inquiry_events() -> Vec<InquiryEvent> {
                             .to_string(),
                         evidence_ids: vec!["evidence:accepted".to_string()],
                     }],
+                    primary_source: None,
+                    independent_corroboration: None,
                 }],
                 stop_conditions: vec![StopConditionAssessment {
                     condition_index: 0,
@@ -153,6 +155,212 @@ async fn recorded_inquiry(run_id: &str) -> (tempfile::TempDir, Vec<InquiryEvent>
     first.unwrap();
     concurrent.unwrap();
     (temp, events, state)
+}
+
+fn persisted_inquiry_sequences(journal: &DeepResearchStateJournal) -> Vec<u64> {
+    journal
+        .runtime
+        .events()
+        .iter()
+        .filter_map(|record| match &record.event {
+            GraphEvent::ExternalEventObserved {
+                source,
+                stream_id,
+                sequence,
+                ..
+            } if source == INQUIRY_EVENT_SOURCE && stream_id == &journal.run_id => Some(*sequence),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn load_inquiry_state_restores_only_a_contiguous_strict_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-inquiry-load-prefix";
+    assert!(load_inquiry_state(temp.path(), run_id)
+        .await
+        .unwrap()
+        .is_none());
+    DeepResearchStateJournal::create(temp.path(), run_id, inquiry_spec())
+        .await
+        .unwrap();
+    assert!(load_inquiry_state(temp.path(), run_id)
+        .await
+        .unwrap()
+        .is_none());
+
+    let events = inquiry_events();
+    let prefix = events[..7].to_vec();
+    let state = a3s::research::replay(&prefix, &InquiryLimits::default()).unwrap();
+    record_inquiry_state(temp.path(), run_id, &prefix, &state)
+        .await
+        .unwrap();
+    let (restored_events, restored_state) = load_inquiry_state(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(restored_events, prefix);
+    assert_eq!(restored_state, state);
+
+    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut gap = journal.runtime.events().to_vec();
+    let missing = gap
+        .iter()
+        .position(|record| {
+            matches!(
+                &record.event,
+                GraphEvent::ExternalEventObserved {
+                    source,
+                    stream_id,
+                    sequence: 3,
+                    ..
+                } if source == INQUIRY_EVENT_SOURCE && stream_id == run_id
+            )
+        })
+        .unwrap();
+    gap.remove(missing);
+    let gap_error = decode_inquiry_state(run_id, &gap).unwrap_err();
+    assert!(format!("{gap_error:#}").contains("is not contiguous"));
+
+    let mut damaged = journal.runtime.events().to_vec();
+    let payload = damaged
+        .iter_mut()
+        .find_map(|record| match &mut record.event {
+            GraphEvent::ExternalEventObserved {
+                source,
+                stream_id,
+                sequence,
+                payload,
+                ..
+            } if source == INQUIRY_EVENT_SOURCE && stream_id == run_id && *sequence == 2 => {
+                Some(payload)
+            }
+            _ => None,
+        })
+        .unwrap();
+    *payload = serde_json::json!({"damaged": true});
+    let damaged_error = decode_inquiry_state(run_id, &damaged).unwrap_err();
+    assert!(format!("{damaged_error:#}").contains("decode DeepResearch inquiry event"));
+}
+
+#[tokio::test]
+async fn incremental_inquiry_prefix_survives_reopen_and_extends_without_duplicates() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-inquiry-incremental-prefix";
+    DeepResearchStateJournal::create(temp.path(), run_id, inquiry_spec())
+        .await
+        .unwrap();
+    let events = inquiry_events();
+    let discovery_prefix = &events[..5];
+    let discovery_state =
+        a3s::research::replay(discovery_prefix, &InquiryLimits::default()).unwrap();
+
+    record_inquiry_state(temp.path(), run_id, discovery_prefix, &discovery_state)
+        .await
+        .unwrap();
+    let reopened = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_inquiry_sequences(&reopened),
+        (1..=discovery_prefix.len() as u64).collect::<Vec<_>>()
+    );
+    assert!(reopened
+        .runtime
+        .graph()
+        .object(&object_id(run_id, "question", "question:root"))
+        .is_some());
+    assert!(reopened
+        .runtime
+        .graph()
+        .object(&object_id(run_id, "outline-section", "section:findings"))
+        .is_none());
+    let checkpoint_path =
+        checkpoint_path(&temp.path().join(".a3s/research/runs/checkpoints"), run_id);
+    let checkpoint: ResearchCheckpoint =
+        serde_json::from_slice(&tokio::fs::read(checkpoint_path).await.unwrap()).unwrap();
+    assert_eq!(
+        checkpoint.event_head.as_deref(),
+        graph_event_head(reopened.runtime.events())
+    );
+    GraphRuntime::strict_replay(reopened.runtime.events()).unwrap();
+    let discovery_event_count = reopened.runtime.events().len();
+    drop(reopened);
+
+    record_inquiry_state(temp.path(), run_id, discovery_prefix, &discovery_state)
+        .await
+        .unwrap();
+    let idempotent = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(idempotent.runtime.events().len(), discovery_event_count);
+    drop(idempotent);
+
+    let completed_state = a3s::research::replay(&events, &InquiryLimits::default()).unwrap();
+    record_inquiry_state(temp.path(), run_id, &events, &completed_state)
+        .await
+        .unwrap();
+    let completed = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_inquiry_sequences(&completed),
+        (1..=events.len() as u64).collect::<Vec<_>>()
+    );
+    GraphRuntime::strict_replay(completed.runtime.events()).unwrap();
+}
+
+#[tokio::test]
+async fn incremental_inquiry_rejects_stale_or_divergent_prefixes() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-inquiry-prefix-conflict";
+    DeepResearchStateJournal::create(temp.path(), run_id, inquiry_spec())
+        .await
+        .unwrap();
+    let events = inquiry_events();
+    let prefix = &events[..5];
+    let prefix_state = a3s::research::replay(prefix, &InquiryLimits::default()).unwrap();
+    record_inquiry_state(temp.path(), run_id, prefix, &prefix_state)
+        .await
+        .unwrap();
+
+    let stale = &events[..2];
+    let stale_state = a3s::research::replay(stale, &InquiryLimits::default()).unwrap();
+    let stale_error = record_inquiry_state(temp.path(), run_id, stale, &stale_state)
+        .await
+        .unwrap_err();
+    assert!(format!("{stale_error:#}").contains("is stale"));
+
+    let mut divergent = prefix.to_vec();
+    let InquiryEvent::ResearchObligationsCommitted {
+        stop_conditions, ..
+    } = &mut divergent[1]
+    else {
+        panic!("fixture event 1 must commit the research contract");
+    };
+    stop_conditions[0] = "A different material stopping condition".to_string();
+    let divergent_state = a3s::research::replay(&divergent, &InquiryLimits::default()).unwrap();
+    let conflict = record_inquiry_state(temp.path(), run_id, &divergent, &divergent_state)
+        .await
+        .unwrap_err();
+    assert!(format!("{conflict:#}").contains("conflicts with the observed event id"));
+
+    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        persisted_inquiry_sequences(&journal),
+        (1..=prefix.len() as u64).collect::<Vec<_>>()
+    );
+    GraphRuntime::strict_replay(journal.runtime.events()).unwrap();
 }
 
 #[tokio::test]

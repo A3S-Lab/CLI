@@ -4,17 +4,19 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
+use a3s_use_extension::ResolvedRemotePackage;
 use anyhow::{bail, Context};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::catalog::{self, Distribution};
-use super::discovery::discover;
+use super::discovery::{discover, extension_registry_provenance};
 use super::id::ComponentId;
 use super::lifecycle::{resolve_install_source, InstallRequest, InstallSource};
 use super::paths::ComponentPaths;
 use super::release_install::{resolve_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
+use crate::registry::{RegistryStore, ResolvedRegistryPackage};
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
 const PLAN_DIGEST_DOMAIN: &[u8] = b"a3s-component-plan-v1\0";
@@ -54,6 +56,8 @@ pub(super) struct PreparedOperationPlan {
     pub(super) plan: OperationPlan,
     pub(super) resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub(super) resolved_sources: BTreeMap<String, InstallSource>,
+    pub(super) resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
+    pub(super) apply_force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -161,6 +165,8 @@ pub(super) struct OperationPlan {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_releases: BTreeMap<String, ResolvedRelease>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    resolved_registry_packages: BTreeMap<String, ResolvedRemotePackage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prerequisites: BTreeMap<String, PlannedCurrentState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     force: Option<bool>,
@@ -227,6 +233,12 @@ impl OperationPlanSet {
                     release.version, release.archive_name, release.sha256
                 );
             }
+            for (component, package) in &plan.resolved_registry_packages {
+                println!(
+                    "resolved registry package: {component} {} {} {} {}",
+                    package.registry_name, package.version, package.target_name, package.sha256
+                );
+            }
             for (component, state) in &plan.prerequisites {
                 println!(
                     "prerequisite: {component} {:?} {:?}",
@@ -288,29 +300,27 @@ pub(super) fn validate_install_plan(
         bail!("component '{}' is not registered", id);
     }
     if external {
-        if request.package.is_none() {
-            bail!(
-                "external component '{}' requires an explicit --from package",
-                id
-            );
-        }
-        if !request.allow_unsigned {
-            bail!(
-                "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
-                id
-            );
-        }
-        if request.version.is_some() {
-            bail!(
-                "external component '{}' derives its version from the package manifest; --version is not supported",
-                id
-            );
-        }
         if request.source != InstallSource::Auto {
             bail!(
-                "external component '{}' uses its explicit --from package; --source is not supported",
+                "external component '{}' is resolved through its package source; --source is not supported",
                 id
             );
+        }
+        if request.package.is_some() {
+            if !request.allow_unsigned {
+                bail!(
+                    "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
+                    id
+                );
+            }
+            if request.version.is_some() {
+                bail!(
+                    "external component '{}' derives its version from the local package manifest; --version is not supported",
+                    id
+                );
+            }
+        } else if request.allow_unsigned {
+            bail!("--allow-unsigned is valid only with an explicit local --from package");
         }
         return Ok(());
     }
@@ -352,6 +362,7 @@ pub(super) async fn install_plan(
     scope: &str,
     migrate: bool,
     paths: &ComponentPaths,
+    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<PreparedOperationPlan> {
     validate_install_plan(id, request)?;
     let state = discover(paths)?
@@ -378,6 +389,7 @@ pub(super) async fn install_plan(
     let mut resolved_releases = BTreeMap::new();
     let mut resolved_sources = BTreeMap::new();
     let mut prerequisites = BTreeMap::new();
+    let mut resolved_registry_packages = BTreeMap::new();
     let (source, ownership) = if external {
         prepare_parent_release(
             &ComponentId::parse("use")?,
@@ -387,7 +399,27 @@ pub(super) async fn install_plan(
             &mut prerequisites,
         )
         .await?;
-        ("local-package".to_string(), "parent:use".to_string())
+        if request.package.is_some() {
+            ("local-package".to_string(), "parent:use".to_string())
+        } else {
+            let registry_store = registries.context(
+                "signed extension installation requires the umbrella registry configuration",
+            )?;
+            let package_id = id
+                .relative_to(&ComponentId::parse("use")?)
+                .context("external extension is outside the Use namespace")?;
+            let resolved = registry_store
+                .resolve_package(
+                    &paths.state_root,
+                    package_id,
+                    request.version.as_deref(),
+                    channel,
+                )
+                .await?;
+            let source = format!("registry:{}", resolved.registry.name);
+            resolved_registry_packages.insert(id.to_string(), resolved);
+            (source, "parent:use".to_string())
+        }
     } else {
         match spec.map(|spec| spec.distribution) {
             Some(Distribution::Bundled) => ("bundled".to_string(), "bundled".to_string()),
@@ -463,6 +495,10 @@ pub(super) async fn install_plan(
         local_package,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
+        resolved_registry_packages: resolved_registry_packages
+            .iter()
+            .map(|(component, resolved)| (component.clone(), resolved.package.clone()))
+            .collect(),
         prerequisites,
         force: Some(request.force),
         allow_unsigned: Some(request.allow_unsigned),
@@ -480,6 +516,8 @@ pub(super) async fn install_plan(
         plan,
         resolved_releases,
         resolved_sources,
+        resolved_registry_packages,
+        apply_force: request.force,
     })
 }
 
@@ -534,6 +572,7 @@ pub(super) fn uninstall_plan(
         local_package: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
+        resolved_registry_packages: BTreeMap::new(),
         prerequisites,
         force: None,
         allow_unsigned: None,
@@ -552,13 +591,18 @@ pub(super) fn uninstall_plan(
 pub(super) async fn upgrade_plan(
     id: &ComponentId,
     paths: &ComponentPaths,
+    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<PreparedOperationPlan> {
     let state = super::discovery::find_state(id, paths)?;
     if state.presence != Presence::Managed {
         bail!("component '{}' is not managed by A3S", id);
     }
-    let spec =
-        catalog::find(id).with_context(|| format!("component '{}' is not registered", id))?;
+    let Some(spec) = catalog::find(id) else {
+        if !is_external_use_extension(id) {
+            bail!("component '{}' is not registered", id);
+        }
+        return registry_extension_upgrade_plan(id, state, paths, registries).await;
+    };
     let release = catalog::release(spec)
         .with_context(|| format!("component '{}' has no managed release", id))?;
     let selected = match state.provenance {
@@ -602,6 +646,7 @@ pub(super) async fn upgrade_plan(
         local_package: None,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
+        resolved_registry_packages: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
         allow_unsigned: None,
@@ -615,6 +660,89 @@ pub(super) async fn upgrade_plan(
         plan,
         resolved_releases,
         resolved_sources,
+        resolved_registry_packages: BTreeMap::new(),
+        apply_force: true,
+    })
+}
+
+async fn registry_extension_upgrade_plan(
+    id: &ComponentId,
+    state: ComponentState,
+    paths: &ComponentPaths,
+    registries: Option<&RegistryStore>,
+) -> anyhow::Result<PreparedOperationPlan> {
+    let installed = extension_registry_provenance(id, paths)?.with_context(|| {
+        format!(
+            "local extension '{}' has no recorded signed upgrade source; install the new package explicitly with 'a3s install {} --from <package> --force --allow-unsigned'",
+            id, id
+        )
+    })?;
+    let registries = registries
+        .context("signed extension upgrade requires the umbrella registry configuration")?;
+    let resolved = registries
+        .resolve_upgrade(&paths.state_root, &installed)
+        .await?;
+    let installed_version = parse_version(&installed.version)
+        .with_context(|| format!("installed extension '{}' has an invalid version", id))?;
+    let resolved_version = parse_version(&resolved.package.version).with_context(|| {
+        format!(
+            "registry returned an invalid version for extension '{}'",
+            id
+        )
+    })?;
+    if resolved_version < installed_version {
+        bail!(
+            "registry '{}' attempted to downgrade extension '{}' from {} to {}",
+            installed.registry_name,
+            id,
+            installed.version,
+            resolved.package.version
+        );
+    }
+
+    let mutates = installed.version != resolved.package.version
+        || installed.sha256 != resolved.package.sha256;
+    let apply_force = mutates;
+    let source = format!("registry:{}", resolved.registry.name);
+    let channel = installed.channel.clone();
+    let resolved_registry_packages = BTreeMap::from([(id.to_string(), resolved.clone())]);
+    let plan = OperationPlan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        component: id.clone(),
+        action: "upgrade",
+        source,
+        requested_source: None,
+        channel: Some(channel),
+        scope: None,
+        migration: None,
+        target: host_target(),
+        ownership: "parent:use".to_string(),
+        mutates,
+        requested_version: None,
+        local_package: None,
+        resolved_sources: BTreeMap::new(),
+        resolved_releases: BTreeMap::new(),
+        resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
+        prerequisites: BTreeMap::new(),
+        force: Some(apply_force),
+        allow_unsigned: Some(false),
+        cascade: None,
+        purge: None,
+        current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
+        message: if mutates {
+            "Apply would install the exact signed target from the extension's recorded registry."
+                .to_string()
+        } else {
+            "The recorded registry resolves to the installed target; apply would be a no-op."
+                .to_string()
+        },
+    };
+    Ok(PreparedOperationPlan {
+        plan,
+        resolved_releases: BTreeMap::new(),
+        resolved_sources: BTreeMap::new(),
+        resolved_registry_packages,
+        apply_force,
     })
 }
 
@@ -937,6 +1065,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         local_package: &'a Option<PlannedLocalPackage>,
         resolved_sources: &'a BTreeMap<String, String>,
         resolved_releases: &'a BTreeMap<String, ResolvedRelease>,
+        resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
         allow_unsigned: Option<bool>,
@@ -966,6 +1095,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 local_package: &plan.local_package,
                 resolved_sources: &plan.resolved_sources,
                 resolved_releases: &plan.resolved_releases,
+                resolved_registry_packages: &plan.resolved_registry_packages,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
                 allow_unsigned: plan.allow_unsigned,
@@ -1006,6 +1136,7 @@ mod tests {
             local_package: None,
             resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
             resolved_releases: BTreeMap::new(),
+            resolved_registry_packages: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),
             allow_unsigned: Some(false),

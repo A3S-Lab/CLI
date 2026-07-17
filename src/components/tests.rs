@@ -100,7 +100,7 @@ exit 2
     let arguments = std::fs::read_to_string(args_log).unwrap();
     assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
     assert!(arguments.contains("--from\n"));
-    assert!(arguments.contains(package.to_string_lossy().as_ref()));
+    assert!(arguments.contains(&*package.to_string_lossy()));
     assert!(arguments.contains("--allow-unsigned\n"));
     assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
 }

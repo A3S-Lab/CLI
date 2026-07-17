@@ -6,8 +6,8 @@
 
 use super::*;
 use crate::system_agents::{
-    epoch_ms, sanitize_display_text, AgentActivityState, AgentChildPresence, AgentPresence,
-    AgentPresencePublisher, SystemAgentRefreshResult,
+    epoch_ms, AgentActivityState, AgentChildPresence, AgentPresence, AgentPresencePublisher,
+    SystemAgentRefreshResult,
 };
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -19,11 +19,12 @@ pub(super) const AGENT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs
 const TERMINAL_STATE_RETENTION: Duration = Duration::from_secs(8);
 const AGENT_ISLAND_ENV: &str = "A3S_AGENT_ISLAND";
 const AGENT_ISLAND_BIN_ENV: &str = "A3S_AGENT_ISLAND_BIN";
-const MAX_AGENT_ISLAND_STDERR_BYTES: u64 = 8 * 1024;
 const MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES: u64 = 8 * 1024;
 const AGENT_ISLAND_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const AGENT_ISLAND_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const AGENT_ISLAND_SINGLETON_EXIT_MAX: Duration = Duration::from_secs(5);
 const AGENT_ISLAND_CONTENTION_RECHECK: Duration = Duration::from_secs(30);
+const AGENT_ISLAND_RECOVERY_RECHECK: Duration = Duration::from_secs(60);
 const AGENT_ISLAND_STABLE_RUNTIME: Duration = Duration::from_secs(30);
 const AGENT_ISLAND_MAX_CONSECUTIVE_FAILURES: u8 = 4;
 
@@ -355,7 +356,7 @@ impl AgentIslandSupervisor {
             }
             Ok(AgentIslandLaunchOutcome::Unsupported(error)) => {
                 tracing::warn!(%error, "native system-agent island helper is incompatible");
-                self.lifecycle = AgentIslandLifecycle::Stopped;
+                self.schedule_recovery_recheck(now, &error);
             }
             Err(error) => {
                 tracing::warn!(%error, "native system-agent island helper failed to launch");
@@ -421,9 +422,13 @@ impl AgentIslandSupervisor {
             tracing::warn!(
                 failures = self.consecutive_failures,
                 %reason,
-                "native system-agent island helper retries exhausted"
+                retry_after_ms = AGENT_ISLAND_RECOVERY_RECHECK.as_millis(),
+                "native system-agent island helper entering recovery cooldown"
             );
-            self.lifecycle = AgentIslandLifecycle::Stopped;
+            self.consecutive_failures = 0;
+            self.lifecycle = AgentIslandLifecycle::Backoff {
+                retry_at: now + AGENT_ISLAND_RECOVERY_RECHECK,
+            };
             return;
         }
         let delay = agent_island_retry_delay(self.consecutive_failures);
@@ -434,6 +439,18 @@ impl AgentIslandSupervisor {
         );
         self.lifecycle = AgentIslandLifecycle::Backoff {
             retry_at: now + delay,
+        };
+    }
+
+    fn schedule_recovery_recheck(&mut self, now: Instant, reason: &str) {
+        tracing::debug!(
+            %reason,
+            retry_after_ms = AGENT_ISLAND_RECOVERY_RECHECK.as_millis(),
+            "native system-agent island helper recovery recheck scheduled"
+        );
+        self.consecutive_failures = 0;
+        self.lifecycle = AgentIslandLifecycle::Backoff {
+            retry_at: now + AGENT_ISLAND_RECOVERY_RECHECK,
         };
     }
 }
@@ -548,17 +565,36 @@ fn agent_island_args(request: &AgentIslandLaunchRequest) -> Vec<OsString> {
     ]
 }
 
-fn resolve_agent_island_binary(environment: &AgentIslandEnvironment) -> std::io::Result<PathBuf> {
-    environment
-        .binary_override
-        .clone()
-        .or_else(remote_ui::webview_helper_path)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "a3s-webview is missing; install it or set A3S_AGENT_ISLAND_BIN",
-            )
-        })
+fn resolve_agent_island_binaries(
+    environment: &AgentIslandEnvironment,
+) -> std::io::Result<(bool, Vec<PathBuf>)> {
+    if let Some(binary) = &environment.binary_override {
+        return Ok((true, vec![binary.clone()]));
+    }
+    let candidates = remote_ui::webview_helper_candidates();
+    if candidates.1.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "a3s-webview is missing; install it or set A3S_AGENT_ISLAND_BIN",
+        ));
+    }
+    Ok(candidates)
+}
+
+async fn find_compatible_agent_island_binary(
+    candidates: Vec<PathBuf>,
+    working_directory: &Path,
+) -> (Option<PathBuf>, Vec<String>) {
+    let mut rejected = Vec::new();
+    for binary in candidates {
+        let binary = std::fs::canonicalize(&binary).unwrap_or(binary);
+        match probe_agent_island_capability(&binary, working_directory).await {
+            Ok(true) => return (Some(binary), rejected),
+            Ok(false) => rejected.push(format!("{} is incompatible", binary.display())),
+            Err(error) => rejected.push(format!("{}: {error}", binary.display())),
+        }
+    }
+    (None, rejected)
 }
 
 fn launch_agent_island(request: AgentIslandLaunchRequest) -> Cmd<Msg> {
@@ -578,44 +614,60 @@ async fn launch_agent_island_with_environment(
     if let Some(reason) = environment.skip_reason() {
         return Ok(AgentIslandLaunchOutcome::Skipped(reason));
     }
-    let binary = resolve_agent_island_binary(&environment)?;
-    if !probe_agent_island_capability(&binary).await? {
+    let working_directory = request.snapshot_path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "agent island snapshot has no private parent directory",
+        )
+    })?;
+    let (explicit, candidates) = resolve_agent_island_binaries(&environment)?;
+    let (binary, rejected) =
+        find_compatible_agent_island_binary(candidates, working_directory).await;
+    let Some(binary) = binary else {
+        let source = if explicit {
+            "configured native helper"
+        } else {
+            "installed native helpers"
+        };
         return Ok(AgentIslandLaunchOutcome::Unsupported(format!(
-            "{} does not support --agent-island; update a3s-webview to a compatible release",
-            binary.display()
+            "{source} do not support --agent-island; update a3s-webview to a compatible release ({})",
+            rejected.join("; ")
         )));
-    }
-    let child = tokio::process::Command::new(&binary)
+    };
+    let mut command = tokio::process::Command::new(&binary);
+    command
         .args(agent_island_args(&request))
+        .current_dir(working_directory)
+        .env("PWD", working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        // The singleton may outlive this TUI while other publishers remain.
+        // A parent-owned pipe would become broken when this process exits and
+        // could terminate the helper on a later diagnostic write.
+        .stderr(Stdio::null());
+    let child = command.spawn()?;
     Ok(AgentIslandLaunchOutcome::Spawned(
         monitor_agent_island_child(child),
     ))
 }
 
 fn monitor_agent_island_child(mut child: tokio::process::Child) -> AgentIslandMonitor {
-    let stderr = child.stderr.take();
     let started_at = Instant::now();
     let (exit_tx, exit) = oneshot::channel();
     tokio::spawn(async move {
-        let read_stderr = read_bounded(stderr, MAX_AGENT_ISLAND_STDERR_BYTES);
-        let (status, stderr) = tokio::join!(child.wait(), read_stderr);
+        let status = child.wait().await;
         let ran_for = started_at.elapsed();
-        let detail = sanitize_display_text(&String::from_utf8_lossy(&stderr), 512);
         let exit = match status {
             Ok(status) => AgentIslandExit {
                 success: status.success(),
                 status: status.to_string(),
-                detail,
+                detail: String::new(),
                 ran_for,
             },
             Err(error) => AgentIslandExit {
                 success: false,
                 status: format!("wait failed: {error}"),
-                detail,
+                detail: String::new(),
                 ran_for,
             },
         };
@@ -624,30 +676,93 @@ fn monitor_agent_island_child(mut child: tokio::process::Child) -> AgentIslandMo
     AgentIslandMonitor { exit, started_at }
 }
 
-async fn probe_agent_island_capability(binary: &Path) -> std::io::Result<bool> {
+#[cfg(unix)]
+fn configure_agent_island_probe(command: &mut tokio::process::Command) {
+    use std::os::unix::process::CommandExt;
+
+    command.as_std_mut().process_group(0);
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct AgentIslandProbeProcessGroup {
+    process_group: libc::pid_t,
+    terminated: bool,
+}
+
+#[cfg(unix)]
+impl AgentIslandProbeProcessGroup {
+    fn attach(child: &tokio::process::Child) -> std::io::Result<Self> {
+        let process_group = child
+            .id()
+            .and_then(|pid| libc::pid_t::try_from(pid).ok())
+            .ok_or_else(|| {
+                std::io::Error::other("native helper probe has no valid process-group id")
+            })?;
+        Ok(Self {
+            process_group,
+            terminated: false,
+        })
+    }
+
+    fn terminate(&mut self) {
+        if self.terminated {
+            return;
+        }
+        self.terminated = true;
+        // SAFETY: the probe was spawned into a new process group whose id is
+        // the direct child's pid. A negative pid targets that entire group,
+        // including descendants that inherited the probe's output handles.
+        unsafe {
+            libc::kill(-self.process_group, libc::SIGKILL);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AgentIslandProbeProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+#[cfg(unix)]
+async fn probe_agent_island_capability(
+    binary: &Path,
+    working_directory: &Path,
+) -> std::io::Result<bool> {
     let mut command = tokio::process::Command::new(binary);
     command
         .args(["--agent-island", "--help"])
+        .current_dir(working_directory)
+        .env("PWD", working_directory)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    configure_agent_island_probe(&mut command);
     let mut child = command.spawn()?;
+    let mut process_group = AgentIslandProbeProcessGroup::attach(&child)?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout = tokio::spawn(read_bounded(stdout, MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES));
-    let stderr = tokio::spawn(read_bounded(stderr, MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES));
+    let mut stdout = tokio::spawn(read_bounded(stdout, MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES));
+    let mut stderr = tokio::spawn(read_bounded(stderr, MAX_AGENT_ISLAND_PROBE_OUTPUT_BYTES));
+    let started = Instant::now();
 
     match tokio::time::timeout(AGENT_ISLAND_PROBE_TIMEOUT, child.wait()).await {
         Ok(status) => {
+            // Capability probes never need background work. Terminating the
+            // group here also closes pipes inherited by a descendant after the
+            // direct child has already exited.
+            process_group.terminate();
             status?;
         }
         Err(_) => {
-            // `kill` also waits for the child, so the timed-out probe cannot
-            // leave a zombie behind. The pipe tasks finish when it closes.
-            let _ = child.kill().await;
-            let _ = stdout.await;
-            let _ = stderr.await;
+            process_group.terminate();
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(AGENT_ISLAND_STDERR_DRAIN_TIMEOUT, child.wait()).await;
+            stdout.abort();
+            stderr.abort();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
@@ -657,10 +772,54 @@ async fn probe_agent_island_capability(binary: &Path) -> std::io::Result<bool> {
             ));
         }
     }
-    let stdout = stdout.await.unwrap_or_default();
-    let stderr = stderr.await.unwrap_or_default();
+    let remaining = AGENT_ISLAND_PROBE_TIMEOUT.saturating_sub(started.elapsed());
+    let outputs = tokio::time::timeout(remaining, async {
+        let stdout = (&mut stdout).await.unwrap_or_default();
+        let stderr = (&mut stderr).await.unwrap_or_default();
+        (stdout, stderr)
+    })
+    .await;
+    let (stdout, stderr) = match outputs {
+        Ok(outputs) => outputs,
+        Err(_) => {
+            stdout.abort();
+            stderr.abort();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "timed out reading {} --agent-island capability output",
+                    binary.display()
+                ),
+            ));
+        }
+    };
     Ok(crate::update::webview_supports_agent_island_output(
         &stdout, &stderr,
+    ))
+}
+
+#[cfg(windows)]
+async fn probe_agent_island_capability(
+    binary: &Path,
+    _working_directory: &Path,
+) -> std::io::Result<bool> {
+    // Windows capability checks use the same bounded PE/target/marker
+    // validation as self-update. Avoiding execution removes the process-tree
+    // escape entirely instead of relying on a racy post-spawn Job assignment.
+    crate::update::webview_binary_supports_agent_island(binary)
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn probe_agent_island_capability(
+    binary: &Path,
+    _working_directory: &Path,
+) -> std::io::Result<bool> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "native helper capability probing is unsupported on this platform: {}",
+            binary.display()
+        ),
     ))
 }
 
@@ -668,11 +827,20 @@ async fn read_bounded<R>(reader: Option<R>, limit: u64) -> Vec<u8>
 where
     R: AsyncRead + Unpin,
 {
-    let Some(reader) = reader else {
+    let Some(mut reader) = reader else {
         return Vec::new();
     };
-    let mut bytes = Vec::new();
-    let _ = reader.take(limit).read_to_end(&mut bytes).await;
+    let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let read = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let retained = limit.saturating_sub(bytes.len()).min(read);
+        bytes.extend_from_slice(&chunk[..retained]);
+    }
     bytes
 }
 

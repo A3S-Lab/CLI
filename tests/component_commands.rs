@@ -93,6 +93,27 @@ fn unsafe_component_ids_fail_at_the_parser_boundary() {
 }
 
 #[test]
+fn duplicate_component_targets_fail_before_locking_or_mutation() {
+    let temp = TempWorkspace::new("duplicate-component-id");
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["install", "code", "code", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["command"], "component.install");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("component 'code' appears more than once in the batch"));
+    assert!(!temp.path("runtime/locks").exists());
+    assert!(!temp.path("state/component-operations").exists());
+}
+
+#[test]
 fn install_dry_run_resolves_a_stable_artifact_without_downloading_or_mutating() {
     if support::box_release_target().is_none() {
         eprintln!("skipping release plan test on unsupported host target");
@@ -355,7 +376,7 @@ fn multi_component_preflight_failure_prevents_network_and_every_mutation() {
     assert!(result["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("requires an explicit --from package"));
+        .contains("no package registry has a production TUF trust root"));
     assert!(server.requests().is_empty());
     assert!(!temp.path("state/components").exists());
     assert!(!temp.path("data/components").exists());

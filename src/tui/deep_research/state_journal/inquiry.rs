@@ -108,6 +108,75 @@ impl DeepResearchStateJournal {
     }
 }
 
+pub(super) async fn load_inquiry_state(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<
+    Option<(
+        Vec<a3s::research::InquiryEvent>,
+        a3s::research::InquiryState,
+    )>,
+> {
+    let Some(journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
+        return Ok(None);
+    };
+    decode_inquiry_state(run_id, journal.runtime.events())
+}
+
+fn decode_inquiry_state(
+    run_id: &str,
+    records: &[a3s_code_core::state_graph::GraphEventRecord],
+) -> Result<
+    Option<(
+        Vec<a3s::research::InquiryEvent>,
+        a3s::research::InquiryState,
+    )>,
+> {
+    let mut events = Vec::new();
+    for record in records {
+        let GraphEvent::ExternalEventObserved {
+            source,
+            stream_id,
+            sequence,
+            event_id,
+            name,
+            payload,
+        } = &record.event
+        else {
+            continue;
+        };
+        if source != INQUIRY_EVENT_SOURCE || stream_id != run_id {
+            continue;
+        }
+
+        let expected_sequence = u64::try_from(events.len())
+            .context("count restored inquiry events")?
+            .saturating_add(1);
+        if *sequence != expected_sequence {
+            anyhow::bail!(
+                "DeepResearch inquiry stream `{run_id}` is not contiguous: expected sequence {expected_sequence}, found {sequence}"
+            );
+        }
+        let event = serde_json::from_value::<a3s::research::InquiryEvent>(payload.clone())
+            .with_context(|| {
+                format!("decode DeepResearch inquiry event `{run_id}` sequence {expected_sequence}")
+            })?;
+        let expected = inquiry_external_event(run_id, events.len(), &event)?;
+        if event_id != &expected.event_id || name != &expected.name {
+            anyhow::bail!(
+                "DeepResearch inquiry stream `{run_id}` sequence {expected_sequence} has inconsistent event identity"
+            );
+        }
+        events.push(event);
+    }
+    if events.is_empty() {
+        return Ok(None);
+    }
+    let state = a3s::research::replay(&events, &a3s::research::InquiryLimits::default())
+        .context("strictly replay restored DeepResearch inquiry events")?;
+    Ok(Some((events, state)))
+}
+
 pub(super) async fn record_inquiry_state(
     workspace: &Path,
     run_id: &str,

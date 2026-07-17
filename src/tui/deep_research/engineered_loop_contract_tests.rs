@@ -39,6 +39,7 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         "material",
         "questions",
         "completion_criteria",
+        "evidence_requirements",
     ] {
         assert!(track_properties[field].is_object(), "missing {field}");
     }
@@ -52,6 +53,19 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
     assert_eq!(track_properties["completion_criteria"]["maxItems"], 3);
     assert!(track_properties["perspective"].get("minLength").is_none());
     assert_eq!(track_properties["material"]["type"], "boolean");
+    assert_eq!(
+        track_properties["evidence_requirements"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        track_properties["evidence_requirements"]["properties"]["primary_source_required"]["type"],
+        "boolean"
+    );
+    assert_eq!(
+        track_properties["evidence_requirements"]["properties"]
+            ["independent_corroboration_required"]["type"],
+        "boolean"
+    );
     let track_required = planner_properties["tracks"]["items"]["required"]
         .as_array()
         .expect("planner track required fields");
@@ -63,6 +77,7 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         "material",
         "questions",
         "completion_criteria",
+        "evidence_requirements",
     ] {
         assert!(
             track_required.contains(&serde_json::json!(field)),
@@ -126,6 +141,9 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
         .is_some_and(|prompt| prompt.contains(
             "Set material=true only when failure to resolve that track would prevent a defensible answer"
         )));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| prompt.contains("Neither requirement is a global default")));
     assert!(contract["planner"]["output_schema"]["properties"]["phases"].is_object());
     assert_eq!(
         contract["planner"]["output_schema"]["properties"]["phases"]["items"]["type"],
@@ -159,6 +177,21 @@ fn production_workflow_uses_an_llm_loop_contract_without_a_precomputed_rule_plan
     assert!(contract["planner"]["prompt"]
         .as_str()
         .is_some_and(|prompt| prompt.contains("direct_then_review")));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| {
+            prompt.contains("Ordinary public-web research defaults to direct_then_review")
+        }));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| {
+            prompt.contains(
+                "Reserve maker routes for genuinely adaptive or parallel evidence production",
+            )
+        }));
+    assert!(contract["planner"]["prompt"]
+        .as_str()
+        .is_some_and(|prompt| !prompt.contains("normally needs direct_then_maker")));
     assert!(contract["planner"]["prompt"]
         .as_str()
         .is_some_and(|prompt| prompt.contains("same language as the query")));

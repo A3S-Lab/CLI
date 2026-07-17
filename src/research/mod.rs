@@ -17,10 +17,11 @@ pub use event::InquiryEvent;
 pub use evidence::{EvidenceDiagnostic, EvidenceDiagnosticKind, EvidenceRef};
 pub use model::{
     CompletionCriterionAssessment, ContractAssessmentStatus, DiagnosticDisposition,
-    EvidenceDiagnosticAssessment, InquiryAudit, InquiryBudgetInput, InquiryConvergenceInput,
-    InquiryLimits, InquiryPhase, Perspective, Question, QuestionStatus, ResearchContractAssessment,
-    ResearchContractOutcome, ResearchMethod, ResearchObligation, ResearchObligationAssessment,
-    SectionDraft, StopConditionAssessment,
+    EvidenceDiagnosticAssessment, EvidenceQualityRequirements, EvidenceRequirementAssessment,
+    InquiryAudit, InquiryBudgetInput, InquiryConvergenceInput, InquiryLimits, InquiryPhase,
+    Perspective, Question, QuestionStatus, ResearchContractAssessment, ResearchContractOutcome,
+    ResearchMethod, ResearchObligation, ResearchObligationAssessment, SectionDraft,
+    SectionRevision, StopConditionAssessment,
 };
 pub use outline::{
     research_outline_json_schema, validate_research_outline, OutlineIdKind, OutlineSection,

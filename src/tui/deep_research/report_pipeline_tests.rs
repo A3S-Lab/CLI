@@ -168,16 +168,28 @@ fn bounded_supporting_obligation_produces_a_qualified_reportable_inquiry() {
 
 #[test]
 fn collect_only_inquiry_projection_owns_completion_and_fails_closed() {
+    let mut question = Question::queued(
+        "question:core",
+        None,
+        "What evidence determines the conclusion?",
+    );
+    question.obligation_ids = vec!["obligation:core".to_string()];
     let events = vec![
         InquiryEvent::StrategySelected {
             method: ResearchMethod::Focused,
         },
-        InquiryEvent::QuestionsQueued {
-            questions: vec![Question::queued(
-                "question:core",
-                None,
-                "What evidence determines the conclusion?",
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations: vec![a3s::research::ResearchObligation::new(
+                "obligation:core",
+                "Core conclusion",
+                "Establish the core conclusion",
+                true,
+                vec!["The conclusion is supported by traceable evidence".to_string()],
             )],
+            stop_conditions: vec!["The core conclusion is traceable".to_string()],
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![question],
         },
         InquiryEvent::EvidenceAccepted {
             evidence: EvidenceRef::new(
@@ -190,6 +202,28 @@ fn collect_only_inquiry_projection_owns_completion_and_fails_closed() {
             question_id: "question:core".to_string(),
             answer: "The retained source supports the conclusion.".to_string(),
             evidence_ids: vec!["evidence:core".to_string()],
+        },
+        InquiryEvent::ResearchContractAssessed {
+            assessment: a3s::research::ResearchContractAssessment {
+                obligations: vec![a3s::research::ResearchObligationAssessment {
+                    obligation_id: "obligation:core".to_string(),
+                    criteria: vec![a3s::research::CompletionCriterionAssessment {
+                        criterion_index: 0,
+                        status: a3s::research::ContractAssessmentStatus::Satisfied,
+                        rationale: "The accepted evidence satisfies the criterion.".to_string(),
+                        evidence_ids: vec!["evidence:core".to_string()],
+                    }],
+                    primary_source: None,
+                    independent_corroboration: None,
+                }],
+                stop_conditions: vec![a3s::research::StopConditionAssessment {
+                    condition_index: 0,
+                    status: a3s::research::ContractAssessmentStatus::Satisfied,
+                    rationale: "The conclusion is traceable.".to_string(),
+                    evidence_ids: vec!["evidence:core".to_string()],
+                }],
+                diagnostics: Vec::new(),
+            },
         },
     ];
     let state = replay(&events, &InquiryLimits::default()).expect("completed inquiry projection");

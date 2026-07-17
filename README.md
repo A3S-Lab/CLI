@@ -181,6 +181,52 @@ not a compatible control-component release. Until that release exists,
 diagnostic that the control component is not published and do not create an
 installed-component record. Bench does not opt into first-use installation.
 
+### Signed extension registries
+
+External Use domains can be resolved from explicitly trusted TUF registries.
+The official `a3s` registry identity is listed but intentionally unavailable
+until its production root is published; the CLI never invents or silently
+accepts a replacement root. Add a third-party registry with a root file or a
+pinned SHA-256:
+
+```sh
+a3s registry add https://packages.example.org/a3s/ \
+  --trust-root ./root.json \
+  --yes
+a3s registry refresh packages
+
+a3s --output json install use/a3s/science --dry-run
+a3s --output json install use/a3s/science \
+  --plan-digest <reviewed-plan-sha256>
+
+a3s --output json upgrade use/a3s/science --dry-run
+a3s --output json upgrade use/a3s/science \
+  --plan-digest <reviewed-upgrade-sha256>
+```
+
+Root files are copied beneath the owned `registries/<name>/root.json` path and
+checked against the recorded digest whenever configuration is loaded. A
+digest-only registry bootstraps from `<registry>/metadata/root.json`; the root
+is cached only after its bytes match the pin. `registry refresh` performs full
+TUF root, timestamp, snapshot, and targets verification, including expiration
+and rollback checks. It does not use a reachability-only `HEAD` request and does
+not download package targets.
+
+Package lookup queries configured registries in stable name order. No match is
+an error, and the same package resolving from more than one trusted registry is
+rejected as ambiguous. Registry installs cannot use `--allow-unsigned`; that
+flag remains limited to an explicit local `--from` package. Registry URLs must
+use HTTPS, except loopback HTTP used by the hermetic test suite.
+
+A signed-extension upgrade reads the complete source provenance from the
+installed Use receipt and queries only that registry and release channel. It
+refuses a removed registry, a changed URL or trust root, and a semantic-version
+downgrade. `a3s upgrade --all` includes signed Registry extensions but excludes
+explicit local packages, whose next source must be supplied by the operator.
+Plain `a3s upgrade` includes newer signed targets in its update listing. When
+verified metadata resolves to the already installed target, the operation
+converges without downloading the archive or publishing a new activation.
+
 ### Reviewable component plans
 
 Installation, upgrade, and uninstall support an immutable review/apply guard:
@@ -198,7 +244,9 @@ and the ordered `plans` array. The digest covers the requested operation and
 flags, target platform, current component state and normalized receipt,
 operation order, local-package path and content, and every exact GitHub release
 version, asset URL, asset name, and SHA-256 selected during resolution.
-Presentation text is deliberately excluded.
+For signed extensions it also covers the registry name and URL, pinned root,
+all TUF metadata versions, package version and channel, platform target, target
+path, archive length, and SHA-256. Presentation text is deliberately excluded.
 
 A release dry-run reads release metadata and, when necessary, its checksum
 file. It never downloads the component payload or changes component state. An
@@ -209,10 +257,47 @@ resolved artifact from that plan instead of performing another `latest`
 lookup. Local Use packages are fingerprinted deterministically, including file
 paths, executable permissions, sizes, and contents.
 
+Signed-extension dry-runs verify metadata without downloading the archive. On
+apply, the umbrella digest is checked first; `a3s` then delegates the exact
+resolved package and its inner registry-plan digest to `a3s-use`. Use repeats
+TUF verification before target download, so a repository change between the
+outer check and payload fetch also fails without activation.
+
 `--plan-digest` and `--dry-run` are mutually exclusive. Homebrew plans bind the
 formula, operation, flags, and current receipt, but Homebrew remains responsible
 for selecting and installing its current bottle; use `--source release` when an
 exact A3S release artifact must be bound by the digest.
+
+### Durable component batches
+
+Mutating `install`, `upgrade`, and `uninstall` batches are serialized by one
+cross-process batch lock. After the operation plan has been resolved and any
+expected digest has been verified, A3S writes an active journal before the
+first component mutation. Every component success or failure is then
+checkpointed with an atomic write and filesystem sync.
+
+If the process or machine stops during a batch, rerunning the same action with
+the same ordered component list resolves and verifies a fresh plan. A3S does
+not replay a stale download plan. Instead, it validates every completed
+checkpoint against current component presence, health, version, provenance,
+and executable path. A still-applied checkpoint is skipped and appears in JSON
+output with `"recovered": true`; a checkpoint whose state has drifted is
+executed again through the normal idempotent lifecycle path. Duplicate
+component IDs are rejected before locking or mutation.
+
+Batch recovery preserves the existing partial-success contract: completed
+components are not rolled back when another component fails. Normal failed
+batches are finalized as failed; only an interrupted active batch is eligible
+for checkpoint recovery. Journals live below the resolved A3S state root:
+
+```text
+component-operations/active.json
+component-operations/last.json
+component-operations/last-interrupted.json
+```
+
+The directory and files use private permissions on Unix. Invalid, oversized,
+or symbolic-link active journals fail closed instead of being ignored.
 
 ### Listing installed components
 
@@ -1262,7 +1347,7 @@ the skill matcher for the current request.
 | `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
 | `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
 | `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
-| `? <question>` | Starts bounded DeepResearch. Collection is read-only and scope-aware; delegated tracks reserve a structured-finalization turn. The independent checker must assess every planned track and stop condition against accepted source anchors; the host rejects a model `finalize` whenever an assessment is bounded/uncovered, a material gap remains, or a cited source is outside the accepted package. Once collection closes, synthesis sees no tools and only accepted source facts plus supported assessments become checked findings. It returns one typed report object containing final Markdown, a private per-track depth map, and a private `report-master` presentation lock. Host publication rejects invented quantitative claims as well as omitted plan tracks, shallow investigation treatments, stale paths, fallback drafts, leaked tool logs, unsafe links, untraceable citations, and broken Markdown/HTML pairs. Failed collection terminates with an explicit degraded report instead of retrying retrieval. |
+| `? <question>` | Starts bounded DeepResearch. An LLM semantic planner chooses a focused inquiry or a source-grounded perspective-guided inquiry and sets the route, stages, depth, parallelism, clocks, stable research obligations, completion criteria, and observable stop conditions without keyword rules or task templates. Perspective-guided work scouts sources before deriving viewpoints, then runs bounded evidence-driven follow-up waves. The host accepts only typed claim/source bindings, independently assesses every research obligation, and blocks reporting when a material obligation is unsatisfied. A closed-evidence outline covers every required question; A3S Flow drafts independent sections in parallel, deterministic audits revise only failed sections for at most two rounds, and event checkpoints resume from the last committed outline/draft/audit boundary. Publication still requires a completed replayable Inquiry, traceable inline citations, safe Markdown/HTML artifacts, and no leaked tool or workflow output. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |
@@ -1370,6 +1455,11 @@ cargo build --manifest-path ../box/src/Cargo.toml -p a3s-box-cli --bin a3s-box
 A3S_BOX_E2E_BIN=../box/src/target/debug/a3s-box cargo test --test compose_acl_e2e -- --ignored --nocapture
 # From the monorepo root; isolates Cargo output from concurrent component builds.
 just use-hotplug-e2e
+cargo test --test remote_registry_components
+A3S_USE_E2E_BIN=../use/target/debug/a3s-use \
+  cargo test --test remote_registry_components \
+  full_stack_registry_install_and_upgrade_activate_only_reviewed_targets \
+  -- --ignored --nocapture
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
 A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
 A3S_TEST_KIMI_REAL=1 cargo test --bin a3s real_kimi_account_completes_an_a3s_tool_round

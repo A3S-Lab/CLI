@@ -34,6 +34,103 @@ pub(crate) enum ValidatedInquiryProjection {
     },
 }
 
+fn workflow_uses_host_managed_inquiry(workflow: &serde_json::Value) -> bool {
+    workflow
+        .pointer("/execution/terminal_authority")
+        .and_then(serde_json::Value::as_str)
+        == Some("host_inquiry_reducer")
+        || workflow
+            .pointer("/execution/mode")
+            .and_then(serde_json::Value::as_str)
+            == Some("collect_only")
+        || workflow.get("mode").and_then(serde_json::Value::as_str)
+            == Some("inquiry_collection_wave")
+}
+
+fn validate_host_managed_research_contract(
+    events: &[InquiryEvent],
+    state: &InquiryState,
+) -> Result<(), String> {
+    let commitments = events
+        .iter()
+        .filter_map(|event| match event {
+            InquiryEvent::ResearchObligationsCommitted {
+                obligations,
+                stop_conditions,
+            } => Some((obligations, stop_conditions)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if commitments.len() != 1 {
+        return Err(format!(
+            "host-managed DeepResearch Inquiry must contain exactly one research obligations commitment; found {}",
+            commitments.len()
+        ));
+    }
+    let (committed_obligations, committed_stop_conditions) = commitments[0];
+    if committed_obligations.is_empty() || committed_stop_conditions.is_empty() {
+        return Err(
+            "host-managed DeepResearch research obligations and stop conditions cannot be empty"
+                .to_string(),
+        );
+    }
+    if state.obligations.is_empty() || state.stop_conditions.is_empty() {
+        return Err(
+            "host-managed DeepResearch Inquiry state omitted its research obligations or stop conditions"
+                .to_string(),
+        );
+    }
+    if state.obligations.as_slice() != committed_obligations.as_slice()
+        || state.stop_conditions.as_slice() != committed_stop_conditions.as_slice()
+    {
+        return Err(
+            "host-managed DeepResearch Inquiry state differs from its committed research contract"
+                .to_string(),
+        );
+    }
+
+    if matches!(
+        state.phase,
+        InquiryPhase::Outlining
+            | InquiryPhase::Drafting
+            | InquiryPhase::Auditing
+            | InquiryPhase::Completed
+    ) {
+        let assessments = events
+            .iter()
+            .filter_map(|event| match event {
+                InquiryEvent::ResearchContractAssessed { assessment } => Some(assessment),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if assessments.len() != 1 {
+            return Err(format!(
+                "host-managed DeepResearch Inquiry must contain exactly one research contract assessment before reporting; found {}",
+                assessments.len()
+            ));
+        }
+        let Some(state_assessment) = state.contract_assessment.as_ref() else {
+            return Err(
+                "host-managed DeepResearch Inquiry state omitted its research contract assessment"
+                    .to_string(),
+            );
+        };
+        if state_assessment.obligations.is_empty() || state_assessment.stop_conditions.is_empty() {
+            return Err(
+                "host-managed DeepResearch contract assessment cannot be empty".to_string(),
+            );
+        }
+        if state_assessment != assessments[0] {
+            return Err(
+                "host-managed DeepResearch Inquiry state differs from its contract assessment event"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 impl ValidatedInquiryProjection {
     pub(crate) fn terminal_outcome(&self) -> Option<InquiryTerminalOutcome> {
@@ -108,17 +205,8 @@ pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTe
 pub(crate) fn validated_inquiry_projection(
     workflow: &serde_json::Value,
 ) -> Result<ValidatedInquiryProjection, String> {
+    let host_managed = workflow_uses_host_managed_inquiry(workflow);
     let Some(inquiry) = workflow.get("inquiry") else {
-        let host_managed = workflow
-            .pointer("/execution/terminal_authority")
-            .and_then(serde_json::Value::as_str)
-            == Some("host_inquiry_reducer")
-            || workflow
-                .pointer("/execution/mode")
-                .and_then(serde_json::Value::as_str)
-                == Some("collect_only")
-            || workflow.get("mode").and_then(serde_json::Value::as_str)
-                == Some("inquiry_collection_wave");
         if host_managed {
             return Err(
                 "host-managed DeepResearch output omitted its Inquiry projection".to_string(),
@@ -140,6 +228,9 @@ pub(crate) fn validated_inquiry_projection(
             .ok_or_else(|| "DeepResearch inquiry projection omitted state".to_string())?,
     )
     .map_err(|error| format!("decode DeepResearch inquiry state: {error}"))?;
+    if host_managed {
+        validate_host_managed_research_contract(&events, &state)?;
+    }
     let replayed = a3s::research::replay(&events, &a3s::research::InquiryLimits::default())
         .map_err(|error| format!("replay DeepResearch inquiry projection: {error}"))?;
     if replayed != state {
@@ -289,6 +380,112 @@ pub(crate) fn evaluate_terminal_inquiry_convergence(
 mod tests {
     use super::*;
 
+    fn legacy_outlining_events() -> Vec<InquiryEvent> {
+        vec![
+            InquiryEvent::StrategySelected {
+                method: a3s::research::ResearchMethod::Focused,
+            },
+            InquiryEvent::QuestionsQueued {
+                questions: vec![a3s::research::Question::queued(
+                    "question:material",
+                    None,
+                    "What does the evidence establish?",
+                )],
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: a3s::research::EvidenceRef::new(
+                    "evidence:one",
+                    vec!["claim:one".to_string()],
+                    vec!["source:one".to_string()],
+                ),
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: "question:material".to_string(),
+                answer: "The accepted evidence establishes the finding.".to_string(),
+                evidence_ids: vec!["evidence:one".to_string()],
+            },
+        ]
+    }
+
+    fn contracted_outlining_events(assessed: bool) -> Vec<InquiryEvent> {
+        let mut question = a3s::research::Question::queued(
+            "question:material",
+            None,
+            "What does the evidence establish?",
+        );
+        question.obligation_ids = vec!["obligation:core".to_string()];
+        let mut events = vec![
+            InquiryEvent::StrategySelected {
+                method: a3s::research::ResearchMethod::Focused,
+            },
+            InquiryEvent::ResearchObligationsCommitted {
+                obligations: vec![a3s::research::ResearchObligation::new(
+                    "obligation:core",
+                    "Core finding",
+                    "Resolve the core finding",
+                    true,
+                    vec!["The finding is supported by traceable evidence".to_string()],
+                )],
+                stop_conditions: vec!["The core finding is traceable".to_string()],
+            },
+            InquiryEvent::QuestionsQueued {
+                questions: vec![question],
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: a3s::research::EvidenceRef::new(
+                    "evidence:one",
+                    vec!["claim:one".to_string()],
+                    vec!["source:one".to_string()],
+                ),
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: "question:material".to_string(),
+                answer: "The accepted evidence establishes the finding.".to_string(),
+                evidence_ids: vec!["evidence:one".to_string()],
+            },
+        ];
+        if assessed {
+            events.push(InquiryEvent::ResearchContractAssessed {
+                assessment: a3s::research::ResearchContractAssessment {
+                    obligations: vec![a3s::research::ResearchObligationAssessment {
+                        obligation_id: "obligation:core".to_string(),
+                        criteria: vec![a3s::research::CompletionCriterionAssessment {
+                            criterion_index: 0,
+                            status: a3s::research::ContractAssessmentStatus::Satisfied,
+                            rationale: "The accepted evidence satisfies the criterion.".to_string(),
+                            evidence_ids: vec!["evidence:one".to_string()],
+                        }],
+                        primary_source: None,
+                        independent_corroboration: None,
+                    }],
+                    stop_conditions: vec![a3s::research::StopConditionAssessment {
+                        condition_index: 0,
+                        status: a3s::research::ContractAssessmentStatus::Satisfied,
+                        rationale: "The finding is traceable.".to_string(),
+                        evidence_ids: vec!["evidence:one".to_string()],
+                    }],
+                    diagnostics: Vec::new(),
+                },
+            });
+        }
+        events
+    }
+
+    fn workflow_with_inquiry(events: Vec<InquiryEvent>, host_managed: bool) -> serde_json::Value {
+        let state = a3s::research::replay(&events, &a3s::research::InquiryLimits::default())
+            .expect("replay test inquiry");
+        let mut workflow = serde_json::json!({
+            "inquiry": {"events": events, "state": state}
+        });
+        if host_managed {
+            workflow["execution"] = serde_json::json!({
+                "mode": "collect_only",
+                "terminal_authority": "host_inquiry_reducer"
+            });
+        }
+        workflow
+    }
+
     fn input() -> ConvergenceInput {
         ConvergenceInput {
             accepted_evidence: 3,
@@ -365,31 +562,77 @@ mod tests {
     }
 
     #[test]
+    fn host_managed_projection_cannot_delete_the_contract_event_and_state_together() {
+        let legacy = workflow_with_inquiry(legacy_outlining_events(), false);
+        assert!(matches!(
+            validated_inquiry_projection(&legacy),
+            Ok(ValidatedInquiryProjection::Inquiry { .. })
+        ));
+
+        let host_managed = workflow_with_inquiry(legacy_outlining_events(), true);
+        let error = validated_inquiry_projection(&host_managed)
+            .expect_err("host-managed Inquiry requires its stable research contract");
+        assert!(
+            error.contains("exactly one research obligations commitment; found 0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn host_managed_outlining_projection_requires_one_persisted_contract_assessment() {
+        let missing = workflow_with_inquiry(contracted_outlining_events(false), true);
+        let error = validated_inquiry_projection(&missing)
+            .expect_err("Outlining cannot delete both assessment event and state");
+        assert!(
+            error.contains("exactly one research contract assessment before reporting; found 0"),
+            "{error}"
+        );
+
+        let complete = workflow_with_inquiry(contracted_outlining_events(true), true);
+        let projection = validated_inquiry_projection(&complete)
+            .expect("a uniquely committed and assessed host contract is valid");
+        assert_eq!(
+            projection.terminal_outcome(),
+            Some(InquiryTerminalOutcome::Completed)
+        );
+    }
+
+    #[test]
+    fn host_managed_projection_rejects_duplicate_contract_authority_events() {
+        let mut workflow = workflow_with_inquiry(contracted_outlining_events(true), true);
+        let events = workflow["inquiry"]["events"].as_array_mut().unwrap();
+        let commitment = events
+            .iter()
+            .find(|event| event["type"] == "research_obligations_committed")
+            .cloned()
+            .unwrap();
+        events.push(commitment);
+        let error = validated_inquiry_projection(&workflow)
+            .expect_err("duplicate contract commitments cannot share authority");
+        assert!(
+            error.contains("exactly one research obligations commitment; found 2"),
+            "{error}"
+        );
+
+        let mut workflow = workflow_with_inquiry(contracted_outlining_events(true), true);
+        let events = workflow["inquiry"]["events"].as_array_mut().unwrap();
+        let assessment = events
+            .iter()
+            .find(|event| event["type"] == "research_contract_assessed")
+            .cloned()
+            .unwrap();
+        events.push(assessment);
+        let error = validated_inquiry_projection(&workflow)
+            .expect_err("duplicate contract assessments cannot share authority");
+        assert!(
+            error.contains("exactly one research contract assessment before reporting; found 2"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn inquiry_publication_requires_the_completed_audit_phase() {
-        let events = vec![
-            InquiryEvent::StrategySelected {
-                method: a3s::research::ResearchMethod::Focused,
-            },
-            InquiryEvent::QuestionsQueued {
-                questions: vec![a3s::research::Question::queued(
-                    "question:material",
-                    None,
-                    "What does the evidence establish?",
-                )],
-            },
-            InquiryEvent::EvidenceAccepted {
-                evidence: a3s::research::EvidenceRef::new(
-                    "evidence:one",
-                    vec!["claim:one".to_string()],
-                    vec!["source:one".to_string()],
-                ),
-            },
-            InquiryEvent::QuestionAnswered {
-                question_id: "question:material".to_string(),
-                answer: "The accepted evidence establishes the finding.".to_string(),
-                evidence_ids: vec!["evidence:one".to_string()],
-            },
-        ];
+        let events = legacy_outlining_events();
         let state =
             a3s::research::replay(&events, &a3s::research::InquiryLimits::default()).unwrap();
         let workflow = serde_json::json!({

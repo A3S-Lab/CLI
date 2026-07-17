@@ -20,6 +20,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 #[cfg(test)]
+static AGENT_ISLAND_PROCESS_TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn agent_island_process_test_lock() -> &'static Mutex<()> {
+    AGENT_ISLAND_PROCESS_TEST_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+#[cfg(test)]
 use crate::top::AgentKind;
 use crate::top::{collect_processes, ProcessRow};
 
@@ -32,6 +40,7 @@ const PRESENCE_FUTURE_SKEW_MS: u64 = 5_000;
 const MAX_REGISTRY_ENTRIES: usize = 4_096;
 const MAX_PRESENCE_FILES: usize = 256;
 const MAX_PRESENCE_BYTES: u64 = 64 * 1024;
+const MAX_STALE_REMOVALS_PER_SCAN: usize = 64;
 const MAX_TASK_CHARS: usize = 240;
 const MAX_AGENT_CHARS: usize = 64;
 const MAX_CHILD_ID_CHARS: usize = 64;
@@ -90,6 +99,7 @@ pub(crate) struct SystemAgentActivity {
     pub(crate) state: AgentActivityState,
     pub(crate) confidence: AgentActivityConfidence,
     pub(crate) started_at_ms: Option<u64>,
+    pub(crate) expires_at_ms: u64,
     pub(crate) local: bool,
 }
 
@@ -132,6 +142,7 @@ struct SystemAgentProtocolActivity {
     confidence: AgentActivityConfidence,
     #[serde(skip_serializing_if = "Option::is_none")]
     started_at_ms: Option<u64>,
+    expires_at_ms: u64,
 }
 
 #[derive(Debug, Default)]
@@ -155,6 +166,7 @@ impl SystemAgentProtocolSnapshot {
                 state: activity.state,
                 confidence: activity.confidence,
                 started_at_ms: activity.started_at_ms,
+                expires_at_ms: activity.expires_at_ms,
             })
             .collect();
         Self {
@@ -269,6 +281,13 @@ impl AgentPresence {
             && self.updated_at_ms <= now_ms.saturating_add(PRESENCE_FUTURE_SKEW_MS)
             && now_ms.saturating_sub(self.updated_at_ms) <= PRESENCE_TTL_MS
     }
+
+    fn stale_at(&self, now_ms: u64) -> bool {
+        self.schema == PRESENCE_SCHEMA
+            && !self.instance_id.trim().is_empty()
+            && (now_ms.saturating_sub(self.updated_at_ms) > PRESENCE_TTL_MS
+                || self.updated_at_ms > now_ms.saturating_add(PRESENCE_FUTURE_SKEW_MS))
+    }
 }
 
 /// Per-process publisher identity and heartbeat file location.
@@ -355,7 +374,15 @@ impl AgentPresencePublisher {
             warnings.push(format!("heartbeat: {error}"));
         }
 
-        let scan = match self.scan_presences(now_ms).await {
+        let observed_pids = process_result.as_ref().ok().map(|processes| {
+            let mut pids = processes
+                .iter()
+                .map(|process| process.pid)
+                .collect::<HashSet<_>>();
+            pids.insert(std::process::id());
+            pids
+        });
+        let scan = match self.scan_presences(now_ms, observed_pids.as_ref()).await {
             Ok(scan) => scan,
             Err(error) => {
                 warnings.push(format!("presence: {error}"));
@@ -395,7 +422,7 @@ impl AgentPresencePublisher {
                 .map(|directory| directory.join(ISLAND_LOCK_FILE)),
             warnings: snapshot.warnings.clone(),
         };
-        match self.write_system_snapshot(&snapshot).await {
+        match self.write_system_snapshot(&snapshot, now_ms).await {
             Ok(path) => result.snapshot_path = Some(path),
             Err(error) => result.warnings.push(format!("snapshot: {error}")),
         }
@@ -469,6 +496,7 @@ impl AgentPresencePublisher {
     async fn write_system_snapshot(
         &self,
         snapshot: &SystemAgentSnapshot,
+        evidence_at_ms: u64,
     ) -> anyhow::Result<PathBuf> {
         let _write = self.write_lock.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -481,7 +509,7 @@ impl AgentPresencePublisher {
             .await
             .with_context(|| "secure the agent-presence directory")?;
 
-        let snapshot = SystemAgentProtocolSnapshot::from_collected(snapshot, epoch_ms());
+        let snapshot = SystemAgentProtocolSnapshot::from_collected(snapshot, evidence_at_ms);
         let bytes = serde_json::to_vec(&snapshot)?;
         if bytes.len() as u64 > MAX_SYSTEM_SNAPSHOT_BYTES {
             anyhow::bail!("system-agent snapshot exceeds the protocol size limit");
@@ -524,10 +552,14 @@ impl AgentPresencePublisher {
 
     #[cfg(test)]
     async fn read_presences(&self, now_ms: u64) -> anyhow::Result<Vec<AgentPresence>> {
-        Ok(self.scan_presences(now_ms).await?.presences)
+        Ok(self.scan_presences(now_ms, None).await?.presences)
     }
 
-    async fn scan_presences(&self, now_ms: u64) -> anyhow::Result<PresenceScan> {
+    async fn scan_presences(
+        &self,
+        now_ms: u64,
+        observed_pids: Option<&HashSet<u32>>,
+    ) -> anyhow::Result<PresenceScan> {
         let Some(directory) = &self.directory else {
             return Ok(PresenceScan::default());
         };
@@ -541,6 +573,7 @@ impl AgentPresencePublisher {
         let mut presences = Vec::new();
         let mut truncated = false;
         let mut entries_seen = 0usize;
+        let mut stale_removal_attempts = 0usize;
         while let Some(entry) = entries.next_entry().await? {
             if entries_seen == MAX_REGISTRY_ENTRIES {
                 anyhow::bail!("agent-presence registry exceeds the directory entry limit");
@@ -566,10 +599,20 @@ impl AgentPresencePublisher {
             let Some(mut presence) = read_presence_file(&path).await else {
                 continue;
             };
-            if presence.instance_id != identity.instance_id
-                || presence.pid != identity.pid
-                || !presence.valid_at(now_ms)
+            if presence.instance_id != identity.instance_id || presence.pid != identity.pid {
+                continue;
+            }
+            if presence.stale_at(now_ms)
+                && observed_pids.is_some_and(|pids| !pids.contains(&presence.pid))
             {
+                if stale_removal_attempts < MAX_STALE_REMOVALS_PER_SCAN {
+                    stale_removal_attempts += 1;
+                    let _ = remove_stale_presence(&path, &identity, now_ms, observed_pids.unwrap())
+                        .await;
+                }
+                continue;
+            }
+            if !presence.valid_at(now_ms) {
                 continue;
             }
             presence.sanitize_received();
@@ -637,6 +680,7 @@ fn aggregate_activities(
             state: AgentActivityState::Unknown,
             confidence: AgentActivityConfidence::Process,
             started_at_ms: None,
+            expires_at_ms: now_ms.saturating_add(PRESENCE_TTL_MS),
             local: false,
         });
     }
@@ -658,6 +702,7 @@ pub(crate) fn activities_for_presence(
         state: presence.state,
         confidence: AgentActivityConfidence::Exact,
         started_at_ms: Some(presence.started_at_ms),
+        expires_at_ms: presence.updated_at_ms.saturating_add(PRESENCE_TTL_MS),
         local,
     }];
     activities.extend(presence.children.iter().map(|child| SystemAgentActivity {
@@ -669,6 +714,7 @@ pub(crate) fn activities_for_presence(
         state: child.state,
         confidence: AgentActivityConfidence::Exact,
         started_at_ms: child.started_at_ms,
+        expires_at_ms: presence.updated_at_ms.saturating_add(PRESENCE_TTL_MS),
         local,
     }));
     activities
@@ -758,6 +804,31 @@ async fn read_presence_file(path: &Path) -> Option<AgentPresence> {
         return None;
     }
     serde_json::from_slice(&bytes).ok()
+}
+
+async fn remove_stale_presence(
+    path: &Path,
+    identity: &PresenceFileIdentity,
+    now_ms: u64,
+    observed_pids: &HashSet<u32>,
+) -> bool {
+    let Ok(metadata) = tokio::fs::symlink_metadata(path).await else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    let Some(presence) = read_presence_file(path).await else {
+        return false;
+    };
+    if presence.instance_id != identity.instance_id
+        || presence.pid != identity.pid
+        || !presence.stale_at(now_ms)
+        || observed_pids.contains(&presence.pid)
+    {
+        return false;
+    }
+    tokio::fs::remove_file(path).await.is_ok()
 }
 
 fn workspace_basename(workspace: &str) -> String {

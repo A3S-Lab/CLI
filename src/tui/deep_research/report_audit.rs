@@ -15,7 +15,20 @@ pub(crate) struct ReportAudit {
     pub(crate) claim_coverage_basis_points: u16,
     pub(crate) accepted_sources: usize,
     pub(crate) cited_sources: usize,
+    #[serde(default)]
+    pub(crate) issues: Vec<ReportAuditIssue>,
     pub(crate) reason: String,
+}
+
+/// A machine-addressable audit failure. Indexes refer to the claim and source
+/// slices passed to [`audit_report`], so callers can map a failure back to the
+/// section that owns the evidence without parsing a human-readable reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ReportAuditIssue {
+    ClaimNotCovered { claim_index: usize },
+    SourceNotCited { source_index: usize },
+    AcceptedSourcesEmpty,
 }
 
 pub(crate) fn audit_report(
@@ -32,30 +45,55 @@ pub(crate) fn audit_report(
             claim_coverage_basis_points: 10_000,
             accepted_sources: 0,
             cited_sources: 0,
+            issues: Vec::new(),
             reason: "legacy report has no event-sourced evidence graph to audit".to_string(),
         };
     }
     let report = normalize(&format!("{markdown}\n{html}"));
-    let matched_claims = claims
+    let matched_claim_indexes = claims
         .iter()
-        .filter(|claim| claim_matches(&report, claim))
-        .count();
+        .enumerate()
+        .filter_map(|(index, claim)| claim_matches(&report, claim).then_some(index))
+        .collect::<HashSet<_>>();
+    let matched_claims = matched_claim_indexes.len();
     let claim_coverage_basis_points = if claims.is_empty() {
         10_000
     } else {
         ((matched_claims.saturating_mul(10_000) / claims.len()).min(10_000)) as u16
     };
     let citation_targets = extract_citation_targets(markdown, html);
-    let cited_sources = source_anchors
+    let cited_source_indexes = source_anchors
         .iter()
-        .filter(|anchor| {
+        .enumerate()
+        .filter_map(|(index, anchor)| {
             normalize_citation_target(anchor)
                 .is_some_and(|anchor| citation_targets.contains(&anchor))
+                .then_some(index)
         })
-        .count();
+        .collect::<HashSet<_>>();
+    let cited_sources = cited_source_indexes.len();
     let sources_pass = !source_anchors.is_empty() && cited_sources > 0;
     let claims_pass = claims.is_empty() || claim_coverage_basis_points >= 5_000;
     let passed = sources_pass && claims_pass;
+    let mut issues = Vec::new();
+    if !claims_pass {
+        issues.extend(
+            (0..claims.len())
+                .filter(|index| !matched_claim_indexes.contains(index))
+                .map(|claim_index| ReportAuditIssue::ClaimNotCovered { claim_index }),
+        );
+    }
+    if !sources_pass {
+        if source_anchors.is_empty() {
+            issues.push(ReportAuditIssue::AcceptedSourcesEmpty);
+        } else {
+            issues.extend(
+                (0..source_anchors.len())
+                    .filter(|index| !cited_source_indexes.contains(index))
+                    .map(|source_index| ReportAuditIssue::SourceNotCited { source_index }),
+            );
+        }
+    }
     let reason = if !sources_pass {
         "report cites none of the accepted evidence sources"
     } else if !claims_pass {
@@ -70,6 +108,7 @@ pub(crate) fn audit_report(
         claim_coverage_basis_points,
         accepted_sources: source_anchors.len(),
         cited_sources,
+        issues,
         reason: reason.to_string(),
     }
 }
@@ -542,6 +581,10 @@ mod tests {
         );
         assert!(!audit.passed);
         assert!(audit.reason.contains("less than half"));
+        assert_eq!(
+            audit.issues,
+            vec![ReportAuditIssue::ClaimNotCovered { claim_index: 0 }]
+        );
     }
 
     #[test]
@@ -555,6 +598,36 @@ mod tests {
         assert!(!audit.passed);
         assert_eq!(audit.cited_sources, 0);
         assert!(audit.reason.contains("cites none"));
+        assert_eq!(
+            audit.issues,
+            vec![ReportAuditIssue::SourceNotCited { source_index: 0 }]
+        );
+    }
+
+    #[test]
+    fn reports_every_failed_evidence_coordinate_without_embedding_evidence_text() {
+        let audit = audit_report(
+            "An unrelated report.",
+            "",
+            &[
+                "The first accepted claim.".to_string(),
+                "The second accepted claim.".to_string(),
+            ],
+            &[
+                "https://example.gov/one".to_string(),
+                "https://example.gov/two".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            audit.issues,
+            vec![
+                ReportAuditIssue::ClaimNotCovered { claim_index: 0 },
+                ReportAuditIssue::ClaimNotCovered { claim_index: 1 },
+                ReportAuditIssue::SourceNotCited { source_index: 0 },
+                ReportAuditIssue::SourceNotCited { source_index: 1 },
+            ]
+        );
     }
 
     #[test]
