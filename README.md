@@ -381,6 +381,28 @@ read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
 
+Workspace Explorer file creation uses a dedicated atomic endpoint. It creates
+missing parent directories, returns a conflict for an existing path, and never
+truncates an existing file; ordinary saves continue through the separate write
+endpoint.
+
+Text reads and successful writes return a SHA-256 content revision. A write may
+send either `expectedRevision` or `expectedContent`; the service checks the
+precondition immediately before writing and returns HTTP 412 without changing
+the file when it no longer matches. Supplying both preconditions is invalid.
+Omitting both is reserved for an explicit unconditional overwrite. Every write
+must still provide string `content`; malformed requests cannot default to an
+empty write.
+
+Web file Quick Open reads the same watched workspace manifest used by native
+search and Code Intelligence instead of starting another directory traversal.
+It returns canonical and workspace-relative paths, preserves binary metadata,
+ranks exact names before path and fuzzy matches, and caps each response at 500
+items. The Changes view is backed by real per-file index/worktree status and
+complete staged or unstaged file content for Monaco diff tabs. Stage, unstage,
+and commit use validated workspace-relative path arguments, support unborn
+repositories, and keep a nested workspace scoped to its own repository prefix.
+
 The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
 for saved-file symbols, definitions, declarations, references,
 implementations, and diagnostics. Dirty editors remain local and explicitly
