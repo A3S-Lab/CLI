@@ -8,6 +8,75 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
+struct CodeUseResolution {
+    executable: Option<PathBuf>,
+    warning: Option<String>,
+}
+
+async fn resolve_code_use_with<D, F, Fut>(
+    allow_first_use_install: bool,
+    offline: bool,
+    discover: D,
+    install: F,
+) -> CodeUseResolution
+where
+    D: FnOnce() -> anyhow::Result<Option<PathBuf>>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
+{
+    match discover() {
+        Ok(Some(executable)) => CodeUseResolution {
+            executable: Some(executable),
+            warning: None,
+        },
+        Ok(None) if allow_first_use_install => match install().await {
+            Ok(executable) => CodeUseResolution {
+                executable: Some(executable),
+                warning: None,
+            },
+            Err(error) => CodeUseResolution {
+                executable: None,
+                warning: Some(format!(
+                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run `a3s doctor use` and `a3s install use` for recovery"
+                )),
+            },
+        },
+        Ok(None) => CodeUseResolution {
+            executable: None,
+            warning: Some(if offline {
+                "A3S Use is not ready and first-use setup is disabled in offline mode; run `a3s install use` after going online"
+                    .to_string()
+            } else {
+                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run `a3s install use` for explicit setup"
+                    .to_string()
+            }),
+        },
+        Err(error) => CodeUseResolution {
+            executable: None,
+            warning: Some(format!(
+                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run `a3s doctor use` for recovery"
+            )),
+        },
+    }
+}
+
+async fn resolve_code_use(context: &InvocationContext) -> CodeUseResolution {
+    resolve_code_use_with(
+        context.network.allow_first_use_install,
+        context.network.offline,
+        || a3s::components::find_ready_executable_with("use", &context.component_paths),
+        || {
+            a3s::components::resolve_or_install_with(
+                "use",
+                &context.component_paths,
+                context.network.allow_first_use_install,
+                context.output.progress,
+            )
+        },
+    )
+    .await
+}
+
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
     let tui_dir = workspace.join(".a3s/tui");
     let canonical = tui_dir.join("sessions");
@@ -648,9 +717,35 @@ pub(crate) async fn run_in(
     let session = Arc::new(session);
     let active_session = Arc::new(std::sync::Mutex::new(Arc::clone(&session)));
 
-    // Headless smoke mode: exercise the agent-stream integration (the hard part
-    // the TUI depends on) without taking over the terminal. Useful for CI/probes
-    // and for validating a model/config end-to-end.
+    // A3S Use is a first-use component. Resolve an existing healthy install or
+    // prepare the verified release before terminal takeover, while preserving
+    // offline/A3S_NO_AUTO_INSTALL as strict no-mutation policies. Setup failure
+    // is non-fatal to Code and points to explicit component diagnostics.
+    let use_resolution = resolve_code_use(context).await;
+    let (use_registry, registry_warning) = match use_resolution.executable {
+        Some(executable) => {
+            let (handle, warning) = crate::use_registry::start(
+                executable,
+                context.directory.clone(),
+                context.cancellation.child_token(),
+                Arc::clone(&session),
+            )
+            .await;
+            (Some(handle), warning)
+        }
+        None => (None, None),
+    };
+    for warning in [use_resolution.warning, registry_warning]
+        .into_iter()
+        .flatten()
+    {
+        initial_messages.push(TranscriptEntry::preformatted(
+            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+        ));
+    }
+
+    // Headless smoke mode exercises the same Use-projected session that the
+    // interactive TUI receives, without taking over the terminal.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         return run_smoke(
             session,
@@ -659,35 +754,6 @@ pub(crate) async fn run_in(
             deep_research_report_tool_gate,
         )
         .await;
-    }
-
-    // A3S Use is optional for Code, so TUI startup never installs it as a side
-    // effect. When a ready component exists, project its immutable registry
-    // generations into this session and keep watching for hot-plug changes.
-    let (use_registry, use_registry_warning) =
-        match a3s::components::find_ready_executable_with("use", &context.component_paths) {
-            Ok(Some(executable)) => {
-                let (handle, warning) = crate::use_registry::start(
-                    executable,
-                    context.directory.clone(),
-                    context.cancellation.child_token(),
-                    Arc::clone(&session),
-                )
-                .await;
-                (Some(handle), warning)
-            }
-            Ok(None) => (None, None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "A3S Use hot-plug is unavailable for this session: {error}"
-                )),
-            ),
-        };
-    if let Some(warning) = use_registry_warning {
-        initial_messages.push(TranscriptEntry::preformatted(
-            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
-        ));
     }
 
     let running_tracker_children = session
@@ -1094,6 +1160,7 @@ pub(crate) async fn run_in(
 mod tests {
     use super::*;
     use a3s_tui::style::strip_ansi;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn resume_hint_highlights_the_complete_command_when_color_is_enabled() {
@@ -1157,5 +1224,65 @@ mod tests {
             &preference,
             "gpt-another-session"
         ));
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_installs_once_when_the_component_is_missing() {
+        let installed = PathBuf::from("/managed/a3s-use");
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_use_with(
+            true,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                Ok(installed.clone())
+            },
+        )
+        .await;
+
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(resolution.executable.as_deref(), Some(installed.as_path()));
+        assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_honors_the_no_auto_install_boundary() {
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_use_with(
+            false,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                anyhow::bail!("installer must not run")
+            },
+        )
+        .await;
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(resolution.executable.is_none());
+        assert!(resolution
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("A3S_NO_AUTO_INSTALL")));
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_keeps_install_failure_non_fatal_and_actionable() {
+        let resolution = resolve_code_use_with(
+            true,
+            false,
+            || Ok(None),
+            || async { anyhow::bail!("release unavailable") },
+        )
+        .await;
+
+        assert!(resolution.executable.is_none());
+        let warning = resolution.warning.unwrap();
+        assert!(warning.contains("release unavailable"), "{warning}");
+        assert!(warning.contains("a3s install use"), "{warning}");
     }
 }

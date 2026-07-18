@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added policy-aware A3S Use preparation to Code TUI startup. A missing Use
+  component is installed from its verified release before terminal takeover
+  when networking and automatic setup are allowed; offline mode and
+  `A3S_NO_AUTO_INSTALL=1` remain strict zero-network, zero-receipt boundaries.
+  Browser, native Office, built-in OCR, and verified external MCP/Skill
+  surfaces are then projected into the dedicated restricted `use` worker.
+
+### Fixed
+
+- Wait for the initial A3S Use MCP projection within a separate bounded startup
+  budget, so the first model turn receives ready Use routes through `task`.
+  Slow or broken surfaces remain non-fatal and continue converging in the
+  background.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

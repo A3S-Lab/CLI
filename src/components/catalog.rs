@@ -174,6 +174,14 @@ const COMPONENTS: &[ComponentSpec] = &[
         auto_install_on_use: false,
         removable: true,
     },
+    ComponentSpec {
+        id: "use/ocr",
+        kind: ComponentKind::Capability,
+        description: "Native OCR runtime readiness",
+        distribution: Distribution::Delegated { parent: "use" },
+        auto_install_on_use: false,
+        removable: true,
+    },
 ];
 
 pub fn all() -> &'static [ComponentSpec] {
@@ -210,7 +218,7 @@ mod tests {
 
     #[test]
     fn catalog_contains_required_use_hierarchy() {
-        for id in ["use", "use/browser", "use/office"] {
+        for id in ["use", "use/browser", "use/office", "use/ocr"] {
             assert!(find(&ComponentId::parse(id).unwrap()).is_some());
         }
     }
