@@ -14,6 +14,13 @@ fn take_matching_queue_claim<T>(
     active.take()
 }
 
+struct StreamStartEnvelope {
+    runtime_expectation: Option<RuntimeExpectation>,
+    submitted_images: Vec<PendingImage>,
+    execution_mode: Mode,
+    plan_draft: Option<PlanDraftRequest>,
+}
+
 impl App {
     /// Change the composer mode without mutating the semantics of an admitted
     /// turn. When no turn is active, keep Core's live policy in sync
@@ -112,10 +119,12 @@ impl App {
             display_task,
             clear_turn_artifacts,
             synthesis,
-            runtime_expectation,
-            submitted_images,
-            execution_mode,
-            None,
+            StreamStartEnvelope {
+                runtime_expectation,
+                submitted_images,
+                execution_mode,
+                plan_draft: None,
+            },
         )
     }
 
@@ -125,11 +134,14 @@ impl App {
         display_task: String,
         clear_turn_artifacts: bool,
         synthesis: bool,
-        runtime_expectation: Option<RuntimeExpectation>,
-        submitted_images: Vec<PendingImage>,
-        execution_mode: Mode,
-        plan_draft: Option<PlanDraftRequest>,
+        envelope: StreamStartEnvelope,
     ) -> Option<Cmd<Msg>> {
+        let StreamStartEnvelope {
+            runtime_expectation,
+            submitted_images,
+            execution_mode,
+            plan_draft,
+        } = envelope;
         let attachments = match submitted_images
             .iter()
             .map(PendingImage::attachment)
@@ -358,10 +370,12 @@ impl App {
                 queued.display,
                 true,
                 false,
-                queued.runtime_expectation,
-                queued.images,
-                execution_mode,
-                plan_draft,
+                StreamStartEnvelope {
+                    runtime_expectation: queued.runtime_expectation,
+                    submitted_images: queued.images,
+                    execution_mode,
+                    plan_draft,
+                },
             );
             if command.is_some() {
                 self.active_queued_turn_token = Some(self.stream_start_token);
