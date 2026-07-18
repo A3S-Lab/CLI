@@ -293,6 +293,10 @@ fn help_panel() -> HelpPanel {
                     "open the complete live semantic transcript with full tool output",
                 )
                 .row(
+                    "Ctrl+B",
+                    "inspect delegated tasks, recent output, and safe cancellation",
+                )
+                .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",
                 )

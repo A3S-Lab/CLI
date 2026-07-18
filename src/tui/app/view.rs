@@ -425,6 +425,10 @@ impl App {
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
     pub(super) fn replace_session(&mut self, session: AgentSession) {
+        // A task panel is scoped to the exact Core session and its live
+        // cancellation handles. Closing it prevents a late refresh or click
+        // from targeting a rebuilt session with a coincidentally equal task id.
+        self.task_panel = None;
         self.session = Arc::new(session);
         let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();

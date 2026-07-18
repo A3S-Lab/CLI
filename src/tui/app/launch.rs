@@ -762,6 +762,8 @@ pub(crate) async fn run_in(
         model_tab: 0,
         relay_panel: None,
         relay_scan_seq: 0,
+        task_panel: None,
+        task_panel_seq: 0,
         codex_account_models: crate::account_providers::codex::cached_codex_models(),
         codex_models_loading: false,
         codex_models_refreshed_at: None,

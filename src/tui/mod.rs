@@ -474,6 +474,9 @@ struct App {
     /// `/relay` session picker and its stale-result guard.
     relay_panel: Option<panels::relay::RelayPanel>,
     relay_scan_seq: u64,
+    /// `/tasks` / Ctrl+B delegated-work inspector and cancellation surface.
+    task_panel: Option<panels::tasks::TaskPanel>,
+    task_panel_seq: u64,
     /// Picker-visible models advertised for the current Codex login.
     codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
     /// Guards the asynchronous Codex catalog refresh from duplicate commands.
@@ -843,6 +846,7 @@ impl App {
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
+            || self.task_panel.is_some()
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()

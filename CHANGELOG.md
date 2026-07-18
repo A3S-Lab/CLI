@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `/tasks` and `Ctrl+B` as a live delegated-work control panel. It reads
+  authoritative Core task snapshots without interrupting the parent turn,
+  retains running tasks plus bounded recent history, preserves semantic
+  selection across one-second refreshes, searches progress and output, opens
+  full task details, and requires a second matching action before invoking real
+  subagent cancellation.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

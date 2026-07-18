@@ -70,5 +70,7 @@ pub(crate) mod relay;
 mod relay_scan;
 #[path = "system/spf.rs"]
 pub(crate) mod spf;
+#[path = "system/tasks.rs"]
+pub(crate) mod tasks;
 #[path = "system/theme.rs"]
 mod theme;

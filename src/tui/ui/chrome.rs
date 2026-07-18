@@ -133,6 +133,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
+    (
+        "/tasks",
+        "inspect delegated work · search, view output, or cancel safely",
+    ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
     (
         "/flow",

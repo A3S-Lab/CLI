@@ -864,6 +864,10 @@ impl App {
                     Msg::UpdatePlan(latest)
                 }));
             }
+            "/tasks" => {
+                self.textarea.clear();
+                return self.open_task_panel();
+            }
             "/relay" => return self.open_relay_panel(),
             "/memory" => {
                 self.textarea.clear();

@@ -5,6 +5,26 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::TaskPanelData {
+                session_id,
+                generation,
+                request_id,
+                tasks,
+            } => {
+                self.apply_task_panel_data(session_id, generation, request_id, tasks);
+            }
+            Msg::TaskPanelTick { generation } => {
+                return self.handle_task_panel_tick(generation);
+            }
+            Msg::TaskPanelCancelFinished {
+                session_id,
+                generation,
+                task_id,
+                cancelled,
+            } => {
+                return self
+                    .apply_task_panel_cancel_result(session_id, generation, task_id, cancelled);
+            }
             Msg::BackgroundSubagentFinished {
                 session_id,
                 generation,
