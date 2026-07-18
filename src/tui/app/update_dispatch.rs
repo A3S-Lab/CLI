@@ -34,6 +34,10 @@ fn composer_attachment_key_action(
     None
 }
 
+fn is_send_now_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 impl App {
     pub(super) fn update_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         if self.quitting {
@@ -91,6 +95,11 @@ impl App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.plan_review_input_active() {
+                    self.textarea.insert_str(&text);
+                    self.relayout();
+                    return None;
+                }
                 if self.composer_input_is_hidden() {
                     return None;
                 }
@@ -171,6 +180,12 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
                 }
+                // A completed plan is a true modal execution boundary. No
+                // underlying panel, mode shortcut, or composer action may run
+                // until the user approves, revises, or abandons it.
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_key(&key);
+                }
                 // The semantic transcript is a true modal surface. It keeps
                 // all styles and owns navigation until explicitly closed.
                 if let Some(transcript) = self.transcript_view.as_mut() {
@@ -218,9 +233,10 @@ impl App {
                 if self.relay_panel.is_some() {
                     return self.handle_relay_key(&key);
                 }
-                // Shift+Tab cycles run mode in any state.
+                // Shift+Tab changes the composer mode. A running or queued
+                // turn retains the immutable mode captured at submission.
                 if key.code == KeyCode::BackTab {
-                    self.mode = self.mode.next();
+                    self.set_composer_mode(self.mode.next());
                     return None;
                 }
                 // /model picker takes keys while open — consume EVERY key so
@@ -481,6 +497,25 @@ impl App {
                     self.history_recall(key.code == KeyCode::Up);
                     return None;
                 }
+                // Ctrl+O is a distinct Send now intent. It cancels a genuinely
+                // active turn and promotes this submission ahead of ordinary
+                // FIFO follow-ups; during terminal settlement it safely falls
+                // back to the normal queue without losing the draft.
+                if is_send_now_key(&key) {
+                    if self.state != State::Streaming
+                        || (self.textarea.value().trim().is_empty()
+                            && self.pending_images.is_empty())
+                    {
+                        return None;
+                    }
+                    let text = self.textarea.value();
+                    self.textarea.clear();
+                    return Some(cmd::msg(if self.stream_interrupt_available() {
+                        Msg::SubmitNow(text)
+                    } else {
+                        Msg::Submit(text)
+                    }));
+                }
                 match composer_attachment_key_action(
                     &key,
                     &self.textarea.value(),
@@ -531,6 +566,9 @@ impl App {
                 }
                 if self.state == State::Awaiting {
                     return self.handle_approval_mouse(&m);
+                }
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_mouse(&m);
                 }
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
@@ -689,6 +727,7 @@ impl App {
             }
 
             Msg::Submit(text) => return self.on_submit(text),
+            Msg::SubmitNow(text) => return self.on_submit_now(text),
 
             Msg::GoalContinue { generation, prompt } => {
                 return self.handle_goal_continue(generation, prompt);
@@ -1190,5 +1229,21 @@ mod tests {
             composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1,),
             Some(ComposerAttachmentKeyAction::RemoveLastImage)
         );
+    }
+
+    #[test]
+    fn send_now_has_a_distinct_control_chord() {
+        assert!(is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL
+        )));
     }
 }

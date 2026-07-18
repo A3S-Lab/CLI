@@ -405,6 +405,10 @@ pub(crate) async fn run_in(
         .and_then(TuiSessionState::effort_index)
         .or_else(load_tui_effort_preference)
         .unwrap_or(DEFAULT_TUI_EFFORT_INDEX);
+    let initial_mode = tui_session_state
+        .as_ref()
+        .map(TuiSessionState::mode)
+        .unwrap_or(Mode::Default);
     let sidecar_model_preference = tui_session_state
         .as_ref()
         .and_then(|state| state.model.clone());
@@ -473,6 +477,7 @@ pub(crate) async fn run_in(
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
+    let execution_policy = TuiExecutionPolicy::new(initial_mode);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -523,9 +528,10 @@ pub(crate) async fn run_in(
             session_id.as_str(),
             apply_launch_model_options(
                 with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate(
+                    tui_session_options_with_gate_and_execution(
                         confirmation.clone(),
                         deep_research_report_tool_gate.clone(),
+                        execution_policy.clone(),
                     )
                     .with_session_store(store.clone())
                     .with_workspace_backend(workspace_services.clone())
@@ -564,9 +570,10 @@ pub(crate) async fn run_in(
                     workspace.clone(),
                     Some(apply_launch_model_options(
                         with_instr(with_recent_workspace_context(
-                            tui_session_options_with_gate(
+                            tui_session_options_with_gate_and_execution(
                                 confirmation.clone(),
                                 deep_research_report_tool_gate.clone(),
+                                execution_policy.clone(),
                             )
                             .with_session_store(store.clone())
                             .with_session_id(session_id.as_str())
@@ -731,10 +738,6 @@ pub(crate) async fn run_in(
 
     remote_ui::prime_webview_lookup();
 
-    let initial_mode = tui_session_state
-        .as_ref()
-        .map(TuiSessionState::mode)
-        .unwrap_or(Mode::Default);
     let initial_paused_goal = tui_session_state
         .as_ref()
         .and_then(|state| state.paused_goal.clone());
@@ -885,6 +888,7 @@ pub(crate) async fn run_in(
         host_tool_call_id: None,
         interrupting: false,
         pending_tools: VecDeque::new(),
+        execution_policy,
         approval_sel: 0,
         history: history_seed,
         history_pos: None,
@@ -896,12 +900,18 @@ pub(crate) async fn run_in(
         anim: 0,
         mode: initial_mode,
         queue: PriorityQueue::new(),
+        queued_turn_modes: HashMap::new(),
+        queued_plan_drafts: HashMap::new(),
         active_queued_turn: None,
         active_queued_turn_token: None,
+        active_turn_mode: None,
+        active_plan_draft: None,
         queue_retry_generation: 0,
         queue_retry_attempt: 0,
         running_task: None,
         plan: PlanProjection::default(),
+        pending_plan_review: None,
+        plan_review: None,
         ide: None,
         memory: None,
         asset_list: None,

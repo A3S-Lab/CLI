@@ -278,10 +278,17 @@ fn help_panel() -> HelpPanel {
             HelpSection::new("Keys")
                 .row(
                     "Enter",
-                    "send; while busy, queue the message (Esc interrupts and runs it now)",
+                    "send; while busy, append the message to the FIFO queue",
+                )
+                .row(
+                    "Ctrl+O",
+                    "Send now: cancel the active turn and promote this prompt",
                 )
                 .row("Shift+Enter", "insert a newline in the input")
-                .row("Shift+Tab", "cycle run mode: default -> plan -> auto")
+                .row(
+                    "Shift+Tab",
+                    "cycle default -> read-only plan/review -> non-interactive auto",
+                )
                 .row(
                     "Up / Down",
                     "recall input history; inside menus, move selection",

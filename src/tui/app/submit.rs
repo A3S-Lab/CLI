@@ -2,8 +2,38 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionIntent {
+    Queue,
+    SendNow,
+}
+
 impl App {
     pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
+        self.on_submit_with_intent(text, SubmissionIntent::Queue)
+    }
+
+    pub(super) fn on_submit_now(&mut self, text: String) -> Option<Cmd<Msg>> {
+        let trimmed = text.trim();
+        if self.shell_mode
+            || self.research_mode
+            || matches!(trimmed.chars().next(), Some('/' | '!' | '?'))
+        {
+            self.textarea.set_value(&text);
+            self.push_notice(
+                NoticeKind::Warning,
+                "Send now accepts an agent prompt, not a shell, research, or slash command",
+            );
+            return None;
+        }
+        self.on_submit_with_intent(text, SubmissionIntent::SendNow)
+    }
+
+    fn on_submit_with_intent(
+        &mut self,
+        text: String,
+        intent: SubmissionIntent,
+    ) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
         if trimmed.is_empty() && self.pending_images.is_empty() {
             return None;
@@ -98,7 +128,8 @@ impl App {
             // The planner chooses the work; the host only supplies finite hard
             // caps and one bounded report finalization phase.
             let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
-            self.queue.push(
+            let execution_mode = self.mode;
+            self.enqueue_turn(
                 USER_TURN_PRIORITY,
                 Queued {
                     text: format!("? {query}"),
@@ -107,6 +138,7 @@ impl App {
                     runtime_expectation,
                     deep_research: Some((query, os_runtime, evidence_scope)),
                 },
+                execution_mode,
             );
             if self.state == State::Idle {
                 return self.drain_queue();
@@ -780,7 +812,7 @@ impl App {
                 return None;
             }
             "/auto" => {
-                self.mode = Mode::Auto;
+                self.set_composer_mode(Mode::Auto);
                 self.textarea.clear();
                 self.rebuild_viewport();
                 return None;
@@ -950,21 +982,45 @@ impl App {
                 },
             },
         };
-        let priority = if loop_cont {
+        let send_now = intent == SubmissionIntent::SendNow && self.state == State::Streaming;
+        let priority = if send_now {
+            PLAN_REVIEW_PRIORITY
+        } else if loop_cont {
             SYNTHETIC_TURN_PRIORITY
         } else {
             USER_TURN_PRIORITY
         };
-        self.queue.push(
-            priority,
-            Queued {
-                text: prompt,
-                display,
-                images: std::mem::take(&mut self.pending_images),
-                runtime_expectation: None,
-                deep_research: None,
-            },
-        );
+        let execution_mode = self.mode;
+        let images = std::mem::take(&mut self.pending_images);
+        if execution_mode == Mode::Plan && !loop_cont {
+            let request = PlanDraftRequest::initial(prompt, display.clone());
+            self.enqueue_plan_turn(
+                priority,
+                Queued {
+                    text: request.planning_prompt(),
+                    display,
+                    images,
+                    runtime_expectation: None,
+                    deep_research: None,
+                },
+                request,
+            );
+        } else {
+            self.enqueue_turn(
+                priority,
+                Queued {
+                    text: prompt,
+                    display,
+                    images,
+                    runtime_expectation: None,
+                    deep_research: None,
+                },
+                execution_mode,
+            );
+        }
+        if send_now {
+            return self.begin_send_now_interrupt();
+        }
         if self.state == State::Idle {
             self.drain_queue()
         } else {

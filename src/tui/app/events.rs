@@ -440,16 +440,20 @@ impl App {
                     );
                 }
                 self.update_viewport_with_stream();
-                if self.mode.auto_approves_confirmation() {
-                    // Silent: the mode indicator already shows auto-approve is on;
-                    // a line per tool is just noise. Do NOT start another
-                    // spinner_tick here — the turn's tick loop is already running
-                    // (state stays Streaming through auto-approval). Stacking one
-                    // per auto-approved tool made the spinner advance several
-                    // frames per 80ms = the speed-up / slow-down cadence.
+                if let Some(approved) = self.execution_policy.auto_confirmation_decision(
+                    &tool_name,
+                    &args,
+                    Path::new(&self.cwd),
+                ) {
+                    // Auto is non-interactive in both directions: approve calls
+                    // that survive the hard guardrail and reject hard denials.
+                    // Do NOT start another spinner tick here — the turn's tick
+                    // loop is already running.
                     let session = self.session.clone();
+                    let reason =
+                        (!approved).then(|| "Denied by the Auto mode hard guardrail.".to_string());
                     return Some(cmd::cmd(move || async move {
-                        let _ = session.confirm_tool_use(&tool_id, true, None).await;
+                        let _ = session.confirm_tool_use(&tool_id, approved, reason).await;
                         Msg::Resume
                     }));
                 }

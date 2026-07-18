@@ -561,9 +561,9 @@ pub(super) fn textarea_width_for(width: u16) -> u16 {
 pub(super) enum Mode {
     /// Standard risk-aware mode: safe reads run quietly and side effects prompt.
     Default,
-    /// Exploration/planning mode: safe reads run quietly and side effects prompt.
+    /// Strict read-only planning mode. Implementation starts only after review.
     Plan,
-    /// Auto-approve every confirmable operation; hard permission denials remain blocked.
+    /// Non-interactive execution. Hard policy and workspace denials still win.
     Auto,
 }
 
@@ -600,22 +600,16 @@ impl Mode {
             Mode::Auto => COMPOSER_CHROME.warning,
         }
     }
-
-    /// Whether an operation that already reached Core's confirmable `Ask`
-    /// branch should be approved without opening the HITL overlay. Critical
-    /// operations never call this method because Core emits `PermissionDenied`
-    /// for them before a confirmation can be requested.
-    pub(super) const fn auto_approves_confirmation(self) -> bool {
-        matches!(self, Mode::Auto)
-    }
 }
 
 /// Highest runnable host-turn priority. Safety decisions and stream lifecycle
 /// barriers are control-plane operations and therefore remain outside the
 /// pending-turn queue.
-pub(super) const USER_TURN_PRIORITY: a3s_lane::Priority = 0;
+pub(super) const PLAN_REVIEW_PRIORITY: a3s_lane::Priority = 0;
+/// Explicit user submissions run before autonomous continuations.
+pub(super) const USER_TURN_PRIORITY: a3s_lane::Priority = 1;
 /// Host-generated work that must never overtake an explicit user turn.
-pub(super) const SYNTHETIC_TURN_PRIORITY: a3s_lane::Priority = 1;
+pub(super) const SYNTHETIC_TURN_PRIORITY: a3s_lane::Priority = 2;
 
 /// A host-owned turn queued while the agent is busy. Priority and FIFO
 /// metadata are owned by `a3s_lane::PriorityQueue`, not duplicated in the UI

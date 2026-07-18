@@ -311,7 +311,8 @@ impl App {
                     TN_PURPLE,
                     &Style::new().bold().render(&label),
                 )));
-                self.queue.push(
+                let execution_mode = self.mode;
+                self.enqueue_turn(
                     SYNTHETIC_TURN_PRIORITY,
                     Queued {
                         text: prompt,
@@ -320,6 +321,7 @@ impl App {
                         runtime_expectation: None,
                         deep_research: None,
                     },
+                    execution_mode,
                 );
                 if self.state == State::Idle {
                     return self.drain_queue();
