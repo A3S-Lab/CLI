@@ -603,6 +603,9 @@ impl App {
             Msg::RelayData { request_id, result } => {
                 self.apply_relay_scan(request_id, result);
             }
+            Msg::RelayRefreshTick { generation } => {
+                return self.handle_relay_refresh_tick(generation);
+            }
             Msg::MemoryLoaded(data) => {
                 if let Some(m) = &mut self.memory {
                     let source = if data.loaded_from_session {

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Expanded `/relay` into a bounded session and background-work dashboard with
+  stable selection across manual or 15-second refreshes, multi-field search,
+  per-source selection memory, wheel navigation, task preview, and live native
+  session status.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

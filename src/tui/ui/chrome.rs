@@ -189,7 +189,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/relay",
-        "resume A3S Code or continue a Claude Code, Codex, or WorkBuddy task",
+        "search, inspect, and resume workspace sessions or background work",
     ),
     ("/help", "show commands and shortcuts"),
     (
