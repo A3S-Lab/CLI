@@ -8565,7 +8565,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
     let exact = HashSet::from([
         "/logout", "/exit", "/fork", "/clear", "/init", "/compact", "/help", "/auto", "/config",
         "/model", "/effort", "/ide", "/plugin", "/theme", "/reload", "/update", "/memory",
-        "/relay",
+        "/relay", "/history",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -8701,6 +8701,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/research",
             handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/history",
+            handler: Exact,
             idle_only: false,
             scope: Local,
         },
@@ -8905,6 +8911,12 @@ fn fork_is_idle_only_and_listed() {
 fn relay_is_idle_only_and_listed() {
     assert!(IDLE_ONLY.contains(&"/relay"));
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/relay"));
+}
+
+#[test]
+fn history_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/history"));
+    assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/history"));
 }
 
 #[test]

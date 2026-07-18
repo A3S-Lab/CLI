@@ -91,6 +91,10 @@ impl App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.history_panel.is_some() {
+                    self.handle_history_panel_paste(&text);
+                    return None;
+                }
                 if self.composer_input_is_hidden() {
                     return None;
                 }
@@ -178,6 +182,12 @@ impl App {
                         self.transcript_view = None;
                     }
                     return None;
+                }
+                // Prompt history search owns printable input while open. The
+                // hidden composer draft remains untouched until Enter accepts
+                // an explicit historical prompt.
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_key(&key);
                 }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
@@ -308,6 +318,13 @@ impl App {
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
+                }
+                // Ctrl+R opens searchable prompt history without disturbing
+                // the draft or a running parent turn.
+                if panels::history::is_history_panel_key(&key) {
+                    let query = self.textarea.value();
+                    self.open_history_panel(&query);
+                    return None;
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -535,6 +552,9 @@ impl App {
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
                     return None;
+                }
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);

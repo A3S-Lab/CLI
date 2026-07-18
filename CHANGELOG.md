@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `/history` and `Ctrl+R` fuzzy prompt search for the current TUI
+  session, with bounded results, keyboard and mouse navigation, and draft-safe
+  selection.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

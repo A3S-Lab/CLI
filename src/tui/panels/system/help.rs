@@ -292,6 +292,7 @@ fn help_panel() -> HelpPanel {
                     "Ctrl+T",
                     "open the complete live semantic transcript with full tool output",
                 )
+                .row("Ctrl+R", "fuzzy-search prompts from the current session")
                 .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",

@@ -425,6 +425,7 @@ impl App {
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
     pub(super) fn replace_session(&mut self, session: AgentSession) {
+        self.history_panel = None;
         self.session = Arc::new(session);
         let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();

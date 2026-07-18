@@ -757,6 +757,8 @@ struct App {
     approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
+    /// `/history` / Ctrl+R fuzzy prompt-history search.
+    history_panel: Option<panels::history::HistoryPanel>,
     /// Cursor into `history` while browsing; `None` means "fresh input".
     history_pos: Option<usize>,
     /// Scratch input captured when prompt-history browsing starts.
@@ -841,6 +843,7 @@ impl App {
         self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
             || self.transcript_view.is_some()
+            || self.history_panel.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
             || self.effort_panel.is_some()

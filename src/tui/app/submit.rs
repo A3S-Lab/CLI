@@ -779,6 +779,11 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
+            "/history" => {
+                self.textarea.clear();
+                self.open_history_panel("");
+                return None;
+            }
             "/auto" => {
                 self.mode = Mode::Auto;
                 self.textarea.clear();

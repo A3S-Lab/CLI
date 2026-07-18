@@ -56,6 +56,8 @@ pub(crate) mod bottom;
 mod effort;
 #[path = "system/help.rs"]
 mod help;
+#[path = "system/history.rs"]
+pub(crate) mod history;
 #[path = "system/menu.rs"]
 mod menu;
 #[path = "system/model.rs"]
