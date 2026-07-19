@@ -564,7 +564,6 @@ fn registry_error(
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 #[path = "../tests/support/tuf_test_support.rs"]
 mod tuf_test_support;
 

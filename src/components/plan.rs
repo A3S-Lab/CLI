@@ -846,7 +846,7 @@ fn fingerprint_local_package_blocking(path: &Path) -> anyhow::Result<PlannedLoca
     } else if metadata.is_dir() {
         let mut entries = Vec::new();
         collect_local_entries(path, path, &mut entries)?;
-        entries.sort_by(|left, right| path_identity(&left.0).cmp(&path_identity(&right.0)));
+        entries.sort_by_key(|entry| path_identity(&entry.0));
         let mut file_count = 0_u64;
         let mut byte_count = 0_u64;
         for (relative, absolute, metadata) in entries {
@@ -1172,12 +1172,12 @@ mod tests {
         let mut purged = first.clone();
         purged.purge = Some(true);
         assert_ne!(
-            plan_digest("component.install", &[first.clone()]).unwrap(),
+            plan_digest("component.install", std::slice::from_ref(&first)).unwrap(),
             plan_digest("component.install", &[forced.clone()]).unwrap()
         );
         for changed in [different_version, different_source, purged] {
             assert_ne!(
-                plan_digest("component.install", &[first.clone()]).unwrap(),
+                plan_digest("component.install", std::slice::from_ref(&first)).unwrap(),
                 plan_digest("component.install", &[changed]).unwrap()
             );
         }
