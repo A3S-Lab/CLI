@@ -46,6 +46,9 @@ impl App {
             return None;
         }
         self.interrupting = true;
+        self.agent_presence
+            .publisher
+            .reconcile_control_grants(Vec::new(), epoch_ms());
         if self.stream_join.is_none() && self.rx.is_none() && !self.host_progress_inflight {
             self.interrupted_stream_start_token = Some(self.stream_start_token);
         }

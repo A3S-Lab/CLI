@@ -447,11 +447,18 @@ fn executable_path(path: &Path) -> Option<PathBuf> {
     }
 }
 
-fn find_on_path(name: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(name))
-        .find_map(|path| executable_path(&path))
+fn find_on_paths(name: &str, paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter_map(|directory| executable_path(&directory.join(name)))
+        .collect()
+}
+
+fn find_all_on_path(name: &str) -> Vec<PathBuf> {
+    let Some(paths) = std::env::var_os("PATH") else {
+        return Vec::new();
+    };
+    find_on_paths(name, std::env::split_paths(&paths))
 }
 
 fn env_webview_override() -> Option<PathBuf> {
@@ -474,31 +481,44 @@ fn dev_webview_candidates(manifest_dir: &Path, name: &str) -> Vec<PathBuf> {
     ]
 }
 
-fn find_dev_webview(name: &str) -> Option<PathBuf> {
+fn find_dev_webviews(name: &str) -> Vec<PathBuf> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     dev_webview_candidates(manifest_dir, name)
         .into_iter()
-        .find_map(|path| executable_path(&path))
+        .filter_map(|path| executable_path(&path))
+        .collect()
 }
 
-fn find_existing_webview() -> Option<PathBuf> {
+pub(crate) fn webview_helper_candidates() -> (bool, Vec<PathBuf>) {
     let name = webview_binary_name();
     if let Some(path) = env_webview_override() {
         // Honor an explicit override even before the file exists; spawn will
         // produce the concrete path error instead of silently using another bin.
-        return Some(path);
+        return (true, vec![path]);
     }
+    let mut candidates = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(sibling) = exe.parent().map(|d| d.join(name)) {
             if let Some(path) = executable_path(&sibling) {
-                return Some(path);
+                candidates.push(path);
             }
         }
     }
-    if let Some(path) = find_dev_webview(name) {
-        return Some(path);
+    for path in find_dev_webviews(name) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
     }
-    find_on_path(name)
+    for path in find_all_on_path(name) {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    }
+    (false, candidates)
+}
+
+fn find_existing_webview() -> Option<PathBuf> {
+    webview_helper_candidates().1.into_iter().next()
 }
 
 pub(crate) fn webview_helper_path() -> Option<PathBuf> {

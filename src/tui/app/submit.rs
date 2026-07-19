@@ -43,6 +43,13 @@ impl App {
             self.textarea.clear();
             return None;
         }
+        // `/checkup` owns a short host-side inspection before it admits the
+        // strict Plan turn. Keep any asynchronously-routed prompt as a draft
+        // instead of letting an ordinary turn race that immutable snapshot.
+        if self.checkup_inflight {
+            self.textarea.set_value(&text);
+            return None;
+        }
         if self.session_rebuild_pending.is_some() {
             self.push_line(
                 &Style::new()
@@ -165,6 +172,9 @@ impl App {
                 )));
                 return None;
             }
+        }
+        if let Some(rest) = slash_tail(trimmed, "/island") {
+            return self.submit_agent_island_command(rest);
         }
         if let Some(rest) = slash_tail(trimmed, "/login") {
             self.textarea.clear();
@@ -817,6 +827,7 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
+            "/checkup" => return self.submit_checkup_command(),
             "/permissions" => {
                 self.textarea.clear();
                 self.open_permission_panel();

@@ -22,7 +22,7 @@ mod options;
 
 pub(crate) use background::{
     open as open_instance, read_log_tail, status as instance_status, stop as stop_instance,
-    WebInstanceRecord, WebInstanceStatus,
+    WebEndpoint, WebInstanceRecord, WebInstanceStatus,
 };
 
 const API_PREFIX: &str = "/api";
@@ -31,7 +31,11 @@ const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 pub(crate) enum ServeOutcome {
     Help,
     ForegroundStopped,
-    Detached(WebInstanceRecord),
+    Detached {
+        instance: WebInstanceRecord,
+        reused: bool,
+    },
+    Existing(WebEndpoint),
 }
 
 pub(crate) fn usage_text() -> String {
@@ -39,7 +43,7 @@ pub(crate) fn usage_text() -> String {
         "a3s web".to_string(),
         String::new(),
         "usage:".to_string(),
-        "  a3s web [-d] [--host 127.0.0.1] [--port 29653]".to_string(),
+        "  a3s web [-d] [--replace] [--host 127.0.0.1] [--port 29653]".to_string(),
         "          [--workspace <path>] [--config <path>] [--web-dir <path>] [--api-only]"
             .to_string(),
         String::new(),
@@ -58,16 +62,58 @@ pub(crate) async fn run(args: &[String]) -> anyhow::Result<ServeOutcome> {
         return Ok(ServeOutcome::Help);
     }
     if options.background {
-        return Ok(ServeOutcome::Detached(
-            background::start(args, &options).await?,
-        ));
+        return Ok(match background::start(args, &options).await? {
+            background::BackgroundStart::Started(instance) => ServeOutcome::Detached {
+                instance,
+                reused: false,
+            },
+            background::BackgroundStart::Reused(instance) => ServeOutcome::Detached {
+                instance,
+                reused: true,
+            },
+            background::BackgroundStart::Existing(instance) => ServeOutcome::Existing(instance),
+        });
     }
 
-    run_foreground(options).await?;
-    Ok(ServeOutcome::ForegroundStopped)
+    match run_foreground(options).await? {
+        Some(instance) => Ok(ServeOutcome::Existing(instance)),
+        None => Ok(ServeOutcome::ForegroundStopped),
+    }
 }
 
-async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
+async fn run_foreground(options: ServeOptions) -> anyhow::Result<Option<WebEndpoint>> {
+    if options.replace {
+        background::replace_managed(&options.workspace).await?;
+    }
+    let listener = match tokio::net::TcpListener::bind(options.addr).await {
+        Ok(listener) => listener,
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if let Some(existing) = background::discover_requested_instance(&options).await? {
+                if options.replace {
+                    anyhow::bail!(
+                        "A3S Web {} is healthy but is not managed by this CLI state; no process \
+                         was stopped. Stop its original command or managed service before using \
+                         --replace",
+                        existing.address
+                    );
+                }
+                return Ok(Some(existing));
+            }
+            anyhow::bail!(
+                "{} is already in use by another application; no process was stopped. Stop that \
+                 application or select an available port with --port 0",
+                options.addr
+            );
+        }
+        Err(error) => {
+            return Err(anyhow::anyhow!(
+                "failed to bind {} before A3S Web startup: {error}",
+                options.addr
+            ))
+        }
+    };
+    let actual_addr = listener.local_addr()?;
+    let web_root = resolve_web_root(&options)?;
     let config_path = ensure_config_path(&options)?;
     let code_config = CodeConfig::from_file(Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("failed to parse {config_path}: {e}"))?;
@@ -108,7 +154,7 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
             eprintln!("warning: A3S Use hot-plug is unavailable for Code Web: {error}");
         }
     }
-    let restored_sessions = KernelService::new(Arc::clone(&state))
+    let restore_report = KernelService::new(Arc::clone(&state))
         .restore_persisted_sessions()
         .await
         .map_err(boot_to_anyhow)?;
@@ -125,16 +171,9 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
     let router = if options.api_only {
         api_router.fallback(api_only_fallback)
     } else {
-        let web_dir = options.web_dir.clone().or_else(find_default_web_dir).ok_or_else(|| {
-            anyhow::anyhow!("web assets were not found; run `npm --prefix apps/web run build` or pass --web-dir")
+        let web_root = web_root.ok_or_else(|| {
+            anyhow::anyhow!("internal error: Web root validation did not produce a directory")
         })?;
-        if !web_dir.join("index.html").is_file() {
-            anyhow::bail!(
-                "web assets at {} do not contain index.html; run `npm --prefix apps/web run build`",
-                web_dir.display()
-            );
-        }
-        let web_root = Arc::new(web_dir);
         api_router.fallback({
             let web_root = Arc::clone(&web_root);
             move |uri| serve_static(uri, Arc::clone(&web_root))
@@ -176,10 +215,6 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
         router
     };
 
-    let listener = tokio::net::TcpListener::bind(options.addr)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to bind {}: {e}", options.addr))?;
-    let actual_addr = listener.local_addr()?;
     background::notify_ready(actual_addr)?;
     println!("A3S Code API:  http://{actual_addr}/api/health");
     if options.api_only {
@@ -189,7 +224,13 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
     }
     println!("Workspace:     {}", options.workspace.display());
     println!("Config:        {config_path}");
-    println!("Tasks restored: {restored_sessions}");
+    println!("Sessions restored: {}", restore_report.restored);
+    if restore_report.unavailable > 0 || restore_report.failed > 0 {
+        println!(
+            "Sessions unavailable: {}",
+            restore_report.unavailable + restore_report.failed
+        );
+    }
     println!("Press Ctrl+C to stop.");
 
     let shutdown_signal = Arc::clone(&shutdown);
@@ -213,8 +254,32 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<()> {
     match (serve_result, shutdown_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(())) => Ok(None),
     }
+}
+
+fn resolve_web_root(options: &ServeOptions) -> anyhow::Result<Option<Arc<PathBuf>>> {
+    if options.api_only {
+        return Ok(None);
+    }
+    let web_dir = options
+        .web_dir
+        .clone()
+        .or_else(find_default_web_dir)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "web assets were not found; reinstall A3S, run `npm --prefix apps/web run build`, \
+                 or pass --web-dir"
+            )
+        })?;
+    if !web_dir.join("index.html").is_file() {
+        anyhow::bail!(
+            "web assets at {} do not contain index.html; reinstall A3S, run `npm --prefix apps/web \
+             run build`, or pass --web-dir",
+            web_dir.display()
+        );
+    }
+    Ok(Some(Arc::new(web_dir)))
 }
 
 fn ensure_config_path(options: &ServeOptions) -> anyhow::Result<String> {

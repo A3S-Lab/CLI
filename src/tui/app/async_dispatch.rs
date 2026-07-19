@@ -339,6 +339,10 @@ impl App {
                         .render(&format!("  session export failed: {error}")),
                 ),
             },
+            Msg::CheckupPreflightCompleted {
+                status_entry,
+                result,
+            } => return self.on_checkup_preflight_completed(status_entry, result),
             Msg::ResearchDiagnostic(result) => match result {
                 Ok(text) => self.push_line(&gutter(TN_CYAN, &text)),
                 Err(error) => self.push_line(

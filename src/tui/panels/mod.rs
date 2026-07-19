@@ -52,6 +52,8 @@ pub(crate) mod sleep;
 mod banner;
 #[path = "system/bottom.rs"]
 pub(crate) mod bottom;
+#[path = "system/checkup.rs"]
+pub(crate) mod checkup;
 #[path = "system/effort.rs"]
 mod effort;
 #[path = "system/help.rs"]

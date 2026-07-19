@@ -27,6 +27,7 @@ a3s-updater = "=0.3.0"
 a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "1b2a60d9c8930dcc9935b6841ed4a7778111f884" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
@@ -57,9 +58,15 @@ axum = "0.8"
 comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
+sysinfo = "0.36.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 system-configuration = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 flate2 = "1"

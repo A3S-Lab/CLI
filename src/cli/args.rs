@@ -197,6 +197,10 @@ pub(crate) struct WebStartArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
 
+    /// Gracefully replace an A3S-managed instance; never stop an unrelated process.
+    #[arg(long)]
+    pub replace: bool,
+
     /// Listen host. Defaults to A3S_CODE_WEB_HOST or 127.0.0.1.
     #[arg(long, value_name = "HOST")]
     pub host: Option<String>,

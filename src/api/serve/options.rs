@@ -12,6 +12,7 @@ pub(crate) struct ServeOptions {
     pub(crate) web_dir: Option<PathBuf>,
     pub(crate) api_only: bool,
     pub(crate) background: bool,
+    pub(crate) replace: bool,
     pub(crate) help: bool,
 }
 
@@ -27,6 +28,7 @@ impl ServeOptions {
         let mut web_dir = std::env::var_os("A3S_CODE_WEB_DIR").map(PathBuf::from);
         let mut api_only = false;
         let mut background = false;
+        let mut replace = false;
         let mut help = false;
 
         let mut index = 0;
@@ -62,6 +64,10 @@ impl ServeOptions {
                     background = true;
                     index += 1;
                 }
+                "--replace" => {
+                    replace = true;
+                    index += 1;
+                }
                 other => anyhow::bail!("unknown a3s web option `{other}`"),
             }
         }
@@ -74,6 +80,7 @@ impl ServeOptions {
             web_dir,
             api_only,
             background,
+            replace,
             help,
         })
     }
@@ -114,8 +121,16 @@ mod tests {
         .expect("valid web options");
 
         assert!(options.background);
+        assert!(!options.replace);
         assert_eq!(options.addr.ip().to_string(), "127.0.0.1");
         assert_eq!(options.addr.port(), 0);
+    }
+
+    #[test]
+    fn parses_explicit_safe_replacement() {
+        let options = ServeOptions::parse(&["--replace".into()]).expect("valid replacement option");
+
+        assert!(options.replace);
     }
 
     #[test]

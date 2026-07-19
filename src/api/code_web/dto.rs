@@ -54,9 +54,12 @@ pub(in crate::api::code_web) struct ConfirmToolUseRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::api::code_web) struct HealthResponse {
+    pub schema_version: u32,
     pub ok: bool,
+    pub service: String,
     pub app: String,
     pub version: String,
+    pub pid: u32,
     pub config_path: String,
     pub workspace: String,
     pub model: Option<String>,

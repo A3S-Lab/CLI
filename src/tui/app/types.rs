@@ -306,6 +306,19 @@ pub(super) enum Msg {
     StreamCommitTick,
     /// Advance the welcome-mascot animation frame.
     BannerTick,
+    /// Refresh the independent whole-system coding-agent collector/exporter.
+    AgentPresenceTick,
+    /// Completion of an exact heartbeat plus sanitized shared snapshot export.
+    AgentPresenceRefreshed(crate::system_agents::SystemAgentRefreshResult),
+    /// Best-effort native system-island helper launch result.
+    AgentIslandLaunchFinished(Result<AgentIslandLaunchOutcome, String>),
+    /// One validated, one-shot inline decision submitted by the native island.
+    AgentIslandControl(crate::system_agents::AgentControlRequest),
+    /// Result of routing a child-row cancellation to Core's real task tracker.
+    AgentIslandSubagentCancelFinished {
+        task_id: String,
+        cancelled: bool,
+    },
     /// Drive the short, high-frame-rate Ultracode activation transition.
     UltracodeTick {
         epoch: u64,
@@ -397,6 +410,12 @@ pub(super) enum Msg {
     SessionExported {
         status_entry: TranscriptEntryId,
         result: Result<(PathBuf, u64), String>,
+    },
+    /// Typed, secret-free host inspection completed before `/checkup` starts
+    /// its strict read-only workspace audit.
+    CheckupPreflightCompleted {
+        status_entry: TranscriptEntryId,
+        result: Result<panels::checkup::CheckupPreflight, String>,
     },
     ResearchDiagnostic(Result<String, String>),
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.

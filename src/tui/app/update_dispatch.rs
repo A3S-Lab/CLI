@@ -866,6 +866,11 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
+                if !queued_turn_restored {
+                    self.record_local_agent_terminal(
+                        crate::system_agents::AgentActivityState::Failed,
+                    );
+                }
                 self.finish();
                 if queued_turn_restored {
                     self.push_line(
@@ -918,6 +923,9 @@ impl App {
                 goal_cancelled,
                 status_entry,
             } => {
+                self.record_local_agent_terminal(
+                    crate::system_agents::AgentActivityState::Cancelled,
+                );
                 // Esc force-aborted the turn. The cancel command awaited the
                 // stream join first, so core has committed the interrupted
                 // history before any queued continuation starts.
@@ -974,6 +982,7 @@ impl App {
                     return None;
                 }
                 // Channel closed without a normal End event (abnormal close).
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 if self.deep_research_loop.is_some()
@@ -1013,6 +1022,34 @@ impl App {
                     }
                     return Some(stream_commit_tick());
                 }
+            }
+
+            Msg::AgentPresenceTick => {
+                let mut commands = vec![agent_presence_tick()];
+                self.sync_agent_island_preference();
+                if let Some(restart) = self.poll_agent_island() {
+                    commands.push(restart);
+                }
+                if !self.agent_presence.refreshing {
+                    commands.push(self.refresh_agent_presence());
+                }
+                return Some(cmd::batch(commands));
+            }
+
+            Msg::AgentPresenceRefreshed(result) => {
+                return self.apply_agent_presence_refresh(result);
+            }
+
+            Msg::AgentIslandLaunchFinished(result) => {
+                self.apply_agent_island_launch_result(result);
+            }
+
+            Msg::AgentIslandControl(request) => {
+                return self.apply_agent_island_control(request);
+            }
+
+            Msg::AgentIslandSubagentCancelFinished { task_id, cancelled } => {
+                self.apply_agent_island_subagent_cancel_result(task_id, cancelled);
             }
 
             Msg::BannerTick => {

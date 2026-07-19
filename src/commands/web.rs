@@ -31,7 +31,7 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
     }
     let argv = start_argv(args, context)?;
     match crate::api::run_web(&argv).await? {
-        crate::api::ServeOutcome::Detached(instance) => {
+        crate::api::ServeOutcome::Detached { instance, reused } => {
             let url = (!instance.api_only).then(|| format!("http://{}/", instance.address));
             let api_url = format!("http://{}/api/health", instance.address);
             render_value(
@@ -39,6 +39,8 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
                 "web.start",
                 json!({
                     "detached": true,
+                    "reused": reused,
+                    "managed": true,
                     "pid": instance.pid,
                     "url": url,
                     "apiUrl": api_url,
@@ -46,6 +48,9 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
                     "logPath": instance.log_path,
                 }),
                 || {
+                    if reused {
+                        println!("Status:          reused healthy managed instance");
+                    }
                     if let Some(url) = url {
                         println!("A3S Web:       {url}");
                     } else {
@@ -54,6 +59,36 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
                     println!("A3S Code API:  {api_url}");
                     println!("Background PID: {}", instance.pid);
                     println!("Log:            {}", instance.log_path.display());
+                },
+            )
+        }
+        crate::api::ServeOutcome::Existing(instance) => {
+            let url = format!("http://{}/", instance.address);
+            let api_url = format!("http://{}/api/health", instance.address);
+            render_value(
+                output,
+                "web.start",
+                json!({
+                    "detached": instance.managed,
+                    "reused": true,
+                    "managed": instance.managed,
+                    "pid": instance.pid,
+                    "url": url,
+                    "apiUrl": api_url,
+                    "workspace": instance.workspace,
+                    "version": instance.version,
+                }),
+                || {
+                    println!("Status:          reused healthy A3S Web instance");
+                    println!("A3S Web:         {url}");
+                    println!("A3S Code API:    {api_url}");
+                    println!("Workspace:       {}", instance.workspace.display());
+                    if let Some(version) = instance.version.as_deref() {
+                        println!("Version:         {version}");
+                    }
+                    if !instance.managed {
+                        println!("Managed:         no (stop it from its original command)");
+                    }
                 },
             )
         }
@@ -140,15 +175,20 @@ async fn open(target: WebTargetArgs, context: &InvocationContext) -> anyhow::Res
     let workspace = target_workspace(target, context)?;
     let instance = crate::api::serve::open_instance(&workspace).await?;
     let url = format!("http://{}/", instance.address);
-    if output == OutputMode::Human && !instance.api_only {
+    let api_only = instance.api_only.unwrap_or(false);
+    if output == OutputMode::Human && !api_only {
         open_url(&url, context)?;
     }
     render_value(
         output,
         "web.open",
-        json!({"url": url, "opened": output == OutputMode::Human && !instance.api_only}),
+        json!({
+            "url": url,
+            "opened": output == OutputMode::Human && !api_only,
+            "managed": instance.managed,
+        }),
         || {
-            if instance.api_only {
+            if api_only {
                 println!(
                     "A3S Web UI is disabled; API: http://{}/api/health",
                     instance.address
@@ -165,19 +205,37 @@ fn render_status(
     workspace: PathBuf,
     output: OutputMode,
 ) -> anyhow::Result<()> {
-    let instance_data = status.instance.as_ref().map(|instance| {
-        json!({
-            "pid": instance.pid,
-            "address": instance.address,
-            "workspace": instance.workspace,
-            "logPath": instance.log_path,
-            "startedAtMs": instance.started_at_ms,
-            "apiOnly": instance.api_only,
+    let instance_data = status
+        .instance
+        .as_ref()
+        .map(|instance| {
+            json!({
+                "pid": instance.pid,
+                "address": instance.address,
+                "workspace": instance.workspace,
+                "logPath": instance.log_path,
+                "startedAtMs": instance.started_at_ms,
+                "apiOnly": instance.api_only,
+                "version": instance.version,
+                "managed": true,
+            })
         })
-    });
+        .or_else(|| {
+            status.observed.as_ref().map(|instance| {
+                json!({
+                    "pid": instance.pid,
+                    "address": instance.address,
+                    "workspace": instance.workspace,
+                    "apiOnly": instance.api_only,
+                    "version": instance.version,
+                    "managed": false,
+                })
+            })
+        });
     let data = json!({
         "running": status.running,
         "stale": status.stale,
+        "managed": status.managed,
         "workspace": workspace,
         "instance": instance_data,
     });
@@ -189,6 +247,14 @@ fn render_status(
                 println!("pid: {}", instance.pid);
                 println!("workspace: {}", instance.workspace.display());
                 println!("log: {}", instance.log_path.display());
+            } else if let Some(instance) = status.observed {
+                println!("running");
+                println!("url: http://{}/", instance.address);
+                if let Some(pid) = instance.pid {
+                    println!("pid: {pid}");
+                }
+                println!("workspace: {}", instance.workspace.display());
+                println!("managed: no (stop it from its original command)");
             }
         } else if status.stale {
             println!("stale instance record for {}", workspace.display());
@@ -203,6 +269,9 @@ fn start_argv(args: WebStartArgs, context: &InvocationContext) -> anyhow::Result
     let mut argv = Vec::new();
     if args.detach {
         argv.push("--detach".to_string());
+    }
+    if args.replace {
+        argv.push("--replace".to_string());
     }
     if let Some(host) = args.host {
         argv.extend(["--host".to_string(), host]);

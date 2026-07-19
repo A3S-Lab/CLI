@@ -134,6 +134,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
     (
+        "/checkup",
+        "audit setup, then review proposed fixes before applying them",
+    ),
+    (
         "/permissions",
         "inspect and revoke exact session or project grants",
     ),
@@ -150,6 +154,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "write a new Markdown session file · optional workspace-relative path",
     ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
+    (
+        "/island",
+        "show or persist Agent Island on/off · /island [on|off|status]",
+    ),
     (
         "/flow",
         "select a workflow asset → OS Workflow as a Service designer (needs /login) · /flow <text> drafts one",
@@ -225,7 +233,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 pub(super) const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
-    "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
+    "/checkup", "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).

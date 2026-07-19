@@ -546,6 +546,9 @@ impl App {
             AgentEvent::End {
                 text, usage, meta, ..
             } => {
+                self.record_local_agent_terminal(
+                    crate::system_agents::AgentActivityState::Completed,
+                );
                 let mut review_text = if text.is_empty() {
                     self.turn_text.clone()
                 } else {
@@ -771,6 +774,7 @@ impl App {
                 if self.recover_deep_research_report_after_model_error(&message) {
                     return self.complete_turn();
                 }
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation

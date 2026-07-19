@@ -12,6 +12,8 @@ impl Model for App {
         })];
         cmds.push(self.request_subagent_snapshots());
         cmds.push(pump_manifest(self.workspace_manifest_rx.clone()));
+        cmds.push(self.refresh_agent_presence());
+        cmds.push(agent_presence_tick());
         // Heartbeat for EVERY session (fresh or resumed). BannerTick self-gates
         // the mascot animation and drives idle maintenance; Ultracode uses its
         // own short-lived high-frame-rate tick.

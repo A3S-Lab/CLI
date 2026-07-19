@@ -18,7 +18,9 @@ use super::runtime_projection::{SubagentOutcome, ToolCallState};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
-use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
+use super::{
+    assistant_block, spaced_message_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -295,10 +297,12 @@ fn render_reasoning(source: &str, width: usize) -> String {
                 }),
         );
     }
-    rows.into_iter()
+    let body = rows
+        .into_iter()
         .map(|line| truncate_visible(&line, width))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    spaced_message_block(&body, width)
 }
 
 fn render_subagent_result(
@@ -1494,6 +1498,9 @@ mod tests {
         let complete = transcript.render_transcript_with_activity(80, 79, true);
         assert_eq!(complete.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&complete[0]);
+        let rows = plain.lines().collect::<Vec<_>>();
+        assert_eq!(rows.first(), Some(&" "));
+        assert_eq!(rows.last(), Some(&" "));
         assert!(plain.contains("• Reasoning"), "{plain}");
         assert!(plain.contains("  └ Inspect the event ordering"), "{plain}");
         assert!(plain.contains("Inspect the event ordering"), "{plain}");

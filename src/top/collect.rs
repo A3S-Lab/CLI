@@ -2,13 +2,10 @@
 //! layer so the same `ProcessRow` snapshot also feeds `--json` and remote
 //! consumers.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
 use a3s_tui::style::Color;
-use futures::stream::{self, StreamExt};
-use tokio::process::Command;
+use sysinfo::{ProcessesToUpdate, System};
 
 use super::{ACCENT, GREEN, ORANGE, RED, YELLOW};
 
@@ -20,15 +17,17 @@ pub(crate) enum AgentKind {
     Codex,
     Cursor,
     Gemini,
+    WorkBuddy,
 }
 
 impl AgentKind {
-    pub(crate) const ALL: [AgentKind; 5] = [
+    pub(crate) const ALL: [AgentKind; 6] = [
         AgentKind::A3sCode,
         AgentKind::ClaudeCode,
         AgentKind::Codex,
         AgentKind::Cursor,
         AgentKind::Gemini,
+        AgentKind::WorkBuddy,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -38,6 +37,7 @@ impl AgentKind {
             AgentKind::Codex => "codex",
             AgentKind::Cursor => "cursor",
             AgentKind::Gemini => "gemini",
+            AgentKind::WorkBuddy => "workbuddy",
         }
     }
 
@@ -48,6 +48,7 @@ impl AgentKind {
             AgentKind::Codex => Color::Rgb(16, 163, 127),
             AgentKind::Cursor => Color::Rgb(180, 182, 200),
             AgentKind::Gemini => Color::Rgb(124, 137, 245),
+            AgentKind::WorkBuddy => Color::Rgb(182, 155, 241),
         }
     }
 }
@@ -92,21 +93,59 @@ pub(crate) struct ProcessRow {
     pub(crate) risk: Risk,
 }
 
-/// Snapshot the host process table via `ps`, sorted agents-first then CPU desc.
+/// Snapshot the host process table through sysinfo, sorted agents-first then
+/// CPU desc. Keeping one process-global System preserves CPU deltas between
+/// refreshes and gives the TUI the same implementation on macOS, Linux, and
+/// Windows.
 pub(crate) async fn collect_processes() -> anyhow::Result<Vec<ProcessRow>> {
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,ppid=,pcpu=,pmem=,etime=,args="])
-        .output()
-        .await?;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!("ps exited with status {}", output.status));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut rows = text
-        .lines()
-        .filter_map(parse_process_line)
+    tokio::task::spawn_blocking(collect_processes_sync)
+        .await
+        .map_err(|error| anyhow::anyhow!("process collector join failed: {error}"))?
+}
+
+static PROCESS_SYSTEM: OnceLock<Mutex<System>> = OnceLock::new();
+
+fn collect_processes_sync() -> anyhow::Result<Vec<ProcessRow>> {
+    let system = PROCESS_SYSTEM.get_or_init(|| Mutex::new(System::new_all()));
+    let mut system = system
+        .lock()
+        .map_err(|_| anyhow::anyhow!("process collector state is poisoned"))?;
+    system.refresh_processes(ProcessesToUpdate::All, true);
+    system.refresh_memory();
+    let total_memory = system.total_memory();
+    let mut rows = system
+        .processes()
+        .iter()
+        .map(|(pid, process)| {
+            let command = if process.cmd().is_empty() {
+                process.name().to_string_lossy().into_owned()
+            } else {
+                process
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let agent =
+                detect_agent(&process.name().to_string_lossy()).or_else(|| detect_agent(&command));
+            ProcessRow {
+                pid: pid.as_u32(),
+                ppid: process.parent().map(|pid| pid.as_u32()).unwrap_or_default(),
+                cpu_pct: process.cpu_usage(),
+                mem_pct: if total_memory == 0 {
+                    0.0
+                } else {
+                    process.memory() as f32 * 100.0 / total_memory as f32
+                },
+                elapsed: format_elapsed_seconds(process.run_time()),
+                cwd: process.cwd().map(|path| path.display().to_string()),
+                risk: process_risk(&command, agent),
+                command,
+                agent,
+            }
+        })
         .collect::<Vec<_>>();
-    enrich_agent_process_cwds(&mut rows).await;
     rows.sort_by(|a, b| {
         b.agent.is_some().cmp(&a.agent.is_some()).then(
             b.cpu_pct
@@ -117,6 +156,7 @@ pub(crate) async fn collect_processes() -> anyhow::Result<Vec<ProcessRow>> {
     Ok(rows)
 }
 
+#[cfg(test)]
 pub(crate) fn parse_process_line(line: &str) -> Option<ProcessRow> {
     let mut it = line.split_whitespace();
     let pid = it.next()?.parse().ok()?;
@@ -146,6 +186,7 @@ pub(crate) fn parse_process_line(line: &str) -> Option<ProcessRow> {
     })
 }
 
+#[cfg(test)]
 /// Return the slice of `line` after skipping `n` whitespace-separated fields.
 fn remainder_after_fields(line: &str, n: usize) -> Option<&str> {
     let mut rest = line.trim_start();
@@ -156,82 +197,7 @@ fn remainder_after_fields(line: &str, n: usize) -> Option<&str> {
     Some(rest)
 }
 
-/// Process CWDs change rarely, so cache them by pid across refreshes; only
-/// brand-new agent pids pay the `lsof`/proc lookup. Pruned to live pids each
-/// pass, so the map stays bounded by the agent processes on the host.
-// Process-global cache shared by both `top` callers; pid cwd is stable enough
-// for display and the map is pruned to live pids every call.
-static CWD_CACHE: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
-
-async fn enrich_agent_process_cwds(rows: &mut [ProcessRow]) {
-    let cache = CWD_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let live_pids: HashSet<u32> = rows.iter().map(|row| row.pid).collect();
-
-    // Serve cached cwds and collect the misses (capped at 16 lookups/pass).
-    let mut misses = Vec::new();
-    {
-        let map = cache.lock().unwrap();
-        for row in rows.iter_mut() {
-            if row.agent.is_some() {
-                match map.get(&row.pid) {
-                    Some(cwd) => row.cwd = Some(cwd.clone()),
-                    None => misses.push(row.pid),
-                }
-            }
-        }
-    }
-    misses.truncate(16);
-
-    if !misses.is_empty() {
-        let resolved: Vec<(u32, Option<String>)> = stream::iter(misses)
-            .map(|pid| async move { (pid, process_cwd(pid).await) })
-            .buffer_unordered(8)
-            .collect()
-            .await;
-        let mut map = cache.lock().unwrap();
-        for (pid, cwd) in resolved {
-            if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
-                map.insert(pid, cwd);
-            }
-        }
-        for row in rows.iter_mut() {
-            if row.agent.is_some() && row.cwd.is_none() {
-                row.cwd = map.get(&row.pid).cloned();
-            }
-        }
-    }
-
-    cache
-        .lock()
-        .unwrap()
-        .retain(|pid, _| live_pids.contains(pid));
-}
-
-async fn process_cwd(pid: u32) -> Option<String> {
-    // `/proc/<pid>/cwd` only exists on Linux; macOS/BSD fall straight to lsof.
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(path) = tokio::fs::read_link(format!("/proc/{pid}/cwd")).await {
-            return Some(path.display().to_string());
-        }
-    }
-    process_cwd_from_lsof(pid).await
-}
-
-async fn process_cwd_from_lsof(pid: u32) -> Option<String> {
-    let mut command = Command::new("lsof");
-    let pid = pid.to_string();
-    command.args(["-a", "-p", &pid, "-d", "cwd", "-Fn"]);
-    let output = tokio::time::timeout(Duration::from_millis(200), command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_lsof_cwd(&String::from_utf8_lossy(&output.stdout))
-}
-
+#[cfg(test)]
 pub(crate) fn parse_lsof_cwd(text: &str) -> Option<String> {
     text.lines()
         .find_map(|line| line.strip_prefix('n'))
@@ -241,19 +207,87 @@ pub(crate) fn parse_lsof_cwd(text: &str) -> Option<String> {
 }
 
 pub(crate) fn detect_agent(command: &str) -> Option<AgentKind> {
-    let l = command.to_lowercase();
-    if l.contains("a3s-code") || l.contains("a3s code") || l.ends_with("/a3s") {
+    let words = command.split_whitespace().collect::<Vec<_>>();
+    let first = words.first().map(|word| executable_basename(word));
+    let wrapper = matches!(
+        first.as_deref(),
+        Some("node" | "node.exe" | "bun" | "bun.exe" | "npx" | "npx.cmd" | "env")
+    );
+    let wrapper_target = wrapper.then(|| words.get(1)).flatten().map(|target| {
+        target
+            .trim_matches(['\'', '"'])
+            .replace('\\', "/")
+            .to_ascii_lowercase()
+    });
+    let executable = match first.as_deref() {
+        Some("node" | "node.exe" | "bun" | "bun.exe" | "npx" | "npx.cmd" | "env") => {
+            words.get(1).map(|word| executable_basename(word))
+        }
+        _ => first,
+    };
+    let executable = executable.as_deref().unwrap_or_default();
+    let subcommand = words.get(1).map(|word| word.to_ascii_lowercase());
+    if matches!(executable, "a3s-code" | "a3s-code.exe")
+        || (matches!(executable, "a3s" | "a3s.exe") && subcommand.as_deref() == Some("code"))
+    {
         Some(AgentKind::A3sCode)
-    } else if l.contains("claude") {
+    } else if matches!(executable, "claude" | "claude.exe" | "claude-code")
+        || wrapper_target
+            .as_deref()
+            .is_some_and(|target| target.contains("/claude-code/") || target.ends_with("/claude"))
+    {
         Some(AgentKind::ClaudeCode)
-    } else if l.contains("codex") {
+    } else if matches!(executable, "codex" | "codex.exe")
+        || wrapper_target.as_deref().is_some_and(|target| {
+            target.contains("/@openai/codex/") || target.ends_with("/codex.js")
+        })
+    {
         Some(AgentKind::Codex)
-    } else if l.contains("cursor-agent") || l.contains("cursor") {
+    } else if matches!(executable, "cursor-agent" | "cursor-agent.exe")
+        || wrapper_target
+            .as_deref()
+            .is_some_and(|target| target.contains("/cursor-agent/"))
+    {
         Some(AgentKind::Cursor)
-    } else if l.contains("gemini") {
+    } else if matches!(executable, "gemini" | "gemini.exe")
+        || wrapper_target
+            .as_deref()
+            .is_some_and(|target| target.contains("/gemini-cli/"))
+    {
         Some(AgentKind::Gemini)
+    } else if matches!(
+        executable,
+        "workbuddy" | "workbuddy.exe" | "codebuddy" | "codebuddy.exe" | "cbc" | "cbc.exe"
+    ) || wrapper_target
+        .as_deref()
+        .is_some_and(|target| target.contains("/workbuddy/") || target.contains("/codebuddy/"))
+    {
+        Some(AgentKind::WorkBuddy)
     } else {
         None
+    }
+}
+
+fn executable_basename(value: &str) -> String {
+    value
+        .trim_matches(['\'', '"'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_ascii_lowercase()
+}
+
+fn format_elapsed_seconds(seconds: u64) -> String {
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    let seconds = seconds % 60;
+    if days > 0 {
+        format!("{days}-{hours:02}:{minutes:02}:{seconds:02}")
+    } else if hours > 0 {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
     }
 }
 

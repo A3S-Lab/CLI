@@ -281,6 +281,8 @@ mod runtime_projection;
 mod transcript;
 
 // Terminal UI support.
+#[path = "app/agent_presence.rs"]
+mod agent_presence;
 #[path = "app/actions.rs"]
 mod app_actions;
 #[path = "app/async_dispatch.rs"]
@@ -351,6 +353,7 @@ mod tool_style;
 mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
+use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
 #[cfg(test)]
@@ -433,6 +436,7 @@ const STREAM_START_TIMEOUT_MS: u64 = 10_000;
 const STREAM_JOIN_SETTLE_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
+const GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS: u64 = 500;
 const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
@@ -505,6 +509,10 @@ struct App {
     code_config: Arc<CodeConfig>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
+    /// Component storage and process PATH snapshot resolved at CLI admission.
+    /// `/checkup` reuses this immutable view instead of rediscovering process
+    /// state from a shell command.
+    component_paths: a3s::components::ComponentPaths,
     config_path: PathBuf,
     memory_dir: PathBuf,
     auto_compact_threshold: f64,
@@ -682,6 +690,9 @@ struct App {
     loop_remaining: usize,
     /// ECS-style projection of live runtime tool and subagent entities.
     runtime: RuntimeProjection,
+    /// Exact local lifecycle publishing and the system-level island bridge.
+    /// Rendering belongs to the independent native `a3s-webview` process.
+    agent_presence: agent_presence::AgentPresenceRuntime,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -738,6 +749,9 @@ struct App {
     /// Set while `/update` is upgrading — drives a progress bar + blocks input;
     /// on success the app restarts into the new binary.
     updating: Option<Instant>,
+    /// Host-owned, read-only `/checkup` preflight. The composer stays hidden
+    /// until its typed result is handed to the strict Plan audit.
+    checkup_inflight: bool,
     /// Last time the streaming viewport was rebuilt — throttles the O(n) rebuild
     /// to ~30fps so a flood of deltas doesn't starve animation on the 1 loop.
     last_paint: Option<Instant>,
@@ -893,6 +907,7 @@ impl App {
             || self.relay_panel.is_some()
             || self.permission_panel.is_some()
             || self.task_panel.is_some()
+            || self.checkup_inflight
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()
@@ -936,9 +951,22 @@ impl App {
         let session = Arc::clone(&self.session);
         let stream_join = self.stream_join.take();
         let host_tool_abort = self.host_tool_abort.take();
+        let agent_presence = self.agent_presence.publisher.clone();
         self.rx = None;
 
         Some(cmd::cmd(move || async move {
+            // Remove the exact heartbeat before potentially waiting on model
+            // cleanup. A blocked filesystem must not wedge quit; if bounded
+            // removal times out, the normal heartbeat TTL retires the row.
+            if tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS),
+                agent_presence.remove(),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!("timed out removing the local agent-presence heartbeat");
+            }
             if let Some(abort) = host_tool_abort {
                 abort.abort();
             }

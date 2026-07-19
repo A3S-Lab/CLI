@@ -145,7 +145,12 @@ pub(crate) fn gutter(color: Color, content: &str) -> String {
 /// `str::lines()` so transcript layout and scroll anchors count it correctly.
 pub(crate) fn assistant_block(content: &str, width: usize) -> String {
     let body = assistant_body(content, width);
-    if body.is_empty() {
+    spaced_message_block(&body, width)
+}
+
+/// Give a rendered semantic message one stable blank row above and below.
+pub(crate) fn spaced_message_block(body: &str, width: usize) -> String {
+    if body.is_empty() || width == 0 {
         return String::new();
     }
     let padding = assistant_padding_row(width);
@@ -274,12 +279,13 @@ pub(crate) fn thinking_block(text: &str, width: usize) -> String {
         return String::new();
     }
 
-    a3s_tui::components::WrappedPrefixBlock::new(text)
+    let body = a3s_tui::components::WrappedPrefixBlock::new(text)
         .margin(PAD)
         .width(width)
         .prefixes("• ", "  ")
         .style(Style::new().fg(TN_GRAY).italic())
-        .view()
+        .view();
+    spaced_message_block(&body, width)
 }
 
 pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
@@ -671,9 +677,18 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("• alpha"));
-        assert!(rows.iter().skip(1).all(|row| row.starts_with("  ")));
-        assert!(rendered.lines().all(|line| visible_len(line) == 16));
+        assert_eq!(rows.first(), Some(&" "));
+        assert_eq!(rows.last(), Some(&" "));
+        assert!(rows[1].starts_with("• alpha"));
+        assert!(rows[2..rows.len() - 1]
+            .iter()
+            .skip(1)
+            .all(|row| row.starts_with("  ")));
+        assert!(rendered
+            .lines()
+            .skip(1)
+            .take(rows.len() - 2)
+            .all(|line| visible_len(line) == 16));
         assert!(rendered.contains(&format!("\x1b[3;{}m• alpha", TN_GRAY.fg_ansi())));
     }
 
@@ -689,9 +704,15 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert!(rows[0].starts_with("• 中文测试内"));
-        assert!(rows[1].starts_with("  容"));
-        assert!(rendered.lines().all(|line| visible_len(line) == 13));
+        assert_eq!(rows[0], " ");
+        assert!(rows[1].starts_with("• 中文测试内"));
+        assert!(rows[2].starts_with("  容"));
+        assert_eq!(rows[3], " ");
+        assert!(rendered
+            .lines()
+            .skip(1)
+            .take(2)
+            .all(|line| visible_len(line) == 13));
     }
 
     #[test]
