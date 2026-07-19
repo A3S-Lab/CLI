@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants. Grant details expose the canonical matching arguments; revocation
   requires a second matching action and affects future checks only.
 
+### Changed
+
+- Expanded `/relay` into a bounded session and background-work dashboard with
+  stable selection across manual or 15-second refreshes, multi-field search,
+  per-source selection memory, wheel navigation, task preview, and live native
+  session status.
+
 ### Fixed
 
 - Made TUI Auto mode genuinely non-interactive for every operation that

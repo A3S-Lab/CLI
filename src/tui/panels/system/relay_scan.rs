@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const PER_AGENT: usize = 8;
+const PER_AGENT: usize = 64;
 const TRANSCRIPT_TAIL_BYTES: u64 = 128 * 1024;
 const TRANSCRIPT_HEAD_BYTES: usize = 96 * 1024;
 
@@ -19,6 +19,27 @@ pub(crate) enum RelayAgent {
     ClaudeCode,
     Codex,
     WorkBuddy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RelaySessionStatus {
+    Saved,
+    Paused,
+    Completed,
+    Error,
+    External,
+}
+
+impl RelaySessionStatus {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Saved => "saved",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Error => "error",
+            Self::External => "transcript",
+        }
+    }
 }
 
 impl RelayAgent {
@@ -39,14 +60,29 @@ impl RelayAgent {
     }
 }
 
+/// Stable identity used by the relay dashboard across scans and reordering.
+///
+/// Native sessions already expose a durable session id. External transcripts
+/// use their source path so appends can change labels and timestamps without
+/// turning the same conversation into a different dashboard row.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum RelaySessionIdentity {
+    Native(String),
+    Transcript { agent: RelayAgent, path: PathBuf },
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RelaySession {
+    pub(crate) identity: RelaySessionIdentity,
     pub(crate) agent: RelayAgent,
     pub(crate) native_id: Option<String>,
     pub(crate) seed: Option<String>,
     pub(crate) label: String,
     pub(crate) modified: SystemTime,
     pub(crate) persisted_model: Option<String>,
+    pub(crate) status: RelaySessionStatus,
+    pub(crate) active_runs: usize,
+    pub(crate) active_subagents: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -69,15 +105,41 @@ impl RelayHistoryRoots {
 pub(super) async fn scan_relay_sessions(
     store: Arc<dyn SessionStore>,
     workspace: PathBuf,
+    current_session: Arc<AgentSession>,
 ) -> Result<Vec<RelaySession>, String> {
     let mut sessions = scan_native_sessions(store).await?;
+    let current_session_id = current_session.id().to_string();
+    let current_history = current_session.history();
+    let live_subagents = current_session.pending_subagent_tasks().await.len();
+    if let Some(current) = sessions
+        .iter_mut()
+        .find(|session| session.native_id.as_deref() == Some(current_session_id.as_str()))
+    {
+        current.active_subagents = live_subagents;
+    } else {
+        let label = last_user_message_in_history(&current_history)
+            .map(|message| truncate(&message, 72))
+            .unwrap_or_else(|| format!("session {current_session_id}"));
+        sessions.push(RelaySession {
+            identity: RelaySessionIdentity::Native(current_session_id.clone()),
+            agent: RelayAgent::A3sCode,
+            native_id: Some(current_session_id.clone()),
+            seed: None,
+            label,
+            modified: SystemTime::now(),
+            persisted_model: None,
+            status: RelaySessionStatus::Saved,
+            active_runs: 0,
+            active_subagents: live_subagents,
+        });
+    }
     let roots = RelayHistoryRoots::discover();
     let mut foreign =
         tokio::task::spawn_blocking(move || scan_foreign_sessions(&workspace, &roots))
             .await
             .map_err(|error| format!("relay transcript scan failed: {error}"))?;
     sessions.append(&mut foreign);
-    Ok(finalize_sessions(sessions))
+    Ok(finalize_sessions(sessions, &current_session_id))
 }
 
 async fn scan_native_sessions(store: Arc<dyn SessionStore>) -> Result<Vec<RelaySession>, String> {
@@ -87,14 +149,33 @@ async fn scan_native_sessions(store: Arc<dyn SessionStore>) -> Result<Vec<RelayS
         .map_err(|error| format!("could not list A3S Code sessions: {error}"))?;
     let mut sessions = Vec::new();
     for id in ids {
-        let data = match store.load(&id).await {
-            Ok(Some(data)) => data,
+        let snapshot = match store.load_snapshot(&id).await {
+            Ok(Some(snapshot)) => snapshot,
             Ok(None) => continue,
             Err(error) => {
                 tracing::warn!(%error, %id, "skipping unreadable relay session");
                 continue;
             }
         };
+        let active_runs = snapshot
+            .run_records
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.snapshot.status,
+                    a3s_code_core::RunStatus::Created
+                        | a3s_code_core::RunStatus::Planning
+                        | a3s_code_core::RunStatus::Executing
+                        | a3s_code_core::RunStatus::Verifying
+                )
+            })
+            .count();
+        let active_subagents = snapshot
+            .subagent_tasks
+            .iter()
+            .filter(|task| task.status == a3s_code_core::SubagentStatus::Running)
+            .count();
+        let data = snapshot.session;
         let label = last_user_message(&data)
             .map(|message| truncate(&message, 72))
             .unwrap_or_else(|| format!("session {id}"));
@@ -103,15 +184,40 @@ async fn scan_native_sessions(store: Arc<dyn SessionStore>) -> Result<Vec<RelayS
             .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
             .unwrap_or(UNIX_EPOCH);
         sessions.push(RelaySession {
+            identity: RelaySessionIdentity::Native(id.clone()),
             agent: RelayAgent::A3sCode,
             native_id: Some(id),
             seed: None,
             label,
             modified,
             persisted_model: app_launch::persisted_model_from_session(&data),
+            status: relay_session_status(data.state),
+            active_runs,
+            active_subagents,
         });
     }
     Ok(sessions)
+}
+
+fn last_user_message_in_history(history: &[Message]) -> Option<String> {
+    history.iter().rev().find_map(|message| {
+        if message.role != "user" {
+            return None;
+        }
+        let text = message.text();
+        let text = text.trim();
+        (!text.is_empty()).then(|| text.to_string())
+    })
+}
+
+fn relay_session_status(state: a3s_code_core::store::SessionState) -> RelaySessionStatus {
+    match state {
+        a3s_code_core::store::SessionState::Paused => RelaySessionStatus::Paused,
+        a3s_code_core::store::SessionState::Completed => RelaySessionStatus::Completed,
+        a3s_code_core::store::SessionState::Error => RelaySessionStatus::Error,
+        a3s_code_core::store::SessionState::Unknown
+        | a3s_code_core::store::SessionState::Active => RelaySessionStatus::Saved,
+    }
 }
 
 fn last_user_message(session: &SessionData) -> Option<String> {
@@ -223,11 +329,24 @@ fn collect_jsonl<F>(
 ) where
     F: Fn(&Path) -> bool,
 {
+    let remaining = PER_AGENT.saturating_sub(
+        sessions
+            .iter()
+            .filter(|session| session.agent == agent)
+            .count(),
+    );
+    if remaining == 0 {
+        return;
+    }
     let mut paths = Vec::new();
     gather_jsonl(directory, 0, 6, &mut paths);
     paths.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
 
-    for (path, modified) in paths.into_iter().filter(|(path, _)| include(path)).take(12) {
+    for (path, modified) in paths
+        .into_iter()
+        .filter(|(path, _)| include(path))
+        .take(remaining)
+    {
         if !seen_files.insert(path.clone()) {
             continue;
         }
@@ -237,12 +356,19 @@ fn collect_jsonl<F>(
             .map(|message| truncate(message, 72))
             .unwrap_or_else(|| jsonl_session_name(&path));
         sessions.push(RelaySession {
+            identity: RelaySessionIdentity::Transcript {
+                agent,
+                path: path.clone(),
+            },
             agent,
             native_id: None,
             seed,
             label,
             modified,
             persisted_model: None,
+            status: RelaySessionStatus::External,
+            active_runs: 0,
+            active_subagents: 0,
         });
     }
 }
@@ -347,8 +473,17 @@ fn jsonl_session_name(path: &Path) -> String {
         .unwrap_or_else(|| "session".to_string())
 }
 
-fn finalize_sessions(mut sessions: Vec<RelaySession>) -> Vec<RelaySession> {
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.modified));
+fn finalize_sessions(
+    mut sessions: Vec<RelaySession>,
+    current_session_id: &str,
+) -> Vec<RelaySession> {
+    sessions.sort_by(|left, right| {
+        let left_current = left.native_id.as_deref() == Some(current_session_id);
+        let right_current = right.native_id.as_deref() == Some(current_session_id);
+        right_current
+            .cmp(&left_current)
+            .then_with(|| right.modified.cmp(&left.modified))
+    });
     let mut kept = HashMap::<RelayAgent, usize>::new();
     sessions.retain(|session| {
         let count = kept.entry(session.agent).or_default();
@@ -424,5 +559,120 @@ mod tests {
             sessions[0].seed.as_deref(),
             Some("ship WorkBuddy relay support")
         );
+    }
+
+    #[test]
+    fn current_native_session_is_pinned_ahead_of_newer_saved_sessions() {
+        let sessions = vec![
+            RelaySession {
+                identity: RelaySessionIdentity::Native("newer".to_string()),
+                agent: RelayAgent::A3sCode,
+                native_id: Some("newer".to_string()),
+                seed: None,
+                label: "newer".to_string(),
+                modified: UNIX_EPOCH + Duration::from_secs(20),
+                persisted_model: None,
+                status: RelaySessionStatus::Saved,
+                active_runs: 0,
+                active_subagents: 0,
+            },
+            RelaySession {
+                identity: RelaySessionIdentity::Native("current".to_string()),
+                agent: RelayAgent::A3sCode,
+                native_id: Some("current".to_string()),
+                seed: None,
+                label: "current".to_string(),
+                modified: UNIX_EPOCH + Duration::from_secs(10),
+                persisted_model: None,
+                status: RelaySessionStatus::Saved,
+                active_runs: 0,
+                active_subagents: 1,
+            },
+        ];
+
+        let sessions = finalize_sessions(sessions, "current");
+
+        assert_eq!(sessions[0].native_id.as_deref(), Some("current"));
+        assert_eq!(sessions[0].active_subagents, 1);
+    }
+
+    #[test]
+    fn session_catalog_is_larger_but_still_bounded_per_agent() {
+        let sessions = (0..80)
+            .map(|index| {
+                let id = if index == 0 {
+                    "current".to_string()
+                } else {
+                    format!("session-{index}")
+                };
+                RelaySession {
+                    identity: RelaySessionIdentity::Native(id.clone()),
+                    agent: RelayAgent::A3sCode,
+                    native_id: Some(id),
+                    seed: None,
+                    label: format!("task {index}"),
+                    modified: UNIX_EPOCH + Duration::from_secs(index),
+                    persisted_model: None,
+                    status: RelaySessionStatus::Saved,
+                    active_runs: 0,
+                    active_subagents: 0,
+                }
+            })
+            .collect();
+
+        let sessions = finalize_sessions(sessions, "current");
+
+        assert_eq!(sessions.len(), PER_AGENT);
+        assert_eq!(sessions[0].native_id.as_deref(), Some("current"));
+        assert!(
+            sessions.len() > 8,
+            "search needs a useful catalog beyond the old eight-row cap"
+        );
+    }
+
+    #[test]
+    fn transcript_collection_respects_the_remaining_agent_budget() {
+        let root = tempfile::tempdir().unwrap();
+        let line = serde_json::json!({
+            "role": "user",
+            "content": "continue the bounded transcript"
+        })
+        .to_string();
+        for index in 0..3 {
+            std::fs::write(
+                root.path().join(format!("{index}.jsonl")),
+                format!("{line}\n"),
+            )
+            .unwrap();
+        }
+        let mut sessions = (0..(PER_AGENT - 1))
+            .map(|index| RelaySession {
+                identity: RelaySessionIdentity::Transcript {
+                    agent: RelayAgent::Codex,
+                    path: PathBuf::from(format!("/existing/{index}.jsonl")),
+                },
+                agent: RelayAgent::Codex,
+                native_id: None,
+                seed: Some(format!("existing task {index}")),
+                label: format!("existing task {index}"),
+                modified: UNIX_EPOCH,
+                persisted_model: None,
+                status: RelaySessionStatus::External,
+                active_runs: 0,
+                active_subagents: 0,
+            })
+            .collect::<Vec<_>>();
+        let mut seen_files = HashSet::new();
+
+        collect_jsonl(
+            root.path(),
+            RelayAgent::Codex,
+            &mut sessions,
+            &mut seen_files,
+            |_| true,
+        );
+
+        assert_eq!(sessions.len(), PER_AGENT);
+        assert_eq!(seen_files.len(), 1);
     }
 }

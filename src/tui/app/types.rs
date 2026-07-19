@@ -453,6 +453,10 @@ pub(super) enum Msg {
         request_id: u64,
         result: Result<Vec<panels::relay::RelaySession>, String>,
     },
+    /// Periodic `/relay` refresh scoped to one open-panel generation.
+    RelayRefreshTick {
+        generation: u64,
+    },
     /// `/memory` graph data loaded (timeline + details + derived graph).
     MemoryLoaded(MemPanelData),
     /// A `/memory` forget-candidate deletion finished, with fresh graph data.
