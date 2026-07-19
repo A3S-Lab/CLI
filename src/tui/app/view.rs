@@ -128,6 +128,9 @@ impl App {
     pub(super) fn finish(&mut self) {
         self.preserve_interrupted_tools();
         self.llm_turn_checkpoint = None;
+        self.active_turn_mode = None;
+        self.active_plan_draft = None;
+        self.execution_policy.set_mode(self.mode);
         self.state = State::Idle;
         self.running_task = None;
         self.plan.clear();
@@ -741,7 +744,7 @@ impl App {
         let (approved, approve_all_pending) = match choice {
             0 => (true, false), // yes, once
             1 => {
-                self.mode = Mode::Auto; // yes, and stop asking
+                self.set_composer_mode(Mode::Auto); // yes, and stop asking
                 (true, true)
             }
             _ => (false, false), // no

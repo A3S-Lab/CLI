@@ -393,7 +393,7 @@ impl App {
         self.model = restore.model;
         self.model_source = restore.model_source;
         self.effort = restore.effort;
-        self.mode = restore.mode;
+        self.set_composer_mode(restore.mode);
         self.context_limit = restore.context_limit;
         self.llm_override = restore.llm_override;
         if let Some(theme) = restore.theme {
@@ -419,8 +419,14 @@ impl App {
         self.background_subagent_watches.clear();
         self.invalidate_subagent_snapshots();
         self.queue.clear();
+        self.queued_turn_modes.clear();
+        self.queued_plan_drafts.clear();
         self.active_queued_turn = None;
         self.active_queued_turn_token = None;
+        self.active_turn_mode = None;
+        self.active_plan_draft = None;
+        self.pending_plan_review = None;
+        self.plan_review = None;
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
         self.queue_retry_attempt = 0;
         self.running_task = None;

@@ -6331,13 +6331,8 @@ fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
 }
 
 #[test]
-fn auto_mode_approves_every_confirmation_required_tool() {
-    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
-
-    let checker = TuiHitlPermissionChecker::new(
-        tui_permission_policy(),
-        DeepResearchReportToolGate::default(),
-    );
+fn auto_mode_resolves_every_confirmation_without_hitl() {
+    let execution = TuiExecutionPolicy::new(Mode::Auto);
     for (tool, args) in [
         ("write", serde_json::json!({"file_path": "README.md"})),
         ("bash", serde_json::json!({"command": "cargo test"})),
@@ -6358,10 +6353,6 @@ fn auto_mode_approves_every_confirmation_required_tool() {
             serde_json::json!({"title": "side effect"}),
         ),
         (
-            "git",
-            serde_json::json!({"command": "checkout", "ref": "feature", "force": true}),
-        ),
-        (
             "batch",
             serde_json::json!({"invocations": [
                 {"tool": "bash", "args": {"command": "cargo test"}}
@@ -6369,15 +6360,31 @@ fn auto_mode_approves_every_confirmation_required_tool() {
         ),
     ] {
         assert_eq!(
-            checker.check(tool, &args),
-            PermissionDecision::Ask,
-            "{tool} must reach HITL instead of bypassing a hard denial"
+            execution.auto_confirmation_decision(tool, &args, Path::new(".")),
+            Some(true),
+            "{tool} must be approved without entering HITL in Auto mode"
         );
-        assert!(Mode::Auto.auto_approves_confirmation());
     }
 
-    assert!(!Mode::Default.auto_approves_confirmation());
-    assert!(!Mode::Plan.auto_approves_confirmation());
+    assert_eq!(
+        execution.auto_confirmation_decision(
+            "bash",
+            &serde_json::json!({"command": "rm -rf /"}),
+            Path::new("."),
+        ),
+        Some(false),
+        "a hard denial must be rejected without entering HITL"
+    );
+
+    execution.set_mode(Mode::Default);
+    assert_eq!(
+        execution.auto_confirmation_decision(
+            "bash",
+            &serde_json::json!({"command": "cargo test"}),
+            Path::new("."),
+        ),
+        None
+    );
 }
 
 #[test]
@@ -7001,6 +7008,82 @@ async fn tui_session_policy_does_not_block_web_fetch() {
         !output.contains("Permission denied"),
         "web_fetch should not be blocked by permission policy: {output}"
     );
+}
+
+#[tokio::test]
+async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "a3s-auto-no-hitl-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.acl");
+    test_config(&cfg);
+
+    let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+        .await
+        .unwrap();
+    let llm = Arc::new(CaptureLlmClient::new(vec![
+        tool_call_response(
+            "bash",
+            serde_json::json!({"command": "printf auto-mode-ok > auto-mode-probe.txt"}),
+        ),
+        done_response(),
+    ]));
+    let gate = DeepResearchReportToolGate::default();
+    gate.set_workspace(&dir);
+    let execution = TuiExecutionPolicy::new(Mode::Auto);
+    let opts = tui_session_options_with_gate_and_execution(
+        a3s_code_core::hitl::ConfirmationPolicy::enabled().with_timeout(300, TimeoutAction::Reject),
+        gate,
+        execution,
+    )
+    .with_llm_client(llm)
+    .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+    let session = agent
+        .session_async(dir.to_string_lossy().to_string(), Some(opts))
+        .await
+        .unwrap();
+
+    let (mut rx, join) = session
+        .stream("Create the requested probe file.", None)
+        .await
+        .unwrap();
+    let mut shell_completed = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            a3s_code_core::AgentEvent::ConfirmationRequired { tool_name, .. } => {
+                panic!("Auto emitted an interactive confirmation for {tool_name}")
+            }
+            a3s_code_core::AgentEvent::PermissionDenied {
+                tool_name, reason, ..
+            } => panic!("{tool_name} was denied in Auto: {reason}"),
+            a3s_code_core::AgentEvent::ToolEnd {
+                name,
+                output,
+                exit_code,
+                ..
+            } if name == "bash" => {
+                assert_eq!(exit_code, 0, "{output}");
+                shell_completed = true;
+            }
+            a3s_code_core::AgentEvent::End { .. } => break,
+            a3s_code_core::AgentEvent::Error { message } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    join.await.unwrap();
+
+    assert!(shell_completed, "the shell tool did not finish");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("auto-mode-probe.txt")).unwrap(),
+        "auto-mode-ok"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

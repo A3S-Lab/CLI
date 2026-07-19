@@ -665,7 +665,8 @@ input prefixes:
 
 | Area | What A3S Code TUI provides |
 | --- | --- |
-| Coding loop | Chat with the coding agent, stream semantic tool cards, approve or deny tools, switch `/auto`, run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork or clear sessions when needed. `/relay` resumes a saved A3S Code session with its per-session settings or hands the latest task from a workspace-scoped Claude Code, Codex, or WorkBuddy transcript to the active session. |
+| Coding loop | Chat with the coding agent, stream semantic tool cards, choose Default, Plan, or Auto execution, run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork or clear sessions when needed. `/relay` resumes a saved A3S Code session with its per-session settings or hands the latest task from a workspace-scoped Claude Code, Codex, or WorkBuddy transcript to the active session. |
+| Execution modes | Default is the interactive HITL mode. Plan exposes only read-only discovery tools, stages the completed plan behind an explicit Approve, Revise, or Abandon decision, and starts approved implementation as a new Default turn. Auto executes every operation that survives explicit policy and workspace hard denials without entering HITL; hard denials fail directly instead of opening an approval prompt. A queued turn retains the mode captured when it was submitted. |
 | Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks, `/config` edits the active config in the same editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. Diff headers use green `+N` and red `-N` counts; Markdown uses Codex-spaced section headings, responsive tables, syntax highlighting, and terminal hyperlinks. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
@@ -753,9 +754,12 @@ Pending host turns are scheduled by `a3s_lane::PriorityQueue`: explicit user
 input has priority over host-generated continuations, while equal-priority
 messages remain FIFO. A queue item is committed only after Core admits its
 stream; `SessionBusy` and admission timeouts restore the same priority and FIFO
-position. Esc cancels and settles the active worker before consuming exactly
-one queued successor. The bottom queue strip contains pending turns only and
-removes a message as soon as Lane claims it for execution.
+position. Enter appends a follow-up to that immutable FIFO queue. `Ctrl+O`
+performs Send now: it cancels and settles the active turn, then promotes the
+new prompt ahead of normal follow-ups without cancelling a durable goal. Each
+queued row retains its submission-time execution mode even if the composer mode
+changes later. The bottom queue strip contains pending turns only and removes a
+message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
 reflows semantic arguments, output, diffs, and Markdown after a resize. User
@@ -775,8 +779,8 @@ instead of rebuilding the full viewport.
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies transcript text on release. |
 | Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, or paste an image with `Ctrl+V`. |
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
-| Approvals | Mutating tools pause in a confirmation overlay with arguments and result context. Default mode prompts, plan mode auto-approves read-only discovery, and auto mode approves later tool calls in the session. |
-| Footer | The footer shows model/provider, effort, mode, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
+| Approvals | In Default mode, gated tools pause in a confirmation overlay with arguments and result context. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL for an operation that survives explicit hard denials. |
+| Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
@@ -789,8 +793,9 @@ Key interactions:
 | Key or input | Behavior |
 | --- | --- |
 | `Enter` | Send the prompt; when a turn is busy, queue the next message. |
+| `Ctrl+O` | Send now: cancel the active turn and promote this prompt ahead of normal queued follow-ups. |
 | `Shift+Enter` | Insert a newline in the input. |
-| `Shift+Tab` | Cycle run mode: default, plan, auto. |
+| `Shift+Tab` | Cycle the composer mode: Default, strict read-only Plan, non-interactive Auto. Running and queued turns keep their submission-time mode. |
 | `Up` / `Down` | Recall input history or move through menus/panels. |
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
@@ -832,14 +837,17 @@ choice continues the next goal iteration without changing the restored execution
 mode; the second enters the session with the goal still paused, where
 `/goal resume` can continue it later.
 
-The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
-prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
-the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
-auto-approves read-only discovery tools but still asks before writes. Auto mode
-silently approves every operation that reaches HITL; hard permission denials
-remain non-bypassable and never enter the confirmation overlay. Tool
-timeouts and confirmation timeouts are tracked separately so a human approval
-pause does not consume the command runtime budget.
+The TUI owns HITL confirmation for gated tools. In Default mode, mutating tools
+prompt through a wheel-browsable, clickable approval overlay. Shift+Tab cycles
+Default, Plan, and Auto for future submissions. Plan exposes only read-only
+discovery tools. When planning completes, the TUI freezes queue draining at an
+explicit Approve, Revise, or Abandon boundary; approval starts implementation
+as a separate Default turn. Auto resolves allowed tools directly in Core and
+bypasses tool-owned confirmation escalation, so it never opens HITL. Explicit
+policy denials and workspace guardrails remain authoritative, and hard denials
+fail without opening an approval prompt. Tool timeouts and confirmation
+timeouts are tracked separately so a human approval pause does not consume the
+command runtime budget.
 
 All local filesystem work stays under the active workspace services and A3S Code
 permission policy. OS operations require `/login`; before login the TUI can
@@ -1166,7 +1174,7 @@ These commands are available outside the asset-specific flows:
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` | Branch the current transcript into a new session id. |
 | `/relay` | Open the A3S Code, Claude Code, Codex, and WorkBuddy session picker. Native sessions resume in place with their saved model, effort, execution mode, theme, and paused goal; external sessions relay their latest user task into the current A3S Code session. |
-| `/auto` | Switch the session into auto-approve mode. |
+| `/auto` | Switch future submissions to non-interactive Auto mode. Operations that survive explicit policy and workspace hard denials execute without HITL. |
 | `/plugin` / `/reload` | Manage and hot-reload skills/plugins, including wheel browsing and click-to-toggle skill state in the TUI. |
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |

@@ -14,7 +14,73 @@ fn take_matching_queue_claim<T>(
     active.take()
 }
 
+struct StreamStartEnvelope {
+    runtime_expectation: Option<RuntimeExpectation>,
+    submitted_images: Vec<PendingImage>,
+    execution_mode: Mode,
+    plan_draft: Option<PlanDraftRequest>,
+}
+
 impl App {
+    /// Change the composer mode without mutating the semantics of an admitted
+    /// turn. When no turn is active, keep Core's live policy in sync
+    /// immediately so the footer and authorization boundary cannot diverge.
+    pub(super) fn set_composer_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        if self.active_turn_mode.is_none() {
+            self.execution_policy.set_mode(mode);
+        }
+    }
+
+    pub(super) fn stream_interrupt_available(&self) -> bool {
+        self.state == State::Streaming
+            && !self.interrupting
+            && !self.stream_join_settling
+            && !self.deep_research_subagent_settlement_inflight
+    }
+
+    /// Cancel the admitted turn so the promoted Send-now queue entry can run.
+    /// Unlike Esc, this does not cancel a durable goal.
+    pub(super) fn begin_send_now_interrupt(&mut self) -> Option<Cmd<Msg>> {
+        if !self.stream_interrupt_available() {
+            return None;
+        }
+        self.interrupting = true;
+        if self.stream_join.is_none() && self.rx.is_none() && !self.host_progress_inflight {
+            self.interrupted_stream_start_token = Some(self.stream_start_token);
+        }
+        self.stream_start_token = self.stream_start_token.wrapping_add(1);
+        self.deep_research_stream_timeout_token =
+            self.deep_research_stream_timeout_token.wrapping_add(1);
+        let status_entry =
+            self.push_tracked_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupting…"));
+        let session = self.session.clone();
+        let join = self.stream_join.take();
+        let host_abort = self.host_tool_abort.take();
+        Some(cmd::cmd(move || async move {
+            if let Some(host_abort) = host_abort {
+                host_abort.abort();
+            }
+            let _ = session
+                .cancel_and_settle(
+                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            if let Some(join) = join {
+                let _ = settle_stream_join_for_quit(
+                    join,
+                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                )
+                .await;
+            }
+            Msg::Interrupted {
+                goal_cancelled: false,
+                status_entry,
+            }
+        }))
+    }
+
     pub(super) fn start_stream_inner(
         &mut self,
         prompt: String,
@@ -42,6 +108,7 @@ impl App {
         synthesis: bool,
         runtime_expectation: Option<RuntimeExpectation>,
     ) -> Option<Cmd<Msg>> {
+        let execution_mode = self.mode;
         let submitted_images = if include_attachments {
             std::mem::take(&mut self.pending_images)
         } else {
@@ -52,8 +119,12 @@ impl App {
             display_task,
             clear_turn_artifacts,
             synthesis,
-            runtime_expectation,
-            submitted_images,
+            StreamStartEnvelope {
+                runtime_expectation,
+                submitted_images,
+                execution_mode,
+                plan_draft: None,
+            },
         )
     }
 
@@ -63,9 +134,14 @@ impl App {
         display_task: String,
         clear_turn_artifacts: bool,
         synthesis: bool,
-        runtime_expectation: Option<RuntimeExpectation>,
-        submitted_images: Vec<PendingImage>,
+        envelope: StreamStartEnvelope,
     ) -> Option<Cmd<Msg>> {
+        let StreamStartEnvelope {
+            runtime_expectation,
+            submitted_images,
+            execution_mode,
+            plan_draft,
+        } = envelope;
         let attachments = match submitted_images
             .iter()
             .map(PendingImage::attachment)
@@ -82,6 +158,9 @@ impl App {
                 return None;
             }
         };
+        self.active_turn_mode = Some(execution_mode);
+        self.active_plan_draft = plan_draft;
+        self.execution_policy.set_mode(execution_mode);
         if clear_turn_artifacts && !synthesis {
             self.auto_review.on_user_turn();
             self.last_activity = Instant::now();
@@ -221,6 +300,30 @@ impl App {
         Some(cmd::batch(commands))
     }
 
+    /// Enqueue a turn together with the execution mode visible at submission.
+    /// a3s-lane owns ordering; this sidecar owns immutable execution semantics.
+    pub(super) fn enqueue_turn(
+        &mut self,
+        priority: a3s_lane::Priority,
+        queued: Queued,
+        mode: Mode,
+    ) -> u64 {
+        let sequence = self.queue.push(priority, queued);
+        self.queued_turn_modes.insert(sequence, mode);
+        sequence
+    }
+
+    pub(super) fn enqueue_plan_turn(
+        &mut self,
+        priority: a3s_lane::Priority,
+        queued: Queued,
+        request: PlanDraftRequest,
+    ) -> u64 {
+        let sequence = self.enqueue_turn(priority, queued, Mode::Plan);
+        self.queued_plan_drafts.insert(sequence, request);
+        sequence
+    }
+
     /// Pop exactly one queued user turn. Once user input is exhausted, resume
     /// a DeepResearch synthesis that was deliberately deferred behind it.
     pub(super) fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
@@ -232,10 +335,19 @@ impl App {
             || self.session_rebuild_pending.is_some()
             || self.interrupted_stream_start_token.is_some()
             || self.active_queued_turn.is_some()
+            || self.pending_plan_review.is_some()
+            || self.plan_review.is_some()
         {
             return None;
         }
         if let Some(next) = self.queue.pop() {
+            let sequence = next.sequence();
+            let execution_mode = self
+                .queued_turn_modes
+                .get(&sequence)
+                .copied()
+                .unwrap_or(self.mode);
+            let plan_draft = self.queued_plan_drafts.get(&sequence).cloned();
             let queued = next.value().clone();
             if let Some((query, os_runtime, evidence_scope)) = queued.deep_research {
                 let command = self.start_deep_research_workflow(
@@ -247,6 +359,9 @@ impl App {
                 if command.is_none() {
                     self.queue.restore(next);
                     self.relayout();
+                } else {
+                    self.queued_turn_modes.remove(&sequence);
+                    self.queued_plan_drafts.remove(&sequence);
                 }
                 return command;
             }
@@ -255,8 +370,12 @@ impl App {
                 queued.display,
                 true,
                 false,
-                queued.runtime_expectation,
-                queued.images,
+                StreamStartEnvelope {
+                    runtime_expectation: queued.runtime_expectation,
+                    submitted_images: queued.images,
+                    execution_mode,
+                    plan_draft,
+                },
             );
             if command.is_some() {
                 self.active_queued_turn_token = Some(self.stream_start_token);
@@ -280,15 +399,15 @@ impl App {
     /// point the exact a3s-lane entry remains restorable on `SessionBusy` or an
     /// admission timeout.
     pub(super) fn commit_active_queued_turn(&mut self, token: u64) -> bool {
-        if take_matching_queue_claim(
+        let Some(item) = take_matching_queue_claim(
             &mut self.active_queued_turn,
             &mut self.active_queued_turn_token,
             token,
-        )
-        .is_none()
-        {
+        ) else {
             return false;
-        }
+        };
+        self.queued_turn_modes.remove(&item.sequence());
+        self.queued_plan_drafts.remove(&item.sequence());
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
         self.queue_retry_attempt = 0;
         true
@@ -311,11 +430,14 @@ impl App {
     }
 
     pub(super) fn discard_active_queued_turn(&mut self, token: u64) {
-        let _ = take_matching_queue_claim(
+        if let Some(item) = take_matching_queue_claim(
             &mut self.active_queued_turn,
             &mut self.active_queued_turn_token,
             token,
-        );
+        ) {
+            self.queued_turn_modes.remove(&item.sequence());
+            self.queued_plan_drafts.remove(&item.sequence());
+        }
     }
 
     pub(super) fn retry_queued_turn_after_admission_failure(&mut self) -> Cmd<Msg> {
@@ -439,16 +561,19 @@ impl App {
             self.completed += 1;
         }
         self.warn_missing_runtime_evidence();
+        let plan_review = self.take_plan_review_candidate();
         // Goal iterations are evaluated by Core before End. A generic hidden
         // synthesis turn must not replace that event gate or consume the turn
         // as if it were complete.
-        let synthesis = if degraded_deep_research || self.goal_run.is_some() {
-            None
-        } else {
-            self.prepare_ultracode_synthesis()
-        };
+        let synthesis =
+            if plan_review.is_some() || degraded_deep_research || self.goal_run.is_some() {
+                None
+            } else {
+                self.prepare_ultracode_synthesis()
+            };
         let completed_stream_join = self.stream_join.take();
         self.finish();
+        self.pending_plan_review = plan_review;
         if let Some(completed_stream_join) = completed_stream_join {
             // Keep input queue-only until the worker has completed persistence,
             // cleanup, and release of core's single-flight admission lease.
@@ -461,6 +586,9 @@ impl App {
         &mut self,
         synthesis: Option<(String, String)>,
     ) -> Option<Cmd<Msg>> {
+        if self.activate_pending_plan_review() {
+            return None;
+        }
         if self.goal_run.as_ref().is_some_and(|run| run.achieved) {
             self.pending_goal_failure = None;
             return self.finish_achieved_goal();
@@ -678,8 +806,8 @@ impl App {
     }
 
     /// An autonomous directive run is starting (/sleep, asset reviews,
-    /// asset run/deploy, /flow drafts, /loop): switch to auto-approve so tool
-    /// prompts can't stall it, and arm the loop budget that re-prompts until
+    /// asset run/deploy, /flow drafts, /loop): switch to non-interactive Auto
+    /// so tool prompts cannot stall it, and arm the loop budget that re-prompts until
     /// the deliverable lands. The prior mode is restored when the run ends
     /// (loop drained, interrupt, error, or /clear). A user already in auto
     /// mode keeps it — nothing is remembered or restored.
@@ -687,7 +815,7 @@ impl App {
         self.loop_remaining = self.loop_remaining.max(budget);
         if self.mode != Mode::Auto {
             self.autonomy_restore = Some(self.mode);
-            self.mode = Mode::Auto;
+            self.set_composer_mode(Mode::Auto);
             self.push_line(&Style::new().fg(TN_GRAY).render(
                 "  ⏵⏵ auto mode engaged for this task — restores when it completes (Esc stops)",
             ));
@@ -697,7 +825,7 @@ impl App {
     pub(super) fn engage_single_turn_autonomy(&mut self) {
         if self.mode != Mode::Auto {
             self.autonomy_restore = Some(self.mode);
-            self.mode = Mode::Auto;
+            self.set_composer_mode(Mode::Auto);
             self.push_line(&Style::new().fg(TN_GRAY).render(
                 "  ⏵⏵ auto mode engaged for this task — restores when it completes (Esc stops)",
             ));
@@ -754,7 +882,7 @@ impl App {
         self.deep_research_report_tool_gate.set_report_only(false);
         self.deep_research_subagent_settlement_inflight = false;
         if let Some(prev) = self.autonomy_restore.take() {
-            self.mode = prev;
+            self.set_composer_mode(prev);
             self.push_line(
                 &Style::new()
                     .fg(TN_GRAY)

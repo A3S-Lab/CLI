@@ -197,7 +197,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "branch a new session from this point (original kept)",
     ),
     ("/clear", "reset the conversation"),
-    ("/auto", "switch to auto-approve mode"),
+    ("/auto", "make future turns non-interactive"),
     ("/exit", "quit a3s code"),
 ];
 

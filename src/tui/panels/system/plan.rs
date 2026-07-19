@@ -25,8 +25,18 @@ impl App {
             .ordered()
             .into_iter()
             .map(|item| {
+                let display = match self
+                    .queued_turn_modes
+                    .get(&item.sequence())
+                    .copied()
+                    .unwrap_or(Mode::Default)
+                {
+                    Mode::Plan => format!("✎ {}", item.value().display),
+                    Mode::Auto => format!("⏵⏵ {}", item.value().display),
+                    Mode::Default => item.value().display.clone(),
+                };
                 chrome
-                    .queued_task(item.value().display.clone())
+                    .queued_task(display)
                     .priority(i32::from(item.priority()))
                     .sequence(item.sequence())
             })

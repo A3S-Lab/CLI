@@ -333,6 +333,8 @@ mod file_change_view;
 mod image;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
+#[path = "ui/plan_review.rs"]
+mod plan_review;
 #[path = "ui/program_preview.rs"]
 mod program_preview;
 #[path = "ui/render.rs"]
@@ -387,6 +389,7 @@ use message_chrome::*;
 pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
+use plan_review::*;
 use render::*;
 use runtime_policy::RuntimePolicy;
 use runtime_projection::{
@@ -753,6 +756,9 @@ struct App {
     interrupting: bool,
     /// Manual tool approvals waiting for a decision, in request order.
     pending_tools: VecDeque<(String, String)>,
+    /// Mode-aware permission boundary shared with every rebuilt Core session.
+    /// It always tracks the immutable mode of the running turn.
+    execution_policy: TuiExecutionPolicy,
     /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
     approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
@@ -779,10 +785,20 @@ struct App {
     /// Host turns submitted while the agent is busy. Ordering and FIFO
     /// semantics come directly from a3s-lane.
     queue: PriorityQueue<Queued>,
+    /// Submission-time execution mode keyed by a3s-lane's stable sequence.
+    /// Keeping this beside the queue avoids mutable footer state changing the
+    /// semantics of a turn that was already submitted.
+    queued_turn_modes: HashMap<u64, Mode>,
+    /// Strict planning requests keyed by the same stable queue sequence.
+    queued_plan_drafts: HashMap<u64, PlanDraftRequest>,
     /// A claimed queued turn remains here until Core admits it. Admission
     /// failure restores this exact item, including its original FIFO sequence.
     active_queued_turn: Option<PriorityItem<Queued>>,
     active_queued_turn_token: Option<u64>,
+    /// Immutable mode of the current stream, retained after queue admission.
+    active_turn_mode: Option<Mode>,
+    /// Planning request owned by the current read-only stream.
+    active_plan_draft: Option<PlanDraftRequest>,
     queue_retry_generation: u64,
     queue_retry_attempt: u8,
     /// Text of the message currently being processed (the running task).
@@ -790,6 +806,11 @@ struct App {
     /// Typed live plan/TODO projection, pinned above the input and updated from
     /// PlanningEnd/TaskUpdated or the Codex-compatible `update_plan` tool.
     plan: PlanProjection,
+    /// Review staged until the completed stream releases Core's single-flight
+    /// lease, then promoted to the modal decision boundary below.
+    pending_plan_review: Option<PlanReviewState>,
+    /// Explicit Approve / Revise / Abandon boundary for a completed plan.
+    plan_review: Option<PlanReviewState>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
     /// `/memory` full-screen timeline panel (Some when open).
@@ -840,6 +861,7 @@ impl App {
     fn composer_input_is_hidden(&self) -> bool {
         self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
+            || (self.plan_review.is_some() && !self.plan_review_input_active())
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()

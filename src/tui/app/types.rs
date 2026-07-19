@@ -254,6 +254,9 @@ pub(super) enum Msg {
         event: Box<AgentEvent>,
     },
     Submit(String),
+    /// Cancel the active turn and run this immutable submission before normal
+    /// queued follow-ups.
+    SubmitNow(String),
     StreamStarted {
         token: u64,
         session: Arc<AgentSession>,

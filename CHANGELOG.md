@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added strict two-phase Plan turns with an explicit Approve, Revise, or
+  Abandon review boundary, plus `Ctrl+O` Send now for promoting a prompt ahead
+  of ordinary queued follow-ups after settling the active turn.
+
+### Fixed
+
+- Made TUI Auto mode genuinely non-interactive for every operation that
+  survives explicit policy and workspace hard denials, including tool-owned
+  confirmation escalation. Late confirmation events resolve automatically in
+  both directions, queued turns retain their submission-time mode, and Plan
+  remains strictly read-only.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added
