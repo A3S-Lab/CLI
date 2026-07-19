@@ -180,6 +180,89 @@ not a compatible control-component release. Until that release exists,
 diagnostic that the control component is not published and do not create an
 installed-component record. Bench does not opt into first-use installation.
 
+### Signed extension registries
+
+External Use domains can be resolved from explicitly trusted TUF registries.
+The official `a3s` registry identity is listed but intentionally unavailable
+until its production root is published; the CLI never invents or silently
+accepts a replacement root. Add a third-party registry with a root file or a
+pinned SHA-256:
+
+```sh
+a3s registry add https://packages.example.org/a3s/ \
+  --trust-root ./root.json \
+  --yes
+a3s registry refresh packages
+
+a3s --output json install use/acme/slack --dry-run
+a3s --output json install use/acme/slack \
+  --plan-digest <reviewed-plan-sha256>
+
+a3s --output json upgrade use/acme/slack --dry-run
+a3s --output json upgrade use/acme/slack \
+  --plan-digest <reviewed-upgrade-sha256>
+```
+
+Root files are copied beneath the owned `registries/<name>/root.json` path and
+checked against the recorded digest whenever configuration is loaded. A
+digest-only registry bootstraps from `<registry>/metadata/root.json`; the root
+is cached only after its bytes match the pin. `registry refresh` performs full
+TUF root, timestamp, snapshot, and targets verification, including expiration
+and rollback checks. It does not use a reachability-only `HEAD` request and does
+not download package targets.
+
+Package lookup queries configured registries in stable name order. No match is
+an error, and the same package resolving from more than one trusted registry is
+rejected as ambiguous. Registry installs cannot use `--allow-unsigned`; that
+flag remains limited to an explicit local `--from` package. Registry URLs must
+use HTTPS, except loopback HTTP used by the hermetic test suite.
+
+A signed-extension upgrade reads the complete source provenance from the
+installed Use receipt and queries only that registry and release channel. It
+refuses a removed registry, a changed URL or trust root, and a semantic-version
+downgrade. `a3s upgrade --all` includes signed registry extensions but excludes
+explicit local packages, whose next source must be supplied by the operator.
+Plain `a3s upgrade` includes newer signed targets in its update listing. When
+verified metadata resolves to the already installed target, the operation
+converges without downloading the archive or publishing a new activation.
+
+### Reviewable component plans
+
+Installation, upgrade, and uninstall support an immutable review/apply guard:
+
+```sh
+a3s --output json install box --dry-run
+a3s --output json install box --plan-digest <reviewed-sha256>
+```
+
+The dry-run returns `planSchemaVersion`, a canonical SHA-256 `planDigest`, and
+the ordered `plans` array. The digest covers the requested operation and flags,
+target platform, current component state and normalized receipt, operation
+order, local-package path and content, and every exact GitHub release version,
+asset URL, asset name, and SHA-256 selected during resolution. For signed
+extensions it also covers the registry name and URL, pinned root, all TUF
+metadata versions, package version and channel, platform target, target path,
+archive length, and SHA-256. Presentation text is deliberately excluded.
+
+A release dry-run reads release metadata and, when necessary, its checksum
+file. It never downloads the component payload or changes component state. An
+apply invocation reacquires the component locks, recomputes the full plan, and
+fails before download if the supplied digest no longer matches. It uses the
+exact resolved artifact from that plan instead of performing another `latest`
+lookup. Local Use packages are fingerprinted deterministically, including file
+paths, executable permissions, sizes, and contents.
+
+Signed-extension dry-runs verify metadata without downloading the archive. On
+apply, the umbrella digest is checked first; `a3s` then delegates the exact
+resolved package and its inner registry-plan digest to `a3s-use`. Use repeats
+TUF verification before target download, so a repository change between the
+outer check and payload fetch also fails without activation.
+
+`--plan-digest` and `--dry-run` are mutually exclusive. Homebrew plans bind the
+formula, operation, flags, and current receipt, but Homebrew remains responsible
+for selecting and installing its current bottle; use `--source release` when an
+exact A3S release artifact must be bound by the digest.
+
 ### Listing installed components
 
 ```sh

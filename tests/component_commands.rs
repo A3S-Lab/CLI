@@ -417,7 +417,7 @@ fn multi_component_preflight_failure_prevents_network_and_every_mutation() {
     assert!(result["error"]["message"]
         .as_str()
         .unwrap()
-        .contains("requires an explicit --from package"));
+        .contains("no package registry has a production TUF trust root"));
     assert!(server.requests().is_empty());
     assert!(!temp.path("state/components").exists());
     assert!(!temp.path("data/components").exists());

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added pinned-root TUF registries for external Use packages, including full
+  metadata refresh, review/apply-bound install plans, signed provenance
+  receipts, and source-preserving upgrades. Registry upgrades query only the
+  recorded registry and channel, reject identity drift and version downgrades,
+  and converge without downloading an already installed target.
+- Added deterministic component operation plans, cross-process component
+  locks, immutable plan digests, and preflight checks so reviewed installs,
+  upgrades, and removals fail before payload download or mutation when their
+  inputs change.
 - Added policy-aware A3S Use preparation to Code TUI startup. A missing Use
   component is installed from its verified release before terminal takeover
   when networking and automatic setup are allowed; offline mode and
