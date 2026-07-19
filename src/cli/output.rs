@@ -67,9 +67,11 @@ pub(crate) fn render_error(
     }
     let structured = error.downcast_ref::<CliError>();
     let component_batch = error.downcast_ref::<a3s::components::ComponentBatchFailure>();
+    let plan_mismatch = error.downcast_ref::<a3s::components::ComponentPlanMismatch>();
     let message = structured
         .map(|error| error.message.clone())
         .or_else(|| component_batch.map(ToString::to_string))
+        .or_else(|| plan_mismatch.map(ToString::to_string))
         .unwrap_or_else(|| format!("{error:#}"));
     let code = structured
         .map(|error| error.code)
@@ -82,6 +84,7 @@ pub(crate) fn render_error(
                 }
             })
         })
+        .or_else(|| plan_mismatch.map(|_| "component.plan_mismatch"))
         .unwrap_or("operation.failed");
     let suggestion = structured
         .and_then(|error| error.suggestion.as_deref())
@@ -89,10 +92,16 @@ pub(crate) fn render_error(
             component_batch
                 .is_some()
                 .then_some("Inspect each component failure and rerun only failed targets.")
+        })
+        .or_else(|| {
+            plan_mismatch
+                .is_some()
+                .then_some("Rerun with --dry-run, review the new plan, and use its planDigest.")
         });
     let details = structured
         .map(|error| error.details.clone())
         .or_else(|| component_batch.and_then(|batch| serde_json::to_value(batch).ok()))
+        .or_else(|| plan_mismatch.and_then(|mismatch| serde_json::to_value(mismatch).ok()))
         .unwrap_or_else(|| json!({}));
     match mode {
         OutputMode::Human => {

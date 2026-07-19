@@ -97,22 +97,30 @@ fn unsafe_component_ids_fail_at_the_parser_boundary() {
 }
 
 #[test]
-fn install_dry_run_plans_without_network_or_mutation() {
+fn install_dry_run_resolves_a_stable_artifact_without_downloading_or_mutating() {
+    if support::box_release_target().is_none() {
+        eprintln!("skipping release plan test on unsupported host target");
+        return;
+    }
     let temp = TempWorkspace::new("component-install-dry-run");
-    let mut command = Command::new(a3s_bin());
-    configure_component_env(&mut command, &temp);
-    let output = command
-        .args([
-            "install",
-            "box",
-            "--source",
-            "release",
-            "--dry-run",
-            "--json",
-        ])
-        .env("A3S_UPDATER_GITHUB_API_BASE", "http://127.0.0.1:1")
-        .output()
-        .unwrap();
+    let server = support::start_fake_box_release(&temp, "2.5.2", None);
+    let run = || {
+        let mut command = Command::new(a3s_bin());
+        configure_component_env(&mut command, &temp);
+        command
+            .args([
+                "install",
+                "box",
+                "--source",
+                "release",
+                "--dry-run",
+                "--json",
+            ])
+            .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+            .output()
+            .unwrap()
+    };
+    let output = run();
 
     assert!(
         output.status.success(),
@@ -123,8 +131,144 @@ fn install_dry_run_plans_without_network_or_mutation() {
     assert_eq!(result["command"], "component.install");
     assert_eq!(result["data"]["dryRun"], true);
     assert_eq!(result["data"]["plans"][0]["component"], "box");
+    assert_eq!(result["data"]["planSchemaVersion"], 1);
+    assert_eq!(result["data"]["planCommand"], "component.install");
+    let digest = result["data"]["planDigest"].as_str().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert_eq!(
+        result["data"]["plans"][0]["resolvedReleases"]["box"]["version"],
+        "2.5.2"
+    );
+    assert_eq!(
+        result["data"]["plans"][0]["resolvedSources"]["box"],
+        "github-release:A3S-Lab/Box"
+    );
+    assert_eq!(
+        result["data"]["plans"][0]["resolvedReleases"]["box"]["archiveName"],
+        format!(
+            "a3s-box-v2.5.2-{}.tar.gz",
+            support::box_release_target().unwrap()
+        )
+    );
+    let repeated: serde_json::Value = serde_json::from_slice(&run().stdout).unwrap();
+    assert_eq!(repeated["data"]["planDigest"], digest);
+    let requests = server.requests();
+    assert!(
+        requests
+            .iter()
+            .filter(|path| path.ends_with("/releases/latest"))
+            .count()
+            >= 2
+    );
+    assert!(
+        requests.iter().all(|path| !path.starts_with("/assets/")),
+        "dry-run downloaded a release asset: {requests:?}"
+    );
     assert!(!temp.path("state/components").exists());
     assert!(!temp.path("data/components").exists());
+}
+
+#[test]
+fn reviewed_release_plan_rejects_changes_before_download_and_applies_exact_artifact() {
+    if support::box_release_target().is_none() {
+        eprintln!("skipping reviewed release plan test on unsupported host target");
+        return;
+    }
+    let temp = TempWorkspace::new("component-reviewed-release-plan");
+    let server = support::start_fake_box_release(&temp, "2.5.2", None);
+
+    let mut review = Command::new(a3s_bin());
+    configure_component_env(&mut review, &temp);
+    let output = review
+        .args([
+            "install",
+            "box",
+            "--source",
+            "release",
+            "--dry-run",
+            "--json",
+        ])
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let review: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let digest = review["data"]["planDigest"].as_str().unwrap().to_string();
+
+    let mut changed = Command::new(a3s_bin());
+    configure_component_env(&mut changed, &temp);
+    let output = changed
+        .args([
+            "install",
+            "box",
+            "--source",
+            "release",
+            "--force",
+            "--plan-digest",
+            &digest,
+            "--json",
+        ])
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stderr.is_empty());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "component.plan_mismatch");
+    assert_eq!(error["error"]["details"]["expected"], digest);
+    assert!(
+        server
+            .requests()
+            .iter()
+            .all(|path| !path.starts_with("/assets/")),
+        "a mismatched plan downloaded an artifact"
+    );
+    assert!(!temp.path("state/components/box.json").exists());
+    assert!(!temp.path("data/components/box").exists());
+
+    let mut apply = Command::new(a3s_bin());
+    configure_component_env(&mut apply, &temp);
+    let output = apply
+        .args([
+            "install",
+            "box",
+            "--source",
+            "release",
+            "--plan-digest",
+            &digest,
+            "--json",
+        ])
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let applied: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(applied["data"]["planDigest"], digest);
+    assert_eq!(applied["data"]["operations"][0]["version"], "2.5.2");
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|path| path.starts_with("/assets/"))
+            .count(),
+        1,
+        "reviewed apply must download exactly one artifact"
+    );
+    assert_eq!(
+        server
+            .requests()
+            .iter()
+            .filter(|path| path.ends_with("/releases/latest"))
+            .count(),
+        3,
+        "the installer must reuse the plan resolution instead of resolving latest again"
+    );
 }
 
 #[test]
@@ -250,27 +394,69 @@ exit 2
 }
 
 #[test]
-fn multi_component_partial_failure_preserves_every_outcome() {
-    let temp = TempWorkspace::new("component-partial");
+fn multi_component_preflight_failure_prevents_network_and_every_mutation() {
+    if support::box_release_target().is_none() {
+        eprintln!("skipping component preflight test on unsupported host target");
+        return;
+    }
+    let temp = TempWorkspace::new("component-preflight");
+    let server = support::start_fake_box_release(&temp, "2.5.2", None);
     let mut command = Command::new(a3s_bin());
     configure_component_env(&mut command, &temp);
     let output = command
-        .args(["install", "code", "use/acme/slack", "--json"])
+        .args(["install", "box", "use/acme/slack", "--json"])
+        .env("A3S_UPDATER_GITHUB_API_BASE", server.api_base())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["command"], "component.install");
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "operation.failed");
+    assert!(result["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("requires an explicit --from package"));
+    assert!(server.requests().is_empty());
+    assert!(!temp.path("state/components").exists());
+    assert!(!temp.path("data/components").exists());
+}
+
+#[test]
+fn multi_component_runtime_failure_preserves_each_completed_outcome() {
+    let temp = TempWorkspace::new("component-runtime-partial");
+    let bin = temp.path("use-bin");
+    make_executable(
+        &bin.join("a3s-use"),
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"components\":[]}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"status\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"component\":{\"id\":\"%s\",\"presence\":\"missing\",\"health\":\"unknown\"}}}\\n' \"$3\"; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"browser\" ]; then printf '{\"schemaVersion\":1,\"ok\":true,\"data\":{\"changed\":true,\"component\":{\"id\":\"browser\",\"version\":\"1.0.0\"}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ] && [ \"$3\" = \"office\" ]; then printf 'office fixture failed\\n' >&2; exit 7; fi\nexit 2\n",
+    );
+
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let output = command
+        .args(["install", "use/browser", "use/office", "--json"])
+        .env("A3S_USE_INSTALL_DIR", &bin)
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(3));
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["command"], "component.install");
-    assert_eq!(result["ok"], false);
     assert_eq!(result["error"]["code"], "component.partial");
     assert_eq!(
         result["error"]["details"]["operations"][0]["component"],
-        "code"
+        "use/browser"
     );
     assert_eq!(
         result["error"]["details"]["failures"][0]["component"],
-        "use/acme/slack"
+        "use/office"
+    );
+    assert_eq!(
+        result["error"]["details"]["planDigest"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
     );
 }
 
@@ -505,6 +691,103 @@ fn external_use_install_uses_cli_json_not_custom_rpc() {
     let arguments = std::fs::read_to_string(args_log).unwrap();
     assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
     assert!(!arguments.to_ascii_lowercase().contains("jsonrpc"));
+}
+
+#[test]
+fn local_package_plan_digest_changes_when_package_content_changes() {
+    let temp = TempWorkspace::new("extension-content-plan");
+    let bin = temp.path("use-bin");
+    let install_log = temp.path("extension-install.log");
+    make_executable(
+        &bin.join("a3s-use"),
+        &format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf 'a3s-use 0.1.0\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"list\" ]; then printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"components\":[]}}}}\\n'; exit 0; fi\nif [ \"$1\" = \"component\" ] && [ \"$2\" = \"install\" ]; then printf '%s\\n' \"$@\" > {}; printf '{{\"schemaVersion\":1,\"ok\":true,\"data\":{{\"changed\":true,\"component\":{{\"id\":\"%s\",\"version\":\"1.0.0\"}}}}}}\\n' \"$3\"; exit 0; fi\nexit 2\n",
+            sh_quote(&install_log)
+        ),
+    );
+    let package = temp.path("package");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("a3s-use-extension.acl"), b"first").unwrap();
+
+    let run = || {
+        let mut command = Command::new(a3s_bin());
+        configure_component_env(&mut command, &temp);
+        command
+            .args([
+                "install",
+                "use/acme/slack",
+                "--from",
+                package.to_str().unwrap(),
+                "--allow-unsigned",
+                "--dry-run",
+                "--json",
+            ])
+            .env("A3S_USE_INSTALL_DIR", &bin)
+            .output()
+            .unwrap()
+    };
+
+    let first = run();
+    assert!(first.status.success(), "{first:?}");
+    let first: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    let first_digest = first["data"]["planDigest"].as_str().unwrap().to_string();
+    let first_package_digest = first["data"]["plans"][0]["localPackage"]["sha256"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    std::fs::write(package.join("a3s-use-extension.acl"), b"other").unwrap();
+    let changed = run();
+    assert!(changed.status.success(), "{changed:?}");
+    let changed: serde_json::Value = serde_json::from_slice(&changed.stdout).unwrap();
+    assert_ne!(changed["data"]["planDigest"], first_digest);
+    assert_ne!(
+        changed["data"]["plans"][0]["localPackage"]["sha256"],
+        first_package_digest
+    );
+
+    let mut stale_apply = Command::new(a3s_bin());
+    configure_component_env(&mut stale_apply, &temp);
+    let output = stale_apply
+        .args([
+            "install",
+            "use/acme/slack",
+            "--from",
+            package.to_str().unwrap(),
+            "--allow-unsigned",
+            "--plan-digest",
+            &first_digest,
+            "--json",
+        ])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "component.plan_mismatch");
+    assert!(!install_log.exists());
+
+    std::fs::write(package.join("a3s-use-extension.acl"), b"first").unwrap();
+    let mut reviewed_apply = Command::new(a3s_bin());
+    configure_component_env(&mut reviewed_apply, &temp);
+    let output = reviewed_apply
+        .args([
+            "install",
+            "use/acme/slack",
+            "--from",
+            package.to_str().unwrap(),
+            "--allow-unsigned",
+            "--plan-digest",
+            &first_digest,
+            "--json",
+        ])
+        .env("A3S_USE_INSTALL_DIR", &bin)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let applied: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(applied["data"]["planDigest"], first_digest);
+    assert!(install_log.exists());
 }
 
 #[test]

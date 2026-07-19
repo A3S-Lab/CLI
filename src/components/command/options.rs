@@ -52,6 +52,7 @@ pub(super) struct InstallOptions {
     pub(super) allow_unsigned: bool,
     pub(super) json: bool,
     pub(super) dry_run: bool,
+    pub(super) plan_digest: Option<String>,
 }
 
 impl InstallOptions {
@@ -99,17 +100,31 @@ impl InstallOptions {
                         value => bail!("unsupported install scope '{value}'"),
                     };
                 }
+                "--plan-digest" => {
+                    index += 1;
+                    options.plan_digest = Some(validate_plan_digest(required_value(
+                        args,
+                        index,
+                        "--plan-digest",
+                    )?)?);
+                }
                 "--force" => options.force = true,
                 "--migrate" => options.migrate = true,
                 "--allow-unsigned" => options.allow_unsigned = true,
                 "--yes" => {}
                 "--dry-run" => options.dry_run = true,
                 "--json" => options.json = true,
+                value if value.starts_with("--plan-digest=") => {
+                    options.plan_digest = Some(validate_plan_digest(
+                        value.trim_start_matches("--plan-digest="),
+                    )?);
+                }
                 value if value.starts_with('-') => bail!("unknown install option '{value}'"),
                 value => options.components.push(ComponentId::parse(value)?),
             }
             index += 1;
         }
+        validate_plan_mode(options.dry_run, options.plan_digest.as_deref())?;
         Ok(options)
     }
 }
@@ -121,24 +136,41 @@ pub(super) struct UninstallOptions {
     pub(super) purge: bool,
     pub(super) json: bool,
     pub(super) dry_run: bool,
+    pub(super) plan_digest: Option<String>,
 }
 
 impl UninstallOptions {
     pub(super) fn parse(args: &[String]) -> anyhow::Result<Self> {
         let mut options = Self::default();
-        for argument in args {
-            match argument.as_str() {
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
                 "--cascade" => options.cascade = true,
                 "--purge" => options.purge = true,
+                "--plan-digest" => {
+                    index += 1;
+                    options.plan_digest = Some(validate_plan_digest(required_value(
+                        args,
+                        index,
+                        "--plan-digest",
+                    )?)?);
+                }
                 "--yes" => {}
                 "--json" => options.json = true,
                 "--dry-run" => options.dry_run = true,
+                value if value.starts_with("--plan-digest=") => {
+                    options.plan_digest = Some(validate_plan_digest(
+                        value.trim_start_matches("--plan-digest="),
+                    )?);
+                }
                 value if value.starts_with('-') => {
                     bail!("unknown uninstall option '{value}'")
                 }
                 value => options.components.push(ComponentId::parse(value)?),
             }
+            index += 1;
         }
+        validate_plan_mode(options.dry_run, options.plan_digest.as_deref())?;
         Ok(options)
     }
 }
@@ -149,26 +181,61 @@ pub(super) struct UpdateOptions {
     pub(super) all: bool,
     pub(super) json: bool,
     pub(super) dry_run: bool,
+    pub(super) plan_digest: Option<String>,
 }
 
 impl UpdateOptions {
     pub(super) fn parse(args: &[String]) -> anyhow::Result<Self> {
         let mut options = Self::default();
-        for argument in args {
-            match argument.as_str() {
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
                 "--all" => options.all = true,
+                "--plan-digest" => {
+                    index += 1;
+                    options.plan_digest = Some(validate_plan_digest(required_value(
+                        args,
+                        index,
+                        "--plan-digest",
+                    )?)?);
+                }
                 "--yes" => {}
                 "--json" => options.json = true,
                 "--dry-run" => options.dry_run = true,
+                value if value.starts_with("--plan-digest=") => {
+                    options.plan_digest = Some(validate_plan_digest(
+                        value.trim_start_matches("--plan-digest="),
+                    )?);
+                }
                 value if value.starts_with('-') => bail!("unknown update option '{value}'"),
                 value => options.components.push(ComponentId::parse(value)?),
             }
+            index += 1;
         }
         if options.all && !options.components.is_empty() {
             bail!("--all cannot be combined with component IDs");
         }
+        validate_plan_mode(options.dry_run, options.plan_digest.as_deref())?;
         Ok(options)
     }
+}
+
+fn validate_plan_digest(value: &str) -> anyhow::Result<String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("--plan-digest requires exactly 64 lowercase hexadecimal characters");
+    }
+    Ok(value.to_string())
+}
+
+fn validate_plan_mode(dry_run: bool, plan_digest: Option<&str>) -> anyhow::Result<()> {
+    if dry_run && plan_digest.is_some() {
+        bail!("--plan-digest cannot be combined with --dry-run");
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

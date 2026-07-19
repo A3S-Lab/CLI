@@ -50,6 +50,7 @@ pub fn configure_component_env(command: &mut std::process::Command, workspace: &
         .env("A3S_DATA_HOME", workspace.path("data"))
         .env("A3S_STATE_HOME", workspace.path("state"))
         .env("A3S_CACHE_HOME", workspace.path("cache"))
+        .env("A3S_RUNTIME_HOME", workspace.path("runtime"))
         .env("HOME", workspace.path("home"))
         .env("PATH", "");
 }
@@ -161,6 +162,7 @@ impl FakeReleaseServer {
         let thread_stop = Arc::clone(&stop);
         let asset_path = format!("/assets/{asset_name}");
         let latest_path = format!("/repos/A3S-Lab/{repository}/releases/latest");
+        let tag_path = format!("/repos/A3S-Lab/{repository}/releases/tags/v{version}");
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -176,6 +178,7 @@ impl FakeReleaseServer {
                         let release = release.clone();
                         let asset_path = asset_path.clone();
                         let latest_path = latest_path.clone();
+                        let tag_path = tag_path.clone();
                         let archive = archive.clone();
                         let requests = Arc::clone(&thread_requests);
                         std::thread::spawn(move || {
@@ -184,6 +187,7 @@ impl FakeReleaseServer {
                                 &release,
                                 &asset_path,
                                 &latest_path,
+                                &tag_path,
                                 &archive,
                                 &requests,
                             );
@@ -227,6 +231,7 @@ fn serve_request(
     release: &[u8],
     asset_path: &str,
     latest_path: &str,
+    tag_path: &str,
     archive: &[u8],
     requests: &Arc<Mutex<Vec<String>>>,
 ) {
@@ -245,7 +250,7 @@ fn serve_request(
     requests.lock().unwrap().push(path.clone());
     let (status, content_type, body) = if path == asset_path {
         ("200 OK", "application/gzip", archive)
-    } else if path == latest_path {
+    } else if path == latest_path || path == tag_path {
         ("200 OK", "application/json", release)
     } else {
         ("404 Not Found", "text/plain", b"not found".as_slice())

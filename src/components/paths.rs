@@ -13,6 +13,7 @@ pub struct ComponentPaths {
     pub data_root: PathBuf,
     pub state_root: PathBuf,
     pub cache_root: PathBuf,
+    pub runtime_root: PathBuf,
     pub current_exe: PathBuf,
     pub path_env: Option<OsString>,
     pub home: Option<PathBuf>,
@@ -53,6 +54,8 @@ impl ComponentPaths {
             home.as_deref(),
             local_app_data.as_deref(),
         )?;
+        let runtime_root =
+            configured_runtime_root(directory, &state_root, local_app_data.as_deref());
         let current_exe =
             std::env::current_exe().context("failed to determine current a3s executable")?;
 
@@ -60,6 +63,7 @@ impl ComponentPaths {
             data_root,
             state_root,
             cache_root,
+            runtime_root,
             current_exe,
             path_env: std::env::var_os("PATH"),
             home,
@@ -95,6 +99,13 @@ impl ComponentPaths {
         append_id(self.cache_root.join("components"), id)
     }
 
+    pub fn operation_lock_path(&self, id: &ComponentId) -> PathBuf {
+        let family = id.as_str().split('/').next().unwrap_or(id.as_str());
+        self.runtime_root
+            .join("locks")
+            .join(format!("{family}.lock"))
+    }
+
     pub fn configured_binary(&self, release: ReleaseSpec) -> Option<PathBuf> {
         self.install_overrides
             .get(release.install_dir_env)
@@ -119,6 +130,7 @@ impl ComponentPaths {
             data_root: root.join("data"),
             state_root: root.join("state"),
             cache_root: root.join("cache"),
+            runtime_root: root.join("runtime"),
             current_exe: root.join("bin/a3s"),
             path_env: None,
             home: Some(root.join("home")),
@@ -131,6 +143,31 @@ impl ComponentPaths {
         self.install_overrides
             .insert(variable.to_string(), directory);
     }
+}
+
+fn configured_runtime_root(
+    directory: &Path,
+    state_root: &Path,
+    local_app_data: Option<&Path>,
+) -> PathBuf {
+    if let Some(value) = std::env::var_os("A3S_RUNTIME_HOME").filter(|value| !value.is_empty()) {
+        return absolute_from(PathBuf::from(value), directory);
+    }
+
+    #[cfg(unix)]
+    if let Some(value) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        return absolute_from(PathBuf::from(value), directory).join("a3s");
+    }
+
+    #[cfg(windows)]
+    if let Some(local_app_data) = local_app_data {
+        return local_app_data.join("A3S/Runtime");
+    }
+
+    #[cfg(not(windows))]
+    let _ = local_app_data;
+
+    state_root.join("runtime")
 }
 
 fn host_binary_name(binary: &str) -> String {
@@ -263,6 +300,10 @@ mod tests {
         assert_eq!(
             paths.cache_dir(&id),
             temp.path().join("cache/components/use/browser")
+        );
+        assert_eq!(
+            paths.operation_lock_path(&id),
+            temp.path().join("runtime/locks/use.lock")
         );
         paths.set_install_override("A3S_USE_INSTALL_DIR", temp.path().join("use-bin"));
         let use_spec = crate::components::catalog::find(&ComponentId::parse("use").unwrap())

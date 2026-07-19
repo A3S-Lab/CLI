@@ -558,7 +558,7 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
             updates: true,
             ..ListArgs::default()
         };
-        a3s::components::run_list_with(
+        a3s::components::run_upgrade_list_with(
             list_argv(list, output)?,
             &context.component_paths,
             context.network.offline,
@@ -579,6 +579,9 @@ async fn run_upgrade(args: UpgradeArgs, context: &InvocationContext) -> anyhow::
     }
     if args.dry_run {
         argv.push("--dry-run".to_string());
+    }
+    if let Some(plan_digest) = args.plan_digest {
+        argv.push(format!("--plan-digest={plan_digest}"));
     }
     append_json_flag(&mut argv, output)?;
     a3s::components::run_update_with(
@@ -837,6 +840,9 @@ fn install_argv(args: InstallArgs, output: OutputMode) -> anyhow::Result<Vec<Str
     if args.dry_run {
         argv.push("--dry-run".to_string());
     }
+    if let Some(plan_digest) = args.plan_digest {
+        argv.push(format!("--plan-digest={plan_digest}"));
+    }
     if args.allow_unsigned {
         argv.push("--allow-unsigned".to_string());
     }
@@ -864,6 +870,9 @@ fn uninstall_argv(args: UninstallArgs, output: OutputMode) -> anyhow::Result<Vec
     }
     if args.dry_run {
         argv.push("--dry-run".to_string());
+    }
+    if let Some(plan_digest) = args.plan_digest {
+        argv.push(format!("--plan-digest={plan_digest}"));
     }
     append_json_flag(&mut argv, output)?;
     Ok(argv)
