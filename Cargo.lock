@@ -29,6 +29,7 @@ dependencies = [
  "http-body-util",
  "httpdate",
  "image",
+ "libc",
  "olpc-cjson",
  "rand 0.8.6",
  "regex",

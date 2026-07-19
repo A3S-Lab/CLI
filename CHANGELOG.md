@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject symbolic-link, non-regular, replaced, or hard-linked component lock
+  files before truncation, and reject symbolic-link lock directories, so a
+  crafted runtime path cannot redirect cross-process lock writes.
 - Wait for the initial A3S Use MCP projection within a separate bounded startup
   budget, so the first model turn receives ready Use routes through `task`.
   Slow or broken surfaces remain non-fatal and continue converging in the
