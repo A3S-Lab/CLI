@@ -82,6 +82,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject symbolic-link, non-regular, replaced, or hard-linked component lock
+  files before truncation, and reject symbolic-link lock directories, so a
+  crafted runtime path cannot redirect cross-process lock writes.
 - Made `a3s web` reuse a healthy instance for the same workspace, quarantine
   stale records, summarize unavailable saved-session models, and refuse to
   signal an unknown listener or an unmanaged A3S process. Release archives and
