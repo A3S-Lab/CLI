@@ -57,6 +57,11 @@ brew install A3S-Lab/tap/a3s
 The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, or Use. This keeps a Code-only installation
 small, while every product still has one public entry point under `a3s`.
+Homebrew and GitHub archives bundle the Web workspace. A Cargo installation
+downloads the CLI's exact-version Web asset on the first `a3s web` start,
+verifies its SHA-256, and caches it in the A3S data directory. `--offline` and
+`A3S_NO_AUTO_INSTALL=1` never perform that download; use `--web-dir` for a
+local build or `--api-only` when no frontend is required.
 
 The Homebrew `a3s` formula also installs the native `a3s-webview` helper on
 macOS. It owns both compact RemoteUI windows and the system-wide Agent Island.
@@ -461,9 +466,12 @@ a3s web start --api-only
 ```
 
 The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
-the TUI. Release archives and installed packages serve their bundled Web
+the TUI. Release archives and Homebrew installations serve their bundled Web
 workspace automatically, including when the selected workspace is empty. A
-source checkout can use `apps/web/dist/workspace`; pass `--web-dir` to select a
+Cargo installation downloads only `a3s-web-v<exact-cli-version>.tar.gz`,
+requires its release SHA-256, rejects links and path traversal, and atomically
+caches the verified workspace under the versioned A3S data directory. A source
+checkout can use `apps/web/dist/workspace`; pass `--web-dir` to select a
 different build or `--api-only` to disable frontend serving. Background mode
 returns only after the service binds successfully and prints its PID, URL, and
 log path (`~/.a3s/logs/web.log` by default).
@@ -474,9 +482,11 @@ instance for that workspace. `--replace` gracefully stops and replaces only an
 instance created by this CLI; `stop` and `--replace` refuse to signal an
 unmanaged A3S server, an unknown process occupying the requested port, or a
 process referenced by a stale record. Stale records are quarantined, and
-`--port 0` selects an available port. Saved sessions whose provider or model is
-no longer configured remain on disk and produce one bounded startup summary
-instead of one warning per session.
+`--port 0` selects an available port. The shared Web-asset cache has its own
+cross-process lock, and a detached start validates a fixed port before any
+first-use download. Saved sessions whose provider or model is no longer
+configured remain on disk and produce one bounded startup summary instead of
+one warning per session.
 
 The bundled frontend renders headings, lists, quotes, tables, links, footnotes,
 inline code, and line-numbered code blocks with a consistent Markdown

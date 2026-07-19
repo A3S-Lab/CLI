@@ -30,7 +30,13 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
         ));
     }
     let argv = start_argv(args, context)?;
-    match crate::api::run_web(&argv).await? {
+    match crate::api::run_web(
+        &argv,
+        context.network.offline,
+        context.network.allow_first_use_install,
+    )
+    .await?
+    {
         crate::api::ServeOutcome::Detached { instance, reused } => {
             let url = (!instance.api_only).then(|| format!("http://{}/", instance.address));
             let api_url = format!("http://{}/api/health", instance.address);

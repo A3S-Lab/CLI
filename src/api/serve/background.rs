@@ -107,6 +107,8 @@ pub(super) async fn start(
         }
         return Ok(BackgroundStart::Existing(existing));
     }
+    ensure_requested_port_available(options).await?;
+    let _prepared_web_root = super::resolve_web_root(options).await?;
 
     let log_path = log_path(&workspace)?;
     if let Some(parent) = log_path.parent() {
@@ -138,6 +140,12 @@ pub(super) async fn start(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    if options.offline {
+        command.env("A3S_OFFLINE", "1");
+    }
+    if !options.allow_asset_download {
+        command.env("A3S_NO_AUTO_INSTALL", "1");
+    }
     configure_detached(&mut command);
 
     let mut child = command
@@ -514,6 +522,27 @@ pub(super) async fn discover_requested_instance(
         options.addr,
         existing.workspace.display()
     )
+}
+
+async fn ensure_requested_port_available(options: &ServeOptions) -> anyhow::Result<()> {
+    if options.addr.port() == 0 {
+        return Ok(());
+    }
+    match tokio::net::TcpListener::bind(options.addr).await {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            bail!(
+                "{} is already in use by another application; no process was stopped. Stop that \
+                 application or select an available port with --port 0",
+                options.addr
+            )
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to validate {} before A3S Web startup", options.addr)),
+    }
 }
 
 async fn discover_matching_instance(options: &ServeOptions) -> anyhow::Result<Option<WebEndpoint>> {

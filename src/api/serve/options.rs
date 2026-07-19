@@ -13,6 +13,8 @@ pub(crate) struct ServeOptions {
     pub(crate) api_only: bool,
     pub(crate) background: bool,
     pub(crate) replace: bool,
+    pub(crate) offline: bool,
+    pub(crate) allow_asset_download: bool,
     pub(crate) help: bool,
 }
 
@@ -29,6 +31,8 @@ impl ServeOptions {
         let mut api_only = false;
         let mut background = false;
         let mut replace = false;
+        let offline = environment_flag("A3S_OFFLINE");
+        let allow_asset_download = !environment_flag("A3S_NO_AUTO_INSTALL");
         let mut help = false;
 
         let mut index = 0;
@@ -81,9 +85,17 @@ impl ServeOptions {
             api_only,
             background,
             replace,
+            offline,
+            allow_asset_download,
             help,
         })
     }
+}
+
+fn environment_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
 }
 
 fn take_value(args: &[String], index: &mut usize, flag: &str) -> anyhow::Result<String> {

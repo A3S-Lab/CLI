@@ -139,13 +139,35 @@ pub struct FakeReleaseServer {
 
 impl FakeReleaseServer {
     pub fn start(repository: &str, version: &str, asset_name: &str, archive: Vec<u8>) -> Self {
+        Self::start_with_advertised_digest(repository, version, asset_name, archive, None)
+    }
+
+    pub fn start_with_digest(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        digest: &str,
+    ) -> Self {
+        Self::start_with_advertised_digest(repository, version, asset_name, archive, Some(digest))
+    }
+
+    fn start_with_advertised_digest(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        advertised_digest: Option<&str>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind release server");
         listener
             .set_nonblocking(true)
             .expect("failed to configure release server");
         let address = listener.local_addr().unwrap();
         let api_base = format!("http://{address}");
-        let digest = format!("{:x}", Sha256::digest(&archive));
+        let digest = advertised_digest
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:x}", Sha256::digest(&archive)));
         let release = serde_json::to_vec(&serde_json::json!({
             "tag_name": format!("v{version}"),
             "body": "fixture",

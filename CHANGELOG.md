@@ -86,7 +86,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale records, summarize unavailable saved-session models, and refuse to
   signal an unknown listener or an unmanaged A3S process. Release archives and
   installation prefixes now serve their packaged Web assets from an otherwise
-  empty workspace.
+  empty workspace. Cargo installations fetch the CLI's exact-version Web
+  release once, verify its SHA-256, safely extract it into a versioned data
+  directory, and reuse that cache across workspaces. Offline and disabled
+  automatic-setup policies remain zero-network, and detached startup checks a
+  foreign port before downloading anything.
 - Applied the same blank-row rhythm to completed reasoning in the semantic
   transcript as live reasoning and assistant Markdown, and revoked Agent
   Island controls immediately when Send now interrupts the active turn.

@@ -218,7 +218,7 @@ jobs:
                  --notes-file release-notes.md --verify-tag --draft
 
   web-assets:
-    needs: release-gate
+    needs: [release-gate, create-release]
     runs-on: ubuntu-latest
     steps:
       - name: Validate Web source revision
@@ -262,6 +262,35 @@ jobs:
         run: bun run build
       - name: Validate Web build
         run: test -f web-source/apps/web/dist/workspace/index.html
+      - name: Package versioned Web release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive_name="a3s-web-v${version}.tar.gz"
+          package_root="$RUNNER_TEMP/a3s-web-package"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          cp -a web-source/apps/web/dist/workspace "$package_root/web"
+          (
+            cd "$package_root"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - web \
+              | gzip -n >"$RUNNER_TEMP/$archive_name"
+          )
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum "$archive_name" >"$archive_name.sha256"
+          )
+          tar -tzf "$RUNNER_TEMP/$archive_name" | grep -Fx 'web/index.html'
+          echo "WEB_RELEASE_ARCHIVE=$RUNNER_TEMP/$archive_name" >>"$GITHUB_ENV"
+          echo "WEB_RELEASE_CHECKSUM=$RUNNER_TEMP/$archive_name.sha256" >>"$GITHUB_ENV"
+      - name: Upload versioned Web release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "$WEB_RELEASE_ARCHIVE" "$WEB_RELEASE_CHECKSUM" \
+            --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload Web workspace
         uses: actions/upload-artifact@v4
         with:
