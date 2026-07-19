@@ -736,9 +736,10 @@ impl App {
         );
         let automatic_delegation = effort_uses_automatic_delegation(profile.effort);
         let mut opts = with_recent_workspace_context(
-            tui_session_options_with_gate_and_execution(
+            tui_session_options_with_gate_grants_and_execution(
                 self.confirmation.clone(),
                 self.deep_research_report_tool_gate.clone(),
+                self.permission_grants.clone(),
                 self.execution_policy.clone(),
             )
             .with_session_store(self.store.clone())
@@ -1195,6 +1196,7 @@ impl App {
                 self.active_plan_draft = None;
                 self.pending_plan_review = None;
                 self.plan_review = None;
+                self.execution_policy.set_mode(self.mode);
                 self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
                 self.queue_retry_attempt = 0;
                 self.completed = 0;

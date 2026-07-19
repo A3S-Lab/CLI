@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added strict two-phase Plan turns with an explicit Approve, Revise, or
   Abandon review boundary, plus `Ctrl+O` Send now for promoting a prompt ahead
   of ordinary queued follow-ups after settling the active turn.
+- Added a scoped Code TUI approval flow with allow-once, exact session grant,
+  exact project grant, and denial-feedback choices. Project grants are bounded,
+  parsed and generated with `a3s-acl`, and atomically stored in
+  `.a3s/permissions.acl` without following symbolic-link targets.
+- Added `/permissions`, a searchable inspector for exact session and project
+  grants. Grant details expose the canonical matching arguments; revocation
+  requires a second matching action and affects future checks only.
 
 ### Fixed
 

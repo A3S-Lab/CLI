@@ -5,6 +5,14 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::ProjectPermissionRevoked {
+                request_id,
+                stable_key,
+                result,
+            } => {
+                self.apply_project_permission_revoke_result(request_id, stable_key, result);
+            }
+
             Msg::BackgroundSubagentFinished {
                 session_id,
                 generation,

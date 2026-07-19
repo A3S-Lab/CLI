@@ -646,6 +646,7 @@ input prefixes:
 /model
 /effort
 /config
+/permissions
 /ide
 /login
 /agent
@@ -779,14 +780,14 @@ instead of rebuilding the full viewport.
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies transcript text on release. |
 | Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, or paste an image with `Ctrl+V`. |
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
-| Approvals | In Default mode, gated tools pause in a confirmation overlay with arguments and result context. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL for an operation that survives explicit hard denials. |
+| Approvals | In Default mode, choose allow once, an exact in-memory session grant, an exact project grant in `.a3s/permissions.acl`, or denial feedback. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL for an operation that survives explicit hard denials. |
 | Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
 | Memory and knowledge | `/memory` opens the durable memory graph. `/ctx` searches past sessions and can attach or save hits. `/kb` opens the local personal knowledge vault. `/okf` manages shareable knowledge packages. |
 | Asset panels | `/agent`, `/mcp`, `/skill`, and `/okf` keep an active local asset visible while you iterate. `/flow` selects or drafts workflow DAG assets for OS Workflow as a Service rather than entering a persistent local dev mode. |
-| Operations panels | `/model`, `/effort`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
+| Operations panels | `/model`, `/effort`, `/permissions`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
 
 Key interactions:
 
@@ -838,16 +839,24 @@ mode; the second enters the session with the goal still paused, where
 `/goal resume` can continue it later.
 
 The TUI owns HITL confirmation for gated tools. In Default mode, mutating tools
-prompt through a wheel-browsable, clickable approval overlay. Shift+Tab cycles
-Default, Plan, and Auto for future submissions. Plan exposes only read-only
-discovery tools. When planning completes, the TUI freezes queue draining at an
-explicit Approve, Revise, or Abandon boundary; approval starts implementation
-as a separate Default turn. Auto resolves allowed tools directly in Core and
-bypasses tool-owned confirmation escalation, so it never opens HITL. Explicit
-policy denials and workspace guardrails remain authoritative, and hard denials
-fail without opening an approval prompt. Tool timeouts and confirmation
-timeouts are tracked separately so a human approval pause does not consume the
-command runtime budget.
+prompt through a wheel-browsable, clickable approval overlay. A decision can
+allow one call, remember the exact capability for this TUI session, atomically
+add it to the project's `.a3s/permissions.acl`, or deny it with feedback for the
+agent. `/permissions` searches both grant scopes, opens the canonical matching
+arguments, and requires a second matching action before revocation. Revocation
+stops future authorization but does not cancel a tool already running.
+
+Shift+Tab cycles Default, Plan, and Auto for future submissions; `/auto`
+selects Auto directly. Each queued turn retains the mode it had when submitted.
+Plan exposes only read-only discovery tools, even when a matching grant exists.
+When planning completes, the TUI freezes queue draining at an explicit Approve,
+Revise, or Abandon boundary; approval starts implementation as a separate
+Default turn. Auto resolves allowed tools directly in Core and bypasses
+tool-owned confirmation escalation, so it never opens HITL. Explicit policy
+denials and workspace guardrails remain authoritative, and hard denials fail
+without opening an approval prompt. Tool and confirmation timeouts are tracked
+separately so a human approval pause does not consume the command runtime
+budget.
 
 All local filesystem work stays under the active workspace services and A3S Code
 permission policy. OS operations require `/login`; before login the TUI can
@@ -1159,6 +1168,7 @@ These commands are available outside the asset-specific flows:
 | `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
+| `/permissions` | Search exact session and project grants, inspect canonical arguments, and revoke with a second matching confirmation. Project changes atomically update `.a3s/permissions.acl`; revocation affects future checks only. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |

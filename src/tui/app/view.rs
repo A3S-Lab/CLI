@@ -147,7 +147,9 @@ impl App {
         self.host_progress_inflight = false;
         self.host_tool_call_id = None;
         self.deep_research_report_tools.clear();
+        self.restore_current_approval_feedback();
         self.pending_tools.clear();
+        self.permission_rule_write_inflight = None;
         self.approval_sel = 0;
         self.interrupting = false;
         self.rebuild_viewport();
@@ -428,6 +430,9 @@ impl App {
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
     pub(super) fn replace_session(&mut self, session: AgentSession) {
+        // Permission rows are scoped to the active session and its shared
+        // grants. Never leave a stale inspector open across replacement.
+        self.permission_panel = None;
         self.session = Arc::new(session);
         let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
@@ -678,25 +683,47 @@ impl App {
         self.textarea.height()
     }
 
-    /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
-    /// a = allow + enable auto-approve for the rest of the session.
+    /// Scoped approval keys. A grant is derived from the authoritative tool
+    /// event, never from the display label.
     pub(super) fn handle_approval_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
+        if self.permission_rule_write_inflight.is_some() {
+            return None;
+        }
+        if self.approval_feedback.is_some() {
+            if key.code == KeyCode::Esc {
+                self.restore_current_approval_feedback();
+                return None;
+            }
+            match self.textarea.handle_key(key) {
+                Some(TextareaMsg::Submit(reason)) if !reason.trim().is_empty() => {
+                    let reason = reason.trim().to_string();
+                    self.restore_current_approval_feedback();
+                    return self.deny_current_approval(&reason).map(cmd::msg);
+                }
+                Some(TextareaMsg::Submit(_)) => return None,
+                Some(TextareaMsg::Changed(_)) => {
+                    self.relayout();
+                    return None;
+                }
+                None => return None,
+            }
+        }
+
         match key.code {
             KeyCode::Up => {
                 self.approval_sel = self.approval_sel.saturating_sub(1);
                 None
             }
             KeyCode::Down => {
-                self.approval_sel = (self.approval_sel + 1).min(2);
+                self.approval_sel = (self.approval_sel + 1).min(3);
                 None
             }
-            // Enter selects the highlighted option (0 yes · 1 always · 2 no).
             KeyCode::Enter => self.apply_approval(self.approval_sel).map(cmd::msg),
             KeyCode::Char('y' | 'Y') => self.apply_approval(0).map(cmd::msg),
-            KeyCode::Char('a' | 'A') => self.apply_approval(1).map(cmd::msg),
-            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.apply_approval(2).map(cmd::msg),
-            // Digit keys pick the numbered option directly (1 Yes · 2 Always · 3 No).
-            KeyCode::Char(c @ '1'..='3') => {
+            KeyCode::Char('s' | 'S') => self.apply_approval(1).map(cmd::msg),
+            KeyCode::Char('p' | 'P') => self.apply_approval(2).map(cmd::msg),
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => self.apply_approval(3).map(cmd::msg),
+            KeyCode::Char(c @ '1'..='4') => {
                 self.apply_approval(c as usize - '1' as usize).map(cmd::msg)
             }
             _ => None,
@@ -707,12 +734,15 @@ impl App {
         if self.state != State::Awaiting {
             return None;
         }
-        let (_, label) = self.pending_tools.front()?;
+        if self.permission_rule_write_inflight.is_some() || self.approval_feedback.is_some() {
+            return None;
+        }
+        let pending = self.pending_tools.front()?;
         let width = (self.width as usize).min(u16::MAX as usize);
         if width == 0 {
             return None;
         }
-        let mut prompt = approval_prompt(label, self.approval_sel);
+        let mut prompt = approval_prompt(&pending.label, self.approval_sel);
         let row_count = prompt.lines(width).len();
         if row_count == 0 {
             return None;
@@ -730,7 +760,7 @@ impl App {
         match prompt.handle_mouse(mouse, width) {
             Some(ApprovalPromptMsg::Selected(index)) => self.apply_approval(index).map(cmd::msg),
             None => {
-                let after = prompt.selected_index().min(2);
+                let after = prompt.selected_index().min(3);
                 if after != before {
                     self.approval_sel = after;
                 }
@@ -740,20 +770,82 @@ impl App {
     }
 
     pub(super) fn apply_approval(&mut self, choice: usize) -> Option<Msg> {
-        let tool_id = self.pending_tools.front()?.0.clone();
-        let (approved, approve_all_pending) = match choice {
-            0 => (true, false), // yes, once
+        let pending = self.pending_tools.front()?.clone();
+        match choice {
+            0 => Some(Msg::ModalConfirm {
+                tool_id: pending.tool_id,
+                approved: true,
+                reason: None,
+            }),
             1 => {
-                self.set_composer_mode(Mode::Auto); // yes, and stop asking
-                (true, true)
+                self.permission_grants
+                    .allow_for_session(pending.grant.clone());
+                self.refresh_permission_panel_grants();
+                Some(Msg::ModalConfirm {
+                    tool_id: pending.tool_id,
+                    approved: true,
+                    reason: None,
+                })
             }
-            _ => (false, false), // no
-        };
+            2 => {
+                if self.project_permission_revoke_inflight.is_some() {
+                    self.push_notice(
+                        NoticeKind::Warning,
+                        "A project permission revocation is running; wait before saving another project rule",
+                    );
+                    return None;
+                }
+                self.permission_rule_write_inflight = Some(pending.tool_id.clone());
+                Some(Msg::PersistProjectPermission {
+                    tool_id: pending.tool_id,
+                    grant: pending.grant,
+                })
+            }
+            _ => {
+                self.begin_approval_feedback(&pending.tool_id);
+                None
+            }
+        }
+    }
+
+    pub(super) fn deny_current_approval(&self, reason: &str) -> Option<Msg> {
+        let tool_id = self.pending_tools.front()?.tool_id.clone();
         Some(Msg::ModalConfirm {
             tool_id,
-            approved,
-            approve_all_pending,
+            approved: false,
+            reason: Some(reason.trim().to_string()),
         })
+    }
+
+    fn begin_approval_feedback(&mut self, tool_id: &str) {
+        if self.approval_feedback.is_some() {
+            return;
+        }
+        self.approval_feedback = Some(ApprovalFeedback {
+            tool_id: tool_id.to_string(),
+            stashed_composer: self.textarea.value(),
+        });
+        self.textarea.clear();
+        self.approval_sel = 3;
+        self.relayout();
+    }
+
+    pub(super) fn restore_current_approval_feedback(&mut self) {
+        let Some(feedback) = self.approval_feedback.take() else {
+            return;
+        };
+        self.textarea.set_value(&feedback.stashed_composer);
+        self.relayout();
+    }
+
+    pub(super) fn restore_approval_feedback_for(&mut self, tool_id: &str) {
+        if self
+            .approval_feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.tool_id == tool_id)
+        {
+            self.restore_current_approval_feedback();
+        }
     }
 
     /// Tool-approval options panel (Claude-style numbered choices).
@@ -761,10 +853,17 @@ impl App {
         if self.state != State::Awaiting {
             return composed;
         }
-        let Some((_, label)) = self.pending_tools.front() else {
+        let Some(pending) = self.pending_tools.front() else {
             return composed;
         };
-        let menu = approval_menu_lines(label, self.approval_sel, self.width as usize);
+        let prompt = approval_prompt(&pending.label, self.approval_sel)
+            .with_denial_feedback(self.approval_feedback.is_some())
+            .with_project_rule_saving(
+                self.permission_rule_write_inflight
+                    .as_deref()
+                    .is_some_and(|tool_id| tool_id == pending.tool_id.as_str()),
+            );
+        let menu = prompt.lines(self.width as usize);
         self.overlay_list_with_rows_below(composed, &menu, self.approval_rows_below())
     }
 

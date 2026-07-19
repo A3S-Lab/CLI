@@ -811,6 +811,11 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
+            "/permissions" => {
+                self.textarea.clear();
+                self.open_permission_panel();
+                return None;
+            }
             "/auto" => {
                 self.set_composer_mode(Mode::Auto);
                 self.textarea.clear();

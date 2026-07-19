@@ -14,10 +14,10 @@ pub(super) fn with_recent_workspace_context(
 pub(super) fn tui_session_options(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
 ) -> SessionOptions {
-    tui_session_options_with_gate_and_execution(
+    tui_session_options_with_gate_and_grants(
         confirmation,
         DeepResearchReportToolGate::default(),
-        TuiExecutionPolicy::default(),
+        TuiPermissionGrants::default(),
     )
 }
 
@@ -26,16 +26,44 @@ pub(super) fn tui_session_options_with_gate(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> SessionOptions {
-    tui_session_options_with_gate_and_execution(
+    tui_session_options_with_gate_and_grants(
         confirmation,
         deep_research_report_tool_gate,
+        TuiPermissionGrants::default(),
+    )
+}
+
+pub(super) fn tui_session_options_with_gate_and_grants(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
+) -> SessionOptions {
+    tui_session_options_with_gate_grants_and_execution(
+        confirmation,
+        deep_research_report_tool_gate,
+        permission_grants,
         TuiExecutionPolicy::default(),
     )
 }
 
+#[cfg(test)]
 pub(super) fn tui_session_options_with_gate_and_execution(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
+    execution_policy: TuiExecutionPolicy,
+) -> SessionOptions {
+    tui_session_options_with_gate_grants_and_execution(
+        confirmation,
+        deep_research_report_tool_gate,
+        TuiPermissionGrants::default(),
+        execution_policy,
+    )
+}
+
+pub(super) fn tui_session_options_with_gate_grants_and_execution(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
     execution_policy: TuiExecutionPolicy,
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
@@ -45,11 +73,14 @@ pub(super) fn tui_session_options_with_gate_and_execution(
         .with_auto_compact(false)
         .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy.clone())
-        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::with_execution(
-            permission_policy,
-            deep_research_report_tool_gate,
-            execution_policy,
-        )))
+        .with_permission_checker(Arc::new(
+            TuiHitlPermissionChecker::with_grants_and_execution(
+                permission_policy,
+                deep_research_report_tool_gate,
+                permission_grants,
+                execution_policy,
+            ),
+        ))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
 }
@@ -147,7 +178,8 @@ impl TuiExecutionPolicy {
     ///
     /// `None` keeps the interactive Default/Plan flow. Auto always returns a
     /// decision: non-denied calls are approved and hard-denied calls are
-    /// rejected.
+    /// rejected. Keeping both Auto outcomes non-interactive prevents a stale
+    /// or third-party confirmation event from opening an authorization modal.
     pub(super) fn auto_confirmation_decision(
         &self,
         tool_name: &str,
@@ -171,8 +203,8 @@ impl TuiExecutionPolicy {
 ///
 /// Permission `Allow` normally bypasses HITL, but tool-owned metadata may
 /// explicitly request a second confirmation check. Auto remains
-/// non-interactive through that path; hard denials are resolved earlier by the
-/// permission checker.
+/// non-interactive through that path; hard denials are still resolved earlier
+/// by the permission checker.
 struct TuiModeConfirmationProvider {
     inner: Arc<a3s_code_core::hitl::ConfirmationManager>,
     execution_policy: TuiExecutionPolicy,
@@ -421,6 +453,7 @@ pub(super) fn should_delay_deep_research_report_tool(
 pub(super) struct TuiHitlPermissionChecker {
     base: a3s_code_core::permissions::PermissionPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
     execution_policy: TuiExecutionPolicy,
 }
 
@@ -430,21 +463,37 @@ impl TuiHitlPermissionChecker {
         base: a3s_code_core::permissions::PermissionPolicy,
         deep_research_report_tool_gate: DeepResearchReportToolGate,
     ) -> Self {
-        Self::with_execution(
+        Self::with_grants(
             base,
             deep_research_report_tool_gate,
+            TuiPermissionGrants::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_grants(
+        base: a3s_code_core::permissions::PermissionPolicy,
+        deep_research_report_tool_gate: DeepResearchReportToolGate,
+        permission_grants: TuiPermissionGrants,
+    ) -> Self {
+        Self::with_grants_and_execution(
+            base,
+            deep_research_report_tool_gate,
+            permission_grants,
             TuiExecutionPolicy::default(),
         )
     }
 
-    pub(super) fn with_execution(
+    pub(super) fn with_grants_and_execution(
         base: a3s_code_core::permissions::PermissionPolicy,
         deep_research_report_tool_gate: DeepResearchReportToolGate,
+        permission_grants: TuiPermissionGrants,
         execution_policy: TuiExecutionPolicy,
     ) -> Self {
         Self {
             base,
             deep_research_report_tool_gate,
+            permission_grants,
             execution_policy,
         }
     }
@@ -499,9 +548,14 @@ impl TuiHitlPermissionChecker {
         }
         if !evidence_collection {
             match self.execution_policy.mode() {
+                // Auto means non-interactive execution. The hard base and
+                // workspace denials above remain authoritative; every other
+                // operation proceeds without entering HITL.
                 Mode::Auto => {
                     return a3s_code_core::permissions::PermissionDecision::Allow;
                 }
+                // Plan is a true read-only boundary. A remembered grant must
+                // never turn a planning turn into an implementation turn.
                 Mode::Plan => {
                     return if plan_tool_is_read_only(&tool)
                         && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
@@ -512,6 +566,9 @@ impl TuiHitlPermissionChecker {
                     };
                 }
                 Mode::Default => {}
+            }
+            if self.permission_grants.allows(&tool, args) {
+                return a3s_code_core::permissions::PermissionDecision::Allow;
             }
         }
         let decision =
@@ -624,9 +681,10 @@ mod execution_policy_tests {
         let gate = DeepResearchReportToolGate::default();
         gate.set_workspace(workspace);
         let execution = TuiExecutionPolicy::new(mode);
-        let checker = TuiHitlPermissionChecker::with_execution(
+        let checker = TuiHitlPermissionChecker::with_grants_and_execution(
             tui_permission_policy(),
             gate,
+            TuiPermissionGrants::default(),
             execution.clone(),
         );
         (checker, execution)
@@ -732,6 +790,36 @@ mod execution_policy_tests {
         );
     }
 
+    #[test]
+    fn plan_mode_is_read_only_even_with_session_grants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gate = DeepResearchReportToolGate::default();
+        gate.set_workspace(workspace.path());
+        let grants = TuiPermissionGrants::default();
+        grants.allow_for_session(ExactPermissionGrant::from_invocation(
+            "write",
+            &serde_json::json!({"file_path": "README.md", "content": "old"}),
+        ));
+        let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+            tui_permission_policy(),
+            gate,
+            grants,
+            TuiExecutionPolicy::new(Mode::Plan),
+        );
+
+        assert_eq!(
+            checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({"file_path": "README.md", "content": "new"})
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
     #[tokio::test]
     async fn auto_mode_bypasses_tool_owned_confirmation_escalation() {
         let execution = TuiExecutionPolicy::new(Mode::Default);
@@ -764,9 +852,10 @@ mod execution_policy_tests {
     #[tokio::test]
     async fn session_options_share_one_execution_policy_across_both_hitl_layers() {
         let execution = TuiExecutionPolicy::new(Mode::Default);
-        let options = tui_session_options_with_gate_and_execution(
+        let options = tui_session_options_with_gate_grants_and_execution(
             a3s_code_core::hitl::ConfirmationPolicy::enabled(),
             DeepResearchReportToolGate::default(),
+            TuiPermissionGrants::default(),
             execution.clone(),
         );
         let checker = options

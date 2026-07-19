@@ -324,6 +324,10 @@ fn help_panel() -> HelpPanel {
                     "memory graph with entities, tiers, aliases, and forget candidates",
                 )
                 .row(
+                    "/permissions",
+                    "search exact session/project grants, inspect arguments, and revoke with confirmation",
+                )
+                .row(
                     "/model",
                     "configured models plus Claude/Codex/Kimi/WorkBuddy/OS gateway tabs",
                 )

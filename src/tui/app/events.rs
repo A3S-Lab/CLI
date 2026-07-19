@@ -423,6 +423,23 @@ impl App {
                 args,
                 ..
             } => {
+                if let Some(approved) = self.execution_policy.auto_confirmation_decision(
+                    &tool_name,
+                    &args,
+                    Path::new(&self.cwd),
+                ) {
+                    // Auto owns the decision before any approval projection is
+                    // created. This keeps late or tool-owned confirmation
+                    // events from flashing "Awaiting approval" in the
+                    // transcript or runtime panel.
+                    let session = self.session.clone();
+                    let reason =
+                        (!approved).then(|| "Denied by the Auto mode hard guardrail.".to_string());
+                    return Some(cmd::cmd(move || async move {
+                        let _ = session.confirm_tool_use(&tool_id, approved, reason).await;
+                        Msg::Resume
+                    }));
+                }
                 self.runtime
                     .await_approval(tool_id.clone(), tool_name.clone(), args.clone());
                 if presentation_policy(&tool_name) == ToolPresentationPolicy::PinnedOnly {
@@ -440,30 +457,14 @@ impl App {
                     );
                 }
                 self.update_viewport_with_stream();
-                if let Some(approved) = self.execution_policy.auto_confirmation_decision(
-                    &tool_name,
-                    &args,
-                    Path::new(&self.cwd),
-                ) {
-                    // Auto is non-interactive in both directions: approve calls
-                    // that survive the hard guardrail and reject hard denials.
-                    // Do NOT start another spinner tick here — the turn's tick
-                    // loop is already running.
-                    let session = self.session.clone();
-                    let reason =
-                        (!approved).then(|| "Denied by the Auto mode hard guardrail.".to_string());
-                    return Some(cmd::cmd(move || async move {
-                        let _ = session.confirm_tool_use(&tool_id, approved, reason).await;
-                        Msg::Resume
-                    }));
-                }
                 // Claude-style: no "requests:" transcript line — the prompt on
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.
                 let was_empty = self.pending_tools.is_empty();
                 self.state = State::Awaiting;
                 let label = tool_approval_label(&tool_name, Some(&args));
-                self.pending_tools.push_back((tool_id, label));
+                self.pending_tools
+                    .push_back(PendingToolApproval::new(tool_id, tool_name, args, label));
                 if was_empty {
                     self.approval_sel = 0;
                 }
@@ -477,7 +478,8 @@ impl App {
                 approved,
                 reason,
             } => {
-                let pending = take_pending_tool_label(&mut self.pending_tools, &tool_id);
+                self.restore_approval_feedback_for(&tool_id);
+                let pending = take_pending_tool_approval(&mut self.pending_tools, &tool_id);
                 if !approved {
                     let reason = reason
                         .filter(|value| !value.trim().is_empty())
@@ -503,7 +505,8 @@ impl App {
                 tool_id,
                 action_taken,
             } => {
-                let pending = take_pending_tool_label(&mut self.pending_tools, &tool_id);
+                self.restore_approval_feedback_for(&tool_id);
+                let pending = take_pending_tool_approval(&mut self.pending_tools, &tool_id);
                 if let Some(completed) = self.runtime.timeout_tool(&tool_id, &action_taken) {
                     self.push_terminal_tool(completed);
                 }

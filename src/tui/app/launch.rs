@@ -477,6 +477,19 @@ pub(crate) async fn run_in(
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
+    let project_permission_rules_path = project_permission_rules_path(Path::new(&workspace));
+    let permission_rules_to_load = project_permission_rules_path.clone();
+    let project_permission_load = tokio::task::spawn_blocking(move || {
+        load_project_permission_grants(&permission_rules_to_load)
+    })
+    .await
+    .map_err(|error| format!("permission rule loader failed: {error}"))
+    .and_then(|result| result);
+    let (project_permission_grants, project_permission_load_error) = match project_permission_load {
+        Ok(grants) => (grants, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
     let execution_policy = TuiExecutionPolicy::new(initial_mode);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
@@ -528,9 +541,10 @@ pub(crate) async fn run_in(
             session_id.as_str(),
             apply_launch_model_options(
                 with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate_and_execution(
+                    tui_session_options_with_gate_grants_and_execution(
                         confirmation.clone(),
                         deep_research_report_tool_gate.clone(),
+                        permission_grants.clone(),
                         execution_policy.clone(),
                     )
                     .with_session_store(store.clone())
@@ -570,9 +584,10 @@ pub(crate) async fn run_in(
                     workspace.clone(),
                     Some(apply_launch_model_options(
                         with_instr(with_recent_workspace_context(
-                            tui_session_options_with_gate_and_execution(
+                            tui_session_options_with_gate_grants_and_execution(
                                 confirmation.clone(),
                                 deep_research_report_tool_gate.clone(),
+                                permission_grants.clone(),
                                 execution_policy.clone(),
                             )
                             .with_session_store(store.clone())
@@ -765,6 +780,7 @@ pub(crate) async fn run_in(
         model_tab: 0,
         relay_panel: None,
         relay_scan_seq: 0,
+        permission_panel: None,
         codex_account_models: crate::account_providers::codex::cached_codex_models(),
         codex_models_loading: false,
         codex_models_refreshed_at: None,
@@ -888,7 +904,13 @@ pub(crate) async fn run_in(
         host_tool_call_id: None,
         interrupting: false,
         pending_tools: VecDeque::new(),
+        permission_grants,
         execution_policy,
+        project_permission_rules_path,
+        permission_rule_write_inflight: None,
+        project_permission_revoke_seq: 0,
+        project_permission_revoke_inflight: None,
+        approval_feedback: None,
         approval_sel: 0,
         history: history_seed,
         history_pos: None,
@@ -937,6 +959,13 @@ pub(crate) async fn run_in(
         height,
         keymap,
     };
+
+    if let Some(error) = project_permission_load_error {
+        app.push_notice(
+            NoticeKind::Warning,
+            format!("Project permission rules were ignored: {error}"),
+        );
+    }
 
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {

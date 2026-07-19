@@ -9,7 +9,7 @@ use a3s_tui::style::{fit_visible, strip_ansi, truncate_visible, visible_len, wra
 
 use super::{SURFACE_SELECTED, TN_FG, TN_GRAY, TN_RED, TN_SUBTLE, TN_YELLOW};
 
-const OPTION_COUNT: usize = 3;
+const OPTION_COUNT: usize = 4;
 const MAX_DETAIL_ROWS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub(super) struct ApprovalPrompt {
     label: String,
     selected: usize,
     y_offset: u16,
+    denial_feedback: bool,
+    saving_project_rule: bool,
 }
 
 impl ApprovalPrompt {
@@ -32,12 +34,31 @@ impl ApprovalPrompt {
             label: sanitize_label(&label.into()),
             selected: selected.min(OPTION_COUNT - 1),
             y_offset: 0,
+            denial_feedback: false,
+            saving_project_rule: false,
         }
+    }
+
+    pub(super) fn with_denial_feedback(mut self, enabled: bool) -> Self {
+        self.denial_feedback = enabled;
+        self
+    }
+
+    pub(super) fn with_project_rule_saving(mut self, enabled: bool) -> Self {
+        self.saving_project_rule = enabled;
+        self
     }
 
     pub(super) fn lines(&self, width: usize) -> Vec<String> {
         if width == 0 {
             return Vec::new();
+        }
+
+        if self.denial_feedback {
+            return self.denial_feedback_lines(width);
+        }
+        if self.saving_project_rule {
+            return self.project_rule_saving_lines(width);
         }
 
         let mut lines = vec![self.title_line(width)];
@@ -70,7 +91,7 @@ impl ApprovalPrompt {
         mouse: &MouseEvent,
         width: usize,
     ) -> Option<ApprovalPromptMsg> {
-        if width == 0 {
+        if width == 0 || self.denial_feedback || self.saving_project_rule {
             return None;
         }
         let local_row = mouse.row.checked_sub(self.y_offset)? as usize;
@@ -146,8 +167,9 @@ impl ApprovalPrompt {
     fn option_line(&self, index: usize, width: usize) -> String {
         let (glyph, label, glyph_color) = match index {
             0 => ("↵", "Allow once", TN_SUBTLE),
-            1 => ("∞", "Enable auto mode", TN_SUBTLE),
-            _ => ("⊘", "Deny", TN_RED),
+            1 => ("◎", "Allow exact capability for this session", TN_SUBTLE),
+            2 => ("⌘", "Add exact capability rule to project", TN_SUBTLE),
+            _ => ("⊘", "Deny and tell the agent why", TN_RED),
         };
         let marker = if index == self.selected_index() {
             "❯"
@@ -168,6 +190,48 @@ impl ApprovalPrompt {
         let glyph = Style::new().fg(glyph_color).render(glyph);
         let label = Style::new().fg(TN_FG).render(&format!(" {label}"));
         fit_visible(&format!("{prefix}{glyph}{label}"), width)
+    }
+
+    fn denial_feedback_lines(&self, width: usize) -> Vec<String> {
+        let prefix = indent(width);
+        let glyph = Style::new().fg(TN_RED).bold().render("⊘");
+        let title = Style::new()
+            .fg(TN_FG)
+            .bold()
+            .render("Tell the agent what to do instead");
+        let mut lines = vec![fit_visible(&format!("{prefix}{glyph} {title}"), width)];
+        lines.extend(self.detail_lines(width));
+        lines.push(fit_visible(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render(&format!("{prefix}Type guidance in the composer below.")),
+            width,
+        ));
+        lines.push(fit_visible(
+            &Style::new()
+                .fg(TN_SUBTLE)
+                .render(&format!("{prefix}Enter deny with feedback · Esc back")),
+            width,
+        ));
+        lines
+    }
+
+    fn project_rule_saving_lines(&self, width: usize) -> Vec<String> {
+        let prefix = indent(width);
+        let glyph = Style::new().fg(TN_YELLOW).bold().render("◆");
+        let title = Style::new()
+            .fg(TN_FG)
+            .bold()
+            .render("Saving project permission rule…");
+        let mut lines = vec![fit_visible(&format!("{prefix}{glyph} {title}"), width)];
+        lines.extend(self.detail_lines(width));
+        lines.push(fit_visible(
+            &Style::new().fg(TN_SUBTLE).render(&format!(
+                "{prefix}The tool remains paused until the ACL write succeeds."
+            )),
+            width,
+        ));
+        lines
     }
 }
 
@@ -207,7 +271,7 @@ mod tests {
     #[test]
     fn approval_surface_uses_semantic_glyphs_and_neutral_labels() {
         let prompt = ApprovalPrompt::new("Bash(cargo test --workspace)", 0);
-        let lines = prompt.lines(48);
+        let lines = prompt.lines(72);
         let plain = lines
             .iter()
             .map(|line| strip_ansi(line))
@@ -221,11 +285,16 @@ mod tests {
         assert!(plain.iter().any(|line| line.contains("1  ↵ Allow once")));
         assert!(plain
             .iter()
-            .any(|line| line.contains("2  ∞ Enable auto mode")));
-        assert!(plain.iter().any(|line| line.contains("3  ⊘ Deny")));
+            .any(|line| line.contains("2  ◎ Allow exact capability for this session")));
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("3  ⌘ Add exact capability rule to project")));
+        assert!(plain
+            .iter()
+            .any(|line| line.contains("4  ⊘ Deny and tell the agent why")));
         assert!(lines[0].contains(&TN_YELLOW.fg_ansi()));
         assert!(lines.iter().any(|line| line.contains(&TN_RED.fg_ansi())));
-        assert!(lines.iter().all(|line| visible_len(line) == 48));
+        assert!(lines.iter().all(|line| visible_len(line) == 72));
     }
 
     #[test]
@@ -233,10 +302,25 @@ mod tests {
         let prompt = ApprovalPrompt::new(format!("Bash({})", "command ".repeat(40)), 1);
         for width in [24, 42, 80] {
             let lines = prompt.lines(width);
-            assert!(lines.len() <= 7, "{lines:?}");
+            assert!(lines.len() <= 8, "{lines:?}");
             assert_eq!(prompt.choice_start_row(width), 3);
             assert!(lines.iter().all(|line| visible_len(line) == width));
             assert!(strip_ansi(&lines[2]).contains('…'));
         }
+    }
+
+    #[test]
+    fn denial_feedback_replaces_choices_with_composer_guidance() {
+        let prompt = ApprovalPrompt::new("Write(src/lib.rs)", 3).with_denial_feedback(true);
+        let plain = prompt
+            .lines(56)
+            .into_iter()
+            .map(|line| strip_ansi(&line))
+            .collect::<Vec<_>>();
+
+        assert!(plain[0].contains("Tell the agent what to do instead"));
+        assert!(plain.iter().any(|line| line.contains("Type guidance")));
+        assert!(plain.iter().any(|line| line.contains("Enter deny")));
+        assert!(!plain.iter().any(|line| line.contains("Allow once")));
     }
 }
