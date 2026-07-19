@@ -37,6 +37,7 @@ pub enum UpdateState {
 pub enum Trust {
     FirstParty,
     LocalExplicit,
+    RegistryTuf,
     Untrusted,
     NotApplicable,
 }

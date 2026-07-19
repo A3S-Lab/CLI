@@ -62,9 +62,13 @@ impl TlsRoots {
                 )
             })?;
         }
-        Ok(ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth())
+        Ok(
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .context("configure Codex WebSocket TLS protocol versions")?
+                .with_root_certificates(roots)
+                .with_no_client_auth(),
+        )
     }
 
     pub(super) fn add_to_reqwest(
