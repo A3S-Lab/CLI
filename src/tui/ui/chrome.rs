@@ -141,6 +141,14 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/tasks",
         "inspect delegated work · search, view output, or cancel safely",
     ),
+    (
+        "/copy",
+        "copy the latest response · add `transcript` for the semantic session",
+    ),
+    (
+        "/export",
+        "write a new Markdown session file · optional workspace-relative path",
+    ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
     (
         "/flow",

@@ -697,6 +697,12 @@ impl App {
                 }
             }
         }
+        if let Some(rest) = slash_tail(trimmed, "/copy") {
+            return self.submit_copy_command(rest);
+        }
+        if let Some(rest) = slash_tail(trimmed, "/export") {
+            return self.submit_export_command(rest);
+        }
         // Slash commands run inline in any state.
         match trimmed {
             "/exit" => return self.begin_graceful_quit(),

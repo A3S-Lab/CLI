@@ -301,6 +301,8 @@ mod app_projections;
 mod app_research;
 #[path = "app/runtime.rs"]
 mod app_runtime;
+#[path = "app/session_share.rs"]
+mod app_session_share;
 #[path = "app/session_state.rs"]
 mod app_session_state;
 #[path = "app/smoke.rs"]

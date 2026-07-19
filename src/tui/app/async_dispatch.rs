@@ -315,6 +315,30 @@ impl App {
                 let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
                 self.push_line(&gutter(TN_GRAY, body.trim_end()));
             }
+            Msg::SessionExported {
+                status_entry,
+                result,
+            } => match result {
+                Ok((path, bytes)) => {
+                    let shown = path
+                        .strip_prefix(Path::new(&self.cwd))
+                        .unwrap_or(path.as_path());
+                    self.replace_tracked_line(
+                        status_entry,
+                        &Style::new().fg(TN_GREEN).render(&format!(
+                            "  ✓ exported session → {} · {}",
+                            shown.display(),
+                            panels::spf::human_size(bytes)
+                        )),
+                    );
+                }
+                Err(error) => self.replace_tracked_line(
+                    status_entry,
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  session export failed: {error}")),
+                ),
+            },
             Msg::ResearchDiagnostic(result) => match result {
                 Ok(text) => self.push_line(&gutter(TN_CYAN, &text)),
                 Err(error) => self.push_line(

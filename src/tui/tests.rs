@@ -5944,6 +5944,25 @@ fn osc52_wraps_base64_in_envelope() {
 }
 
 #[test]
+fn osc52_bounds_utf8_bytes_without_splitting_a_character() {
+    use base64::Engine;
+
+    let source = "界".repeat(OSC52_PAYLOAD_BYTE_LIMIT);
+    let envelope = osc52_copy(&source);
+    let encoded = envelope
+        .strip_prefix("\u{1b}]52;c;")
+        .and_then(|value| value.strip_suffix('\u{7}'))
+        .unwrap();
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+
+    assert!(payload.len() <= OSC52_PAYLOAD_BYTE_LIMIT);
+    assert!(std::str::from_utf8(&payload).is_ok());
+    assert!(payload.len() < source.len());
+}
+
+#[test]
 fn slice_cols_handles_ascii_and_wide() {
     assert_eq!(slice_cols("hello", 1, 4), "ell");
     assert_eq!(slice_cols("hello", 0, 100), "hello");
@@ -8710,6 +8729,8 @@ fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
 fn registered_slash_commands_have_declared_handler_paths() {
     let parameterized = HashSet::from([
         "/login",
+        "/copy",
+        "/export",
         "/ctx",
         "/kb",
         "/okf",
@@ -8807,6 +8828,18 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/tasks",
             handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/copy",
+            handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/export",
+            handler: Parameterized,
             idle_only: false,
             scope: Local,
         },
@@ -9008,6 +9041,8 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 
     let parameterized_names = HashSet::from([
         "/login",
+        "/copy",
+        "/export",
         "/ctx",
         "/kb",
         "/okf",

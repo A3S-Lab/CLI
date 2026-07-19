@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `A3S_NO_AUTO_INSTALL=1` remain strict zero-network, zero-receipt boundaries.
   Browser, native Office, built-in OCR, and verified external MCP/Skill
   surfaces are then projected into the dedicated restricted `use` worker.
+- Added `/history` and `Ctrl+R` fuzzy prompt search for the current TUI
+  session, with bounded results, keyboard and mouse navigation, and draft-safe
+  selection.
+- Added reliable TUI session sharing. `/copy` copies the latest assistant
+  source Markdown, `/copy transcript` requests the complete semantic session
+  through the native clipboard or bounded OSC 52 path, and `/export [path]`
+  atomically creates a private no-clobber Markdown snapshot inside the current
+  workspace. Exports preserve visible messages, tools, and delegated results
+  while excluding private reasoning, transient terminal chrome, and hidden
+  duplicate cells.
 
 ### Changed
 
@@ -59,9 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget, so the first model turn receives ready Use routes through `task`.
   Slow or broken surfaces remain non-fatal and continue converging in the
   background.
-- Added `/history` and `Ctrl+R` fuzzy prompt search for the current TUI
-  session, with bounded results, keyboard and mouse navigation, and draft-safe
-  selection.
 
 ## [0.9.6] - 2026-07-17
 

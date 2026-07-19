@@ -393,6 +393,11 @@ pub(super) enum Msg {
     },
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
+    /// Atomic, no-clobber Markdown export of the current semantic transcript.
+    SessionExported {
+        status_entry: TranscriptEntryId,
+        result: Result<(PathBuf, u64), String>,
+    },
     ResearchDiagnostic(Result<String, String>),
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
     DeepResearchWorkflowCompleted {
