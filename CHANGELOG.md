@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added reliable TUI session sharing. `/copy` copies the latest assistant
+  source Markdown, `/copy transcript` requests the complete semantic session
+  through the native clipboard or bounded OSC 52 path, and `/export [path]`
+  atomically creates a private no-clobber Markdown snapshot inside the current
+  workspace. Exports preserve visible messages, tools, and delegated results
+  while excluding private reasoning, transient terminal chrome, and hidden
+  duplicate cells.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

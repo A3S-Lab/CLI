@@ -1151,6 +1151,8 @@ These commands are available outside the asset-specific flows:
 | `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
+| `/copy` / `/copy transcript` | Copy the latest assistant source Markdown or the complete semantic session. Native clipboard delivery is reported only when verified; otherwise the TUI identifies the OSC 52 request and its 64,000-byte UTF-8 payload limit. |
+| `/export [path]` | Atomically create a private Markdown session snapshot at a workspace-relative path. With no path, generate a unique session-and-time filename; never overwrite an existing target. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |
@@ -1170,6 +1172,13 @@ These commands are available outside the asset-specific flows:
 | `/plugin` / `/reload` | Manage and hot-reload skills/plugins, including wheel browsing and click-to-toggle skill state in the TUI. |
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
+
+Session copy/export uses the raw semantic transcript rather than terminal-wrapped
+ANSI output. It preserves user and assistant Markdown, visible tool lifecycle
+and output, and visible delegated-task results. Private reasoning, transient UI
+notices, terminal-width-dependent rows, and hidden duplicate cells are excluded.
+An explicit export path must stay inside the workspace, its parent directory
+must already exist, and an existing file or escaping symlink is rejected.
 
 A3S Code auto-discovers `SKILL.md` skills from project and user roots:
 `.a3s/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`, plus

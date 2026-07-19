@@ -133,6 +133,14 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
+    (
+        "/copy",
+        "copy the latest response · add `transcript` for the semantic session",
+    ),
+    (
+        "/export",
+        "write a new Markdown session file · optional workspace-relative path",
+    ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
     (
         "/flow",

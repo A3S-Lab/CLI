@@ -8,6 +8,14 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "/login <token>",
         "sign in with a copied OS access token instead of browser auth",
     ),
+    (
+        "/copy [transcript]",
+        "copy the latest response or the complete semantic session Markdown",
+    ),
+    (
+        "/export [path]",
+        "atomically create a Markdown session file inside the workspace",
+    ),
     ("/ctx <query>", "search past ctx-indexed agent sessions"),
     (
         "/ctx <n>",

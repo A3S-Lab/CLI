@@ -214,11 +214,24 @@ pub(super) fn fit_viewport_row(row: &str, width: usize) -> String {
 /// The OSC 52 escape that asks the terminal to set the system clipboard to
 /// `text` (base64). Works over SSH on terminals that support OSC 52. Capped so a
 /// long reply can't blow past a terminal's OSC 52 size limit.
+pub(super) const OSC52_PAYLOAD_BYTE_LIMIT: usize = 64_000;
+
 pub(super) fn osc52_copy(text: &str) -> String {
     use base64::Engine;
-    let capped: String = text.chars().take(64_000).collect();
+    let capped = osc52_payload(text);
     let b64 = base64::engine::general_purpose::STANDARD.encode(capped.as_bytes());
     format!("\x1b]52;c;{b64}\x07")
+}
+
+fn osc52_payload(text: &str) -> &str {
+    if text.len() <= OSC52_PAYLOAD_BYTE_LIMIT {
+        return text;
+    }
+    let mut end = OSC52_PAYLOAD_BYTE_LIMIT;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &text[..end]
 }
 
 /// Marker the agent puts inline in its reply to offer the RemoteUI popup. The
@@ -238,24 +251,55 @@ pub(super) fn remote_view_button(detail: &str) -> String {
         .view()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ClipboardCopyOutcome {
+    /// The terminal accepted the OSC 52 request on stdout. The terminal may
+    /// still decline it according to its own clipboard policy.
+    pub(super) terminal_requested: bool,
+    /// A platform clipboard helper completed successfully.
+    pub(super) native_delivered: bool,
+    /// OSC 52 carried only the bounded prefix of a larger payload.
+    pub(super) terminal_truncated: bool,
+    /// Number of complete UTF-8 characters carried by the OSC 52 payload.
+    pub(super) terminal_character_count: usize,
+}
+
 /// Put `text` on the system clipboard: OSC 52 (portable, survives SSH on
 /// supporting terminals) plus the native tool where we have one (macOS pbcopy).
-pub(super) fn copy_to_clipboard(text: &str) {
+/// The outcome distinguishes a terminal request from verified native delivery.
+pub(super) fn copy_to_clipboard(text: &str) -> ClipboardCopyOutcome {
     use std::io::Write;
     let mut out = std::io::stdout();
-    let _ = out.write_all(osc52_copy(text).as_bytes());
-    let _ = out.flush();
+    let terminal_requested = out
+        .write_all(osc52_copy(text).as_bytes())
+        .and_then(|()| out.flush())
+        .is_ok();
+    let terminal_payload = osc52_payload(text);
+    let terminal_truncated = terminal_payload.len() < text.len();
+    let terminal_character_count = terminal_payload.chars().count();
     #[cfg(target_os = "macos")]
-    {
+    let native_delivered = {
+        let mut delivered = false;
         if let Ok(mut child) = std::process::Command::new("pbcopy")
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
+            let wrote = child
+                .stdin
+                .take()
+                .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+            let succeeded = child.wait().is_ok_and(|status| status.success());
+            delivered = wrote && succeeded;
         }
+        delivered
+    };
+    #[cfg(not(target_os = "macos"))]
+    let native_delivered = false;
+    ClipboardCopyOutcome {
+        terminal_requested,
+        native_delivered,
+        terminal_truncated,
+        terminal_character_count,
     }
 }
 
