@@ -736,9 +736,10 @@ impl App {
         );
         let automatic_delegation = effort_uses_automatic_delegation(profile.effort);
         let mut opts = with_recent_workspace_context(
-            tui_session_options_with_gate(
+            tui_session_options_with_gate_and_execution(
                 self.confirmation.clone(),
                 self.deep_research_report_tool_gate.clone(),
+                self.execution_policy.clone(),
             )
             .with_session_store(self.store.clone())
             .with_session_id(profile.session_id.as_str())
@@ -1082,7 +1083,7 @@ impl App {
                         })
                         .unwrap_or_default();
                     self.push_line(&Style::new().fg(ACCENT).bold().render(&format!(
-                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on){native}",
+                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto mode on){native}",
                     )));
                 } else if let Some(status) = codex_effort {
                     let cap = if status.capped { " (model limit)" } else { "" };

@@ -1,0 +1,8 @@
+{
+  "name": "a3s-code-managed-srt",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.66"
+  }
+}

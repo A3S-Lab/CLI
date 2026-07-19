@@ -82,6 +82,10 @@ impl App {
                 return None;
             }
         };
+        // Core freezes this mode with the run admission. Later composer-mode
+        // changes affect only the next turn, including all child/background
+        // work already admitted under this one.
+        self.execution_policy.set_mode(self.mode);
         if clear_turn_artifacts && !synthesis {
             self.auto_review.on_user_turn();
             self.last_activity = Instant::now();
@@ -677,12 +681,12 @@ impl App {
         resume_after_pending_confirmation_cmd(self.rx.clone())
     }
 
-    /// An autonomous directive run is starting (/sleep, asset reviews,
-    /// asset run/deploy, /flow drafts, /loop): switch to auto-approve so tool
-    /// prompts can't stall it, and arm the loop budget that re-prompts until
-    /// the deliverable lands. The prior mode is restored when the run ends
-    /// (loop drained, interrupt, error, or /clear). A user already in auto
-    /// mode keeps it — nothing is remembered or restored.
+    /// An autonomous directive run is starting (/sleep, asset reviews, asset
+    /// run/deploy, /flow drafts, /loop): switch to non-interactive Auto routing
+    /// so approval prompts cannot stall it, and arm the loop budget that
+    /// re-prompts until the deliverable lands. Calls outside the Auto boundary
+    /// are denied. The prior mode is restored when the run ends (loop drained,
+    /// interrupt, error, or /clear). A user already in Auto keeps it.
     pub(super) fn engage_autonomy(&mut self, budget: usize) {
         self.loop_remaining = self.loop_remaining.max(budget);
         if self.mode != Mode::Auto {

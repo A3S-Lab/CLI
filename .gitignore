@@ -1,3 +1,4 @@
 /target
 .cargo/
 .a3s/
+/support/managed-srt/node_modules/

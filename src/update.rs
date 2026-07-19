@@ -8,6 +8,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod support;
+
 struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
@@ -504,6 +506,29 @@ fn standalone_upgrade_with(
     runner: &impl CommandRunner,
     exe: PathBuf,
 ) -> Result<PathBuf, String> {
+    standalone_upgrade_with_support_validator(latest, runner, exe, validate_release_support)
+}
+
+fn validate_release_support(root: &Path) -> Result<(), String> {
+    a3s::components::validate_managed_srt_payload(root)
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "release archive contains invalid managed SRT support at {}: {error}",
+                root.display()
+            )
+        })
+}
+
+fn standalone_upgrade_with_support_validator<F>(
+    latest: &str,
+    runner: &impl CommandRunner,
+    exe: PathBuf,
+    validate_support: F,
+) -> Result<PathBuf, String>
+where
+    F: Fn(&Path) -> Result<(), String>,
+{
     let target = release_target().ok_or_else(|| {
         format!(
             "automatic self-update is not supported on {}-{}",
@@ -514,13 +539,11 @@ fn standalone_upgrade_with(
     let url = format!(
         "https://github.com/A3S-Lab/Cli/releases/download/v{latest}/a3s-v{latest}-{target}.tar.gz"
     );
-    let tmp = unique_update_dir();
-    if std::fs::create_dir_all(&tmp).is_err() {
-        return Err(format!(
-            "could not create temporary directory {}",
-            tmp.display()
-        ));
-    }
+    let temporary = tempfile::Builder::new()
+        .prefix("a3s-update-")
+        .tempdir()
+        .map_err(|error| format!("could not create secure update directory: {error}"))?;
+    let tmp = temporary.path();
     let tarball = tmp.join("a3s.tar.gz");
     println!("\n⬇  downloading a3s {latest}…\n");
     let dl = runner.status(
@@ -540,7 +563,6 @@ fn standalone_upgrade_with(
         ],
     );
     if !dl {
-        let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!("download failed: {url}"));
     }
     let extracted = runner.status(
@@ -552,9 +574,8 @@ fn standalone_upgrade_with(
             tmp.as_os_str().to_os_string(),
         ],
     );
-    let new_bin = find_downloaded_binary(&tmp);
+    let new_bin = find_downloaded_binary(tmp);
     if !extracted || new_bin.is_none() {
-        let _ = std::fs::remove_dir_all(&tmp);
         return Err("release archive did not contain an a3s binary".to_string());
     }
     let new_bin = new_bin.unwrap();
@@ -565,21 +586,30 @@ fn standalone_upgrade_with(
     }
     if verify_binary_version(runner, new_bin.as_os_str(), latest).is_none() {
         eprintln!("\n✗ downloaded a3s did not report version {latest}");
-        let _ = std::fs::remove_dir_all(&tmp);
         return Err(format!(
             "downloaded binary {} did not report version {latest}",
             new_bin.display()
         ));
     }
-    let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => Ok(exe),
+    let mut support = support::prepare_support_activation(tmp, &exe, validate_support)
+        .map_err(|error| format!("downloaded release support could not be installed: {error}"))?;
+    match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
+        Ok(()) => {
+            if let Err(error) = support.commit() {
+                eprintln!("\n⚠  a3s was updated, but old support cleanup failed: {error}");
+            }
+            Ok(exe)
+        }
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
-            Err(err)
+            match support.rollback() {
+                Ok(()) => Err(err),
+                Err(rollback) => Err(format!(
+                    "{err}; managed SRT support rollback also failed: {rollback}"
+                )),
+            }
         }
-    };
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
+    }
 }
 
 fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
@@ -605,14 +635,6 @@ fn find_downloaded_binary(root: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn unique_update_dir() -> PathBuf {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!("a3s-update-{}-{nanos}", std::process::id()))
 }
 
 fn sibling_temp_path(target: &Path, suffix: &str) -> Option<PathBuf> {
@@ -982,6 +1004,46 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_support_fixture(root: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        for directory in [
+            "node_modules/@anthropic-ai/sandbox-runtime/dist",
+            "node_modules/@pondwader/socks5-server",
+            "node_modules/commander",
+            "node_modules/node-forge",
+            "node_modules/zod",
+        ] {
+            std::fs::create_dir_all(root.join(directory)).unwrap();
+        }
+        std::fs::write(
+            root.join("package.json"),
+            include_bytes!("../support/managed-srt/package.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("package-lock.json"),
+            include_bytes!("../support/managed-srt/package-lock.json"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("node_modules/@anthropic-ai/sandbox-runtime/package.json"),
+            br#"{"name":"@anthropic-ai/sandbox-runtime","version":"0.0.66"}"#,
+        )
+        .unwrap();
+        let cli = root.join("node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js");
+        std::fs::write(&cli, "#!/usr/bin/env node\n").unwrap();
+        std::fs::set_permissions(cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn validate_support_fixture(root: &Path) -> Result<(), String> {
+        a3s::components::validate_managed_srt_payload_structure(root)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
     struct LinkFailingBrewRunner {
         commands: Mutex<Vec<String>>,
         prefix: PathBuf,
@@ -1216,10 +1278,18 @@ mod tests {
     #[derive(Default)]
     struct FakeStandaloneRunner {
         commands: Mutex<Vec<String>>,
+        reject_installed_binary: Option<PathBuf>,
     }
 
     #[cfg(unix)]
     impl FakeStandaloneRunner {
+        fn rejecting_installed_binary(path: PathBuf) -> Self {
+            Self {
+                commands: Mutex::new(Vec::new()),
+                reject_installed_binary: Some(path),
+            }
+        }
+
         fn commands(&self) -> Vec<String> {
             self.commands.lock().unwrap().clone()
         }
@@ -1247,6 +1317,18 @@ mod tests {
                     stderr: Vec::new(),
                 });
             }
+            if self
+                .reject_installed_binary
+                .as_deref()
+                .is_some_and(|path| path.as_os_str() == program)
+                && args == [OsString::from("--version")]
+            {
+                return Some(CommandOutput {
+                    success: true,
+                    stdout: b"a3s 0.1.0\n".to_vec(),
+                    stderr: Vec::new(),
+                });
+            }
             RealCommandRunner.output(program, args)
         }
 
@@ -1271,6 +1353,7 @@ mod tests {
                         .map(|pair| PathBuf::from(&pair[1]));
                     if let Some(dest) = dest {
                         write_executable(&dest.join("a3s"), "9.9.9");
+                        write_support_fixture(&dest.join("support/managed-srt"));
                         true
                     } else {
                         false
@@ -1293,11 +1376,23 @@ mod tests {
         write_executable(&current, "0.1.0");
 
         let runner = FakeStandaloneRunner::default();
-        let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
+        let result = standalone_upgrade_with_support_validator(
+            "9.9.9",
+            &runner,
+            current.clone(),
+            validate_support_fixture,
+        );
 
         assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+        validate_support_fixture(
+            &current
+                .parent()
+                .unwrap()
+                .join(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT),
+        )
+        .unwrap();
 
         let commands = runner.commands();
         assert!(commands
@@ -1359,6 +1454,9 @@ mod tests {
                         .map(|pair| PathBuf::from(&pair[1]))
                         .is_some_and(|dest| {
                             write_executable(&dest.join("pkg").join("bin").join("a3s"), "9.9.9");
+                            write_support_fixture(
+                                &dest.join("pkg").join("support").join("managed-srt"),
+                            );
                             true
                         }),
                     _ => false,
@@ -1367,10 +1465,47 @@ mod tests {
         }
 
         let runner = NestedRunner::default();
-        let result = standalone_upgrade_with("9.9.9", &runner, current.clone());
+        let result = standalone_upgrade_with_support_validator(
+            "9.9.9",
+            &runner,
+            current.clone(),
+            validate_support_fixture,
+        );
 
         assert_eq!(result.as_deref(), Ok(current.as_path()));
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn standalone_upgrade_restores_support_when_binary_activation_fails() {
+        let tmp = TempDir::new("standalone-support-rollback");
+        let current = tmp.path("bin/a3s");
+        write_executable(&current, "0.1.0");
+        let support = current
+            .parent()
+            .unwrap()
+            .join(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+        std::fs::create_dir_all(&support).unwrap();
+        std::fs::write(support.join("old-support"), "preserve").unwrap();
+
+        let runner = FakeStandaloneRunner::rejecting_installed_binary(current.clone());
+        let error = standalone_upgrade_with_support_validator(
+            "9.9.9",
+            &runner,
+            current.clone(),
+            validate_support_fixture,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("did not report version 9.9.9"), "{error}");
+        let out = Command::new(&current).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
+        assert_eq!(
+            std::fs::read_to_string(support.join("old-support")).unwrap(),
+            "preserve"
+        );
+        assert!(!support.join("package-lock.json").exists());
     }
 }

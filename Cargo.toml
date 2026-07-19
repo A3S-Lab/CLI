@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.9.6"
+version = "0.9.7"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=5.3.5"
+a3s-code-core = "=6.1.0"
 a3s-boot = "=0.1.2"
 a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
@@ -39,6 +39,7 @@ tokio-util = "0.7"
 base64 = "0.22"
 futures = "0.3"
 fs2 = "0.4"
+libc = "0.2"
 http-body-util = "0.1"
 httpdate = "1"
 rand = "0.8"

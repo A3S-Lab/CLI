@@ -440,19 +440,6 @@ impl App {
                     );
                 }
                 self.update_viewport_with_stream();
-                if self.mode.auto_approves_confirmation() {
-                    // Silent: the mode indicator already shows auto-approve is on;
-                    // a line per tool is just noise. Do NOT start another
-                    // spinner_tick here — the turn's tick loop is already running
-                    // (state stays Streaming through auto-approval). Stacking one
-                    // per auto-approved tool made the spinner advance several
-                    // frames per 80ms = the speed-up / slow-down cadence.
-                    let session = self.session.clone();
-                    return Some(cmd::cmd(move || async move {
-                        let _ = session.confirm_tool_use(&tool_id, true, None).await;
-                        Msg::Resume
-                    }));
-                }
                 // Claude-style: no "requests:" transcript line — the prompt on
                 // the activity line shows the tool; after approval the tool just
                 // runs and its result lands via ToolEnd.

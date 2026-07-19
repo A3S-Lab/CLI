@@ -676,7 +676,7 @@ impl App {
     }
 
     /// Inline tool-approval keys (Codex-style): y/Enter allow, n/Esc deny,
-    /// a = allow + enable auto-approve for the rest of the session.
+    /// a = allow every currently pending request and use Auto for the next run.
     pub(super) fn handle_approval_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
         match key.code {
             KeyCode::Up => {
@@ -741,7 +741,7 @@ impl App {
         let (approved, approve_all_pending) = match choice {
             0 => (true, false), // yes, once
             1 => {
-                self.mode = Mode::Auto; // yes, and stop asking
+                self.mode = Mode::Auto;
                 (true, true)
             }
             _ => (false, false), // no

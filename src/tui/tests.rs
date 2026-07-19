@@ -6081,7 +6081,7 @@ fn tui_default_policy_allows_readonly_research_tools() {
 }
 
 #[test]
-fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
+fn tui_hitl_checker_fails_closed_without_a_process_sandbox() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
     let checker = TuiHitlPermissionChecker::new(
@@ -6091,27 +6091,27 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "rg Permission crates/cli/src/tui/mod.rs | head -20"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "git diff -- crates/cli/src/tui/mod.rs"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": command})),
-            PermissionDecision::Allow,
-            "dangerous command names used as data must not be overblocked: {command}"
+            PermissionDecision::Ask,
+            "host Bash must require approval when no process sandbox is available: {command}"
         );
     }
     assert_eq!(
@@ -6256,7 +6256,7 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
                 ]
             })
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Allow
     );
     assert_eq!(
         checker.check(
@@ -6328,56 +6328,6 @@ fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
         assert_eq!(checker.risk_action(tool, &args), action);
         assert_eq!(checker.check(tool, &args), permission);
     }
-}
-
-#[test]
-fn auto_mode_approves_every_confirmation_required_tool() {
-    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
-
-    let checker = TuiHitlPermissionChecker::new(
-        tui_permission_policy(),
-        DeepResearchReportToolGate::default(),
-    );
-    for (tool, args) in [
-        ("write", serde_json::json!({"file_path": "README.md"})),
-        ("bash", serde_json::json!({"command": "cargo test"})),
-        ("runtime", serde_json::json!({"tasks": ["external work"]})),
-        ("program", serde_json::json!({"source": "return 1"})),
-        ("task", serde_json::json!({"prompt": "inspect"})),
-        (
-            "parallel_task",
-            serde_json::json!({"tasks": [{"prompt": "inspect"}]}),
-        ),
-        (
-            "dynamic_workflow",
-            serde_json::json!({"source": "async function run() {}"}),
-        ),
-        ("Skill", serde_json::json!({"skill_name": "review"})),
-        (
-            "mcp__github__create_issue",
-            serde_json::json!({"title": "side effect"}),
-        ),
-        (
-            "git",
-            serde_json::json!({"command": "checkout", "ref": "feature", "force": true}),
-        ),
-        (
-            "batch",
-            serde_json::json!({"invocations": [
-                {"tool": "bash", "args": {"command": "cargo test"}}
-            ]}),
-        ),
-    ] {
-        assert_eq!(
-            checker.check(tool, &args),
-            PermissionDecision::Ask,
-            "{tool} must reach HITL instead of bypassing a hard denial"
-        );
-        assert!(Mode::Auto.auto_approves_confirmation());
-    }
-
-    assert!(!Mode::Default.auto_approves_confirmation());
-    assert!(!Mode::Plan.auto_approves_confirmation());
 }
 
 #[test]
@@ -6902,14 +6852,14 @@ fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
         .expect("TUI sessions should install the smart HITL checker");
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "write",
             &serde_json::json!({"file_path": "README.md", "content": "new"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Allow
     );
 }
 
@@ -6928,7 +6878,7 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     gate.set_report_only(true);
     assert_eq!(

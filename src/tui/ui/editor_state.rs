@@ -559,11 +559,11 @@ pub(super) fn textarea_width_for(width: u16) -> u16 {
 /// Run mode, cycled with Shift+Tab.
 #[derive(Clone, Copy, PartialEq)]
 pub(super) enum Mode {
-    /// Standard risk-aware mode: safe reads run quietly and side effects prompt.
+    /// Bounded workspace work is quiet; boundary expansion requires approval.
     Default,
-    /// Exploration/planning mode: safe reads run quietly and side effects prompt.
+    /// Read-only exploration; side effects are unavailable.
     Plan,
-    /// Auto-approve every confirmable operation; hard permission denials remain blocked.
+    /// Non-interactive allow/deny routing; operations that need approval are denied.
     Auto,
 }
 
@@ -599,14 +599,6 @@ impl Mode {
             Mode::Plan => COMPOSER_CHROME.active,
             Mode::Auto => COMPOSER_CHROME.warning,
         }
-    }
-
-    /// Whether an operation that already reached Core's confirmable `Ask`
-    /// branch should be approved without opening the HITL overlay. Critical
-    /// operations never call this method because Core emits `PermissionDenied`
-    /// for them before a confirmation can be requested.
-    pub(super) const fn auto_approves_confirmation(self) -> bool {
-        matches!(self, Mode::Auto)
     }
 }
 

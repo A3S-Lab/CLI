@@ -95,6 +95,13 @@ impl ComponentPaths {
         append_id(self.cache_root.join("components"), id)
     }
 
+    pub fn operation_lock_path(&self, id: &ComponentId) -> PathBuf {
+        let family = id.as_str().split('/').next().unwrap_or(id.as_str());
+        self.state_root
+            .join("component-locks")
+            .join(format!("{family}.lock"))
+    }
+
     pub fn configured_binary(&self, release: ReleaseSpec) -> Option<PathBuf> {
         self.install_overrides
             .get(release.install_dir_env)

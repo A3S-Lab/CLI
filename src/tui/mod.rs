@@ -445,6 +445,8 @@ struct App {
     store: Arc<dyn a3s_code_core::store::SessionStore>,
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
+    /// Run-scoped mode and local process boundary shared with Core sessions.
+    execution_policy: TuiExecutionPolicy,
     /// This session's id (for model-switch resume + the exit hint).
     session_id: String,
     /// Credential source paired with `model`, persisted per session so a

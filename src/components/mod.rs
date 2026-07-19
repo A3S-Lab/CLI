@@ -5,6 +5,8 @@ mod command;
 mod discovery;
 mod id;
 mod lifecycle;
+mod lock;
+mod managed_srt;
 mod paths;
 mod probe;
 mod release_install;
@@ -17,6 +19,10 @@ pub use command::{
     ComponentBatchFailure,
 };
 pub use id::ComponentId;
+pub use managed_srt::{
+    resolve_managed_srt, validate_managed_srt_payload, validate_managed_srt_payload_structure,
+    ManagedSrtResolution, ManagedSrtRuntime, MANAGED_SRT_PAYLOAD_RELATIVE_ROOT,
+};
 pub use paths::ComponentPaths;
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {

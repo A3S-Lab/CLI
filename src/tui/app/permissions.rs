@@ -14,24 +14,49 @@ pub(super) fn with_recent_workspace_context(
 pub(super) fn tui_session_options(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
 ) -> SessionOptions {
-    tui_session_options_with_gate(confirmation, DeepResearchReportToolGate::default())
+    tui_session_options_with_gate_and_execution(
+        confirmation,
+        DeepResearchReportToolGate::default(),
+        TuiExecutionPolicy::default(),
+    )
 }
 
+#[cfg(test)]
 pub(super) fn tui_session_options_with_gate(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> SessionOptions {
+    tui_session_options_with_gate_and_execution(
+        confirmation,
+        deep_research_report_tool_gate,
+        TuiExecutionPolicy::default(),
+    )
+}
+
+pub(super) fn tui_session_options_with_gate_and_execution(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    execution_policy: TuiExecutionPolicy,
+) -> SessionOptions {
     let permission_policy = tui_permission_policy();
-    SessionOptions::new()
+    let sandbox = execution_policy.sandbox_handle();
+    let confirmation_manager =
+        TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
+    let options = SessionOptions::new()
         .with_auto_compact(false)
-        .with_confirmation_policy(confirmation)
+        .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy.clone())
-        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(
+        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::with_execution_policy(
             permission_policy,
             deep_research_report_tool_gate,
+            execution_policy,
         )))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
-        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
+        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD);
+    match sandbox {
+        Some(sandbox) => options.with_sandbox_handle(sandbox),
+        None => options,
+    }
 }
 
 /// Core serializable permission policy for the TUI.
@@ -76,6 +101,268 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
             "dynamic_workflow(*)",
             "Skill(*)",
         ])
+}
+
+/// Live selector for the next run's execution semantics.
+///
+/// Core snapshots this object when a run is admitted. Changing the composer
+/// mode can therefore affect the next run without broadening an in-flight run
+/// or any child work it already created.
+#[derive(Clone)]
+pub(super) struct TuiExecutionPolicy {
+    mode: Arc<AtomicU8>,
+    workspace: Arc<PathBuf>,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+}
+
+impl Default for TuiExecutionPolicy {
+    fn default() -> Self {
+        Self::new(Mode::Default)
+    }
+}
+
+impl TuiExecutionPolicy {
+    const DEFAULT: u8 = 0;
+    const PLAN: u8 = 1;
+    const AUTO: u8 = 2;
+
+    pub(super) fn new(mode: Mode) -> Self {
+        Self::for_workspace(mode, PathBuf::from("."), None)
+    }
+
+    pub(super) fn for_workspace(
+        mode: Mode,
+        workspace: PathBuf,
+        sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    ) -> Self {
+        let policy = Self {
+            mode: Arc::new(AtomicU8::new(Self::DEFAULT)),
+            workspace: Arc::new(workspace),
+            sandbox,
+        };
+        policy.set_mode(mode);
+        policy
+    }
+
+    pub(super) fn sandbox_handle(&self) -> Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>> {
+        self.sandbox.clone()
+    }
+
+    pub(super) fn sandbox_available(&self) -> bool {
+        self.sandbox.is_some()
+    }
+
+    pub(super) fn set_mode(&self, mode: Mode) {
+        let encoded = match mode {
+            Mode::Default => Self::DEFAULT,
+            Mode::Plan => Self::PLAN,
+            Mode::Auto => Self::AUTO,
+        };
+        self.mode.store(encoded, Ordering::SeqCst);
+    }
+
+    pub(super) fn mode(&self) -> Mode {
+        match self.mode.load(Ordering::SeqCst) {
+            Self::PLAN => Mode::Plan,
+            Self::AUTO => Mode::Auto,
+            _ => Mode::Default,
+        }
+    }
+
+    fn snapshot(&self) -> Self {
+        Self {
+            mode: Arc::new(AtomicU8::new(match self.mode() {
+                Mode::Default => Self::DEFAULT,
+                Mode::Plan => Self::PLAN,
+                Mode::Auto => Self::AUTO,
+            })),
+            workspace: Arc::clone(&self.workspace),
+            sandbox: self.sandbox.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BashBoundaryRequest {
+    UseDefault,
+    RequireEscalated,
+    Invalid,
+}
+
+fn bash_boundary_request(args: &serde_json::Value) -> BashBoundaryRequest {
+    match args.get("sandbox_permissions") {
+        None => BashBoundaryRequest::UseDefault,
+        Some(serde_json::Value::String(value)) if value == "use_default" => {
+            BashBoundaryRequest::UseDefault
+        }
+        Some(serde_json::Value::String(value)) if value == "require_escalated" => {
+            BashBoundaryRequest::RequireEscalated
+        }
+        Some(_) => BashBoundaryRequest::Invalid,
+    }
+}
+
+fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Value) -> bool {
+    matches!(tool_name, "write" | "edit" | "patch")
+        && args
+            .get("file_path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(a3s_code_core::sandbox::is_protected_workspace_path)
+}
+
+/// Confirmation provider that keeps Default/Plan interactive and makes Auto
+/// genuinely non-interactive. Unexpected escalation in Auto is denied before
+/// a confirmation event can be emitted.
+struct TuiModeConfirmationProvider {
+    inner: Arc<a3s_code_core::hitl::ConfirmationManager>,
+    execution_policy: TuiExecutionPolicy,
+}
+
+impl TuiModeConfirmationProvider {
+    fn new(
+        policy: a3s_code_core::hitl::ConfirmationPolicy,
+        execution_policy: TuiExecutionPolicy,
+    ) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let timeout_ms = policy.default_timeout_ms;
+        let policy = policy.with_timeout(timeout_ms, a3s_code_core::hitl::TimeoutAction::Reject);
+        Self {
+            inner: Arc::new(a3s_code_core::hitl::ConfirmationManager::new(
+                policy, event_tx,
+            )),
+            execution_policy,
+        }
+    }
+
+    fn rejected_response(
+    ) -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(a3s_code_core::hitl::ConfirmationResponse {
+            approved: false,
+            reason: Some("Denied by the non-interactive Auto execution boundary.".to_string()),
+        });
+        rx
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
+    fn snapshot_for_run(&self) -> Option<Arc<dyn a3s_code_core::hitl::ConfirmationProvider>> {
+        Some(Arc::new(Self {
+            inner: Arc::clone(&self.inner),
+            execution_policy: self.execution_policy.snapshot(),
+        }))
+    }
+
+    async fn requires_confirmation(&self, tool_name: &str) -> bool {
+        self.inner.requires_confirmation(tool_name).await
+    }
+
+    async fn confirmation_available_for(
+        &self,
+        _tool_name: &str,
+        _args: &serde_json::Value,
+    ) -> bool {
+        self.execution_policy.mode() != Mode::Auto
+    }
+
+    async fn request_confirmation(
+        &self,
+        tool_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse> {
+        if self.execution_policy.mode() == Mode::Auto {
+            Self::rejected_response()
+        } else {
+            self.inner
+                .request_confirmation(tool_id, tool_name, args)
+                .await
+        }
+    }
+
+    async fn confirm(
+        &self,
+        tool_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<bool, String> {
+        self.inner.confirm(tool_id, approved, reason).await
+    }
+
+    async fn policy(&self) -> a3s_code_core::hitl::ConfirmationPolicy {
+        self.inner.policy().await
+    }
+
+    async fn set_policy(&self, policy: a3s_code_core::hitl::ConfirmationPolicy) {
+        let timeout_ms = policy.default_timeout_ms;
+        self.inner
+            .set_policy(policy.with_timeout(timeout_ms, a3s_code_core::hitl::TimeoutAction::Reject))
+            .await;
+    }
+
+    async fn check_timeouts(&self) -> usize {
+        self.inner.check_timeouts().await
+    }
+
+    async fn cancel(&self, tool_id: &str) -> bool {
+        self.inner.cancel(tool_id).await
+    }
+
+    async fn expire(&self, tool_id: &str, _action: a3s_code_core::hitl::TimeoutAction) -> bool {
+        self.inner
+            .expire(tool_id, a3s_code_core::hitl::TimeoutAction::Reject)
+            .await
+    }
+
+    async fn cancel_all(&self) -> usize {
+        self.inner.cancel_all().await
+    }
+
+    async fn pending_confirmations(&self) -> Vec<a3s_code_core::hitl::PendingConfirmationInfo> {
+        self.inner.pending_confirmation_details().await
+    }
+}
+
+fn plan_tool_is_read_only(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read"
+            | "grep"
+            | "glob"
+            | "ls"
+            | "code_symbols"
+            | "code_navigation"
+            | "code_diagnostics"
+            | "web_search"
+            | "web_fetch"
+    )
+}
+
+fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read"
+            | "grep"
+            | "glob"
+            | "ls"
+            | "code_symbols"
+            | "code_navigation"
+            | "code_diagnostics"
+            | "web_search"
+            | "web_fetch"
+            | "generate_object"
+            | "search_skills"
+            | "write"
+            | "edit"
+            | "patch"
+            | "batch"
+            | "program"
+            | "task"
+            | "parallel_task"
+            | "dynamic_workflow"
+            | "skill"
+    ) || tool_name.starts_with("mcp__")
 }
 
 #[derive(Clone, Default)]
@@ -237,16 +524,31 @@ pub(super) fn should_delay_deep_research_report_tool(
 pub(super) struct TuiHitlPermissionChecker {
     base: a3s_code_core::permissions::PermissionPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
+    execution_policy: TuiExecutionPolicy,
 }
 
 impl TuiHitlPermissionChecker {
+    #[cfg(test)]
     pub(super) fn new(
         base: a3s_code_core::permissions::PermissionPolicy,
         deep_research_report_tool_gate: DeepResearchReportToolGate,
     ) -> Self {
+        Self::with_execution_policy(
+            base,
+            deep_research_report_tool_gate,
+            TuiExecutionPolicy::default(),
+        )
+    }
+
+    pub(super) fn with_execution_policy(
+        base: a3s_code_core::permissions::PermissionPolicy,
+        deep_research_report_tool_gate: DeepResearchReportToolGate,
+        execution_policy: TuiExecutionPolicy,
+    ) -> Self {
         Self {
             base,
             deep_research_report_tool_gate,
+            execution_policy,
         }
     }
 
@@ -286,24 +588,96 @@ impl TuiHitlPermissionChecker {
             };
         }
 
-        if self
+        let boundary_workspace = self
             .deep_research_report_tool_gate
             .workspace()
-            .is_some_and(|workspace| {
-                let checker = a3s_code_core::permissions::InteractiveToolGuardrail::default()
-                    .with_workspace(workspace);
-                a3s_code_core::permissions::PermissionChecker::check(&checker, &tool, args)
-                    == a3s_code_core::permissions::PermissionDecision::Deny
-            })
+            .unwrap_or_else(|| self.execution_policy.workspace.as_ref().clone());
+        let hard_guardrail = a3s_code_core::permissions::InteractiveToolGuardrail::default()
+            .with_workspace(boundary_workspace);
+        if a3s_code_core::permissions::PermissionChecker::check(&hard_guardrail, &tool, args)
+            == a3s_code_core::permissions::PermissionDecision::Deny
         {
             return a3s_code_core::permissions::PermissionDecision::Deny;
         }
-        let decision =
-            a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(&tool, args);
         if !evidence_collection {
-            return decision;
+            let protected_workspace_metadata = targets_protected_workspace_metadata(&tool, args);
+            return match self.execution_policy.mode() {
+                Mode::Auto => {
+                    if protected_workspace_metadata {
+                        return a3s_code_core::permissions::PermissionDecision::Deny;
+                    }
+                    if tool == "bash" {
+                        return if matches!(
+                            bash_boundary_request(args),
+                            BashBoundaryRequest::UseDefault
+                        ) && self.execution_policy.sandbox_available()
+                        {
+                            a3s_code_core::permissions::PermissionDecision::Allow
+                        } else {
+                            a3s_code_core::permissions::PermissionDecision::Deny
+                        };
+                    }
+                    if tool == "git" {
+                        return match a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(
+                            &tool, args,
+                        ) {
+                            a3s_code_core::permissions::PermissionDecision::Allow => {
+                                a3s_code_core::permissions::PermissionDecision::Allow
+                            }
+                            a3s_code_core::permissions::PermissionDecision::Ask
+                            | a3s_code_core::permissions::PermissionDecision::Deny => {
+                                a3s_code_core::permissions::PermissionDecision::Deny
+                            }
+                        };
+                    }
+                    if auto_tool_stays_inside_governed_boundaries(&tool) {
+                        a3s_code_core::permissions::PermissionDecision::Allow
+                    } else {
+                        a3s_code_core::permissions::PermissionDecision::Deny
+                    }
+                }
+                Mode::Plan => {
+                    if plan_tool_is_read_only(&tool) {
+                        a3s_code_core::permissions::PermissionDecision::Allow
+                    } else {
+                        a3s_code_core::permissions::PermissionDecision::Deny
+                    }
+                }
+                Mode::Default => match tool.as_str() {
+                    "write" | "edit" | "patch" => {
+                        if protected_workspace_metadata {
+                            a3s_code_core::permissions::PermissionDecision::Ask
+                        } else {
+                            a3s_code_core::permissions::PermissionDecision::Allow
+                        }
+                    }
+                    "bash" => match bash_boundary_request(args) {
+                        BashBoundaryRequest::UseDefault
+                            if self.execution_policy.sandbox_available() =>
+                        {
+                            a3s_code_core::permissions::PermissionDecision::Allow
+                        }
+                        BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
+                            a3s_code_core::permissions::PermissionDecision::Ask
+                        }
+                        BashBoundaryRequest::Invalid => {
+                            a3s_code_core::permissions::PermissionDecision::Deny
+                        }
+                    },
+                    "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow"
+                    | "skill" => a3s_code_core::permissions::PermissionDecision::Allow,
+                    name if name.starts_with("mcp__") => {
+                        a3s_code_core::permissions::PermissionDecision::Allow
+                    }
+                    _ => a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(
+                        &tool, args,
+                    ),
+                },
+            };
         }
 
+        let decision =
+            a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(&tool, args);
         if self.deep_research_report_tool_gate.network_disabled()
             && matches!(tool.as_str(), "web_search" | "web_fetch")
         {
@@ -339,6 +713,14 @@ impl TuiHitlPermissionChecker {
 }
 
 impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker {
+    fn snapshot_for_run(&self) -> Option<Arc<dyn a3s_code_core::permissions::PermissionChecker>> {
+        Some(Arc::new(Self {
+            base: self.base.clone(),
+            deep_research_report_tool_gate: self.deep_research_report_tool_gate.clone(),
+            execution_policy: self.execution_policy.snapshot(),
+        }))
+    }
+
     fn expose_to_model(&self, tool_name: &str) -> bool {
         let tool = tool_name.to_ascii_lowercase();
         if self.deep_research_report_tool_gate.synthesis_only() {
@@ -355,6 +737,9 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
                 }
                 _ => false,
             };
+        }
+        if self.execution_policy.mode() == Mode::Plan {
+            return plan_tool_is_read_only(&tool);
         }
         true
     }
@@ -394,6 +779,10 @@ pub(super) fn touch_workspace_file_path_for_manifest(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "permissions/execution_policy_tests.rs"]
+mod execution_policy_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RuntimeEvidenceMode {

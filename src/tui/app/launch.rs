@@ -8,6 +8,13 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
+fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
+    ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    )
+}
+
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
     let tui_dir = workspace.join(".a3s/tui");
     let canonical = tui_dir.join("sessions");
@@ -373,13 +380,16 @@ pub(crate) async fn run_in(
     {
         SYNTAX_THEME.store(theme, std::sync::atomic::Ordering::Relaxed);
     }
+    let initial_mode = tui_session_state
+        .as_ref()
+        .map(TuiSessionState::mode)
+        .unwrap_or(Mode::Default);
 
-    // Enable HITL confirmation so file-modifying tools (write/edit/patch) can
-    // run — they require a confirmation manager, otherwise they fail with
-    // "requires confirmation but no HITL confirmation manager is configured".
-    // The TUI is that manager (approve/deny modal, or /auto). Keep the human
-    // confirmation wait separate from the tool execution timeout: reading and
-    // deciding must not consume the tool's runtime budget.
+    // Install the TUI confirmation channel for explicit host escalation,
+    // protected workspace metadata, risky Git, and external tools that declare
+    // side effects. Ordinary workspace edits and sandboxed commands do not
+    // enter HITL. Keep any human decision wait separate from the tool runtime
+    // budget.
     let confirmation = a3s_code_core::hitl::ConfirmationPolicy::enabled()
         .with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject);
     // Claude Code compatibility: load Claude/plugin SKILL.md skills alongside
@@ -473,6 +483,33 @@ pub(crate) async fn run_in(
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
+    let managed_srt = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        Path::new(&workspace),
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let (sandbox_handle, sandbox_load_warning) = match managed_srt.runtime {
+        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
+            Ok(sandbox) => (
+                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
+                None,
+            ),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Local command sandbox failed its bounded OS capability probe: {error}. \
+                     Default mode will ask before exact host Bash execution; Auto mode will deny \
+                     Bash. Repair the reported platform prerequisite and restart `a3s code`"
+                )),
+            ),
+        },
+        None => (None, managed_srt.warning),
+    };
+    let execution_policy =
+        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace), sandbox_handle);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -500,7 +537,7 @@ pub(crate) async fn run_in(
             o.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
         }
     };
-    let manifest_backend = ManifestWorkspaceBackend::new(std::path::PathBuf::from(&workspace));
+    let manifest_backend = tui_manifest_backend(Path::new(&workspace));
     let workspace_manifest = manifest_backend.manifest();
     let initial_manifest = workspace_manifest.snapshot();
     let initial_files = initial_manifest.file_paths();
@@ -523,9 +560,10 @@ pub(crate) async fn run_in(
             session_id.as_str(),
             apply_launch_model_options(
                 with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate(
+                    tui_session_options_with_gate_and_execution(
                         confirmation.clone(),
                         deep_research_report_tool_gate.clone(),
+                        execution_policy.clone(),
                     )
                     .with_session_store(store.clone())
                     .with_workspace_backend(workspace_services.clone())
@@ -564,9 +602,10 @@ pub(crate) async fn run_in(
                     workspace.clone(),
                     Some(apply_launch_model_options(
                         with_instr(with_recent_workspace_context(
-                            tui_session_options_with_gate(
+                            tui_session_options_with_gate_and_execution(
                                 confirmation.clone(),
                                 deep_research_report_tool_gate.clone(),
+                                execution_policy.clone(),
                             )
                             .with_session_store(store.clone())
                             .with_session_id(session_id.as_str())
@@ -731,10 +770,6 @@ pub(crate) async fn run_in(
 
     remote_ui::prime_webview_lookup();
 
-    let initial_mode = tui_session_state
-        .as_ref()
-        .map(TuiSessionState::mode)
-        .unwrap_or(Mode::Default);
     let initial_paused_goal = tui_session_state
         .as_ref()
         .and_then(|state| state.paused_goal.clone());
@@ -748,6 +783,7 @@ pub(crate) async fn run_in(
         store: store.clone(),
         confirmation,
         deep_research_report_tool_gate,
+        execution_policy,
         session_id: session_id.clone(),
         model_source: launch_model_source,
         session_rebuild_seq: 0,
@@ -928,6 +964,10 @@ pub(crate) async fn run_in(
         keymap,
     };
 
+    if let Some(warning) = sandbox_load_warning {
+        app.push_notice(NoticeKind::Warning, warning);
+    }
+
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
             app.messages.push(TranscriptEntry::preformatted(gutter(
@@ -1093,6 +1133,7 @@ pub(crate) async fn run_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::workspace::{WorkspaceFileSystem, WorkspacePath};
     use a3s_tui::style::strip_ansi;
 
     #[test]
@@ -1157,5 +1198,26 @@ mod tests {
             &preference,
             "gpt-another-session"
         ));
+    }
+
+    #[tokio::test]
+    async fn tui_workspace_backend_enforces_the_credential_boundary() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("visible.txt"), "visible").unwrap();
+        std::fs::write(workspace.path().join(".env"), "TOKEN=secret").unwrap();
+        let backend = tui_manifest_backend(workspace.path());
+
+        assert_eq!(
+            backend
+                .read_text(&WorkspacePath::from_normalized("visible.txt"))
+                .await
+                .unwrap(),
+            "visible"
+        );
+        let error = backend
+            .read_text(&WorkspacePath::from_normalized(".env"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("credential boundary"), "{error}");
     }
 }

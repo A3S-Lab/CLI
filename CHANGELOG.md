@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-07-19
+
+### Added
+
+- Added a fixed, integrity-verified managed local-command sandbox to release
+  archives, Homebrew installations, and first-use source installations. Startup
+  now probes the complete native boundary and reports actionable prerequisites.
+
+### Changed
+
+- Updated the A3S Code Core baseline to 6.1.0 and snapshotted execution and
+  confirmation policy per admitted run so child and background work cannot
+  inherit a later mode change.
+- Made Default mode run bounded workspace edits and sandboxed Bash without
+  routine prompts, kept Plan mode read-only, and made Auto mode strictly
+  non-interactive with explicit denial at any unavailable or elevated boundary.
+- Made standalone upgrades validate and transactionally activate the matching
+  sandbox support payload together with the executable, including rollback when
+  binary activation fails.
+
+### Fixed
+
+- Removed the runtime dependency on a global `srt` command, which previously
+  caused Default mode to fall back to host-command approval and Auto mode to
+  deny Bash when `srt` was absent from `PATH`.
+- Prevented Auto mode from opening HITL for tool-owned escalation, protected
+  workspace metadata, risky Git operations, and side-effecting or unknown
+  external calls.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added
