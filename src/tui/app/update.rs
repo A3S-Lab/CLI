@@ -224,6 +224,7 @@ impl Model for App {
         let composed = self.overlay_relay_menu(composed);
         let composed = self.overlay_permission_menu(composed);
         let composed = self.overlay_task_menu(composed);
+        let composed = self.overlay_history_menu(composed);
         let composed = self.overlay_review_menu(composed);
         let composed = self.overlay_flow_menu(composed);
         let composed = self.overlay_agent_menu(composed);

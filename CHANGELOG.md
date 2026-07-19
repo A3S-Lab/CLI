@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget, so the first model turn receives ready Use routes through `task`.
   Slow or broken surfaces remain non-fatal and continue converging in the
   background.
+- Added `/history` and `Ctrl+R` fuzzy prompt search for the current TUI
+  session, with bounded results, keyboard and mouse navigation, and draft-safe
+  selection.
 
 ## [0.9.6] - 2026-07-17
 

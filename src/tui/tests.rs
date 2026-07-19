@@ -8743,6 +8743,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/relay",
         "/permissions",
         "/tasks",
+        "/history",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -8890,6 +8891,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/research",
             handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/history",
+            handler: Exact,
             idle_only: false,
             scope: Local,
         },
@@ -9108,6 +9115,12 @@ fn relay_is_idle_only_and_listed() {
 fn tasks_is_non_idle_and_listed() {
     assert!(!IDLE_ONLY.contains(&"/tasks"));
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tasks"));
+}
+
+#[test]
+fn history_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/history"));
+    assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/history"));
 }
 
 #[test]

@@ -981,6 +981,7 @@ pub(crate) async fn run_in(
         approval_feedback: None,
         approval_sel: 0,
         history: history_seed,
+        history_panel: None,
         history_pos: None,
         history_draft: None,
         model: launch_model,

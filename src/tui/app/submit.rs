@@ -816,6 +816,11 @@ impl App {
                 self.open_permission_panel();
                 return None;
             }
+            "/history" => {
+                self.textarea.clear();
+                self.open_history_panel("");
+                return None;
+            }
             "/auto" => {
                 self.set_composer_mode(Mode::Auto);
                 self.textarea.clear();

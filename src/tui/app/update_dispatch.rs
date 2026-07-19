@@ -95,6 +95,10 @@ impl App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.history_panel.is_some() {
+                    self.handle_history_panel_paste(&text);
+                    return None;
+                }
                 if self.plan_review_input_active() {
                     self.textarea.insert_str(&text);
                     self.relayout();
@@ -198,6 +202,12 @@ impl App {
                 // streams. Revocation changes future checks only.
                 if self.permission_panel.is_some() {
                     return self.handle_permission_panel_key(&key);
+                }
+                // Prompt history search owns printable input while open. The
+                // hidden composer draft remains untouched until Enter accepts
+                // an explicit historical prompt.
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_key(&key);
                 }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
@@ -340,6 +350,13 @@ impl App {
                 // decision modals and focused panels retain priority above it.
                 if panels::tasks::is_task_panel_key(&key) {
                     return self.toggle_task_panel();
+                }
+                // Ctrl+R opens searchable prompt history without disturbing
+                // the draft or a running parent turn.
+                if panels::history::is_history_panel_key(&key) {
+                    let query = self.textarea.value();
+                    self.open_history_panel(&query);
+                    return None;
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -595,6 +612,9 @@ impl App {
                 }
                 if self.task_panel.is_some() {
                     return self.handle_task_panel_mouse(&m);
+                }
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);

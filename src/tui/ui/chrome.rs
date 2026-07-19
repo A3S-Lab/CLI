@@ -177,6 +177,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "inspect DeepResearch event state · status, explain, or strict replay",
     ),
     (
+        "/history",
+        "fuzzy-search prompts from the current session",
+    ),
+    (
         "/kb",
         "open the local personal knowledge base · add/import/search/vault",
     ),
