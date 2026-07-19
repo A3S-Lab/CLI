@@ -194,6 +194,11 @@ impl App {
                     }
                     return None;
                 }
+                // Exact permission grants remain inspectable while a turn
+                // streams. Revocation changes future checks only.
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_key(&key);
+                }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
                     return self.handle_help_key(&key);
@@ -573,6 +578,9 @@ impl App {
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
                     return None;
+                }
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);
@@ -1158,14 +1166,14 @@ impl App {
             Msg::ModalConfirm {
                 tool_id,
                 approved,
-                approve_all_pending,
+                reason,
             } => {
-                let pending = take_pending_tools_for_confirmation(
-                    &mut self.pending_tools,
-                    &tool_id,
-                    approved && approve_all_pending,
-                );
-                if !pending.is_empty() {
+                let pending = take_pending_tool_for_confirmation(&mut self.pending_tools, &tool_id);
+                if let Some(pending) = pending {
+                    self.restore_approval_feedback_for(&tool_id);
+                    if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                        self.permission_rule_write_inflight = None;
+                    }
                     self.approval_sel = 0;
                     self.state = if self.pending_tools.is_empty() {
                         State::Streaming
@@ -1175,9 +1183,9 @@ impl App {
                     let session = self.session.clone();
                     return Some(cmd::batch(vec![
                         cmd::cmd(move || async move {
-                            for (tool_id, _) in pending {
-                                let _ = session.confirm_tool_use(&tool_id, approved, None).await;
-                            }
+                            let _ = session
+                                .confirm_tool_use(&pending.tool_id, approved, reason)
+                                .await;
                             Msg::Resume
                         }),
                         spinner_tick(),
@@ -1189,6 +1197,70 @@ impl App {
                 } else {
                     State::Awaiting
                 };
+            }
+
+            Msg::PersistProjectPermission { tool_id, grant } => {
+                if self.permission_rule_write_inflight.as_deref() != Some(tool_id.as_str())
+                    || self
+                        .pending_tools
+                        .front()
+                        .is_none_or(|pending| pending.tool_id.as_str() != tool_id.as_str())
+                {
+                    return None;
+                }
+                let path = self.project_permission_rules_path.clone();
+                let persisted_grant = grant.clone();
+                return Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        persist_project_permission_grant(&path, persisted_grant)
+                    })
+                    .await
+                    .map_err(|error| format!("permission rule writer failed: {error}"))
+                    .and_then(|result| result);
+                    Msg::ProjectPermissionPersisted {
+                        tool_id,
+                        grant,
+                        result,
+                    }
+                }));
+            }
+
+            Msg::ProjectPermissionPersisted {
+                tool_id,
+                grant,
+                result,
+            } => {
+                if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                    self.permission_rule_write_inflight = None;
+                }
+                match result {
+                    Ok(path) => {
+                        let scope = grant.scope_label();
+                        self.permission_grants.allow_for_project(grant);
+                        self.refresh_permission_panel_grants();
+                        self.push_notice(
+                            NoticeKind::Info,
+                            format!("Project permission saved to {} · {scope}", path.display()),
+                        );
+                        if self
+                            .pending_tools
+                            .front()
+                            .is_some_and(|pending| pending.tool_id.as_str() == tool_id.as_str())
+                        {
+                            return Some(cmd::msg(Msg::ModalConfirm {
+                                tool_id,
+                                approved: true,
+                                reason: None,
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        self.push_notice(
+                            NoticeKind::Warning,
+                            format!("Project permission was not saved: {error}"),
+                        );
+                    }
+                }
             }
 
             other => return self.handle_async_message(other),

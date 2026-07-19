@@ -116,35 +116,30 @@ pub(super) fn is_new_remote_view(
     last_view != Some(spec)
 }
 
-pub(super) fn take_pending_tool_label(
-    pending_tools: &mut VecDeque<(String, String)>,
+pub(super) fn take_pending_tool_approval(
+    pending_tools: &mut VecDeque<PendingToolApproval>,
     tool_id: &str,
-) -> Option<(String, bool)> {
+) -> Option<(PendingToolApproval, bool)> {
     let index = pending_tools
         .iter()
-        .position(|(pending_id, _)| pending_id == tool_id)?;
+        .position(|pending| pending.tool_id == tool_id)?;
     let was_front = index == 0;
     pending_tools
         .remove(index)
-        .map(|(_, label)| (label, was_front))
+        .map(|pending| (pending, was_front))
 }
 
-pub(super) fn take_pending_tools_for_confirmation(
-    pending_tools: &mut VecDeque<(String, String)>,
+pub(super) fn take_pending_tool_for_confirmation(
+    pending_tools: &mut VecDeque<PendingToolApproval>,
     expected_tool_id: &str,
-    take_all: bool,
-) -> Vec<(String, String)> {
+) -> Option<PendingToolApproval> {
     if pending_tools
         .front()
-        .is_none_or(|(tool_id, _)| tool_id != expected_tool_id)
+        .is_none_or(|pending| pending.tool_id != expected_tool_id)
     {
-        return Vec::new();
+        return None;
     }
-    if take_all {
-        pending_tools.drain(..).collect()
-    } else {
-        pending_tools.pop_front().into_iter().collect()
-    }
+    pending_tools.pop_front()
 }
 
 /// Presentation ownership for a model-requested tool call.

@@ -291,6 +291,8 @@ mod app_commands;
 mod app_events;
 #[path = "app/launch.rs"]
 mod app_launch;
+#[path = "app/permission_rules.rs"]
+mod app_permission_rules;
 #[path = "app/permissions.rs"]
 mod app_permissions;
 #[path = "app/projections.rs"]
@@ -361,6 +363,7 @@ use app_commands::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
 pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
+use app_permission_rules::*;
 use app_permissions::*;
 use app_projections::*;
 pub(crate) use app_session_state::tui_session_state_path;
@@ -477,6 +480,8 @@ struct App {
     /// `/relay` session picker and its stale-result guard.
     relay_panel: Option<panels::relay::RelayPanel>,
     relay_scan_seq: u64,
+    /// `/permissions` exact session/project grant inspector and revocation surface.
+    permission_panel: Option<panels::permissions::PermissionPanel>,
     /// Picker-visible models advertised for the current Codex login.
     codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
     /// Guards the asynchronous Codex catalog refresh from duplicate commands.
@@ -755,11 +760,24 @@ struct App {
     host_tool_call_id: Option<String>,
     interrupting: bool,
     /// Manual tool approvals waiting for a decision, in request order.
-    pending_tools: VecDeque<(String, String)>,
+    pending_tools: VecDeque<PendingToolApproval>,
+    /// Exact session/project grants shared across model and effort rebuilds.
+    permission_grants: TuiPermissionGrants,
     /// Mode-aware permission boundary shared with every rebuilt Core session.
     /// It always tracks the immutable mode of the running turn.
     execution_policy: TuiExecutionPolicy,
-    /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
+    /// Dedicated project ACL file for reviewed persistent grants.
+    project_permission_rules_path: PathBuf,
+    /// Project rule write currently in flight. Its request remains at the FIFO
+    /// head until persistence succeeds, so a failed write cannot silently
+    /// broaden the active session.
+    permission_rule_write_inflight: Option<String>,
+    /// Monotonic identity and global lock for atomic project-grant revocation.
+    project_permission_revoke_seq: u64,
+    project_permission_revoke_inflight: Option<(u64, ExactPermissionGrant)>,
+    /// Denial feedback temporarily owns the composer while retaining its draft.
+    approval_feedback: Option<ApprovalFeedback>,
+    /// Selected row in the tool-approval options panel.
     approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
@@ -865,6 +883,7 @@ impl App {
             || self.transcript_view.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
+            || self.permission_panel.is_some()
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()
@@ -973,6 +992,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
     approval_prompt(label, selected).lines(width)
 }

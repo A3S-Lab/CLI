@@ -393,6 +393,7 @@ impl App {
         self.model = restore.model;
         self.model_source = restore.model_source;
         self.effort = restore.effort;
+        self.active_turn_mode = None;
         self.set_composer_mode(restore.mode);
         self.context_limit = restore.context_limit;
         self.llm_override = restore.llm_override;
@@ -430,7 +431,9 @@ impl App {
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
         self.queue_retry_attempt = 0;
         self.running_task = None;
+        self.restore_current_approval_feedback();
         self.pending_tools.clear();
+        self.permission_rule_write_inflight = None;
         self.pending_images.clear();
         self.pending_ctx = None;
         self.ctx_hits.clear();

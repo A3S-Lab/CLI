@@ -60,6 +60,8 @@ mod help;
 mod menu;
 #[path = "system/model.rs"]
 pub(crate) mod model;
+#[path = "system/permissions.rs"]
+pub(crate) mod permissions;
 #[path = "system/plan.rs"]
 mod plan;
 #[path = "system/plugins.rs"]

@@ -313,7 +313,22 @@ pub(super) enum Msg {
     ModalConfirm {
         tool_id: String,
         approved: bool,
-        approve_all_pending: bool,
+        reason: Option<String>,
+    },
+    PersistProjectPermission {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+    },
+    ProjectPermissionPersisted {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+        result: Result<PathBuf, String>,
+    },
+    /// Result of an explicitly confirmed project-grant revocation.
+    ProjectPermissionRevoked {
+        request_id: u64,
+        stable_key: String,
+        result: Result<ProjectPermissionRevocation, String>,
     },
     BackgroundSubagentFinished {
         session_id: String,
