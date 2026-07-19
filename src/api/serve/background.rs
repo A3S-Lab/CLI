@@ -1,10 +1,11 @@
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use fs2::FileExt;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,6 +17,7 @@ const READY_FILE_ENV: &str = "A3S_INTERNAL_WEB_READY_FILE";
 pub(super) const INSTANCE_NONCE_ENV: &str = "A3S_INTERNAL_WEB_INSTANCE_NONCE";
 pub(super) const INSTANCE_FILE_ENV: &str = "A3S_INTERNAL_WEB_INSTANCE_FILE";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const START_LOCK_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -30,6 +32,38 @@ pub(crate) struct WebInstanceRecord {
     pub executable: PathBuf,
     pub started_at_ms: u128,
     pub api_only: bool,
+    #[serde(default)]
+    pub version: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WebEndpoint {
+    pub address: SocketAddr,
+    pub workspace: PathBuf,
+    pub version: Option<String>,
+    pub pid: Option<u32>,
+    pub managed: bool,
+    pub api_only: Option<bool>,
+}
+
+impl WebEndpoint {
+    fn from_managed(instance: &WebInstanceRecord) -> Self {
+        Self {
+            address: instance.address,
+            workspace: instance.workspace.clone(),
+            version: instance.version.clone(),
+            pid: Some(instance.pid),
+            managed: true,
+            api_only: Some(instance.api_only),
+        }
+    }
+}
+
+pub(super) enum BackgroundStart {
+    Started(WebInstanceRecord),
+    Reused(WebInstanceRecord),
+    Existing(WebEndpoint),
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -37,27 +71,44 @@ pub(crate) struct WebInstanceRecord {
 pub(crate) struct WebInstanceStatus {
     pub running: bool,
     pub stale: bool,
+    pub managed: bool,
     pub instance: Option<WebInstanceRecord>,
+    pub observed: Option<WebEndpoint>,
 }
 
 pub(super) async fn start(
     args: &[String],
     options: &ServeOptions,
-) -> anyhow::Result<WebInstanceRecord> {
+) -> anyhow::Result<BackgroundStart> {
     let executable = std::env::current_exe()
         .map_err(|error| anyhow::anyhow!("could not locate the current a3s executable: {error}"))?;
     let workspace = canonical_workspace(&options.workspace)?;
+    let _start_lock = acquire_start_lock(&workspace).await?;
     let instance_path = instance_path(&workspace)?;
     if let Some(existing) = read_instance(&instance_path)? {
         if probe_instance(&existing).await {
+            if options.replace {
+                stop_owned_instance(&instance_path, &existing).await?;
+            } else {
+                return Ok(BackgroundStart::Reused(existing));
+            }
+        } else {
+            quarantine_stale_instance(&instance_path)?;
+        }
+    }
+
+    if let Some(existing) = discover_requested_instance(options).await? {
+        if options.replace {
             bail!(
-                "A3S Web is already running for {} at http://{}",
-                workspace.display(),
+                "A3S Web {} is healthy but is not managed by this CLI state; no process was \
+                 stopped. Stop its original command or managed service before using --replace",
                 existing.address
             );
         }
-        quarantine_stale_instance(&instance_path)?;
+        return Ok(BackgroundStart::Existing(existing));
     }
+    ensure_requested_port_available(options).await?;
+    let _prepared_web_root = super::resolve_web_root(options).await?;
 
     let log_path = log_path(&workspace)?;
     if let Some(parent) = log_path.parent() {
@@ -89,6 +140,12 @@ pub(super) async fn start(
         .stdin(Stdio::null())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log));
+    if options.offline {
+        command.env("A3S_OFFLINE", "1");
+    }
+    if !options.allow_asset_download {
+        command.env("A3S_NO_AUTO_INSTALL", "1");
+    }
     configure_detached(&mut command);
 
     let mut child = command
@@ -109,35 +166,53 @@ pub(super) async fn start(
         executable: std::env::current_exe()?,
         started_at_ms: unix_millis(),
         api_only: options.api_only,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     wait_until_control_ready(&record, &mut child).await?;
     write_instance(&instance_path, &record)?;
 
-    Ok(record)
+    Ok(BackgroundStart::Started(record))
 }
 
 pub(crate) async fn status(workspace: &Path) -> anyhow::Result<WebInstanceStatus> {
     let workspace = canonical_workspace(workspace)?;
     let path = instance_path(&workspace)?;
     let Some(instance) = read_instance(&path)? else {
+        let mut options = ServeOptions::parse(&[])?;
+        options.workspace = workspace;
+        let observed = discover_matching_instance(&options).await?;
         return Ok(WebInstanceStatus {
-            running: false,
+            running: observed.is_some(),
             stale: false,
+            managed: false,
             instance: None,
+            observed,
         });
     };
     let running = probe_instance(&instance).await;
     Ok(WebInstanceStatus {
         running,
         stale: !running,
+        managed: true,
         instance: Some(instance),
+        observed: None,
     })
 }
 
 pub(crate) async fn stop(workspace: &Path) -> anyhow::Result<Option<WebInstanceRecord>> {
     let workspace = canonical_workspace(workspace)?;
+    let _start_lock = acquire_start_lock(&workspace).await?;
     let path = instance_path(&workspace)?;
     let Some(instance) = read_instance(&path)? else {
+        let mut options = ServeOptions::parse(&[])?;
+        options.workspace = workspace.clone();
+        if let Some(existing) = discover_matching_instance(&options).await? {
+            bail!(
+                "A3S Web is running at http://{} but is not managed by this CLI state; no process \
+                 was stopped. Stop the original foreground command instead",
+                existing.address
+            );
+        }
         return Ok(None);
     };
     if !probe_instance(&instance).await {
@@ -148,7 +223,27 @@ pub(crate) async fn stop(workspace: &Path) -> anyhow::Result<Option<WebInstanceR
         );
     }
 
-    let url = control_url(&instance, "stop");
+    stop_owned_instance(&path, &instance).await?;
+    Ok(Some(instance))
+}
+
+pub(super) async fn replace_managed(workspace: &Path) -> anyhow::Result<Option<WebInstanceRecord>> {
+    let workspace = canonical_workspace(workspace)?;
+    let _start_lock = acquire_start_lock(&workspace).await?;
+    let path = instance_path(&workspace)?;
+    let Some(instance) = read_instance(&path)? else {
+        return Ok(None);
+    };
+    if !probe_instance(&instance).await {
+        quarantine_stale_instance(&path)?;
+        return Ok(None);
+    }
+    stop_owned_instance(&path, &instance).await?;
+    Ok(Some(instance))
+}
+
+async fn stop_owned_instance(path: &Path, instance: &WebInstanceRecord) -> anyhow::Result<()> {
+    let url = control_url(instance, "stop");
     let response = control_client()?
         .post(url)
         .send()
@@ -159,21 +254,26 @@ pub(crate) async fn stop(workspace: &Path) -> anyhow::Result<Option<WebInstanceR
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if !probe_instance(&instance).await {
-            remove_instance_if_owned(&path, &instance.nonce);
-            return Ok(Some(instance));
+        if !probe_instance(instance).await {
+            remove_instance_if_owned(path, &instance.nonce);
+            return Ok(());
         }
         sleep(POLL_INTERVAL).await;
     }
     bail!("A3S Web did not stop within 10 seconds; no force signal was sent")
 }
 
-pub(crate) async fn open(workspace: &Path) -> anyhow::Result<WebInstanceRecord> {
+pub(crate) async fn open(workspace: &Path) -> anyhow::Result<WebEndpoint> {
     let status = status(workspace).await?;
-    match (status.running, status.instance) {
-        (true, Some(instance)) => Ok(instance),
-        _ => bail!("A3S Web is not running for {}", workspace.display()),
+    if status.running {
+        if let Some(instance) = status.instance.as_ref() {
+            return Ok(WebEndpoint::from_managed(instance));
+        }
+        if let Some(observed) = status.observed {
+            return Ok(observed);
+        }
     }
+    bail!("A3S Web is not running for {}", workspace.display())
 }
 
 pub(crate) fn read_log_tail(path: &Path, lines: usize) -> anyhow::Result<String> {
@@ -242,7 +342,7 @@ async fn wait_until_ready(
 
 fn foreground_args(args: &[String]) -> impl Iterator<Item = &String> {
     args.iter()
-        .filter(|argument| !matches!(argument.as_str(), "-d" | "--detach"))
+        .filter(|argument| !matches!(argument.as_str(), "-d" | "--detach" | "--replace"))
 }
 
 fn log_path(workspace: &Path) -> anyhow::Result<PathBuf> {
@@ -263,6 +363,53 @@ fn instance_path(workspace: &Path) -> anyhow::Result<PathBuf> {
     Ok(state_root()?
         .join("web/instances")
         .join(format!("{}.json", workspace_key(workspace))))
+}
+
+async fn acquire_start_lock(workspace: &Path) -> anyhow::Result<StartLock> {
+    let path = state_root()?
+        .join("web/locks")
+        .join(format!("{}.lock", workspace_key(workspace)));
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("could not create Web lock directory {}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("could not open Web lifecycle lock {}", path.display()))?;
+    let deadline = Instant::now() + START_LOCK_TIMEOUT;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(StartLock { file }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "timed out waiting for another A3S Web lifecycle operation for {}",
+                        workspace.display()
+                    );
+                }
+                sleep(POLL_INTERVAL).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("could not lock Web lifecycle state {}", path.display())
+                })
+            }
+        }
+    }
+}
+
+struct StartLock {
+    file: File,
+}
+
+impl Drop for StartLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 fn state_root() -> anyhow::Result<PathBuf> {
@@ -356,6 +503,122 @@ fn quarantine_stale_instance(path: &Path) -> anyhow::Result<()> {
     })
 }
 
+pub(super) async fn discover_requested_instance(
+    options: &ServeOptions,
+) -> anyhow::Result<Option<WebEndpoint>> {
+    if options.addr.port() == 0 {
+        return Ok(None);
+    }
+    let Some(existing) = probe_web_endpoint(options.addr).await else {
+        return Ok(None);
+    };
+    let workspace = canonical_workspace(&options.workspace)?;
+    if same_workspace(&workspace, &existing.workspace) {
+        return Ok(Some(existing));
+    }
+    bail!(
+        "{} is already serving A3S Web for {}; no process was stopped. Use that workspace's Web \
+         instance or select another port with --port 0",
+        options.addr,
+        existing.workspace.display()
+    )
+}
+
+async fn ensure_requested_port_available(options: &ServeOptions) -> anyhow::Result<()> {
+    if options.addr.port() == 0 {
+        return Ok(());
+    }
+    match tokio::net::TcpListener::bind(options.addr).await {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            bail!(
+                "{} is already in use by another application; no process was stopped. Stop that \
+                 application or select an available port with --port 0",
+                options.addr
+            )
+        }
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to validate {} before A3S Web startup", options.addr)),
+    }
+}
+
+async fn discover_matching_instance(options: &ServeOptions) -> anyhow::Result<Option<WebEndpoint>> {
+    if options.addr.port() == 0 {
+        return Ok(None);
+    }
+    let workspace = canonical_workspace(&options.workspace)?;
+    Ok(probe_web_endpoint(options.addr)
+        .await
+        .filter(|existing| same_workspace(&workspace, &existing.workspace)))
+}
+
+async fn probe_web_endpoint(address: SocketAddr) -> Option<WebEndpoint> {
+    let connect_address = connectable_address(address);
+    let client = control_client().ok()?;
+    let response = client
+        .get(format!("http://{connect_address}/api/v1/health"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value = response.json::<serde_json::Value>().await.ok()?;
+    let health = value.get("data").unwrap_or(&value);
+    if health.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let service = health.get("service").and_then(serde_json::Value::as_str);
+    let app = health.get("app").and_then(serde_json::Value::as_str);
+    let identified =
+        service == Some("a3s-code-web") || matches!(app, Some("a3s-code-web" | "书小安"));
+    if !identified {
+        return None;
+    }
+    let workspace = health
+        .get("workspace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|workspace| !workspace.trim().is_empty())
+        .map(PathBuf::from)?;
+    let pid = health
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|pid| u32::try_from(pid).ok());
+    let version = health
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(ToOwned::to_owned);
+
+    Some(WebEndpoint {
+        address,
+        workspace,
+        version,
+        pid,
+        managed: false,
+        api_only: None,
+    })
+}
+
+fn connectable_address(address: SocketAddr) -> SocketAddr {
+    if !address.ip().is_unspecified() {
+        return address;
+    }
+    match address {
+        SocketAddr::V4(address) => SocketAddr::from(([127, 0, 0, 1], address.port())),
+        SocketAddr::V6(address) => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], address.port())),
+    }
+}
+
+fn same_workspace(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => absolute(left.to_path_buf()) == absolute(right.to_path_buf()),
+    }
+}
+
 fn control_url(instance: &WebInstanceRecord, action: &str) -> String {
     format!(
         "http://{}/.a3s/web/{}/{}",
@@ -436,11 +699,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn foreground_arguments_remove_only_the_background_flag() {
+    fn foreground_arguments_remove_parent_only_lifecycle_flags() {
         let args = vec![
             "--host".to_string(),
             "127.0.0.1".to_string(),
             "-d".to_string(),
+            "--replace".to_string(),
             "--port".to_string(),
             "29653".to_string(),
         ];

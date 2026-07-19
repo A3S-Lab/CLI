@@ -7,6 +7,106 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-07-19
+
+### Added
+
+- Added `/checkup`, a secret-free setup audit with typed, read-only checks for
+  component health, duplicate or shadowed PATH installations, ACL semantics,
+  skills, applicable `AGENTS.md` files, MCP state, and terminal capabilities.
+  Findings enter the strict Plan workflow and stop at Approve, Revise, or
+  Abandon before any remediation can change the system.
+- Added the system-wide Agent Island integration. It is enabled by default,
+  can be changed with `/island on|off|status`, aggregates A3S, Claude, Codex,
+  Cursor, Gemini, and WorkBuddy activity into one native singleton, and exposes
+  authenticated one-shot approve, deny, stop, cancel, and reply controls with
+  task status and elapsed time.
+- Added a workspace-scoped `a3s web start|stop|status|logs|open` lifecycle,
+  including `--replace` for gracefully replacing only CLI-managed instances,
+  file-lock convergence for concurrent starts, and structured output for
+  automation.
+- Added strict two-phase Plan turns with an explicit Approve, Revise, or
+  Abandon review boundary, plus `Ctrl+O` Send now for promoting a prompt ahead
+  of ordinary queued follow-ups after settling the active turn.
+- Added a scoped Code TUI approval flow with allow-once, exact session grant,
+  exact project grant, and denial-feedback choices. Project grants are bounded,
+  parsed and generated with `a3s-acl`, and atomically stored in
+  `.a3s/permissions.acl` without following symbolic-link targets.
+- Added `/permissions`, a searchable inspector for exact session and project
+  grants. Grant details expose the canonical matching arguments; revocation
+  requires a second matching action and affects future checks only.
+- Added `/tasks` and `Ctrl+B` as a live delegated-work control panel. It reads
+  authoritative Core task snapshots without interrupting the parent turn,
+  retains running tasks plus bounded recent history, preserves semantic
+  selection across one-second refreshes, searches progress and output, opens
+  full task details, and requires a second matching action before invoking real
+  subagent cancellation.
+- Added pinned-root TUF registries for external Use packages, including full
+  metadata refresh, review/apply-bound install plans, signed provenance
+  receipts, and source-preserving upgrades. Registry upgrades query only the
+  recorded registry and channel, reject identity drift and version downgrades,
+  and converge without downloading an already installed target.
+- Added deterministic component operation plans, cross-process component
+  locks, immutable plan digests, and preflight checks so reviewed installs,
+  upgrades, and removals fail before payload download or mutation when their
+  inputs change.
+- Added policy-aware A3S Use preparation to Code TUI startup. A missing Use
+  component is installed from its verified release before terminal takeover
+  when networking and automatic setup are allowed; offline mode and
+  `A3S_NO_AUTO_INSTALL=1` remain strict zero-network, zero-receipt boundaries.
+  Browser, native Office, built-in OCR, and verified external MCP/Skill
+  surfaces are then projected into the dedicated restricted `use` worker.
+- Added `/history` and `Ctrl+R` fuzzy prompt search for the current TUI
+  session, with bounded results, keyboard and mouse navigation, and draft-safe
+  selection.
+- Added reliable TUI session sharing. `/copy` copies the latest assistant
+  source Markdown, `/copy transcript` requests the complete semantic session
+  through the native clipboard or bounded OSC 52 path, and `/export [path]`
+  atomically creates a private no-clobber Markdown snapshot inside the current
+  workspace. Exports preserve visible messages, tools, and delegated results
+  while excluding private reasoning, transient terminal chrome, and hidden
+  duplicate cells.
+
+### Changed
+
+- Refined the bundled A3S Web workspace with more precise Markdown typography,
+  syntax-highlighted tool commands and arguments, live execution previews, and
+  Simplified Chinese Monaco and editor-tab context menus.
+- Updated the release baselines to A3S Code Core 6.0.0, A3S TUI 0.1.13, and
+  A3S Use 0.1.2. `/checkup` uses the TUI's conservative terminal capability
+  profile instead of guessing support from a single environment variable.
+- Expanded `/relay` into a bounded session and background-work dashboard with
+  stable selection across manual or 15-second refreshes, multi-field search,
+  per-source selection memory, wheel navigation, task preview, and live native
+  session status.
+
+### Fixed
+
+- Reject symbolic-link, non-regular, replaced, or hard-linked component lock
+  files before truncation, and reject symbolic-link lock directories, so a
+  crafted runtime path cannot redirect cross-process lock writes.
+- Made `a3s web` reuse a healthy instance for the same workspace, quarantine
+  stale records, summarize unavailable saved-session models, and refuse to
+  signal an unknown listener or an unmanaged A3S process. Release archives and
+  installation prefixes now serve their packaged Web assets from an otherwise
+  empty workspace. Cargo installations fetch the CLI's exact-version Web
+  release once, verify its SHA-256, safely extract it into a versioned data
+  directory, and reuse that cache across workspaces. Offline and disabled
+  automatic-setup policies remain zero-network, and detached startup checks a
+  foreign port before downloading anything.
+- Applied the same blank-row rhythm to completed reasoning in the semantic
+  transcript as live reasoning and assistant Markdown, and revoked Agent
+  Island controls immediately when Send now interrupts the active turn.
+- Made TUI Auto mode genuinely non-interactive for every operation that
+  survives explicit policy and workspace hard denials, including tool-owned
+  confirmation escalation. Late confirmation events resolve automatically in
+  both directions, queued turns retain their submission-time mode, and Plan
+  remains strictly read-only.
+- Wait for the initial A3S Use MCP projection within a separate bounded startup
+  budget, so the first model turn receives ready Use routes through `task`.
+  Slow or broken surfaces remain non-fatal and continue converging in the
+  background.
+
 ## [0.9.6] - 2026-07-17
 
 ### Added

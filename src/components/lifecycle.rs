@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use a3s_updater::{
-    uninstall_owned_files, ComponentReceipt, InstallProvenance, RECEIPT_SCHEMA_VERSION,
+    parse_version, uninstall_owned_files, ComponentReceipt, InstallProvenance,
+    RECEIPT_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -11,10 +12,12 @@ use serde::Serialize;
 use super::catalog::{self, ComponentSpec, Distribution, ReleaseSpec};
 use super::discovery::find_state;
 use super::id::ComponentId;
+use super::lock::ComponentOperationLock;
 use super::paths::ComponentPaths;
 use super::probe::probe_version;
-use super::release_install::install_release;
+use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
+use crate::registry::ResolvedRegistryPackage;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum InstallSource {
@@ -24,14 +27,34 @@ pub enum InstallSource {
     Release,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InstallIntent {
+    #[default]
+    Install,
+    Upgrade,
+}
+
+impl InstallIntent {
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Upgrade => "upgrade",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InstallRequest {
     pub version: Option<String>,
     pub source: InstallSource,
+    pub intent: InstallIntent,
     pub package: Option<PathBuf>,
     pub force: bool,
     pub allow_unsigned: bool,
     pub progress: bool,
+    pub resolved_releases: BTreeMap<String, ResolvedRelease>,
+    pub resolved_sources: BTreeMap<String, InstallSource>,
+    pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
 }
 
 impl Default for InstallRequest {
@@ -39,10 +62,14 @@ impl Default for InstallRequest {
         Self {
             version: None,
             source: InstallSource::Auto,
+            intent: InstallIntent::Install,
             package: None,
             force: false,
             allow_unsigned: false,
             progress: true,
+            resolved_releases: BTreeMap::new(),
+            resolved_sources: BTreeMap::new(),
+            resolved_registry_packages: BTreeMap::new(),
         }
     }
 }
@@ -67,7 +94,36 @@ pub async fn install_component(
     request: &InstallRequest,
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
+    let _lock = ComponentOperationLock::acquire(paths.operation_lock_path(id), id).await?;
+    install_component_locked(id, request, paths).await
+}
+
+pub(super) async fn install_component_locked(
+    id: &ComponentId,
+    request: &InstallRequest,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
     if let Some(spec) = catalog::find(id) {
+        if request.package.is_some() {
+            bail!("--from is valid only for external Use extensions");
+        }
+        if request.allow_unsigned {
+            bail!("--allow-unsigned is valid only for external Use extensions");
+        }
+        if request.version.is_some() && !matches!(spec.distribution, Distribution::Release(_)) {
+            bail!(
+                "component '{}' does not own a versioned release; --version is not supported",
+                id
+            );
+        }
+        if request.source != InstallSource::Auto
+            && !matches!(spec.distribution, Distribution::Release(_))
+        {
+            bail!(
+                "component '{}' does not own an install source; --source is not supported",
+                id
+            );
+        }
         return match spec.distribution {
             Distribution::Bundled => install_bundled(id, spec, paths),
             Distribution::Release(release) => {
@@ -78,7 +134,7 @@ pub async fn install_component(
             }
             Distribution::Delegated { parent } => {
                 let parent = ComponentId::parse(parent)?;
-                let parent_path = ensure_parent(&parent, paths, request.progress).await?;
+                let parent_path = ensure_parent(&parent, paths, request).await?;
                 delegate_install(id, &parent, &parent_path, request)
             }
         };
@@ -88,17 +144,56 @@ pub async fn install_component(
     if !id.is_child_of(&use_id) || id.as_str().split('/').count() < 3 {
         bail!("component '{}' is not registered", id);
     }
-    if request.package.is_none() {
+    if request.source != InstallSource::Auto {
         bail!(
-            "external component '{}' requires an explicit --from package",
+            "external component '{}' is resolved through its package source; --source is not supported",
             id
         );
     }
-    let parent_path = ensure_parent(&use_id, paths, request.progress).await?;
+    if request.package.is_some() {
+        if !request.allow_unsigned {
+            bail!(
+                "external component '{}' uses an unsigned local package; rerun with --allow-unsigned",
+                id
+            );
+        }
+        if request.version.is_some() {
+            bail!(
+                "external component '{}' derives its version from the local package manifest; --version is not supported",
+                id
+            );
+        }
+    } else {
+        if request.allow_unsigned {
+            bail!("--allow-unsigned is valid only with an explicit local --from package");
+        }
+        let resolved = request
+            .resolved_registry_packages
+            .get(id.as_str())
+            .with_context(|| {
+                format!(
+                    "external component '{}' has no reviewed signed-registry resolution",
+                    id
+                )
+            })?;
+        validate_registry_resolution(id, resolved)?;
+    }
+    let parent_path = ensure_parent(&use_id, paths, request).await?;
     delegate_install(id, &use_id, &parent_path, request)
 }
 
+#[cfg(test)]
 pub fn uninstall_component(
+    id: &ComponentId,
+    cascade: bool,
+    purge: bool,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
+    let _lock = ComponentOperationLock::acquire_sync(&paths.operation_lock_path(id), id)?;
+    uninstall_component_locked(id, cascade, purge, paths)
+}
+
+pub(super) fn uninstall_component_locked(
     id: &ComponentId,
     cascade: bool,
     purge: bool,
@@ -146,7 +241,7 @@ pub fn uninstall_component(
     if cascade {
         for child in children.into_iter().rev() {
             let child_id = ComponentId::parse(&child.component_id)?;
-            uninstall_component(&child_id, true, purge, paths)?;
+            uninstall_component_locked(&child_id, true, purge, paths)?;
         }
     }
 
@@ -180,7 +275,7 @@ pub fn uninstall_component(
 async fn ensure_parent(
     parent: &ComponentId,
     paths: &ComponentPaths,
-    progress: bool,
+    request: &InstallRequest,
 ) -> anyhow::Result<PathBuf> {
     let state = find_state(parent, paths)?;
     if state.is_ready() {
@@ -190,11 +285,13 @@ async fn ensure_parent(
         .with_context(|| format!("parent component '{}' is not registered", parent))?;
     let release = catalog::release(spec)
         .with_context(|| format!("parent component '{}' is not installable", parent))?;
-    let request = InstallRequest {
-        progress,
+    let parent_request = InstallRequest {
+        progress: request.progress,
+        resolved_releases: request.resolved_releases.clone(),
+        resolved_sources: request.resolved_sources.clone(),
         ..InstallRequest::default()
     };
-    let record = install_product(parent, spec, release, &request, paths).await?;
+    let record = install_product(parent, spec, release, &parent_request, paths).await?;
     record
         .path
         .context("installed parent did not report an executable path")
@@ -228,7 +325,13 @@ async fn install_product(
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     let state = find_state(id, paths)?;
-    if state.is_ready() && !request.force {
+    let requested_version_is_ready = request.version.as_deref().is_none_or(|requested| {
+        state
+            .version
+            .as_deref()
+            .is_some_and(|installed| parse_version(installed).ok() == parse_version(requested).ok())
+    });
+    if state.is_ready() && requested_version_is_ready && !request.force {
         return Ok(OperationRecord {
             component: id.clone(),
             action: "install",
@@ -246,41 +349,83 @@ async fn install_product(
         );
     }
 
-    let source = match request.source {
-        InstallSource::Auto if release.homebrew_formula.is_some() && a3s_is_homebrew_managed() => {
-            InstallSource::Homebrew
-        }
-        InstallSource::Auto => InstallSource::Release,
-        explicit => explicit,
-    };
+    let source = resolve_install_source(id, release, request)?;
     match source {
-        InstallSource::Homebrew => install_homebrew(id, release, paths, request.progress),
-        InstallSource::Release => install_release(id, release, request, paths).await,
+        InstallSource::Homebrew => install_homebrew(id, release, request, paths),
+        InstallSource::Release => {
+            install_release(
+                id,
+                release,
+                request,
+                request.resolved_releases.get(id.as_str()),
+                paths,
+            )
+            .await
+        }
         InstallSource::Auto => {
             bail!("automatic install source was not resolved")
         }
     }
 }
 
+pub(super) fn resolve_install_source(
+    id: &ComponentId,
+    release: ReleaseSpec,
+    request: &InstallRequest,
+) -> anyhow::Result<InstallSource> {
+    if let Some(resolved) = request.resolved_sources.get(id.as_str()).copied() {
+        if request.source != InstallSource::Auto && request.source != resolved {
+            bail!(
+                "reviewed install source {:?} does not match requested source {:?}",
+                resolved,
+                request.source
+            );
+        }
+        return Ok(resolved);
+    }
+    Ok(match request.source {
+        InstallSource::Auto
+            if request.version.is_none()
+                && release.homebrew_formula.is_some()
+                && a3s_is_homebrew_managed() =>
+        {
+            InstallSource::Homebrew
+        }
+        InstallSource::Auto => InstallSource::Release,
+        explicit => explicit,
+    })
+}
+
 fn install_homebrew(
     id: &ComponentId,
     release: ReleaseSpec,
+    request: &InstallRequest,
     paths: &ComponentPaths,
-    progress: bool,
 ) -> anyhow::Result<OperationRecord> {
+    if request.version.is_some() {
+        bail!(
+            "component '{}' cannot select an exact version through Homebrew; use --source release",
+            id
+        );
+    }
     let formula = release
         .homebrew_formula
         .with_context(|| format!("component '{}' has no Homebrew formula", id))?;
+    let verb = match (request.intent, request.force) {
+        (InstallIntent::Upgrade, _) => "upgrade",
+        (InstallIntent::Install, true) => "reinstall",
+        (InstallIntent::Install, false) => "install",
+    };
     super::progress(
-        progress,
-        format!("a3s: installing '{}' with Homebrew...", id),
+        request.progress,
+        format!("a3s: {} '{}' with Homebrew...", verb, id),
     );
     let status = Command::new("brew")
-        .args(["install", formula])
+        .args([verb, formula])
         .status()
         .context("failed to run Homebrew")?;
     if !status.success() {
-        bail!("Homebrew failed to install '{}'", id);
+        bail!("Homebrew failed to {verb} '{}'", id);
     }
     let prefix_output = Command::new("brew")
         .args(["--prefix", formula])
@@ -307,12 +452,12 @@ fn install_homebrew(
     paths.receipt_store().write(&receipt)?;
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: true,
         version: Some(version),
         provenance: Some(InstallProvenance::Homebrew),
         path: Some(executable),
-        message: format!("Installed component '{}' with Homebrew.", id),
+        message: format!("Homebrew completed {verb} for component '{}'.", id),
     })
 }
 
@@ -336,6 +481,26 @@ fn delegate_install(
     if request.allow_unsigned {
         command.arg("--allow-unsigned");
     }
+    if let Some(resolved) = request.resolved_registry_packages.get(id.as_str()) {
+        validate_registry_resolution(id, resolved)?;
+        let plan_digest = resolved.package.plan_digest().map_err(anyhow::Error::new)?;
+        command
+            .arg("--registry-name")
+            .arg(&resolved.registry.name)
+            .arg("--registry-url")
+            .arg(&resolved.registry.url)
+            .arg("--trust-root")
+            .arg(&resolved.registry.trust_root)
+            .arg("--version")
+            .arg(&resolved.package.version)
+            .arg("--channel")
+            .arg(&resolved.package.channel)
+            .arg("--registry-plan-digest")
+            .arg(plan_digest);
+        if let Some(path) = &resolved.registry.trusted_root_path {
+            command.arg("--trusted-root").arg(path);
+        }
+    }
     let output = command.output().with_context(|| {
         format!(
             "failed to delegate install to parent component '{}'",
@@ -352,7 +517,7 @@ fn delegate_install(
     let component = data.get("component");
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: data
             .get("changed")
             .and_then(serde_json::Value::as_bool)
@@ -368,6 +533,31 @@ fn delegate_install(
             .map(PathBuf::from),
         message: format!("Parent component '{}' installed '{}'.", parent, id),
     })
+}
+
+fn validate_registry_resolution(
+    id: &ComponentId,
+    resolved: &ResolvedRegistryPackage,
+) -> anyhow::Result<()> {
+    let parent = ComponentId::parse("use")?;
+    let package_id = id
+        .relative_to(&parent)
+        .context("signed registry package is outside the Use namespace")?;
+    if resolved.package.package_id != package_id {
+        bail!(
+            "reviewed registry package '{}' does not match component '{}'",
+            resolved.package.package_id,
+            id
+        );
+    }
+    if resolved.package.registry_name != resolved.registry.name
+        || resolved.package.registry_url != resolved.registry.url
+        || resolved.package.root_sha256
+            != resolved.registry.trust_root.trim_start_matches("sha256:")
+    {
+        bail!("reviewed registry package provenance is internally inconsistent");
+    }
+    Ok(())
 }
 
 fn delegate_uninstall(

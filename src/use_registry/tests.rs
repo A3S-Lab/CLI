@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(unix)]
+// Keep process-backed fixtures from competing for spawn and stdio scheduling;
+// startup budget tests must measure the product path, not test-harness load.
+static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn test_config() -> a3s_code_core::CodeConfig {
     a3s_code_core::CodeConfig::from_acl(
         r#"
@@ -143,6 +148,11 @@ impl a3s_code_core::LlmClient for UseCallingLlm {
 #[test]
 fn dedicated_use_worker_allows_only_use_mcp_tools() {
     let worker = use_worker_spec(&DesiredCapabilities::default()).into_agent_definition();
+    assert_eq!(
+        worker.confirmation_inheritance,
+        Some(ConfirmationInheritance::InheritParent),
+        "Use Ask decisions must reach the parent TUI instead of auto-approval"
+    );
     assert_eq!(
         worker
             .permissions
@@ -301,6 +311,7 @@ async fn use_worker_advertises_a_route_only_after_its_mcp_projection_applies() {
 async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -361,6 +372,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
 async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -632,6 +644,7 @@ esac
 async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let binary = std::env::var_os("A3S_USE_E2E_BIN")
         .map(PathBuf::from)
         .expect("A3S_USE_E2E_BIN must point to the real a3s-use binary");
@@ -890,6 +903,7 @@ async fn assert_fixture_tool(session: &AgentSession, expected: &str) {
 async fn startup_discovery_respects_its_budget() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("slow-a3s-use");
     std::fs::write(&executable, "#!/bin/sh\nsleep 5\n").unwrap();
@@ -934,9 +948,116 @@ async fn startup_discovery_respects_its_budget() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("slow-initial-mcp");
+    let snapshot = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"registry": {
+            "schemaVersion": 1,
+            "generation": 1,
+            "revision": "1111111111111111111111111111111111111111111111111111111111111111",
+            "capabilities": [{
+                "id": "use/acme/report",
+                "route": "report",
+                "version": "1.0.0",
+                "origin": "extension",
+                "enabled": true,
+                "packageRoot": temp.path(),
+                "surfaces": ["mcp"],
+                "mcp": {"target": "acme/report", "transport": "stdio"},
+                "skills": []
+            }]
+        }}
+    });
+    let unchanged = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"changed": false, "registry": null}
+    });
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "mcp" ] && [ "$2" = "serve" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*)
+        sleep 1.25
+        printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"slow-fixture","version":"1.0.0"}}}}}}'
+        ;;
+      *'"method":"notifications/initialized"'*) ;;
+      *'"method":"tools/list"'*)
+        printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}}}]}}}}'
+        ;;
+    esac
+  done
+  exit 0
+fi
+
+case "$1 $2" in
+  "capability snapshot") printf '%s\n' '{}' ;;
+  "capability watch") printf '%s\n' '{}' ;;
+  *) exit 2 ;;
+esac
+"#,
+        shell_single_quote(&snapshot.to_string()),
+        shell_single_quote(&unchanged.to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temp.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    assert!(
+        STARTUP_PROJECTION_BUDGET > STARTUP_DISCOVERY_BUDGET,
+        "production startup must reserve more time for initial MCP projection"
+    );
+    let started = std::time::Instant::now();
+    let (handle, warning) = start_with_budgets(
+        executable,
+        temp.path().to_path_buf(),
+        CancellationToken::new(),
+        Arc::clone(&session),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    assert!(warning.is_none(), "{warning:?}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "fixture did not exercise the longer projection budget"
+    );
+    assert!(
+        session
+            .tool_names()
+            .iter()
+            .any(|name| name == "mcp__use_report__fixture_tool"),
+        "initial MCP route was not ready when startup returned"
+    );
+
+    handle.shutdown().await;
+    session.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn timed_out_startup_discovery_converges_from_the_watch_generation() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -1127,6 +1248,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
 #[cfg(unix)]
 #[tokio::test]
 async fn partial_reconciliation_never_advances_the_generation() {
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let skill_path = temp.path().join("SKILL.md");
     std::fs::write(&skill_path, fixture_skill()).unwrap();

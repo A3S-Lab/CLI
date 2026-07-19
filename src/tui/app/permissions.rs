@@ -14,22 +14,73 @@ pub(super) fn with_recent_workspace_context(
 pub(super) fn tui_session_options(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
 ) -> SessionOptions {
-    tui_session_options_with_gate(confirmation, DeepResearchReportToolGate::default())
+    tui_session_options_with_gate_and_grants(
+        confirmation,
+        DeepResearchReportToolGate::default(),
+        TuiPermissionGrants::default(),
+    )
 }
 
+#[cfg(test)]
 pub(super) fn tui_session_options_with_gate(
     confirmation: a3s_code_core::hitl::ConfirmationPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
 ) -> SessionOptions {
+    tui_session_options_with_gate_and_grants(
+        confirmation,
+        deep_research_report_tool_gate,
+        TuiPermissionGrants::default(),
+    )
+}
+
+pub(super) fn tui_session_options_with_gate_and_grants(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
+) -> SessionOptions {
+    tui_session_options_with_gate_grants_and_execution(
+        confirmation,
+        deep_research_report_tool_gate,
+        permission_grants,
+        TuiExecutionPolicy::default(),
+    )
+}
+
+#[cfg(test)]
+pub(super) fn tui_session_options_with_gate_and_execution(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    execution_policy: TuiExecutionPolicy,
+) -> SessionOptions {
+    tui_session_options_with_gate_grants_and_execution(
+        confirmation,
+        deep_research_report_tool_gate,
+        TuiPermissionGrants::default(),
+        execution_policy,
+    )
+}
+
+pub(super) fn tui_session_options_with_gate_grants_and_execution(
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+    deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
+    execution_policy: TuiExecutionPolicy,
+) -> SessionOptions {
     let permission_policy = tui_permission_policy();
+    let confirmation_manager =
+        TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
     SessionOptions::new()
         .with_auto_compact(false)
-        .with_confirmation_policy(confirmation)
+        .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy.clone())
-        .with_permission_checker(Arc::new(TuiHitlPermissionChecker::new(
-            permission_policy,
-            deep_research_report_tool_gate,
-        )))
+        .with_permission_checker(Arc::new(
+            TuiHitlPermissionChecker::with_grants_and_execution(
+                permission_policy,
+                deep_research_report_tool_gate,
+                permission_grants,
+                execution_policy,
+            ),
+        ))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
 }
@@ -76,6 +127,171 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
             "dynamic_workflow(*)",
             "Skill(*)",
         ])
+}
+
+/// Active execution semantics shared by the TUI and every rebuilt Core
+/// session. The value describes the running turn, not the mutable composer
+/// mode, so a queued Auto turn cannot become interactive if the user changes
+/// the footer mode before it starts.
+#[derive(Clone)]
+pub(super) struct TuiExecutionPolicy {
+    mode: Arc<AtomicU8>,
+}
+
+impl Default for TuiExecutionPolicy {
+    fn default() -> Self {
+        Self::new(Mode::Default)
+    }
+}
+
+impl TuiExecutionPolicy {
+    const DEFAULT: u8 = 0;
+    const PLAN: u8 = 1;
+    const AUTO: u8 = 2;
+
+    pub(super) fn new(mode: Mode) -> Self {
+        let policy = Self {
+            mode: Arc::new(AtomicU8::new(Self::DEFAULT)),
+        };
+        policy.set_mode(mode);
+        policy
+    }
+
+    pub(super) fn set_mode(&self, mode: Mode) {
+        let encoded = match mode {
+            Mode::Default => Self::DEFAULT,
+            Mode::Plan => Self::PLAN,
+            Mode::Auto => Self::AUTO,
+        };
+        self.mode.store(encoded, Ordering::SeqCst);
+    }
+
+    pub(super) fn mode(&self) -> Mode {
+        match self.mode.load(Ordering::SeqCst) {
+            Self::PLAN => Mode::Plan,
+            Self::AUTO => Mode::Auto,
+            _ => Mode::Default,
+        }
+    }
+
+    /// Resolve a confirmation already emitted by Core without entering HITL.
+    ///
+    /// `None` keeps the interactive Default/Plan flow. Auto always returns a
+    /// decision: non-denied calls are approved and hard-denied calls are
+    /// rejected. Keeping both Auto outcomes non-interactive prevents a stale
+    /// or third-party confirmation event from opening an authorization modal.
+    pub(super) fn auto_confirmation_decision(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        workspace: &Path,
+    ) -> Option<bool> {
+        if self.mode() != Mode::Auto {
+            return None;
+        }
+        let checker = a3s_code_core::permissions::InteractiveToolGuardrail::for_mode("auto")
+            .with_workspace(workspace);
+        Some(
+            a3s_code_core::permissions::PermissionChecker::check(&checker, tool_name, args)
+                != a3s_code_core::permissions::PermissionDecision::Deny,
+        )
+    }
+}
+
+/// Confirmation provider that preserves interactive HITL for Default/Plan
+/// turns while disabling the escalation path for an immutable Auto turn.
+///
+/// Permission `Allow` normally bypasses HITL, but tool-owned metadata may
+/// explicitly request a second confirmation check. Auto remains
+/// non-interactive through that path; hard denials are still resolved earlier
+/// by the permission checker.
+struct TuiModeConfirmationProvider {
+    inner: Arc<a3s_code_core::hitl::ConfirmationManager>,
+    execution_policy: TuiExecutionPolicy,
+}
+
+impl TuiModeConfirmationProvider {
+    fn new(
+        policy: a3s_code_core::hitl::ConfirmationPolicy,
+        execution_policy: TuiExecutionPolicy,
+    ) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        Self {
+            inner: Arc::new(a3s_code_core::hitl::ConfirmationManager::new(
+                policy, event_tx,
+            )),
+            execution_policy,
+        }
+    }
+
+    fn auto_response() -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse>
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(a3s_code_core::hitl::ConfirmationResponse {
+            approved: true,
+            reason: None,
+        });
+        rx
+    }
+}
+
+#[async_trait::async_trait]
+impl a3s_code_core::hitl::ConfirmationProvider for TuiModeConfirmationProvider {
+    async fn requires_confirmation(&self, tool_name: &str) -> bool {
+        self.execution_policy.mode() != Mode::Auto
+            && self.inner.requires_confirmation(tool_name).await
+    }
+
+    async fn request_confirmation(
+        &self,
+        tool_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> tokio::sync::oneshot::Receiver<a3s_code_core::hitl::ConfirmationResponse> {
+        if self.execution_policy.mode() == Mode::Auto {
+            Self::auto_response()
+        } else {
+            self.inner
+                .request_confirmation(tool_id, tool_name, args)
+                .await
+        }
+    }
+
+    async fn confirm(
+        &self,
+        tool_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<bool, String> {
+        self.inner.confirm(tool_id, approved, reason).await
+    }
+
+    async fn policy(&self) -> a3s_code_core::hitl::ConfirmationPolicy {
+        self.inner.policy().await
+    }
+
+    async fn set_policy(&self, policy: a3s_code_core::hitl::ConfirmationPolicy) {
+        self.inner.set_policy(policy).await;
+    }
+
+    async fn check_timeouts(&self) -> usize {
+        self.inner.check_timeouts().await
+    }
+
+    async fn cancel_all(&self) -> usize {
+        self.inner.cancel_all().await
+    }
+
+    async fn pending_confirmations(&self) -> Vec<a3s_code_core::hitl::PendingConfirmationInfo> {
+        self.inner.pending_confirmation_details().await
+    }
+}
+
+fn plan_tool_is_read_only(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read" | "grep" | "glob" | "ls" | "web_search" | "web_fetch"
+    )
 }
 
 #[derive(Clone, Default)]
@@ -237,16 +453,48 @@ pub(super) fn should_delay_deep_research_report_tool(
 pub(super) struct TuiHitlPermissionChecker {
     base: a3s_code_core::permissions::PermissionPolicy,
     deep_research_report_tool_gate: DeepResearchReportToolGate,
+    permission_grants: TuiPermissionGrants,
+    execution_policy: TuiExecutionPolicy,
 }
 
 impl TuiHitlPermissionChecker {
+    #[cfg(test)]
     pub(super) fn new(
         base: a3s_code_core::permissions::PermissionPolicy,
         deep_research_report_tool_gate: DeepResearchReportToolGate,
     ) -> Self {
+        Self::with_grants(
+            base,
+            deep_research_report_tool_gate,
+            TuiPermissionGrants::default(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_grants(
+        base: a3s_code_core::permissions::PermissionPolicy,
+        deep_research_report_tool_gate: DeepResearchReportToolGate,
+        permission_grants: TuiPermissionGrants,
+    ) -> Self {
+        Self::with_grants_and_execution(
+            base,
+            deep_research_report_tool_gate,
+            permission_grants,
+            TuiExecutionPolicy::default(),
+        )
+    }
+
+    pub(super) fn with_grants_and_execution(
+        base: a3s_code_core::permissions::PermissionPolicy,
+        deep_research_report_tool_gate: DeepResearchReportToolGate,
+        permission_grants: TuiPermissionGrants,
+        execution_policy: TuiExecutionPolicy,
+    ) -> Self {
         Self {
             base,
             deep_research_report_tool_gate,
+            permission_grants,
+            execution_policy,
         }
     }
 
@@ -297,6 +545,31 @@ impl TuiHitlPermissionChecker {
             })
         {
             return a3s_code_core::permissions::PermissionDecision::Deny;
+        }
+        if !evidence_collection {
+            match self.execution_policy.mode() {
+                // Auto means non-interactive execution. The hard base and
+                // workspace denials above remain authoritative; every other
+                // operation proceeds without entering HITL.
+                Mode::Auto => {
+                    return a3s_code_core::permissions::PermissionDecision::Allow;
+                }
+                // Plan is a true read-only boundary. A remembered grant must
+                // never turn a planning turn into an implementation turn.
+                Mode::Plan => {
+                    return if plan_tool_is_read_only(&tool)
+                        && matches!(base, a3s_code_core::permissions::PermissionDecision::Allow)
+                    {
+                        a3s_code_core::permissions::PermissionDecision::Allow
+                    } else {
+                        a3s_code_core::permissions::PermissionDecision::Deny
+                    };
+                }
+                Mode::Default => {}
+            }
+            if self.permission_grants.allows(&tool, args) {
+                return a3s_code_core::permissions::PermissionDecision::Allow;
+            }
         }
         let decision =
             a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(&tool, args);
@@ -356,6 +629,9 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
                 _ => false,
             };
         }
+        if self.execution_policy.mode() == Mode::Plan {
+            return plan_tool_is_read_only(&tool);
+        }
         true
     }
 
@@ -392,6 +668,210 @@ pub(super) fn touch_workspace_file_path_for_manifest(
         if let Some(path) = relative.to_str() {
             manifest.touch_file(path);
         }
+    }
+}
+
+#[cfg(test)]
+mod execution_policy_tests {
+    use super::*;
+    use a3s_code_core::hitl::ConfirmationProvider;
+    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
+
+    fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecutionPolicy) {
+        let gate = DeepResearchReportToolGate::default();
+        gate.set_workspace(workspace);
+        let execution = TuiExecutionPolicy::new(mode);
+        let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+            tui_permission_policy(),
+            gate,
+            TuiPermissionGrants::default(),
+            execution.clone(),
+        );
+        (checker, execution)
+    }
+
+    #[test]
+    fn auto_mode_resolves_non_denied_tools_without_hitl() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (checker, _) = checker(workspace.path(), Mode::Auto);
+
+        for (tool, args) in [
+            (
+                "write",
+                serde_json::json!({"file_path": "README.md", "content": "updated"}),
+            ),
+            ("bash", serde_json::json!({"command": "cargo test"})),
+            (
+                "task",
+                serde_json::json!({"prompt": "inspect and implement the change"}),
+            ),
+            (
+                "mcp__github__create_issue",
+                serde_json::json!({"title": "tracked work"}),
+            ),
+        ] {
+            assert_eq!(
+                checker.check(tool, &args),
+                PermissionDecision::Allow,
+                "Auto must not enter HITL for {tool}"
+            );
+        }
+
+        assert_eq!(
+            checker.check("bash", &serde_json::json!({"command": "rm -rf /"})),
+            PermissionDecision::Deny,
+            "hard guardrails remain authoritative in Auto"
+        );
+    }
+
+    #[test]
+    fn execution_mode_is_shared_across_checker_clones() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (checker, execution) = checker(workspace.path(), Mode::Default);
+        let clone = checker.clone();
+        let args = serde_json::json!({"command": "cargo test"});
+
+        assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+        execution.set_mode(Mode::Auto);
+        assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
+        assert_eq!(clone.check("bash", &args), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn plan_mode_is_read_only() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (checker, _) = checker(workspace.path(), Mode::Plan);
+
+        assert_eq!(
+            checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({"file_path": "README.md", "content": "new"})
+            ),
+            PermissionDecision::Deny
+        );
+        assert!(!checker.expose_to_model("write"));
+    }
+
+    #[test]
+    fn auto_confirmation_fallback_never_routes_to_hitl() {
+        let workspace = tempfile::tempdir().unwrap();
+        let execution = TuiExecutionPolicy::new(Mode::Auto);
+
+        assert_eq!(
+            execution.auto_confirmation_decision(
+                "bash",
+                &serde_json::json!({"command": "cargo test"}),
+                workspace.path(),
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            execution.auto_confirmation_decision(
+                "bash",
+                &serde_json::json!({"command": "rm -rf /"}),
+                workspace.path(),
+            ),
+            Some(false),
+            "hard denials must be rejected automatically instead of opening HITL"
+        );
+
+        execution.set_mode(Mode::Default);
+        assert_eq!(
+            execution.auto_confirmation_decision(
+                "bash",
+                &serde_json::json!({"command": "cargo test"}),
+                workspace.path(),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn plan_mode_is_read_only_even_with_session_grants() {
+        let workspace = tempfile::tempdir().unwrap();
+        let gate = DeepResearchReportToolGate::default();
+        gate.set_workspace(workspace.path());
+        let grants = TuiPermissionGrants::default();
+        grants.allow_for_session(ExactPermissionGrant::from_invocation(
+            "write",
+            &serde_json::json!({"file_path": "README.md", "content": "old"}),
+        ));
+        let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+            tui_permission_policy(),
+            gate,
+            grants,
+            TuiExecutionPolicy::new(Mode::Plan),
+        );
+
+        assert_eq!(
+            checker.check("read", &serde_json::json!({"file_path": "README.md"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check(
+                "write",
+                &serde_json::json!({"file_path": "README.md", "content": "new"})
+            ),
+            PermissionDecision::Deny
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_mode_bypasses_tool_owned_confirmation_escalation() {
+        let execution = TuiExecutionPolicy::new(Mode::Default);
+        let provider = TuiModeConfirmationProvider::new(
+            a3s_code_core::hitl::ConfirmationPolicy::enabled(),
+            execution.clone(),
+        );
+
+        assert!(
+            provider
+                .requires_confirmation("mcp__server__destructive")
+                .await
+        );
+
+        execution.set_mode(Mode::Auto);
+        assert!(
+            !provider
+                .requires_confirmation("mcp__server__destructive")
+                .await
+        );
+        let response = provider
+            .request_confirmation("tool-1", "mcp__server__destructive", &serde_json::json!({}))
+            .await
+            .await
+            .expect("Auto confirmation should resolve immediately");
+        assert!(response.approved);
+        assert!(provider.pending_confirmations().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn session_options_share_one_execution_policy_across_both_hitl_layers() {
+        let execution = TuiExecutionPolicy::new(Mode::Default);
+        let options = tui_session_options_with_gate_grants_and_execution(
+            a3s_code_core::hitl::ConfirmationPolicy::enabled(),
+            DeepResearchReportToolGate::default(),
+            TuiPermissionGrants::default(),
+            execution.clone(),
+        );
+        let checker = options
+            .permission_checker
+            .expect("TUI options should install a permission checker");
+        let confirmation = options
+            .confirmation_manager
+            .expect("TUI options should install a confirmation provider");
+        let args = serde_json::json!({"command": "cargo test"});
+
+        assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+        assert!(confirmation.requires_confirmation("bash").await);
+
+        execution.set_mode(Mode::Auto);
+        assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
+        assert!(!confirmation.requires_confirmation("bash").await);
     }
 }
 

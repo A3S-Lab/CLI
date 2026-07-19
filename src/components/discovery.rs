@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{ComponentReceipt, InstallProvenance};
+use a3s_use_extension::ResolvedRemotePackage;
 use anyhow::{bail, Context};
 
 use super::catalog::{self, ComponentKind, ComponentSpec, Distribution, ReleaseSpec};
@@ -135,6 +136,7 @@ fn discover_dynamic_use_extensions(parent_binary: &Path) -> anyhow::Result<Vec<C
             update: UpdateState::Unknown,
             trust: match component.get("trust").and_then(serde_json::Value::as_str) {
                 Some("local-explicit") => Trust::LocalExplicit,
+                Some("registry-tuf") => Trust::RegistryTuf,
                 _ => Trust::Untrusted,
             },
             provenance: Some(InstallProvenance::Delegated),
@@ -150,6 +152,77 @@ fn discover_dynamic_use_extensions(parent_binary: &Path) -> anyhow::Result<Vec<C
         });
     }
     Ok(extensions)
+}
+
+pub(crate) fn extension_registry_provenance(
+    id: &ComponentId,
+    paths: &ComponentPaths,
+) -> anyhow::Result<Option<ResolvedRemotePackage>> {
+    let use_id = ComponentId::parse("use")?;
+    let package_id = id
+        .relative_to(&use_id)
+        .filter(|value| value.split('/').count() == 2)
+        .with_context(|| format!("component '{}' is not an external Use extension", id))?;
+    let parent = find_state(&use_id, paths)?;
+    let parent_binary = parent
+        .is_ready()
+        .then_some(parent.path.as_deref())
+        .flatten()
+        .with_context(|| "parent component 'use' is not ready")?;
+    let output = run_bounded(
+        parent_binary.as_os_str(),
+        &[
+            OsString::from("component"),
+            OsString::from("status"),
+            OsString::from(package_id),
+            OsString::from("--json"),
+        ],
+    )?;
+    if !output.success {
+        bail!("Use component status exited unsuccessfully");
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("invalid Use component status JSON")?;
+    let component = value
+        .get("component")
+        .or_else(|| value.get("data").and_then(|data| data.get("component")))
+        .context("Use component status has no component object")?;
+    let returned_id = component
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .context("Use component status has no component ID")?;
+    if returned_id != package_id && returned_id != id.as_str() {
+        bail!("Use component status returned mismatched ID '{returned_id}'");
+    }
+
+    match component.get("trust").and_then(serde_json::Value::as_str) {
+        Some("local-explicit") => Ok(None),
+        Some("registry-tuf") => {
+            let registry = component
+                .get("registry")
+                .filter(|value| !value.is_null())
+                .context("signed extension status has no registry provenance")?;
+            let resolved: ResolvedRemotePackage = serde_json::from_value(registry.clone())
+                .context("signed extension status has invalid registry provenance")?;
+            if resolved.package_id != package_id {
+                bail!(
+                    "signed extension provenance package '{}' does not match '{}'",
+                    resolved.package_id,
+                    package_id
+                );
+            }
+            if component
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|version| version != resolved.version)
+            {
+                bail!("signed extension status version does not match its registry provenance");
+            }
+            Ok(Some(resolved))
+        }
+        Some(trust) => bail!("unsupported installed extension trust source '{trust}'"),
+        None => bail!("installed extension status has no trust source"),
+    }
 }
 
 pub fn find_state(id: &ComponentId, paths: &ComponentPaths) -> anyhow::Result<ComponentState> {

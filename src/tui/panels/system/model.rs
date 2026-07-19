@@ -736,9 +736,11 @@ impl App {
         );
         let automatic_delegation = effort_uses_automatic_delegation(profile.effort);
         let mut opts = with_recent_workspace_context(
-            tui_session_options_with_gate(
+            tui_session_options_with_gate_grants_and_execution(
                 self.confirmation.clone(),
                 self.deep_research_report_tool_gate.clone(),
+                self.permission_grants.clone(),
+                self.execution_policy.clone(),
             )
             .with_session_store(self.store.clone())
             .with_session_id(profile.session_id.as_str())
@@ -1071,7 +1073,7 @@ impl App {
                     )));
                 }
                 if selected == ULTRACODE {
-                    self.mode = Mode::Auto;
+                    self.set_composer_mode(Mode::Auto);
                     self.gradient_until = Some(Instant::now());
                     self.gradient_frame = 0;
                     let native = codex_effort
@@ -1082,7 +1084,7 @@ impl App {
                         })
                         .unwrap_or_default();
                     self.push_line(&Style::new().fg(ACCENT).bold().render(&format!(
-                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on){native}",
+                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (non-interactive Auto on){native}",
                     )));
                 } else if let Some(status) = codex_effort {
                     let cap = if status.capped { " (model limit)" } else { "" };
@@ -1186,8 +1188,15 @@ impl App {
                 self.runtime.clear_turn_entities();
                 self.runtime.clear_subagent_entities();
                 self.queue.clear();
+                self.queued_turn_modes.clear();
+                self.queued_plan_drafts.clear();
                 self.active_queued_turn = None;
                 self.active_queued_turn_token = None;
+                self.active_turn_mode = None;
+                self.active_plan_draft = None;
+                self.pending_plan_review = None;
+                self.plan_review = None;
+                self.execution_policy.set_mode(self.mode);
                 self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
                 self.queue_retry_attempt = 0;
                 self.completed = 0;

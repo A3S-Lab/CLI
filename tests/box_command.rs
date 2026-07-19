@@ -4,14 +4,24 @@ mod support;
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 
 use support::{
     a3s_bin, box_release_target, configure_component_env, make_executable, sh_quote,
     start_fake_box_release, TempWorkspace,
 };
 
+static PROCESS_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn process_test_guard() -> MutexGuard<'static, ()> {
+    PROCESS_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 #[test]
 fn box_command_delegates_to_configured_a3s_box() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("delegate");
     let bin_dir = temp.path("bin");
     let args_log = temp.path("args.log");
@@ -43,6 +53,7 @@ fn box_command_delegates_to_configured_a3s_box() {
 
 #[test]
 fn box_command_propagates_a3s_box_exit_status() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("exit-status");
     let bin_dir = temp.path("bin");
     make_executable(
@@ -67,6 +78,7 @@ fn box_command_propagates_a3s_box_exit_status() {
 
 #[test]
 fn use_box_routes_through_use_with_one_resolved_box_executable() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("use-box-delegate");
     let use_bin = temp.path("use-bin");
     let box_bin = temp.path("box-bin");
@@ -118,6 +130,7 @@ fn use_box_routes_through_use_with_one_resolved_box_executable() {
 
 #[test]
 fn non_box_use_routes_do_not_install_box() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("use-without-box");
     let use_bin = temp.path("use-bin");
     make_executable(
@@ -145,6 +158,7 @@ fn non_box_use_routes_do_not_install_box() {
 
 #[test]
 fn use_box_auto_install_creates_only_the_authoritative_box_receipt() {
+    let _guard = process_test_guard();
     if box_release_target().is_none() {
         eprintln!("skipping release install test on unsupported host target");
         return;
@@ -182,6 +196,7 @@ fn use_box_auto_install_creates_only_the_authoritative_box_receipt() {
 
 #[test]
 fn compose_namespace_delegates_to_a3s_box_compose_without_reparsing_arguments() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("compose-delegate");
     let bin_dir = temp.path("bin");
     let args_log = temp.path("args.log");
@@ -216,6 +231,7 @@ fn compose_namespace_delegates_to_a3s_box_compose_without_reparsing_arguments() 
 
 #[test]
 fn compose_shortcuts_prepend_the_box_compose_command() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("compose-shortcuts");
     let bin_dir = temp.path("bin");
     let args_log = temp.path("args.log");
@@ -261,6 +277,7 @@ fn compose_shortcuts_prepend_the_box_compose_command() {
 
 #[test]
 fn box_command_auto_installs_a_verified_release() {
+    let _guard = process_test_guard();
     if box_release_target().is_none() {
         eprintln!("skipping release install test on unsupported host target");
         return;
@@ -312,6 +329,7 @@ fn box_command_auto_installs_a_verified_release() {
 
 #[test]
 fn box_command_respects_no_auto_install() {
+    let _guard = process_test_guard();
     let temp = TempWorkspace::new("no-auto-install");
     let mut command = Command::new(a3s_bin());
     configure_component_env(&mut command, &temp);

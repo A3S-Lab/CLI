@@ -16,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 18b349aa7e125c197b6121258d40b0ef1899bbf5
-  A3S_CODE_CORE_VERSION: 5.3.5
-  A3S_TUI_VERSION: 0.1.12
+  A3S_WEB_SOURCE_REF: 898f6a55554cf566e81903847c17651250d9c444
+  A3S_CODE_CORE_VERSION: 6.0.0
+  A3S_TUI_VERSION: 0.1.13
 jobs:
   release-gate:
     name: Validate release candidate
@@ -101,6 +101,7 @@ jobs:
             "a3s-search 1.4.3"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
+            "a3s-use-extension 0.1.2"
           )
           for requirement in "${required_crates[@]}"; do
             read -r crate version <<<"$requirement"
@@ -218,7 +219,7 @@ jobs:
                  --notes-file release-notes.md --verify-tag --draft
 
   web-assets:
-    needs: release-gate
+    needs: [release-gate, create-release]
     runs-on: ubuntu-latest
     steps:
       - name: Validate Web source revision
@@ -262,6 +263,35 @@ jobs:
         run: bun run build
       - name: Validate Web build
         run: test -f web-source/apps/web/dist/workspace/index.html
+      - name: Package versioned Web release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive_name="a3s-web-v${version}.tar.gz"
+          package_root="$RUNNER_TEMP/a3s-web-package"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          cp -a web-source/apps/web/dist/workspace "$package_root/web"
+          (
+            cd "$package_root"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - web \
+              | gzip -n >"$RUNNER_TEMP/$archive_name"
+          )
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum "$archive_name" >"$archive_name.sha256"
+          )
+          tar -tzf "$RUNNER_TEMP/$archive_name" | grep -Fx 'web/index.html'
+          echo "WEB_RELEASE_ARCHIVE=$RUNNER_TEMP/$archive_name" >>"$GITHUB_ENV"
+          echo "WEB_RELEASE_CHECKSUM=$RUNNER_TEMP/$archive_name.sha256" >>"$GITHUB_ENV"
+      - name: Upload versioned Web release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "$WEB_RELEASE_ARCHIVE" "$WEB_RELEASE_CHECKSUM" \
+            --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload Web workspace
         uses: actions/upload-artifact@v4
         with:

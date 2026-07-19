@@ -9709,6 +9709,7 @@ fn agent_matches_source(agent: AgentKind, source: &str) -> bool {
         AgentKind::Codex => source.contains("codex"),
         AgentKind::Cursor => source.contains("cursor"),
         AgentKind::Gemini => source.contains("gemini"),
+        AgentKind::WorkBuddy => source.contains("workbuddy") || source.contains("codebuddy"),
     }
 }
 

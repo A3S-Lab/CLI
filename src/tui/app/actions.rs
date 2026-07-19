@@ -17,7 +17,20 @@ impl App {
     }
 
     pub(super) fn session_status_chips(&self) -> Vec<SessionStatusChip> {
-        let mut chips = vec![mode_status_chip(self.mode)];
+        let effective_mode = self.active_turn_mode.unwrap_or(self.mode);
+        let mut chips = vec![mode_status_chip(effective_mode)];
+        if self
+            .active_turn_mode
+            .is_some_and(|active| active != self.mode)
+        {
+            chips.push(
+                SessionStatusChip::new("↪", format!("next:{}", self.mode.name()))
+                    .color(COMPOSER_CHROME.secondary),
+            );
+        }
+        if self.plan_review.is_some() {
+            chips.push(SessionStatusChip::new("◆", "plan review").color(COMPOSER_CHROME.active));
+        }
 
         if self.goal.is_some() {
             chips.push(goal_status_chip(self.goal_since));

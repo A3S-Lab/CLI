@@ -2,30 +2,44 @@
 
 use super::super::*;
 use a3s_tui::components::{TabbedMenuItem, TabbedMenuPanel, TabbedMenuPanelMsg, TabbedMenuTab};
+use a3s_tui::event::MouseEventKind;
 
 pub(crate) use super::relay_scan::RelaySession;
-use super::relay_scan::{scan_relay_sessions, RelayAgent};
+use super::relay_scan::{
+    scan_relay_sessions, RelayAgent, RelaySessionIdentity, RelaySessionStatus,
+};
 
 const RELAY_MAX_VISIBLE_ROWS: usize = 12;
+const RELAY_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 pub(crate) struct RelayPanel {
+    generation: u64,
     request_id: u64,
     sessions: Vec<RelaySession>,
     tab: usize,
-    selected: usize,
+    selected_by_agent: [Option<RelaySessionIdentity>; RelayAgent::ALL.len()],
+    query: String,
+    searching: bool,
+    preview: bool,
     loading: bool,
     error: Option<String>,
+    current_session_id: String,
 }
 
 impl RelayPanel {
-    fn loading(request_id: u64) -> Self {
+    fn loading(generation: u64, request_id: u64, current_session_id: String) -> Self {
         Self {
+            generation,
             request_id,
             sessions: Vec::new(),
             tab: 0,
-            selected: 0,
+            selected_by_agent: std::array::from_fn(|_| None),
+            query: String::new(),
+            searching: false,
+            preview: false,
             loading: true,
             error: None,
+            current_session_id,
         }
     }
 
@@ -33,21 +47,215 @@ impl RelayPanel {
         RelayAgent::ALL[self.tab.min(RelayAgent::ALL.len() - 1)]
     }
 
-    fn active_indices(&self) -> Vec<usize> {
-        let agent = self.active_agent();
+    fn indices_for_tab(&self, tab: usize) -> Vec<usize> {
+        let agent = RelayAgent::ALL[tab.min(RelayAgent::ALL.len() - 1)];
         self.sessions
             .iter()
             .enumerate()
-            .filter_map(|(index, session)| (session.agent == agent).then_some(index))
+            .filter_map(|(index, session)| {
+                (session.agent == agent && relay_session_matches_query(session, &self.query))
+                    .then_some(index)
+            })
             .collect()
     }
 
-    fn clamp_selection(&mut self) {
-        self.tab = self.tab.min(RelayAgent::ALL.len() - 1);
-        self.selected = self
-            .selected
-            .min(self.active_indices().len().saturating_sub(1));
+    fn active_indices(&self) -> Vec<usize> {
+        self.indices_for_tab(self.tab)
     }
+
+    fn selected_index(&self) -> usize {
+        let indices = self.active_indices();
+        let selected = self
+            .selected_by_agent
+            .get(self.tab)
+            .and_then(Option::as_ref);
+        selected
+            .and_then(|selected| {
+                indices.iter().position(|index| {
+                    self.sessions
+                        .get(*index)
+                        .is_some_and(|session| &session.identity == selected)
+                })
+            })
+            .unwrap_or(0)
+            .min(indices.len().saturating_sub(1))
+    }
+
+    fn selected_session(&self) -> Option<&RelaySession> {
+        let indices = self.active_indices();
+        indices
+            .get(self.selected_index())
+            .and_then(|index| self.sessions.get(*index))
+    }
+
+    fn remember_visible_index(&mut self, tab: usize, visible_index: usize) {
+        let tab = tab.min(RelayAgent::ALL.len() - 1);
+        let identity = self
+            .indices_for_tab(tab)
+            .get(visible_index)
+            .and_then(|index| self.sessions.get(*index))
+            .map(|session| session.identity.clone());
+        if identity.is_some() {
+            self.selected_by_agent[tab] = identity;
+        }
+    }
+
+    fn reconcile_selections(&mut self) {
+        self.tab = self.tab.min(RelayAgent::ALL.len() - 1);
+        for tab in 0..RelayAgent::ALL.len() {
+            let agent = RelayAgent::ALL[tab];
+            let selection_still_exists =
+                self.selected_by_agent[tab]
+                    .as_ref()
+                    .is_some_and(|identity| {
+                        self.sessions
+                            .iter()
+                            .any(|session| session.agent == agent && &session.identity == identity)
+                    });
+            if selection_still_exists {
+                continue;
+            }
+            self.selected_by_agent[tab] = self
+                .indices_for_tab(tab)
+                .first()
+                .and_then(|index| self.sessions.get(*index))
+                .or_else(|| self.sessions.iter().find(|session| session.agent == agent))
+                .map(|session| session.identity.clone());
+        }
+    }
+
+    fn set_tab(&mut self, tab: usize) {
+        self.tab = tab.min(RelayAgent::ALL.len() - 1);
+    }
+
+    fn move_selection(&mut self, amount: isize) {
+        let indices = self.active_indices();
+        if indices.is_empty() {
+            return;
+        }
+        let current = self.selected_index();
+        let next = if amount.is_negative() {
+            current.saturating_sub(amount.unsigned_abs())
+        } else {
+            current
+                .saturating_add(amount as usize)
+                .min(indices.len().saturating_sub(1))
+        };
+        self.remember_visible_index(self.tab, next);
+    }
+
+    fn move_selection_to(&mut self, index: usize) {
+        let last = self.active_indices().len().saturating_sub(1);
+        self.remember_visible_index(self.tab, index.min(last));
+    }
+
+    fn select_item(&mut self, tab: usize, item: usize) -> Option<RelaySession> {
+        self.set_tab(tab);
+        let session = self
+            .indices_for_tab(self.tab)
+            .get(item)
+            .and_then(|index| self.sessions.get(*index))
+            .cloned()?;
+        self.selected_by_agent[self.tab] = Some(session.identity.clone());
+        Some(session)
+    }
+
+    fn apply_scan(&mut self, request_id: u64, result: Result<Vec<RelaySession>, String>) -> bool {
+        if self.request_id != request_id {
+            return false;
+        }
+        self.loading = false;
+        match result {
+            Ok(sessions) => {
+                self.sessions = sessions;
+                self.error = None;
+            }
+            Err(error) => {
+                self.error = Some(error);
+            }
+        }
+        self.reconcile_selections();
+        true
+    }
+
+    fn accepts_refresh_tick(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn handle_search_key(&mut self, key: &KeyEvent) -> RelayPanelAction {
+        match key.code {
+            KeyCode::Esc => self.searching = false,
+            KeyCode::Enter => {
+                return self
+                    .selected_session()
+                    .cloned()
+                    .map_or(RelayPanelAction::None, RelayPanelAction::Activate);
+            }
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::PageUp => self.move_selection(-(RELAY_MAX_VISIBLE_ROWS as isize)),
+            KeyCode::PageDown => self.move_selection(RELAY_MAX_VISIBLE_ROWS as isize),
+            KeyCode::Home => self.move_selection_to(0),
+            KeyCode::End => self.move_selection_to(usize::MAX),
+            KeyCode::Left | KeyCode::BackTab => self.set_tab(self.tab.saturating_sub(1)),
+            KeyCode::Right | KeyCode::Tab => {
+                self.set_tab((self.tab + 1).min(RelayAgent::ALL.len() - 1));
+            }
+            KeyCode::Backspace => {
+                self.query.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.query.clear();
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.query.push(character);
+            }
+            _ => {}
+        }
+        RelayPanelAction::None
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> RelayPanelAction {
+        if self.searching {
+            return self.handle_search_key(key);
+        }
+        match key.code {
+            KeyCode::Up => self.move_selection(-1),
+            KeyCode::Down => self.move_selection(1),
+            KeyCode::PageUp => self.move_selection(-(RELAY_MAX_VISIBLE_ROWS as isize)),
+            KeyCode::PageDown => self.move_selection(RELAY_MAX_VISIBLE_ROWS as isize),
+            KeyCode::Home => self.move_selection_to(0),
+            KeyCode::End => self.move_selection_to(usize::MAX),
+            KeyCode::Left | KeyCode::BackTab => self.set_tab(self.tab.saturating_sub(1)),
+            KeyCode::Right | KeyCode::Tab => {
+                self.set_tab((self.tab + 1).min(RelayAgent::ALL.len() - 1));
+            }
+            KeyCode::Char('/') => self.searching = true,
+            KeyCode::Char('c' | 'C') if !self.query.is_empty() => self.query.clear(),
+            KeyCode::Char(' ' | 'p' | 'P') => self.preview = !self.preview,
+            KeyCode::Char('r' | 'R') => return RelayPanelAction::Refresh,
+            KeyCode::Enter => {
+                return self
+                    .selected_session()
+                    .cloned()
+                    .map_or(RelayPanelAction::None, RelayPanelAction::Activate);
+            }
+            KeyCode::Esc => return RelayPanelAction::Close,
+            _ => {}
+        }
+        RelayPanelAction::None
+    }
+}
+
+enum RelayPanelAction {
+    None,
+    Refresh,
+    Activate(RelaySession),
+    Close,
 }
 
 fn relay_agent_color(agent: RelayAgent) -> Color {
@@ -59,21 +267,70 @@ fn relay_agent_color(agent: RelayAgent) -> Color {
     }
 }
 
+fn relay_session_matches_query(session: &RelaySession, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let identity = match &session.identity {
+        RelaySessionIdentity::Native(id) => id.clone(),
+        RelaySessionIdentity::Transcript { path, .. } => path.to_string_lossy().into_owned(),
+    };
+    let haystack = format!(
+        "{} {} {} {} {} {}",
+        session.agent.label(),
+        session.status.label(),
+        session.label,
+        session.seed.as_deref().unwrap_or_default(),
+        session.persisted_model.as_deref().unwrap_or_default(),
+        identity,
+    )
+    .to_lowercase();
+    query
+        .split_whitespace()
+        .all(|term| haystack.contains(&term.to_lowercase()))
+}
+
+fn relay_compact_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn relay_panel_footer(panel: &RelayPanel) -> String {
+    if let Some(error) = panel.error.as_deref() {
+        return format!("Refresh failed · {}", relay_compact_text(error));
+    }
+    if panel.preview {
+        return panel.selected_session().map_or_else(
+            || "Peek · no matching session".to_string(),
+            |session| {
+                let task = session.seed.as_deref().unwrap_or(&session.label);
+                format!("Peek · {}", relay_compact_text(task))
+            },
+        );
+    }
+    let count = panel.active_indices().len();
+    format!(
+        "{count} {} {} · auto-refresh 15s · Space peek",
+        panel.active_agent().label(),
+        if count == 1 { "session" } else { "sessions" },
+    )
+}
+
 fn relay_max_rows(height: usize) -> usize {
-    height.saturating_sub(8).clamp(3, RELAY_MAX_VISIBLE_ROWS)
+    height.saturating_sub(9).clamp(3, RELAY_MAX_VISIBLE_ROWS)
 }
 
 fn relay_panel_height(panel: &RelayPanel, max_items: usize) -> usize {
     let item_count = panel.active_indices().len().max(1).min(max_items);
-    // Title + tab strip + hint + rows + footer spacing.
-    4 + item_count
+    // Title + tab strip + hint + rows + scroll allowance + status/peek footer.
+    5 + item_count
 }
 
 fn relay_menu_panel(panel: &RelayPanel, max_items: usize) -> TabbedMenuPanel {
-    let empty_text = if panel.loading {
+    let empty_text = if panel.loading && panel.sessions.is_empty() {
         "(scanning sessions…)".to_string()
-    } else if let Some(error) = &panel.error {
-        format!("(scan failed: {})", truncate(error, 72))
+    } else if !panel.query.trim().is_empty() {
+        format!("(no matches for \"{}\")", truncate(panel.query.trim(), 48))
     } else {
         "(no sessions for this workspace)".to_string()
     };
@@ -83,8 +340,18 @@ fn relay_menu_panel(panel: &RelayPanel, max_items: usize) -> TabbedMenuPanel {
             let items = panel
                 .sessions
                 .iter()
-                .filter(|session| session.agent == agent)
-                .map(|session| TabbedMenuItem::new(session.label.clone()).prefix("⮌"))
+                .filter(|session| {
+                    session.agent == agent && relay_session_matches_query(session, &panel.query)
+                })
+                .map(|session| {
+                    TabbedMenuItem::new(session.label.clone())
+                        .prefix(relay_session_prefix(session, &panel.current_session_id))
+                        .description(relay_session_description(
+                            session,
+                            &panel.current_session_id,
+                            SystemTime::now(),
+                        ))
+                })
                 .collect::<Vec<_>>();
             TabbedMenuTab::new(agent.label(), relay_agent_color(agent))
                 .items(items)
@@ -92,17 +359,104 @@ fn relay_menu_panel(panel: &RelayPanel, max_items: usize) -> TabbedMenuPanel {
         })
         .collect::<Vec<_>>();
 
+    let title = if panel.loading && !panel.sessions.is_empty() {
+        "Sessions and background work · refreshing…"
+    } else {
+        "Sessions and background work"
+    };
+    let hint = if panel.searching {
+        format!(
+            "Filter: {}▌ · type to refine · ↑/↓ select · Enter continue · Esc done · Ctrl+U clear",
+            panel.query
+        )
+    } else if panel.query.is_empty() {
+        "↑/↓ session · ←/→ agent · / search · Enter continue · R refresh · Esc".to_string()
+    } else {
+        format!(
+            "Filter: {} · / edit · C clear · Enter continue · R refresh · Esc",
+            panel.query
+        )
+    };
+
     TabbedMenuPanel::new(tabs)
-        .title("Resume or relay session")
-        .hint("↑/↓ session · ←/→ agent · Enter continue · Esc")
+        .title(title)
+        .hint(hint)
         .active_tab(panel.tab)
-        .selected(panel.selected)
+        .selected(panel.selected_index())
         .max_items(max_items)
+        .footer(relay_panel_footer(panel))
         .indent(2)
         .hint_color(TN_GRAY)
         .text_color(TN_FG)
         .muted_color(TN_GRAY)
         .selected_colors(TN_FG, SURFACE_SELECTED)
+}
+
+fn relay_session_prefix(session: &RelaySession, current_session_id: &str) -> &'static str {
+    if session.native_id.as_deref() == Some(current_session_id) {
+        return "●";
+    }
+    if session.active_runs > 0 || session.active_subagents > 0 {
+        return "◐";
+    }
+    match session.status {
+        RelaySessionStatus::Saved => "○",
+        RelaySessionStatus::Paused => "Ⅱ",
+        RelaySessionStatus::Completed => "✓",
+        RelaySessionStatus::Error => "!",
+        RelaySessionStatus::External => "⮌",
+    }
+}
+
+fn relay_session_description(
+    session: &RelaySession,
+    current_session_id: &str,
+    now: SystemTime,
+) -> String {
+    let mut parts = vec![
+        if session.native_id.as_deref() == Some(current_session_id) {
+            "current".to_string()
+        } else {
+            session.status.label().to_string()
+        },
+    ];
+    if session.active_runs > 0 {
+        parts.push(format!(
+            "{} unfinished {}",
+            session.active_runs,
+            if session.active_runs == 1 {
+                "run"
+            } else {
+                "runs"
+            }
+        ));
+    }
+    if session.active_subagents > 0 {
+        parts.push(format!(
+            "{} background {}",
+            session.active_subagents,
+            if session.active_subagents == 1 {
+                "agent"
+            } else {
+                "agents"
+            }
+        ));
+    }
+    if let Some(model) = session.persisted_model.as_deref() {
+        parts.push(truncate(model, 28));
+    }
+    parts.push(relative_session_age(session.modified, now));
+    parts.join(" · ")
+}
+
+fn relative_session_age(modified: SystemTime, now: SystemTime) -> String {
+    let seconds = now.duration_since(modified).unwrap_or_default().as_secs();
+    match seconds {
+        0..=59 => "now".to_string(),
+        60..=3_599 => format!("{}m", seconds / 60),
+        3_600..=86_399 => format!("{}h", seconds / 3_600),
+        _ => format!("{}d", seconds / 86_400),
+    }
 }
 
 fn relay_menu_lines(panel: &RelayPanel, width: usize, max_items: usize) -> Vec<String> {
@@ -123,6 +477,13 @@ fn relay_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: us
         .min(u16::MAX as usize) as u16
 }
 
+fn relay_refresh_tick(generation: u64) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        tokio::time::sleep(RELAY_REFRESH_INTERVAL).await;
+        Msg::RelayRefreshTick { generation }
+    })
+}
+
 impl App {
     pub(crate) fn open_relay_panel(&mut self) -> Option<Cmd<Msg>> {
         self.textarea.clear();
@@ -135,14 +496,26 @@ impl App {
             return None;
         }
         self.relay_scan_seq = self.relay_scan_seq.wrapping_add(1).max(1);
+        let generation = self.relay_scan_seq;
+        self.relay_panel = Some(RelayPanel::loading(generation, 0, self.session_id.clone()));
+        let refresh = self.refresh_relay_panel()?;
+        Some(cmd::batch(vec![refresh, relay_refresh_tick(generation)]))
+    }
+
+    fn refresh_relay_panel(&mut self) -> Option<Cmd<Msg>> {
+        let panel = self.relay_panel.as_mut()?;
+        self.relay_scan_seq = self.relay_scan_seq.wrapping_add(1).max(1);
         let request_id = self.relay_scan_seq;
-        self.relay_panel = Some(RelayPanel::loading(request_id));
+        panel.request_id = request_id;
+        panel.loading = true;
+        panel.error = None;
         let store = Arc::clone(&self.store);
         let workspace = PathBuf::from(&self.cwd);
+        let current_session = Arc::clone(&self.session);
         Some(cmd::cmd(move || async move {
             Msg::RelayData {
                 request_id,
-                result: scan_relay_sessions(store, workspace).await,
+                result: scan_relay_sessions(store, workspace, current_session).await,
             }
         }))
     }
@@ -155,52 +528,49 @@ impl App {
         let Some(panel) = self.relay_panel.as_mut() else {
             return;
         };
-        if panel.request_id != request_id {
-            return;
+        panel.apply_scan(request_id, result);
+    }
+
+    pub(crate) fn handle_relay_refresh_tick(&mut self, generation: u64) -> Option<Cmd<Msg>> {
+        let panel = self.relay_panel.as_ref()?;
+        if !panel.accepts_refresh_tick(generation) {
+            return None;
         }
-        panel.loading = false;
-        match result {
-            Ok(sessions) => {
-                panel.sessions = sessions;
-                panel.error = None;
-            }
-            Err(error) => {
-                panel.sessions.clear();
-                panel.error = Some(error);
-            }
+        let tick = relay_refresh_tick(generation);
+        if panel.loading {
+            return Some(tick);
         }
-        panel.clamp_selection();
+        match self.refresh_relay_panel() {
+            Some(refresh) => Some(cmd::batch(vec![refresh, tick])),
+            None => Some(tick),
+        }
     }
 
     pub(crate) fn handle_relay_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
-        let panel = self.relay_panel.as_mut()?;
-        let last = panel.active_indices().len().saturating_sub(1);
-        match key.code {
-            KeyCode::Up => panel.selected = panel.selected.saturating_sub(1),
-            KeyCode::Down => panel.selected = (panel.selected + 1).min(last),
-            KeyCode::Left => {
-                panel.tab = panel.tab.saturating_sub(1);
-                panel.selected = 0;
+        let action = self.relay_panel.as_mut()?.handle_key(key);
+        match action {
+            RelayPanelAction::None => None,
+            RelayPanelAction::Refresh => self.refresh_relay_panel(),
+            RelayPanelAction::Activate(session) => self.activate_relay_session(session),
+            RelayPanelAction::Close => {
+                self.relay_panel = None;
+                None
             }
-            KeyCode::Right | KeyCode::Tab => {
-                panel.tab = (panel.tab + 1).min(RelayAgent::ALL.len() - 1);
-                panel.selected = 0;
-            }
-            KeyCode::Enter => {
-                let session = panel
-                    .active_indices()
-                    .get(panel.selected.min(last))
-                    .and_then(|index| panel.sessions.get(*index))
-                    .cloned();
-                return session.and_then(|session| self.activate_relay_session(session));
-            }
-            KeyCode::Esc => self.relay_panel = None,
-            _ => {}
         }
-        None
     }
 
     pub(crate) fn handle_relay_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.relay_panel.as_mut()?.move_selection(-1);
+                return None;
+            }
+            MouseEventKind::ScrollDown => {
+                self.relay_panel.as_mut()?.move_selection(1);
+                return None;
+            }
+            _ => {}
+        }
         let panel = self.relay_panel.as_ref()?;
         let max_items = relay_max_rows(self.height as usize);
         let height = relay_panel_height(panel, max_items);
@@ -217,21 +587,15 @@ impl App {
         match menu.handle_mouse(mouse) {
             Some(TabbedMenuPanelMsg::TabChanged(tab)) => {
                 if let Some(panel) = self.relay_panel.as_mut() {
-                    panel.tab = tab.min(RelayAgent::ALL.len() - 1);
-                    panel.selected = 0;
+                    panel.set_tab(tab);
                 }
                 None
             }
             Some(TabbedMenuPanelMsg::Selected { tab, item }) => {
-                let session = self.relay_panel.as_ref().and_then(|panel| {
-                    let agent = RelayAgent::ALL[tab.min(RelayAgent::ALL.len() - 1)];
-                    panel
-                        .sessions
-                        .iter()
-                        .filter(|session| session.agent == agent)
-                        .nth(item)
-                        .cloned()
-                });
+                let session = self
+                    .relay_panel
+                    .as_mut()
+                    .and_then(|panel| panel.select_item(tab, item));
                 session.and_then(|session| self.activate_relay_session(session))
             }
             Some(TabbedMenuPanelMsg::Cancelled) | None => None,
@@ -393,7 +757,8 @@ impl App {
         self.model = restore.model;
         self.model_source = restore.model_source;
         self.effort = restore.effort;
-        self.mode = restore.mode;
+        self.active_turn_mode = None;
+        self.set_composer_mode(restore.mode);
         self.context_limit = restore.context_limit;
         self.llm_override = restore.llm_override;
         if let Some(theme) = restore.theme {
@@ -419,12 +784,20 @@ impl App {
         self.background_subagent_watches.clear();
         self.invalidate_subagent_snapshots();
         self.queue.clear();
+        self.queued_turn_modes.clear();
+        self.queued_plan_drafts.clear();
         self.active_queued_turn = None;
         self.active_queued_turn_token = None;
+        self.active_turn_mode = None;
+        self.active_plan_draft = None;
+        self.pending_plan_review = None;
+        self.plan_review = None;
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
         self.queue_retry_attempt = 0;
         self.running_task = None;
+        self.restore_current_approval_feedback();
         self.pending_tools.clear();
+        self.permission_rule_write_inflight = None;
         self.pending_images.clear();
         self.pending_ctx = None;
         self.ctx_hits.clear();
@@ -475,38 +848,5 @@ impl App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use a3s_tui::style::visible_len;
-
-    #[test]
-    fn relay_tabs_include_workbuddy() {
-        assert_eq!(
-            RelayAgent::ALL.map(RelayAgent::label),
-            ["A3S Code", "Claude Code", "Codex", "WorkBuddy"]
-        );
-    }
-
-    #[test]
-    fn relay_menu_rows_are_bounded_to_the_terminal_width() {
-        let panel = RelayPanel {
-            request_id: 1,
-            sessions: vec![RelaySession {
-                agent: RelayAgent::WorkBuddy,
-                native_id: None,
-                seed: Some("task".to_string()),
-                label: "a very long WorkBuddy task label that must be clipped safely".to_string(),
-                modified: UNIX_EPOCH,
-                persisted_model: None,
-            }],
-            tab: 3,
-            selected: 0,
-            loading: false,
-            error: None,
-        };
-
-        for line in relay_menu_lines(&panel, 32, 12) {
-            assert!(visible_len(&line) <= 32, "{line:?}");
-        }
-    }
-}
+#[path = "relay_tests.rs"]
+mod tests;

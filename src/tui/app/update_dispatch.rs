@@ -34,6 +34,10 @@ fn composer_attachment_key_action(
     None
 }
 
+fn is_send_now_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 impl App {
     pub(super) fn update_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         if self.quitting {
@@ -91,6 +95,15 @@ impl App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.history_panel.is_some() {
+                    self.handle_history_panel_paste(&text);
+                    return None;
+                }
+                if self.plan_review_input_active() {
+                    self.textarea.insert_str(&text);
+                    self.relayout();
+                    return None;
+                }
                 if self.composer_input_is_hidden() {
                     return None;
                 }
@@ -171,6 +184,12 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
                 }
+                // A completed plan is a true modal execution boundary. No
+                // underlying panel, mode shortcut, or composer action may run
+                // until the user approves, revises, or abandons it.
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_key(&key);
+                }
                 // The semantic transcript is a true modal surface. It keeps
                 // all styles and owns navigation until explicitly closed.
                 if let Some(transcript) = self.transcript_view.as_mut() {
@@ -178,6 +197,17 @@ impl App {
                         self.transcript_view = None;
                     }
                     return None;
+                }
+                // Exact permission grants remain inspectable while a turn
+                // streams. Revocation changes future checks only.
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_key(&key);
+                }
+                // Prompt history search owns printable input while open. The
+                // hidden composer draft remains untouched until Enter accepts
+                // an explicit historical prompt.
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_key(&key);
                 }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
@@ -213,14 +243,21 @@ impl App {
                     self.ide_key(&key);
                     return None;
                 }
+                // `/tasks` / Ctrl+B is a modal delegated-work inspector. It
+                // remains available while a turn streams, but its keys never
+                // leak into the live composer or interrupt the parent turn.
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_key(&key);
+                }
                 // `/relay` is a modal session picker; execution-mode shortcuts
                 // and composer input must not change behind it.
                 if self.relay_panel.is_some() {
                     return self.handle_relay_key(&key);
                 }
-                // Shift+Tab cycles run mode in any state.
+                // Shift+Tab changes the composer mode. A running or queued
+                // turn retains the immutable mode captured at submission.
                 if key.code == KeyCode::BackTab {
-                    self.mode = self.mode.next();
+                    self.set_composer_mode(self.mode.next());
                     return None;
                 }
                 // /model picker takes keys while open — consume EVERY key so
@@ -308,6 +345,18 @@ impl App {
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
+                }
+                // Cross-platform terminal control for delegated work. Higher
+                // decision modals and focused panels retain priority above it.
+                if panels::tasks::is_task_panel_key(&key) {
+                    return self.toggle_task_panel();
+                }
+                // Ctrl+R opens searchable prompt history without disturbing
+                // the draft or a running parent turn.
+                if panels::history::is_history_panel_key(&key) {
+                    let query = self.textarea.value();
+                    self.open_history_panel(&query);
+                    return None;
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -481,6 +530,25 @@ impl App {
                     self.history_recall(key.code == KeyCode::Up);
                     return None;
                 }
+                // Ctrl+O is a distinct Send now intent. It cancels a genuinely
+                // active turn and promotes this submission ahead of ordinary
+                // FIFO follow-ups; during terminal settlement it safely falls
+                // back to the normal queue without losing the draft.
+                if is_send_now_key(&key) {
+                    if self.state != State::Streaming
+                        || (self.textarea.value().trim().is_empty()
+                            && self.pending_images.is_empty())
+                    {
+                        return None;
+                    }
+                    let text = self.textarea.value();
+                    self.textarea.clear();
+                    return Some(cmd::msg(if self.stream_interrupt_available() {
+                        Msg::SubmitNow(text)
+                    } else {
+                        Msg::Submit(text)
+                    }));
+                }
                 match composer_attachment_key_action(
                     &key,
                     &self.textarea.value(),
@@ -532,9 +600,21 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_mouse(&m);
                 }
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_mouse(&m);
+                }
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
                     return None;
+                }
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_mouse(&m);
+                }
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_mouse(&m);
+                }
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);
@@ -689,6 +769,7 @@ impl App {
             }
 
             Msg::Submit(text) => return self.on_submit(text),
+            Msg::SubmitNow(text) => return self.on_submit_now(text),
 
             Msg::GoalContinue { generation, prompt } => {
                 return self.handle_goal_continue(generation, prompt);
@@ -785,6 +866,11 @@ impl App {
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
+                if !queued_turn_restored {
+                    self.record_local_agent_terminal(
+                        crate::system_agents::AgentActivityState::Failed,
+                    );
+                }
                 self.finish();
                 if queued_turn_restored {
                     self.push_line(
@@ -837,6 +923,9 @@ impl App {
                 goal_cancelled,
                 status_entry,
             } => {
+                self.record_local_agent_terminal(
+                    crate::system_agents::AgentActivityState::Cancelled,
+                );
                 // Esc force-aborted the turn. The cancel command awaited the
                 // stream join first, so core has committed the interrupted
                 // history before any queued continuation starts.
@@ -893,6 +982,7 @@ impl App {
                     return None;
                 }
                 // Channel closed without a normal End event (abnormal close).
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 if self.deep_research_loop.is_some()
@@ -932,6 +1022,34 @@ impl App {
                     }
                     return Some(stream_commit_tick());
                 }
+            }
+
+            Msg::AgentPresenceTick => {
+                let mut commands = vec![agent_presence_tick()];
+                self.sync_agent_island_preference();
+                if let Some(restart) = self.poll_agent_island() {
+                    commands.push(restart);
+                }
+                if !self.agent_presence.refreshing {
+                    commands.push(self.refresh_agent_presence());
+                }
+                return Some(cmd::batch(commands));
+            }
+
+            Msg::AgentPresenceRefreshed(result) => {
+                return self.apply_agent_presence_refresh(result);
+            }
+
+            Msg::AgentIslandLaunchFinished(result) => {
+                self.apply_agent_island_launch_result(result);
+            }
+
+            Msg::AgentIslandControl(request) => {
+                return self.apply_agent_island_control(request);
+            }
+
+            Msg::AgentIslandSubagentCancelFinished { task_id, cancelled } => {
+                self.apply_agent_island_subagent_cancel_result(task_id, cancelled);
             }
 
             Msg::BannerTick => {
@@ -1119,14 +1237,14 @@ impl App {
             Msg::ModalConfirm {
                 tool_id,
                 approved,
-                approve_all_pending,
+                reason,
             } => {
-                let pending = take_pending_tools_for_confirmation(
-                    &mut self.pending_tools,
-                    &tool_id,
-                    approved && approve_all_pending,
-                );
-                if !pending.is_empty() {
+                let pending = take_pending_tool_for_confirmation(&mut self.pending_tools, &tool_id);
+                if let Some(pending) = pending {
+                    self.restore_approval_feedback_for(&tool_id);
+                    if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                        self.permission_rule_write_inflight = None;
+                    }
                     self.approval_sel = 0;
                     self.state = if self.pending_tools.is_empty() {
                         State::Streaming
@@ -1136,9 +1254,9 @@ impl App {
                     let session = self.session.clone();
                     return Some(cmd::batch(vec![
                         cmd::cmd(move || async move {
-                            for (tool_id, _) in pending {
-                                let _ = session.confirm_tool_use(&tool_id, approved, None).await;
-                            }
+                            let _ = session
+                                .confirm_tool_use(&pending.tool_id, approved, reason)
+                                .await;
                             Msg::Resume
                         }),
                         spinner_tick(),
@@ -1150,6 +1268,70 @@ impl App {
                 } else {
                     State::Awaiting
                 };
+            }
+
+            Msg::PersistProjectPermission { tool_id, grant } => {
+                if self.permission_rule_write_inflight.as_deref() != Some(tool_id.as_str())
+                    || self
+                        .pending_tools
+                        .front()
+                        .is_none_or(|pending| pending.tool_id.as_str() != tool_id.as_str())
+                {
+                    return None;
+                }
+                let path = self.project_permission_rules_path.clone();
+                let persisted_grant = grant.clone();
+                return Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        persist_project_permission_grant(&path, persisted_grant)
+                    })
+                    .await
+                    .map_err(|error| format!("permission rule writer failed: {error}"))
+                    .and_then(|result| result);
+                    Msg::ProjectPermissionPersisted {
+                        tool_id,
+                        grant,
+                        result,
+                    }
+                }));
+            }
+
+            Msg::ProjectPermissionPersisted {
+                tool_id,
+                grant,
+                result,
+            } => {
+                if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                    self.permission_rule_write_inflight = None;
+                }
+                match result {
+                    Ok(path) => {
+                        let scope = grant.scope_label();
+                        self.permission_grants.allow_for_project(grant);
+                        self.refresh_permission_panel_grants();
+                        self.push_notice(
+                            NoticeKind::Info,
+                            format!("Project permission saved to {} · {scope}", path.display()),
+                        );
+                        if self
+                            .pending_tools
+                            .front()
+                            .is_some_and(|pending| pending.tool_id.as_str() == tool_id.as_str())
+                        {
+                            return Some(cmd::msg(Msg::ModalConfirm {
+                                tool_id,
+                                approved: true,
+                                reason: None,
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        self.push_notice(
+                            NoticeKind::Warning,
+                            format!("Project permission was not saved: {error}"),
+                        );
+                    }
+                }
             }
 
             other => return self.handle_async_message(other),
@@ -1190,5 +1372,21 @@ mod tests {
             composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1,),
             Some(ComposerAttachmentKeyAction::RemoveLastImage)
         );
+    }
+
+    #[test]
+    fn send_now_has_a_distinct_control_chord() {
+        assert!(is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL
+        )));
     }
 }

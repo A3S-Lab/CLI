@@ -2,8 +2,38 @@
 
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubmissionIntent {
+    Queue,
+    SendNow,
+}
+
 impl App {
     pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
+        self.on_submit_with_intent(text, SubmissionIntent::Queue)
+    }
+
+    pub(super) fn on_submit_now(&mut self, text: String) -> Option<Cmd<Msg>> {
+        let trimmed = text.trim();
+        if self.shell_mode
+            || self.research_mode
+            || matches!(trimmed.chars().next(), Some('/' | '!' | '?'))
+        {
+            self.textarea.set_value(&text);
+            self.push_notice(
+                NoticeKind::Warning,
+                "Send now accepts an agent prompt, not a shell, research, or slash command",
+            );
+            return None;
+        }
+        self.on_submit_with_intent(text, SubmissionIntent::SendNow)
+    }
+
+    fn on_submit_with_intent(
+        &mut self,
+        text: String,
+        intent: SubmissionIntent,
+    ) -> Option<Cmd<Msg>> {
         let trimmed = text.trim();
         if trimmed.is_empty() && self.pending_images.is_empty() {
             return None;
@@ -11,6 +41,13 @@ impl App {
         // No input while compacting or upgrading.
         if self.compacting.is_some() || self.updating.is_some() {
             self.textarea.clear();
+            return None;
+        }
+        // `/checkup` owns a short host-side inspection before it admits the
+        // strict Plan turn. Keep any asynchronously-routed prompt as a draft
+        // instead of letting an ordinary turn race that immutable snapshot.
+        if self.checkup_inflight {
+            self.textarea.set_value(&text);
             return None;
         }
         if self.session_rebuild_pending.is_some() {
@@ -98,7 +135,8 @@ impl App {
             // The planner chooses the work; the host only supplies finite hard
             // caps and one bounded report finalization phase.
             let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
-            self.queue.push(
+            let execution_mode = self.mode;
+            self.enqueue_turn(
                 USER_TURN_PRIORITY,
                 Queued {
                     text: format!("? {query}"),
@@ -107,6 +145,7 @@ impl App {
                     runtime_expectation,
                     deep_research: Some((query, os_runtime, evidence_scope)),
                 },
+                execution_mode,
             );
             if self.state == State::Idle {
                 return self.drain_queue();
@@ -133,6 +172,9 @@ impl App {
                 )));
                 return None;
             }
+        }
+        if let Some(rest) = slash_tail(trimmed, "/island") {
+            return self.submit_agent_island_command(rest);
         }
         if let Some(rest) = slash_tail(trimmed, "/login") {
             self.textarea.clear();
@@ -665,6 +707,12 @@ impl App {
                 }
             }
         }
+        if let Some(rest) = slash_tail(trimmed, "/copy") {
+            return self.submit_copy_command(rest);
+        }
+        if let Some(rest) = slash_tail(trimmed, "/export") {
+            return self.submit_export_command(rest);
+        }
         // Slash commands run inline in any state.
         match trimmed {
             "/exit" => return self.begin_graceful_quit(),
@@ -779,8 +827,19 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
+            "/checkup" => return self.submit_checkup_command(),
+            "/permissions" => {
+                self.textarea.clear();
+                self.open_permission_panel();
+                return None;
+            }
+            "/history" => {
+                self.textarea.clear();
+                self.open_history_panel("");
+                return None;
+            }
             "/auto" => {
-                self.mode = Mode::Auto;
+                self.set_composer_mode(Mode::Auto);
                 self.textarea.clear();
                 self.rebuild_viewport();
                 return None;
@@ -863,6 +922,10 @@ impl App {
                     let latest = crate::update::fetch_latest_async().await;
                     Msg::UpdatePlan(latest)
                 }));
+            }
+            "/tasks" => {
+                self.textarea.clear();
+                return self.open_task_panel();
             }
             "/relay" => return self.open_relay_panel(),
             "/memory" => {
@@ -950,21 +1013,45 @@ impl App {
                 },
             },
         };
-        let priority = if loop_cont {
+        let send_now = intent == SubmissionIntent::SendNow && self.state == State::Streaming;
+        let priority = if send_now {
+            PLAN_REVIEW_PRIORITY
+        } else if loop_cont {
             SYNTHETIC_TURN_PRIORITY
         } else {
             USER_TURN_PRIORITY
         };
-        self.queue.push(
-            priority,
-            Queued {
-                text: prompt,
-                display,
-                images: std::mem::take(&mut self.pending_images),
-                runtime_expectation: None,
-                deep_research: None,
-            },
-        );
+        let execution_mode = self.mode;
+        let images = std::mem::take(&mut self.pending_images);
+        if execution_mode == Mode::Plan && !loop_cont {
+            let request = PlanDraftRequest::initial(prompt, display.clone());
+            self.enqueue_plan_turn(
+                priority,
+                Queued {
+                    text: request.planning_prompt(),
+                    display,
+                    images,
+                    runtime_expectation: None,
+                    deep_research: None,
+                },
+                request,
+            );
+        } else {
+            self.enqueue_turn(
+                priority,
+                Queued {
+                    text: prompt,
+                    display,
+                    images,
+                    runtime_expectation: None,
+                    deep_research: None,
+                },
+                execution_mode,
+            );
+        }
+        if send_now {
+            return self.begin_send_now_interrupt();
+        }
         if self.state == State::Idle {
             self.drain_queue()
         } else {

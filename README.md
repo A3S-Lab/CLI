@@ -57,15 +57,21 @@ brew install A3S-Lab/tap/a3s
 The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, or Use. This keeps a Code-only installation
 small, while every product still has one public entry point under `a3s`.
+Homebrew and GitHub archives bundle the Web workspace. A Cargo installation
+downloads the CLI's exact-version Web asset on the first `a3s web` start,
+verifies its SHA-256, and caches it in the A3S data directory. `--offline` and
+`A3S_NO_AUTO_INSTALL=1` never perform that download; use `--web-dir` for a
+local build or `--api-only` when no frontend is required.
 
-The Homebrew `a3s` formula also installs the native RemoteUI helper
-`a3s-webview` on macOS. If a source or Cargo installation does not have that
-helper, `a3s code` falls back immediately to printing the browser URL.
+The Homebrew `a3s` formula also installs the native `a3s-webview` helper on
+macOS. It owns both compact RemoteUI windows and the system-wide Agent Island.
+If a source or Cargo installation does not have that helper, `a3s code` keeps
+working and RemoteUI falls back immediately to printing the browser URL.
 
 ### Components and delayed installation
 
 The built-in catalog registers `code`, `box`, `bench`, `search`, and `use`.
-Browser and Office are delegated child capabilities owned by Use:
+Browser, native Office, and OCR are capabilities owned by Use:
 
 | Component | Installed with `a3s` | Public command | Installation behavior |
 | --- | --- | --- | --- |
@@ -73,9 +79,10 @@ Browser and Office are delegated child capabilities owned by Use:
 | Box | No | `a3s box ...` | Installs Box on first use, then forwards the arguments to it. |
 | Bench | No | `a3s bench ...` | Requires an explicit compatible Bench installation. |
 | Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
-| Use | No | `a3s use ...` | Installs Use on first real use, then forwards native Browser, Office, Box, or extension arguments. |
+| Use | No | `a3s use ...` / `a3s code` | Installs Use on first real use, including TUI startup when policy allows, then forwards or projects native Browser, Office, OCR, Box, or extension surfaces. |
 | Use/Browser | With Use | `a3s use browser ...` | Reports Browser provider readiness through Use; it is not a second product archive. |
 | Use/Office | With Use | `a3s use office ...` | Delegates OfficeCLI readiness and explicit installation through Use. |
+| Use/OCR | With Use | `a3s use ocr ...` | Projects built-in OCR tools and its Skill; local Tesseract or explicit vision-provider readiness remains separate. |
 
 First-use installation for opted-in components is persistent and user-wide. After a component has been
 installed, subsequent commands reuse it; changing projects does not download it
@@ -179,6 +186,89 @@ not a compatible control-component release. Until that release exists,
 diagnostic that the control component is not published and do not create an
 installed-component record. Bench does not opt into first-use installation.
 
+### Signed extension registries
+
+External Use domains can be resolved from explicitly trusted TUF registries.
+The official `a3s` registry identity is listed but intentionally unavailable
+until its production root is published; the CLI never invents or silently
+accepts a replacement root. Add a third-party registry with a root file or a
+pinned SHA-256:
+
+```sh
+a3s registry add https://packages.example.org/a3s/ \
+  --trust-root ./root.json \
+  --yes
+a3s registry refresh packages
+
+a3s --output json install use/acme/slack --dry-run
+a3s --output json install use/acme/slack \
+  --plan-digest <reviewed-plan-sha256>
+
+a3s --output json upgrade use/acme/slack --dry-run
+a3s --output json upgrade use/acme/slack \
+  --plan-digest <reviewed-upgrade-sha256>
+```
+
+Root files are copied beneath the owned `registries/<name>/root.json` path and
+checked against the recorded digest whenever configuration is loaded. A
+digest-only registry bootstraps from `<registry>/metadata/root.json`; the root
+is cached only after its bytes match the pin. `registry refresh` performs full
+TUF root, timestamp, snapshot, and targets verification, including expiration
+and rollback checks. It does not use a reachability-only `HEAD` request and does
+not download package targets.
+
+Package lookup queries configured registries in stable name order. No match is
+an error, and the same package resolving from more than one trusted registry is
+rejected as ambiguous. Registry installs cannot use `--allow-unsigned`; that
+flag remains limited to an explicit local `--from` package. Registry URLs must
+use HTTPS, except loopback HTTP used by the hermetic test suite.
+
+A signed-extension upgrade reads the complete source provenance from the
+installed Use receipt and queries only that registry and release channel. It
+refuses a removed registry, a changed URL or trust root, and a semantic-version
+downgrade. `a3s upgrade --all` includes signed registry extensions but excludes
+explicit local packages, whose next source must be supplied by the operator.
+Plain `a3s upgrade` includes newer signed targets in its update listing. When
+verified metadata resolves to the already installed target, the operation
+converges without downloading the archive or publishing a new activation.
+
+### Reviewable component plans
+
+Installation, upgrade, and uninstall support an immutable review/apply guard:
+
+```sh
+a3s --output json install box --dry-run
+a3s --output json install box --plan-digest <reviewed-sha256>
+```
+
+The dry-run returns `planSchemaVersion`, a canonical SHA-256 `planDigest`, and
+the ordered `plans` array. The digest covers the requested operation and flags,
+target platform, current component state and normalized receipt, operation
+order, local-package path and content, and every exact GitHub release version,
+asset URL, asset name, and SHA-256 selected during resolution. For signed
+extensions it also covers the registry name and URL, pinned root, all TUF
+metadata versions, package version and channel, platform target, target path,
+archive length, and SHA-256. Presentation text is deliberately excluded.
+
+A release dry-run reads release metadata and, when necessary, its checksum
+file. It never downloads the component payload or changes component state. An
+apply invocation reacquires the component locks, recomputes the full plan, and
+fails before download if the supplied digest no longer matches. It uses the
+exact resolved artifact from that plan instead of performing another `latest`
+lookup. Local Use packages are fingerprinted deterministically, including file
+paths, executable permissions, sizes, and contents.
+
+Signed-extension dry-runs verify metadata without downloading the archive. On
+apply, the umbrella digest is checked first; `a3s` then delegates the exact
+resolved package and its inner registry-plan digest to `a3s-use`. Use repeats
+TUF verification before target download, so a repository change between the
+outer check and payload fetch also fails without activation.
+
+`--plan-digest` and `--dry-run` are mutually exclusive. Homebrew plans bind the
+formula, operation, flags, and current receipt, but Homebrew remains responsible
+for selecting and installing its current bottle; use `--source release` when an
+exact A3S release artifact must be bound by the digest.
+
 ### Listing installed components
 
 ```sh
@@ -232,6 +322,8 @@ a3s list --json
 a3s install use
 a3s install use/browser
 a3s install use/office
+a3s info use/ocr --sources
+a3s doctor use/ocr
 a3s uninstall use/office
 
 a3s use capabilities --json
@@ -239,30 +331,35 @@ a3s use browser render https://example.com
 a3s use browser open https://example.com --session research
 a3s use browser snapshot --session research --json
 a3s use browser close --session research
+a3s use ocr doctor --json
 a3s use box compose up --detach
 a3s use extension disable acme/slack --json
 a3s use extension enable acme/slack --json
 a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
 ```
 
-Browser and Office are built-in Use domains. Independently implemented domains
-can be explicitly installed from A3S ACL packages that declare native CLI,
-standard MCP, and/or `SKILL.md` surfaces. A3S does not define an extension
-JSON-RPC protocol; `--json` remains a one-command CLI result.
+Browser, native Office, and OCR are built-in Use domains. Independently
+implemented domains can be explicitly installed from A3S ACL packages that
+declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
+define an extension JSON-RPC protocol; `--json` remains a one-command CLI
+result.
 
-When an already-ready Use component is present, both `a3s code` and `a3s web`
-consume its unified capability snapshot and keep one watcher for the process.
-Browser, Office, and enabled external MCP/Skill surfaces are projected into
-every active Code session. Code registers a dedicated `use` worker that can
-invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
-delegation tools are denied. The worker's current capability IDs and purpose are
-published in the live `task` and `parallel_task` definitions, so the parent
-model can select it without a hard-coded prompt. Application failures do not
-fall back to another execution surface, and an Office
+The Code TUI treats Use as a first-use component: before terminal takeover it
+reuses a healthy install or installs the verified release when networking and
+automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain
+strict no-network, no-receipt boundaries, and a failed setup does not prevent
+Code from starting. Code Web consumes an already-ready component without
+changing its lifecycle. Both surfaces keep one registry watcher for the
+process. Browser, Office, OCR, and enabled external MCP/Skill surfaces are
+projected into every active Code session. Code registers a dedicated `use`
+worker that can invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP,
+and recursive delegation tools are denied. The worker's current capability IDs
+and purpose are published in the live `task` and `parallel_task` definitions,
+so the parent model can select it without a hard-coded prompt. Application
+failures do not fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
 rebuild replays the current surfaces, and a Web process shares the watcher
-across all concurrent sessions. Starting Code never installs Use as a side
-effect.
+across all concurrent sessions.
 
 The TUI derives capability lifecycle labels only from standard MCP progress
 emitted by the dedicated `use` worker: Browser progress appears as
@@ -358,16 +455,46 @@ Start the local Web API and bundled 书小安 frontend:
 ```sh
 a3s web start
 a3s web start --detach
+a3s web status
+a3s web open
+a3s web logs --follow
+a3s web start --detach --replace
+a3s web stop
 a3s -C /path/to/project web start
 a3s web start --host 127.0.0.1 --port 29653
 a3s web start --api-only
 ```
 
 The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
-the TUI. By default it serves the Rsbuild output from `apps/web/dist/workspace`; pass
-`--web-dir` to serve a different frontend build. Background mode returns only
-after the service binds successfully and prints its PID, URL, and log path
-(`~/.a3s/logs/web.log` by default).
+the TUI. Release archives and Homebrew installations serve their bundled Web
+workspace automatically, including when the selected workspace is empty. A
+Cargo installation downloads only `a3s-web-v<exact-cli-version>.tar.gz`,
+requires its release SHA-256, rejects links and path traversal, and atomically
+caches the verified workspace under the versioned A3S data directory. A source
+checkout can use `apps/web/dist/workspace`; pass `--web-dir` to select a
+different build or `--api-only` to disable frontend serving. Background mode
+returns only after the service binds successfully and prints its PID, URL, and
+log path (`~/.a3s/logs/web.log` by default).
+
+Detached instances are keyed by canonical workspace and protected by a
+cross-process start lock. Repeating `a3s web start --detach` reuses a healthy
+instance for that workspace. `--replace` gracefully stops and replaces only an
+instance created by this CLI; `stop` and `--replace` refuse to signal an
+unmanaged A3S server, an unknown process occupying the requested port, or a
+process referenced by a stale record. Stale records are quarantined, and
+`--port 0` selects an available port. The shared Web-asset cache has its own
+cross-process lock, and a detached start validates a fixed port before any
+first-use download. Saved sessions whose provider or model is no longer
+configured remain on disk and produce one bounded startup summary instead of
+one warning per session.
+
+The bundled frontend renders headings, lists, quotes, tables, links, footnotes,
+inline code, and line-numbered code blocks with a consistent Markdown
+typography system. Tool calls show syntax-highlighted commands and arguments,
+working-directory context, live progress, copy actions, and compact execution
+previews. Monaco's editor context menu and the file-tree menu use Simplified
+Chinese, and editor tabs support pointer and keyboard context menus for close,
+close others, close right, copy path, and reveal actions.
 
 Web tasks, visible messages, titles, goals, effort, model selection, and
 execution mode are saved under `~/.a3s/code-web` and restored before the API
@@ -376,7 +503,7 @@ Default mode allows read-only tools and pauses mutating tools for Web HITL
 approval; plan mode denies mutations, while auto mode runs without approval.
 
 Code Web sessions auto-save Core snapshots under `~/.a3s/code-web/sessions`
-and restore when `a3s code serve` starts again. Browser-only metadata such as
+and restore when `a3s web` starts again. Browser-only metadata such as
 titles and a bounded recent UI transcript stays beside them under
 `~/.a3s/code-web/metadata`. The projection preserves Web-only `/help`, shell,
 fork, and structured-event records without adding them to model context;
@@ -646,6 +773,8 @@ input prefixes:
 /model
 /effort
 /config
+/permissions
+/tasks
 /ide
 /login
 /agent
@@ -665,7 +794,8 @@ input prefixes:
 
 | Area | What A3S Code TUI provides |
 | --- | --- |
-| Coding loop | Chat with the coding agent, stream semantic tool cards, approve or deny tools, switch `/auto`, run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork or clear sessions when needed. `/relay` resumes a saved A3S Code session with its per-session settings or hands the latest task from a workspace-scoped Claude Code, Codex, or WorkBuddy transcript to the active session. |
+| Coding loop | Chat with the coding agent, stream semantic tool cards, choose Default, Plan, or Auto execution, inspect or safely cancel delegated work with `/tasks` or `Ctrl+B`, run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork or clear sessions when needed. `/relay` pins the current session, searches a bounded multi-source catalog, preserves semantic selection across refreshes, shows saved state and live background-agent counts, resumes a native session with its settings, or hands the latest task from a workspace-scoped Claude Code, Codex, or WorkBuddy transcript to the active session. |
+| Execution modes | Default is the interactive HITL mode. Plan exposes only read-only discovery tools, stages the completed plan behind an explicit Approve, Revise, or Abandon decision, and starts approved implementation as a new Default turn. Auto executes every operation that survives explicit policy and workspace hard denials without entering HITL; hard denials fail directly instead of opening an approval prompt. A queued turn retains the mode captured when it was submitted. |
 | Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks, `/config` edits the active config in the same editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. Diff headers use green `+N` and red `-N` counts; Markdown uses Codex-spaced section headings, responsive tables, syntax highlighting, and terminal hyperlinks. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
@@ -753,14 +883,17 @@ Pending host turns are scheduled by `a3s_lane::PriorityQueue`: explicit user
 input has priority over host-generated continuations, while equal-priority
 messages remain FIFO. A queue item is committed only after Core admits its
 stream; `SessionBusy` and admission timeouts restore the same priority and FIFO
-position. Esc cancels and settles the active worker before consuming exactly
-one queued successor. The bottom queue strip contains pending turns only and
-removes a message as soon as Lane claims it for execution.
+position. Enter appends a follow-up to that immutable FIFO queue. `Ctrl+O`
+performs Send now: it cancels and settles the active turn, then promotes the
+new prompt ahead of normal follow-ups without cancelling a durable goal. Each
+queued row retains its submission-time execution mode even if the composer mode
+changes later. The bottom queue strip contains pending turns only and removes a
+message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. User
-surfaces and assistant Markdown each own a blank row above and below their
-content; streaming and finalized assistant cells keep the same vertical rhythm
+reflows semantic arguments, output, diffs, and Markdown after a resize. User,
+reasoning, and assistant message surfaces each own a blank row above and below
+their content; streaming and finalized cells keep the same vertical rhythm
 while adjacent tool activity remains compact. Streamed Markdown commits only
 complete lines, paces stable rows with adaptive catch-up, keeps active tables in
 a replaceable tail, and provisionally completes a candidate table before
@@ -773,30 +906,64 @@ instead of rebuilding the full viewport.
 | Surface | What you see and control |
 | --- | --- |
 | Transcript | Assistant text, reasoning, tool cards, diff summaries, task updates, memory recall/store notices, compaction notices, and RemoteUI action links stay in one scrollable history. Drag-select copies transcript text on release. |
-| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, or paste an image with `Ctrl+V`. |
+| Input line | Type a normal prompt, use `Shift+Enter` for multiline input, prefix `!` for a direct shell turn, prefix `?` for DeepResearch, use `@<path>` to attach a workspace file through the clickable picker, paste an image with `Ctrl+V`, or fuzzy-search prompts from the current session with `/history` or `Ctrl+R`. |
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
-| Approvals | Mutating tools pause in a confirmation overlay with arguments and result context. Default mode prompts, plan mode auto-approves read-only discovery, and auto mode approves later tool calls in the session. |
-| Footer | The footer shows model/provider, effort, mode, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
+| Delegated tasks | `/tasks` or `Ctrl+B` opens the authoritative task catalog while the parent turn keeps streaming. Search, inspect recent progress or full output, refresh, and cancel a running task with a second matching `X` or Delete press. |
+| Approvals | In Default mode, choose allow once, an exact in-memory session grant, an exact project grant in `.a3s/permissions.acl`, or denial feedback. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL for an operation that survives explicit hard denials. |
+| Setup checkup | `/checkup` runs bounded, secret-free host diagnostics for components, PATH, ACL, skills, applicable `AGENTS.md`, MCP, and terminal capabilities, then enters strict Plan mode. Any proposed repair stops at Approve, Revise, or Abandon before it can run. |
+| Agent Island | `/island [on|off|status]` controls the saved, default-on system island preference. One native singleton aggregates supported coding agents and exposes task state, elapsed time, attention reasons, replies, and one-shot HITL controls. |
+| Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
 | Memory and knowledge | `/memory` opens the durable memory graph. `/ctx` searches past sessions and can attach or save hits. `/kb` opens the local personal knowledge vault. `/okf` manages shareable knowledge packages. |
 | Asset panels | `/agent`, `/mcp`, `/skill`, and `/okf` keep an active local asset visible while you iterate. `/flow` selects or drafts workflow DAG assets for OS Workflow as a Service rather than entering a persistent local dev mode. |
-| Operations panels | `/model`, `/effort`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
+| Operations panels | `/model`, `/effort`, `/permissions`, `/tasks`, `/checkup`, `/island`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
 
 Key interactions:
 
 | Key or input | Behavior |
 | --- | --- |
 | `Enter` | Send the prompt; when a turn is busy, queue the next message. |
+| `Ctrl+O` | Send now: cancel the active turn and promote this prompt ahead of normal queued follow-ups. |
 | `Shift+Enter` | Insert a newline in the input. |
-| `Shift+Tab` | Cycle run mode: default, plan, auto. |
+| `Shift+Tab` | Cycle the composer mode: Default, strict read-only Plan, non-interactive Auto. Running and queued turns keep their submission-time mode. |
 | `Up` / `Down` | Recall input history or move through menus/panels. |
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
+| `Ctrl+R` | Fuzzy-search prompts from the current session without replacing the current draft until a result is accepted. Press it again to cycle matches. |
 | `Ctrl+T` | Open the complete live semantic session transcript, including full tool output and the current streaming tail. |
+| `Ctrl+B` | Open or close delegated-task control without interrupting the parent turn. |
 | `Esc` | Interrupt the running turn or close the active panel. |
 | `Ctrl+C` twice | Quit the TUI after session persistence runs. |
+
+### Agent Island And Setup Checkup
+
+Agent Island is enabled by default and opens only while at least one supported
+agent is active. A3S Code publishes its exact parent and delegated-task
+lifecycle; bounded process discovery also recognizes A3S, Claude, Codex,
+Cursor, Gemini, and WorkBuddy. All A3S Code processes on the machine write to
+one private per-user snapshot, while `a3s-webview` enforces a single native
+island process. Completed, failed, and cancelled rows remain briefly visible so
+the result does not disappear at the instant a task settles.
+
+Approval and control buttons use short-lived, one-shot tokens scoped to the
+exact task and current approval context. Approve once, approve for the session,
+deny, stop, delegated-task cancel, and reply are revalidated by the owning TUI;
+stale controls are rejected. Raw task text is withheld from the shared system
+snapshot unless `A3S_AGENT_STATUS_SHARE_TASKS=1` is explicitly set. `/island
+off` persists an opt-out, `/island on` restores the default behavior, and
+`/island status` reports launch availability. SSH and headless Linux sessions
+do not auto-open a GUI unless `A3S_AGENT_ISLAND=1` explicitly enables it.
+
+`/checkup` performs a typed host preflight before asking the model to audit
+workspace guidance. The preflight reads only bounded, non-secret health facts:
+installed components, executable/PATH identity, ACL syntax and semantic
+validation, skill and instruction sizes, in-memory MCP status, and conservative
+terminal capabilities. The audit may use only read-only workspace inspection,
+then the normal strict Plan review presents Approve, Revise, or Abandon.
+Nothing is installed, updated, edited, removed, started, stopped, or logged in
+during the audit turn.
 
 ### Startup, Sessions, And Safety
 
@@ -832,14 +999,25 @@ choice continues the next goal iteration without changing the restored execution
 mode; the second enters the session with the goal still paused, where
 `/goal resume` can continue it later.
 
-The TUI owns HITL confirmation for gated tools. In default mode, mutating tools
-prompt through a wheel-browsable, clickable approval overlay; `a` or `/auto` approves later tool calls for
-the session, while Shift+Tab cycles default, plan, and auto modes. Plan mode
-auto-approves read-only discovery tools but still asks before writes. Auto mode
-silently approves every operation that reaches HITL; hard permission denials
-remain non-bypassable and never enter the confirmation overlay. Tool
-timeouts and confirmation timeouts are tracked separately so a human approval
-pause does not consume the command runtime budget.
+The TUI owns HITL confirmation for gated tools. In Default mode, mutating tools
+prompt through a wheel-browsable, clickable approval overlay. A decision can
+allow one call, remember the exact capability for this TUI session, atomically
+add it to the project's `.a3s/permissions.acl`, or deny it with feedback for the
+agent. `/permissions` searches both grant scopes, opens the canonical matching
+arguments, and requires a second matching action before revocation. Revocation
+stops future authorization but does not cancel a tool already running.
+
+Shift+Tab cycles Default, Plan, and Auto for future submissions; `/auto`
+selects Auto directly. Each queued turn retains the mode it had when submitted.
+Plan exposes only read-only discovery tools, even when a matching grant exists.
+When planning completes, the TUI freezes queue draining at an explicit Approve,
+Revise, or Abandon boundary; approval starts implementation as a separate
+Default turn. Auto resolves allowed tools directly in Core and bypasses
+tool-owned confirmation escalation, so it never opens HITL. Explicit policy
+denials and workspace guardrails remain authoritative, and hard denials fail
+without opening an approval prompt. Tool and confirmation timeouts are tracked
+separately so a human approval pause does not consume the command runtime
+budget.
 
 All local filesystem work stays under the active workspace services and A3S Code
 permission policy. OS operations require `/login`; before login the TUI can
@@ -1151,6 +1329,10 @@ These commands are available outside the asset-specific flows:
 | `/effort` | Change the active effort profile from `low` to `ultracode`, with keyboard, wheel, and click adjustment before confirmation rebuilds the session with matching budgets and prompt guidance. |
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
+| `/permissions` | Search exact session and project grants, inspect canonical arguments, and revoke with a second matching confirmation. Project changes atomically update `.a3s/permissions.acl`; revocation affects future checks only. |
+| `/tasks` | Inspect the current session's running and recent delegated tasks, search status/progress/output, open full details, refresh, or safely cancel a running task. |
+| `/copy` / `/copy transcript` | Copy the latest assistant source Markdown or the complete semantic session. Native clipboard delivery is reported only when verified; otherwise the TUI identifies the OSC 52 request and its 64,000-byte UTF-8 payload limit. |
+| `/export [path]` | Atomically create a private Markdown session snapshot at a workspace-relative path. With no path, generate a unique session-and-time filename; never overwrite an existing target. |
 | `/theme` | Cycle syntax highlighting themes. |
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |
@@ -1165,11 +1347,18 @@ These commands are available outside the asset-specific flows:
 | `/compact` | Summarize and shrink the active conversation context. |
 | `/clear` | Start a fresh conversation in the current session surface. |
 | `/fork` | Branch the current transcript into a new session id. |
-| `/relay` | Open the A3S Code, Claude Code, Codex, and WorkBuddy session picker. Native sessions resume in place with their saved model, effort, execution mode, theme, and paused goal; external sessions relay their latest user task into the current A3S Code session. |
-| `/auto` | Switch the session into auto-approve mode. |
+| `/relay` | Open the multi-session/background-work dashboard for A3S Code, Claude Code, Codex, and WorkBuddy. Press `/` to filter by task, status, model, session id, or source path; `Space` toggles a compact task peek; `R` refreshes immediately, and the panel also refreshes every 15 seconds while retaining a selected session that is still present. Native resume restores model, effort, execution mode, theme, and paused goal; external sessions relay their latest user task into the current A3S Code session. |
+| `/auto` | Switch future submissions to non-interactive Auto mode. Operations that survive explicit policy and workspace hard denials execute without HITL. |
 | `/plugin` / `/reload` | Manage and hot-reload skills/plugins, including wheel browsing and click-to-toggle skill state in the TUI. |
 | `/update` | Upgrade the CLI and restart back into the saved session. |
 | `/exit` | Quit `a3s code` after session persistence runs. |
+
+Session copy/export uses the raw semantic transcript rather than terminal-wrapped
+ANSI output. It preserves user and assistant Markdown, visible tool lifecycle
+and output, and visible delegated-task results. Private reasoning, transient UI
+notices, terminal-width-dependent rows, and hidden duplicate cells are excluded.
+An explicit export path must stay inside the workspace, its parent directory
+must already exist, and an existing file or escaping symlink is rejected.
 
 A3S Code auto-discovers `SKILL.md` skills from project and user roots:
 `.a3s/skills`, `.agents/skills`, `.codex/skills`, `.claude/skills`, plus
@@ -1352,7 +1541,10 @@ post-shutdown storage cleanup against a real MicroVM runtime. The ignored
 Use hot-plug E2E builds the independently released `a3s-use` binary in an
 isolated target directory, then crosses its public process/JSON boundary to
 verify installation, MCP invocation, version replacement, TUI session replay,
-disable, and re-enable convergence. The ignored
+disable, and re-enable convergence. It also packages the real binaries and
+Browser, Office, and OCR Skills in release layout, drives Code's first-use
+download and verified install path, and proves those three routes are present
+in the first model turn without exposing raw Use MCP tools. The ignored
 `ctx_compact_real_llm` test drives the configured model (`~/.a3s/config.acl`)
 with matched compressed and uncompressed seeded histories. It asserts that
 streaming usage is reported, compaction shrinks the history, the provider sees

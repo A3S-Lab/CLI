@@ -285,19 +285,32 @@ or promotion operations remain interactive-only.
 ### 7.1 A3S Web
 
 ```text
-a3s web start [--detach] [--host <host>] [--port <port>]
-    [--directory <path>] [--web-dir <path>] [--api-only]
-a3s web stop [--directory <path>]
-a3s web status [--directory <path>]
-a3s web logs [--directory <path>] [--follow]
-a3s web open [--directory <path>]
+a3s web start [--detach] [--replace] [--host <host>] [--port <port>]
+    [--web-dir <path>] [--api-only]
+a3s web stop
+a3s web status
+a3s web logs [--follow]
+a3s web open
+a3s -C <path> web <start|stop|status|logs|open>
 ```
 
 `a3s web` remains a documented human shortcut for `a3s web start`. Scripts
 should use the explicit verb. Foreground is the default; `--detach` creates a
 managed instance associated with the canonical workspace. Stop and status
 validate process identity and never signal an unrelated process from a stale
-PID file.
+PID file. Repeated detached starts reuse a healthy same-workspace instance,
+concurrent starts converge under a workspace lock, and stale records are
+quarantined. `--replace` gracefully replaces only a CLI-managed instance; it
+does not kill an unknown port listener or take ownership of an A3S server
+started elsewhere.
+
+GitHub archives and Homebrew installations carry the matching Web workspace.
+When Cargo cannot install those data files, the first online Web start resolves
+only the CLI's exact release version, verifies the published SHA-256, safely
+extracts the archive, and atomically activates a versioned user-data cache
+behind a cross-process lock. Offline mode and `A3S_NO_AUTO_INSTALL=1` never
+contact the release service. A fixed detached port is validated before the
+first-use download begins.
 
 Web sessions for the same canonical workspace share one Code Intelligence
 runtime. Monaco consumes typed status, outline, navigation, and diagnostics

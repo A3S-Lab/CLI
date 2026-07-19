@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use a3s_tui::style::truncate_visible;
+use a3s_tui::style::{strip_ansi, truncate_visible};
 
 use super::design_markdown::Markdown;
 use super::message_chrome::{
@@ -18,7 +18,9 @@ use super::runtime_projection::{SubagentOutcome, ToolCallState};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
-use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
+use super::{
+    assistant_block, spaced_message_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -295,10 +297,12 @@ fn render_reasoning(source: &str, width: usize) -> String {
                 }),
         );
     }
-    rows.into_iter()
+    let body = rows
+        .into_iter()
         .map(|line| truncate_visible(&line, width))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    spaced_message_block(&body, width)
 }
 
 fn render_subagent_result(
@@ -414,6 +418,42 @@ impl Transcript {
 
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Return the newest committed assistant Markdown without terminal
+    /// rendering, wrapping, or transcript chrome.
+    pub(crate) fn latest_assistant_markdown(&self, live_assistant: Option<&str>) -> Option<String> {
+        if let Some(source) = live_assistant
+            .map(sanitize_export_source)
+            .filter(|source| !source.trim().is_empty())
+        {
+            return Some(source);
+        }
+        self.entries.iter().rev().find_map(|stored| {
+            let TranscriptEntry::AssistantMarkdown { source } = &stored.entry else {
+                return None;
+            };
+            let source = sanitize_export_source(source);
+            (!source.trim().is_empty()).then_some(source)
+        })
+    }
+
+    /// Build a stable, shareable Markdown projection from semantic conversation
+    /// entries. Transient UI notices, terminal-width-dependent preformatted
+    /// rows, and private reasoning are deliberately excluded.
+    pub(crate) fn semantic_markdown(&self, live_assistant: Option<&str>) -> Option<String> {
+        let mut blocks = self
+            .entries
+            .iter()
+            .filter_map(|stored| export_entry_markdown(&stored.entry))
+            .collect::<Vec<_>>();
+        if let Some(source) = live_assistant
+            .map(sanitize_export_source)
+            .filter(|source| !source.trim().is_empty())
+        {
+            blocks.push(role_markdown("Assistant", &source));
+        }
+        (!blocks.is_empty()).then(|| format!("{}\n", blocks.join("\n\n")))
     }
 
     /// Drop provisional entries appended after an LLM attempt began. Tool
@@ -977,6 +1017,171 @@ impl Transcript {
     }
 }
 
+fn export_entry_markdown(entry: &TranscriptEntry) -> Option<String> {
+    match entry {
+        TranscriptEntry::User { source } => {
+            let source = sanitize_export_source(source);
+            (!source.trim().is_empty()).then(|| role_markdown("User", &source))
+        }
+        TranscriptEntry::AssistantMarkdown { source } => {
+            let source = sanitize_export_source(source);
+            (!source.trim().is_empty()).then(|| role_markdown("Assistant", &source))
+        }
+        TranscriptEntry::Tool(tool) if tool.visible => Some(export_tool_markdown(tool)),
+        TranscriptEntry::Subagent(subagent) if subagent.visible => {
+            Some(export_subagent_markdown(subagent))
+        }
+        TranscriptEntry::Preformatted(_)
+        | TranscriptEntry::Notice { .. }
+        | TranscriptEntry::Reasoning { .. }
+        | TranscriptEntry::Tool(_)
+        | TranscriptEntry::Subagent(_) => None,
+    }
+}
+
+fn role_markdown(role: &str, source: &str) -> String {
+    format!("## {role}\n\n{}", source.trim_matches('\n'))
+}
+
+fn export_tool_markdown(tool: &ToolTranscriptEntry) -> String {
+    let mut block = format!(
+        "### Tool: {}\n\n- Status: {}",
+        markdown_code_span(&tool.name),
+        markdown_code_span(tool_state_label(tool.state))
+    );
+    if let Some(exit_code) = tool.exit_code {
+        block.push_str(&format!(
+            "\n- Exit code: {}",
+            markdown_code_span(&exit_code.to_string())
+        ));
+    }
+    if let Some(duration) = tool.duration {
+        block.push_str(&format!(
+            "\n- Duration: {}",
+            markdown_code_span(&export_duration(duration))
+        ));
+    }
+
+    if let Some(args) = tool.args() {
+        let args = serde_json::to_string_pretty(&args).unwrap_or_else(|_| args.to_string());
+        block.push_str("\n\n#### Arguments\n\n");
+        block.push_str(&markdown_fence("json", &sanitize_export_source(&args)));
+    } else {
+        let args = sanitize_export_source(&tool.args_json);
+        if !args.trim().is_empty() {
+            block.push_str("\n\n#### Arguments\n\n");
+            block.push_str(&markdown_fence("text", &args));
+        }
+    }
+
+    let output = sanitize_export_source(&tool.output);
+    if !output.trim().is_empty() {
+        block.push_str("\n\n#### Output\n\n");
+        block.push_str(&markdown_fence("text", &output));
+    }
+
+    if let Some(metadata) = tool.metadata.as_ref().filter(|value| !value.is_null()) {
+        let metadata =
+            serde_json::to_string_pretty(metadata).unwrap_or_else(|_| metadata.to_string());
+        block.push_str("\n\n#### Metadata\n\n");
+        block.push_str(&markdown_fence("json", &sanitize_export_source(&metadata)));
+    }
+    block
+}
+
+fn export_subagent_markdown(subagent: &SubagentTranscriptEntry) -> String {
+    let status = match subagent.outcome {
+        SubagentOutcome::Succeeded => "succeeded",
+        SubagentOutcome::Failed => "failed",
+        SubagentOutcome::Cancelled => "cancelled",
+        SubagentOutcome::TrackingLost => "tracking-lost",
+    };
+    let mut block = format!(
+        "### Delegated task: {}\n\n- ID: {}\n- Status: {}",
+        markdown_code_span(&subagent.agent),
+        markdown_code_span(&subagent.task_id),
+        markdown_code_span(status)
+    );
+    let task = sanitize_export_source(&subagent.task);
+    if !task.trim().is_empty() {
+        block.push_str("\n\n#### Task\n\n");
+        block.push_str(task.trim_matches('\n'));
+    }
+    let output = sanitize_export_source(&subagent.output);
+    if !output.trim().is_empty() {
+        block.push_str("\n\n#### Output\n\n");
+        block.push_str(output.trim_matches('\n'));
+    }
+    block
+}
+
+fn tool_state_label(state: ToolCallState) -> &'static str {
+    match state {
+        ToolCallState::Preparing => "preparing",
+        ToolCallState::AwaitingApproval => "awaiting-approval",
+        ToolCallState::Running => "running",
+        ToolCallState::Succeeded => "succeeded",
+        ToolCallState::Failed => "failed",
+        ToolCallState::Denied => "denied",
+        ToolCallState::TimedOut => "timed-out",
+        ToolCallState::Interrupted => "interrupted",
+    }
+}
+
+fn export_duration(duration: Duration) -> String {
+    if duration.as_secs() >= 60 {
+        return format!(
+            "{}m {:02}s",
+            duration.as_secs() / 60,
+            duration.as_secs() % 60
+        );
+    }
+    if duration.as_secs() > 0 {
+        return format!("{:.1}s", duration.as_secs_f64());
+    }
+    format!("{}ms", duration.as_millis())
+}
+
+fn markdown_fence(language: &str, source: &str) -> String {
+    let fence = "`".repeat(longest_backtick_run(source).saturating_add(1).max(3));
+    format!(
+        "{fence}{language}\n{}\n{fence}",
+        source.trim_end_matches('\n')
+    )
+}
+
+fn markdown_code_span(source: &str) -> String {
+    let source = sanitize_export_source(source).replace('\n', " ");
+    let fence = "`".repeat(longest_backtick_run(&source).saturating_add(1).max(1));
+    let padding = if source.starts_with('`')
+        || source.starts_with(' ')
+        || source.ends_with('`')
+        || source.ends_with(' ')
+    {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{padding}{source}{padding}{fence}")
+}
+
+fn longest_backtick_run(source: &str) -> usize {
+    source
+        .split(|character| character != '`')
+        .map(str::len)
+        .max()
+        .unwrap_or(0)
+}
+
+fn sanitize_export_source(source: &str) -> String {
+    strip_ansi(source)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .chars()
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .collect()
+}
+
 fn append_activity_cell(cluster: &mut String, cell: &str) {
     if !cluster.is_empty() {
         cluster.push('\n');
@@ -1088,6 +1293,82 @@ mod tests {
     use super::super::tool_style::{TOOL_ARGUMENT_COLOR, TOOL_PATH_COLOR};
     use super::super::ACCENT;
     use super::*;
+
+    #[test]
+    fn semantic_markdown_is_source_backed_and_excludes_private_or_transient_rows() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::preformatted("\x1b[31mtemporary spinner\x1b[0m"),
+            TranscriptEntry::notice(NoticeKind::Info, "temporary notice"),
+            TranscriptEntry::user("\x1b[2JReview **this**.\r\nKeep the source."),
+            TranscriptEntry::reasoning("private chain of thought"),
+            TranscriptEntry::assistant_markdown("Committed `answer`.\n"),
+        ]);
+        transcript.finish_tool(
+            "visible-tool",
+            "read".into(),
+            Some(serde_json::json!({"file_path": "src/main.rs"})),
+            "line one\n```danger\nline two".into(),
+            0,
+            Some(serde_json::json!({"kind": "read"})),
+            true,
+        );
+        transcript.finish_tool(
+            "hidden-tool",
+            "internal".into(),
+            None,
+            "hidden output".into(),
+            0,
+            None,
+            false,
+        );
+        transcript.finish_subagent(
+            "task-1".into(),
+            "review".into(),
+            "Check the patch.".into(),
+            true,
+            "Looks good.".into(),
+            true,
+        );
+
+        let markdown = transcript
+            .semantic_markdown(Some("Live **tail**.\x1b]0;title\x07"))
+            .expect("semantic Markdown");
+
+        assert!(markdown.contains("## User\n\nReview **this**.\nKeep the source."));
+        assert!(markdown.contains("## Assistant\n\nCommitted `answer`."));
+        assert!(markdown.contains("### Tool: `read`"));
+        assert!(markdown.contains("\"file_path\": \"src/main.rs\""));
+        assert!(markdown.contains("````text\nline one\n```danger\nline two\n````"));
+        assert!(markdown.contains("#### Metadata"));
+        assert!(markdown.contains("### Delegated task: `review`"));
+        assert!(markdown.contains("## Assistant\n\nLive **tail**."));
+        assert!(!markdown.contains("temporary spinner"));
+        assert!(!markdown.contains("temporary notice"));
+        assert!(!markdown.contains("private chain of thought"));
+        assert!(!markdown.contains("hidden output"));
+        assert!(!markdown.contains("\x1b"));
+        assert!(markdown.ends_with('\n'));
+    }
+
+    #[test]
+    fn latest_assistant_markdown_returns_sanitized_raw_source() {
+        let transcript = Transcript::from_entries(vec![
+            TranscriptEntry::assistant_markdown("first"),
+            TranscriptEntry::user("next"),
+            TranscriptEntry::assistant_markdown("\x1b[31mlatest\tanswer\x1b[0m"),
+        ]);
+
+        assert_eq!(
+            transcript.latest_assistant_markdown(None).as_deref(),
+            Some("latest\tanswer")
+        );
+        assert_eq!(
+            transcript
+                .latest_assistant_markdown(Some("\x1b[32mlive\x1b[0m"))
+                .as_deref(),
+            Some("live")
+        );
+    }
 
     fn assert_bounded(rendered: &str, width: usize) {
         for line in rendered.lines() {
@@ -1217,6 +1498,9 @@ mod tests {
         let complete = transcript.render_transcript_with_activity(80, 79, true);
         assert_eq!(complete.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&complete[0]);
+        let rows = plain.lines().collect::<Vec<_>>();
+        assert_eq!(rows.first(), Some(&" "));
+        assert_eq!(rows.last(), Some(&" "));
         assert!(plain.contains("• Reasoning"), "{plain}");
         assert!(plain.contains("  └ Inspect the event ordering"), "{plain}");
         assert!(plain.contains("Inspect the event ordering"), "{plain}");

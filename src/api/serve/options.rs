@@ -12,6 +12,9 @@ pub(crate) struct ServeOptions {
     pub(crate) web_dir: Option<PathBuf>,
     pub(crate) api_only: bool,
     pub(crate) background: bool,
+    pub(crate) replace: bool,
+    pub(crate) offline: bool,
+    pub(crate) allow_asset_download: bool,
     pub(crate) help: bool,
 }
 
@@ -27,6 +30,9 @@ impl ServeOptions {
         let mut web_dir = std::env::var_os("A3S_CODE_WEB_DIR").map(PathBuf::from);
         let mut api_only = false;
         let mut background = false;
+        let mut replace = false;
+        let offline = environment_flag("A3S_OFFLINE");
+        let allow_asset_download = !environment_flag("A3S_NO_AUTO_INSTALL");
         let mut help = false;
 
         let mut index = 0;
@@ -62,6 +68,10 @@ impl ServeOptions {
                     background = true;
                     index += 1;
                 }
+                "--replace" => {
+                    replace = true;
+                    index += 1;
+                }
                 other => anyhow::bail!("unknown a3s web option `{other}`"),
             }
         }
@@ -74,9 +84,18 @@ impl ServeOptions {
             web_dir,
             api_only,
             background,
+            replace,
+            offline,
+            allow_asset_download,
             help,
         })
     }
+}
+
+fn environment_flag(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
 }
 
 fn take_value(args: &[String], index: &mut usize, flag: &str) -> anyhow::Result<String> {
@@ -114,8 +133,16 @@ mod tests {
         .expect("valid web options");
 
         assert!(options.background);
+        assert!(!options.replace);
         assert_eq!(options.addr.ip().to_string(), "127.0.0.1");
         assert_eq!(options.addr.port(), 0);
+    }
+
+    #[test]
+    fn parses_explicit_safe_replacement() {
+        let options = ServeOptions::parse(&["--replace".into()]).expect("valid replacement option");
+
+        assert!(options.replace);
     }
 
     #[test]

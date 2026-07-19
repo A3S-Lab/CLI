@@ -1513,28 +1513,36 @@ fn approval_menu_uses_decision_focused_semantic_surface() {
     let lines = approval_menu_lines(
         "Bash(cargo test very-long-filter-name-that-should-not-overflow)",
         1,
-        42,
+        72,
     );
     let plain = lines
         .iter()
         .map(|line| a3s_tui::style::strip_ansi(line))
         .collect::<Vec<_>>();
 
-    assert_eq!(plain.len(), 7);
     assert!(plain[0].contains("◆ Permission required"), "{plain:?}");
     assert!(plain[1].contains("Run"), "{plain:?}");
-    assert!(plain[3].contains("1  ↵ Allow once"), "{plain:?}");
-    assert!(plain[4].contains("2  ∞ Enable auto mode"), "{plain:?}");
-    assert!(plain[5].contains("3  ⊘ Deny"), "{plain:?}");
-    assert!(plain[6].contains("Enter select"), "{plain:?}");
+    assert!(plain.iter().any(|line| line.contains("1  ↵ Allow once")));
+    assert!(plain
+        .iter()
+        .any(|line| line.contains("2  ◎ Allow exact capability for this session")));
+    assert!(plain
+        .iter()
+        .any(|line| line.contains("3  ⌘ Add exact capability rule to project")));
+    assert!(plain
+        .iter()
+        .any(|line| line.contains("4  ⊘ Deny and tell the agent why")));
+    assert!(plain.iter().any(|line| line.contains("Enter select")));
     assert!(
         lines
             .iter()
-            .all(|line| a3s_tui::style::visible_len(line) <= 42),
+            .all(|line| a3s_tui::style::visible_len(line) <= 72),
         "{plain:?}"
     );
     assert!(
-        lines[4].contains(SURFACE_SELECTED.bg_ansi().as_str()),
+        lines
+            .iter()
+            .any(|line| line.contains(SURFACE_SELECTED.bg_ansi().as_str())),
         "selected row is styled"
     );
 }
@@ -1799,70 +1807,75 @@ async fn parallel_opts_register_parallel_task() {
 #[test]
 fn concurrent_tool_approvals_are_kept_in_fifo_order() {
     let mut pending = VecDeque::from([
-        ("tool-a".to_string(), "edit file".to_string()),
-        ("tool-b".to_string(), "run tests".to_string()),
+        pending_approval("tool-a", "edit file"),
+        pending_approval("tool-b", "run tests"),
     ]);
 
     assert_eq!(
         pending
             .front()
-            .map(|(id, label)| (id.as_str(), label.as_str())),
+            .map(|pending| (pending.tool_id.as_str(), pending.label.as_str())),
         Some(("tool-a", "edit file"))
     );
     assert_eq!(
-        take_pending_tools_for_confirmation(&mut pending, "tool-a", false),
-        vec![("tool-a".to_string(), "edit file".to_string())]
+        take_pending_tool_for_confirmation(&mut pending, "tool-a")
+            .map(|pending| (pending.tool_id, pending.label)),
+        Some(("tool-a".to_string(), "edit file".to_string()))
     );
     assert_eq!(
         pending
             .front()
-            .map(|(id, label)| (id.as_str(), label.as_str())),
+            .map(|pending| (pending.tool_id.as_str(), pending.label.as_str())),
         Some(("tool-b", "run tests"))
     );
 }
 
 #[test]
-fn always_approval_takes_every_existing_request_in_fifo_order() {
+fn scoped_approval_never_grants_other_pending_requests() {
     let mut pending = VecDeque::from([
-        ("tool-a".to_string(), "edit file".to_string()),
-        ("tool-b".to_string(), "run tests".to_string()),
-        ("tool-c".to_string(), "write report".to_string()),
+        pending_approval("tool-a", "edit file"),
+        pending_approval("tool-b", "run tests"),
+        pending_approval("tool-c", "write report"),
     ]);
 
     assert_eq!(
-        take_pending_tools_for_confirmation(&mut pending, "tool-a", true),
-        vec![
-            ("tool-a".to_string(), "edit file".to_string()),
-            ("tool-b".to_string(), "run tests".to_string()),
-            ("tool-c".to_string(), "write report".to_string()),
-        ]
+        take_pending_tool_for_confirmation(&mut pending, "tool-a").map(|pending| pending.tool_id),
+        Some("tool-a".to_string())
     );
-    assert!(pending.is_empty());
+    assert_eq!(
+        pending
+            .iter()
+            .map(|pending| pending.tool_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["tool-b", "tool-c"]
+    );
 }
 
 #[test]
 fn out_of_order_tool_terminal_events_do_not_skip_the_fifo_head() {
     let mut pending = VecDeque::from([
-        ("tool-a".to_string(), "edit file".to_string()),
-        ("tool-b".to_string(), "run tests".to_string()),
+        pending_approval("tool-a", "edit file"),
+        pending_approval("tool-b", "run tests"),
     ]);
 
     // A later request may be confirmed or time out before the prompt at
     // the head resolves. Remove that request without advancing the UI.
     assert_eq!(
-        take_pending_tool_label(&mut pending, "tool-b"),
+        take_pending_tool_approval(&mut pending, "tool-b")
+            .map(|(pending, was_front)| (pending.label, was_front)),
         Some(("run tests".to_string(), false))
     );
     assert_eq!(
         pending
             .front()
-            .map(|(id, label)| (id.as_str(), label.as_str())),
+            .map(|pending| (pending.tool_id.as_str(), pending.label.as_str())),
         Some(("tool-a", "edit file"))
     );
 
     // Resolving the head then advances (and in this case drains) the queue.
     assert_eq!(
-        take_pending_tool_label(&mut pending, "tool-a"),
+        take_pending_tool_approval(&mut pending, "tool-a")
+            .map(|(pending, was_front)| (pending.label, was_front)),
         Some(("edit file".to_string(), true))
     );
     assert!(pending.is_empty());
@@ -1871,32 +1884,48 @@ fn out_of_order_tool_terminal_events_do_not_skip_the_fifo_head() {
 #[test]
 fn stale_modal_confirmation_cannot_apply_to_the_next_tool() {
     let mut pending = VecDeque::from([
-        ("tool-a".to_string(), "edit file".to_string()),
-        ("tool-b".to_string(), "run tests".to_string()),
+        pending_approval("tool-a", "edit file"),
+        pending_approval("tool-b", "run tests"),
     ]);
 
     // The head resolves externally after its prompt generated a UI message.
     assert_eq!(
-        take_pending_tool_label(&mut pending, "tool-a"),
+        take_pending_tool_approval(&mut pending, "tool-a")
+            .map(|(pending, was_front)| (pending.label, was_front)),
         Some(("edit file".to_string(), true))
     );
 
     // The stale response remains bound to tool-a rather than approving or
     // denying the new head, tool-b.
-    assert!(take_pending_tools_for_confirmation(&mut pending, "tool-a", true).is_empty());
-    assert_eq!(pending.front().map(|(id, _)| id.as_str()), Some("tool-b"));
+    assert!(take_pending_tool_for_confirmation(&mut pending, "tool-a").is_none());
+    assert_eq!(
+        pending.front().map(|pending| pending.tool_id.as_str()),
+        Some("tool-b")
+    );
 }
 
 #[test]
 fn unknown_tool_terminal_event_does_not_mutate_pending_approvals() {
     let mut pending = VecDeque::from([
-        ("tool-a".to_string(), "edit file".to_string()),
-        ("tool-b".to_string(), "run tests".to_string()),
+        pending_approval("tool-a", "edit file"),
+        pending_approval("tool-b", "run tests"),
     ]);
 
-    assert!(take_pending_tool_label(&mut pending, "tool-c").is_none());
+    assert!(take_pending_tool_approval(&mut pending, "tool-c").is_none());
     assert_eq!(pending.len(), 2);
-    assert_eq!(pending.front().map(|(id, _)| id.as_str()), Some("tool-a"));
+    assert_eq!(
+        pending.front().map(|pending| pending.tool_id.as_str()),
+        Some("tool-a")
+    );
+}
+
+fn pending_approval(tool_id: &str, label: &str) -> PendingToolApproval {
+    PendingToolApproval::new(
+        tool_id.to_string(),
+        "bash".to_string(),
+        serde_json::json!({"command": label}),
+        label.to_string(),
+    )
 }
 
 #[tokio::test]
@@ -5915,6 +5944,25 @@ fn osc52_wraps_base64_in_envelope() {
 }
 
 #[test]
+fn osc52_bounds_utf8_bytes_without_splitting_a_character() {
+    use base64::Engine;
+
+    let source = "界".repeat(OSC52_PAYLOAD_BYTE_LIMIT);
+    let envelope = osc52_copy(&source);
+    let encoded = envelope
+        .strip_prefix("\u{1b}]52;c;")
+        .and_then(|value| value.strip_suffix('\u{7}'))
+        .unwrap();
+    let payload = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+
+    assert!(payload.len() <= OSC52_PAYLOAD_BYTE_LIMIT);
+    assert!(std::str::from_utf8(&payload).is_ok());
+    assert!(payload.len() < source.len());
+}
+
+#[test]
 fn slice_cols_handles_ascii_and_wide() {
     assert_eq!(slice_cols("hello", 1, 4), "ell");
     assert_eq!(slice_cols("hello", 0, 100), "hello");
@@ -6287,20 +6335,50 @@ fn tui_hitl_checker_classifies_bash_git_and_batch_risk() {
 }
 
 #[test]
-fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
+fn exact_permission_grants_survive_checker_clones_without_bypassing_hard_denies() {
+    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
+
+    let workspace = tempfile::tempdir().unwrap();
+    let gate = DeepResearchReportToolGate::default();
+    gate.set_workspace(workspace.path());
+    let grants = TuiPermissionGrants::default();
+    let checker =
+        TuiHitlPermissionChecker::with_grants(tui_permission_policy(), gate, grants.clone());
+    let allowed = serde_json::json!({"command": "cargo test -p a3s"});
+
+    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Ask);
+    grants.allow_for_session(ExactPermissionGrant::from_invocation("bash", &allowed));
+    assert_eq!(checker.check("bash", &allowed), PermissionDecision::Allow);
+    assert_eq!(
+        checker.check(
+            "bash",
+            &serde_json::json!({"command": "cargo test --workspace"})
+        ),
+        PermissionDecision::Ask
+    );
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "rm -rf /"})),
+        PermissionDecision::Deny
+    );
+}
+
+#[test]
+fn tui_auto_uses_the_shared_guardrail_only_as_a_hard_denial_floor() {
     use a3s_code_core::permissions::{
         InteractiveToolGuardrail, PermissionChecker, PermissionDecision, ToolRiskAction,
         ToolRiskLevel,
     };
 
     let checker = InteractiveToolGuardrail::for_mode("auto").with_workspace(Path::new("."));
-    for (tool, args, level, action, permission) in [
+    let execution = TuiExecutionPolicy::new(Mode::Auto);
+    for (tool, args, level, action, permission, auto_decision) in [
         (
             "read",
             serde_json::json!({"file_path": "README.md"}),
             ToolRiskLevel::Routine,
             ToolRiskAction::Allow,
             PermissionDecision::Allow,
+            true,
         ),
         (
             "write",
@@ -6308,6 +6386,7 @@ fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
             ToolRiskLevel::Bounded,
             ToolRiskAction::Allow,
             PermissionDecision::Allow,
+            true,
         ),
         (
             "bash",
@@ -6315,6 +6394,7 @@ fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
             ToolRiskLevel::High,
             ToolRiskAction::ReviewByLlm,
             PermissionDecision::Ask,
+            true,
         ),
         (
             "bash",
@@ -6322,24 +6402,35 @@ fn tui_guardrail_keeps_confirmable_and_non_bypassable_risk_separate() {
             ToolRiskLevel::Critical,
             ToolRiskAction::RuleDeny,
             PermissionDecision::Deny,
+            false,
         ),
     ] {
         assert_eq!(checker.assess(tool, &args).level, level);
         assert_eq!(checker.risk_action(tool, &args), action);
         assert_eq!(checker.check(tool, &args), permission);
+        assert_eq!(
+            execution.auto_confirmation_decision(tool, &args, Path::new(".")),
+            Some(auto_decision),
+            "TUI auto routing drifted from the shared guardrail for {tool}"
+        );
     }
 }
 
 #[test]
-fn auto_mode_approves_every_confirmation_required_tool() {
-    use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
-
-    let checker = TuiHitlPermissionChecker::new(
-        tui_permission_policy(),
-        DeepResearchReportToolGate::default(),
-    );
+fn auto_mode_resolves_every_confirmation_without_hitl() {
+    let execution = TuiExecutionPolicy::new(Mode::Auto);
     for (tool, args) in [
         ("write", serde_json::json!({"file_path": "README.md"})),
+        (
+            "git",
+            serde_json::json!({"command": "checkout", "ref": "feature"}),
+        ),
+        (
+            "batch",
+            serde_json::json!({"invocations": [
+                {"tool": "write", "args": {"file_path": "README.md"}}
+            ]}),
+        ),
         ("bash", serde_json::json!({"command": "cargo test"})),
         ("runtime", serde_json::json!({"tasks": ["external work"]})),
         ("program", serde_json::json!({"source": "return 1"})),
@@ -6358,10 +6449,6 @@ fn auto_mode_approves_every_confirmation_required_tool() {
             serde_json::json!({"title": "side effect"}),
         ),
         (
-            "git",
-            serde_json::json!({"command": "checkout", "ref": "feature", "force": true}),
-        ),
-        (
             "batch",
             serde_json::json!({"invocations": [
                 {"tool": "bash", "args": {"command": "cargo test"}}
@@ -6369,15 +6456,31 @@ fn auto_mode_approves_every_confirmation_required_tool() {
         ),
     ] {
         assert_eq!(
-            checker.check(tool, &args),
-            PermissionDecision::Ask,
-            "{tool} must reach HITL instead of bypassing a hard denial"
+            execution.auto_confirmation_decision(tool, &args, Path::new(".")),
+            Some(true),
+            "{tool} must be approved without entering HITL in Auto mode"
         );
-        assert!(Mode::Auto.auto_approves_confirmation());
     }
 
-    assert!(!Mode::Default.auto_approves_confirmation());
-    assert!(!Mode::Plan.auto_approves_confirmation());
+    assert_eq!(
+        execution.auto_confirmation_decision(
+            "bash",
+            &serde_json::json!({"command": "rm -rf /"}),
+            Path::new("."),
+        ),
+        Some(false),
+        "a hard denial must be rejected without entering HITL"
+    );
+
+    execution.set_mode(Mode::Default);
+    assert_eq!(
+        execution.auto_confirmation_decision(
+            "bash",
+            &serde_json::json!({"command": "cargo test"}),
+            Path::new("."),
+        ),
+        None
+    );
 }
 
 #[test]
@@ -7001,6 +7104,82 @@ async fn tui_session_policy_does_not_block_web_fetch() {
         !output.contains("Permission denied"),
         "web_fetch should not be blocked by permission policy: {output}"
     );
+}
+
+#[tokio::test]
+async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
+    let dir = std::env::temp_dir().join(format!(
+        "a3s-auto-no-hitl-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("config.acl");
+    test_config(&cfg);
+
+    let agent = a3s_code_core::Agent::new(cfg.to_string_lossy().to_string())
+        .await
+        .unwrap();
+    let llm = Arc::new(CaptureLlmClient::new(vec![
+        tool_call_response(
+            "bash",
+            serde_json::json!({"command": "printf auto-mode-ok > auto-mode-probe.txt"}),
+        ),
+        done_response(),
+    ]));
+    let gate = DeepResearchReportToolGate::default();
+    gate.set_workspace(&dir);
+    let execution = TuiExecutionPolicy::new(Mode::Auto);
+    let opts = tui_session_options_with_gate_and_execution(
+        a3s_code_core::hitl::ConfirmationPolicy::enabled().with_timeout(300, TimeoutAction::Reject),
+        gate,
+        execution,
+    )
+    .with_llm_client(llm)
+    .with_planning_mode(a3s_code_core::PlanningMode::Disabled);
+    let session = agent
+        .session_async(dir.to_string_lossy().to_string(), Some(opts))
+        .await
+        .unwrap();
+
+    let (mut rx, join) = session
+        .stream("Create the requested probe file.", None)
+        .await
+        .unwrap();
+    let mut shell_completed = false;
+    while let Some(event) = rx.recv().await {
+        match event {
+            a3s_code_core::AgentEvent::ConfirmationRequired { tool_name, .. } => {
+                panic!("Auto emitted an interactive confirmation for {tool_name}")
+            }
+            a3s_code_core::AgentEvent::PermissionDenied {
+                tool_name, reason, ..
+            } => panic!("{tool_name} was denied in Auto: {reason}"),
+            a3s_code_core::AgentEvent::ToolEnd {
+                name,
+                output,
+                exit_code,
+                ..
+            } if name == "bash" => {
+                assert_eq!(exit_code, 0, "{output}");
+                shell_completed = true;
+            }
+            a3s_code_core::AgentEvent::End { .. } => break,
+            a3s_code_core::AgentEvent::Error { message } => panic!("{message}"),
+            _ => {}
+        }
+    }
+    join.await.unwrap();
+
+    assert!(shell_completed, "the shell tool did not finish");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("auto-mode-probe.txt")).unwrap(),
+        "auto-mode-ok"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
@@ -8550,6 +8729,8 @@ fn cancel_pending_picker_clears_panel_and_deferred_asset_command() {
 fn registered_slash_commands_have_declared_handler_paths() {
     let parameterized = HashSet::from([
         "/login",
+        "/copy",
+        "/export",
         "/ctx",
         "/kb",
         "/okf",
@@ -8561,11 +8742,31 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/mcp",
         "/skill",
         "/research",
+        "/island",
     ]);
     let exact = HashSet::from([
-        "/logout", "/exit", "/fork", "/clear", "/init", "/compact", "/help", "/auto", "/config",
-        "/model", "/effort", "/ide", "/plugin", "/theme", "/reload", "/update", "/memory",
+        "/logout",
+        "/exit",
+        "/fork",
+        "/clear",
+        "/init",
+        "/compact",
+        "/help",
+        "/auto",
+        "/config",
+        "/model",
+        "/effort",
+        "/ide",
+        "/plugin",
+        "/theme",
+        "/reload",
+        "/update",
+        "/memory",
         "/relay",
+        "/permissions",
+        "/tasks",
+        "/history",
+        "/checkup",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -8617,6 +8818,42 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/config",
             handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/checkup",
+            handler: Exact,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/island",
+            handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/permissions",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/tasks",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/copy",
+            handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/export",
+            handler: Parameterized,
             idle_only: false,
             scope: Local,
         },
@@ -8701,6 +8938,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/research",
             handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/history",
+            handler: Exact,
             idle_only: false,
             scope: Local,
         },
@@ -8812,6 +9055,8 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 
     let parameterized_names = HashSet::from([
         "/login",
+        "/copy",
+        "/export",
         "/ctx",
         "/kb",
         "/okf",
@@ -8823,6 +9068,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/mcp",
         "/skill",
         "/research",
+        "/island",
     ]);
     for row in &rows {
         match row.handler {
@@ -8854,6 +9100,14 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         let row = rows.iter().find(|row| row.command == cmd).unwrap();
         assert_eq!(row.scope, SlashRuntimeScope::Local);
     }
+}
+
+#[test]
+fn permissions_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/permissions"));
+    assert!(SLASH_COMMANDS
+        .iter()
+        .any(|(name, _)| *name == "/permissions"));
 }
 
 #[test]
@@ -8905,6 +9159,18 @@ fn fork_is_idle_only_and_listed() {
 fn relay_is_idle_only_and_listed() {
     assert!(IDLE_ONLY.contains(&"/relay"));
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/relay"));
+}
+
+#[test]
+fn tasks_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/tasks"));
+    assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tasks"));
+}
+
+#[test]
+fn history_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/history"));
+    assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/history"));
 }
 
 #[test]

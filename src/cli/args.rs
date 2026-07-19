@@ -197,6 +197,10 @@ pub(crate) struct WebStartArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
 
+    /// Gracefully replace an A3S-managed instance; never stop an unrelated process.
+    #[arg(long)]
+    pub replace: bool,
+
     /// Listen host. Defaults to A3S_CODE_WEB_HOST or 127.0.0.1.
     #[arg(long, value_name = "HOST")]
     pub host: Option<String>,
@@ -554,6 +558,14 @@ pub(crate) struct InstallArgs {
     /// Resolve and print the operation plan without mutation.
     #[arg(long)]
     pub dry_run: bool,
+    /// Apply only if the newly resolved plan matches this reviewed SHA-256 digest.
+    #[arg(
+        long,
+        value_name = "SHA256",
+        conflicts_with = "dry_run",
+        value_parser = parse_plan_digest
+    )]
+    pub plan_digest: Option<String>,
     /// Explicitly trust an unsigned local development package.
     #[arg(long)]
     pub allow_unsigned: bool,
@@ -576,6 +588,14 @@ pub(crate) struct UpgradeArgs {
     /// Resolve and print the operation plan without mutation.
     #[arg(long)]
     pub dry_run: bool,
+    /// Apply only if the newly resolved plan matches this reviewed SHA-256 digest.
+    #[arg(
+        long,
+        value_name = "SHA256",
+        conflicts_with = "dry_run",
+        value_parser = parse_plan_digest
+    )]
+    pub plan_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Args)]
@@ -595,6 +615,25 @@ pub(crate) struct UninstallArgs {
     /// Resolve and print the operation plan without mutation.
     #[arg(long)]
     pub dry_run: bool,
+    /// Apply only if the newly resolved plan matches this reviewed SHA-256 digest.
+    #[arg(
+        long,
+        value_name = "SHA256",
+        conflicts_with = "dry_run",
+        value_parser = parse_plan_digest
+    )]
+    pub plan_digest: Option<String>,
+}
+
+fn parse_plan_digest(value: &str) -> Result<String, String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("expected exactly 64 lowercase hexadecimal characters".to_string());
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Debug, Args)]

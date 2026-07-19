@@ -11,26 +11,58 @@ struct RestoredSessionInstall {
     llm_client: Arc<dyn a3s_code_core::LlmClient>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::api) struct SessionRestoreReport {
+    pub(in crate::api) restored: usize,
+    pub(in crate::api) unavailable: usize,
+    pub(in crate::api) failed: usize,
+}
+
 impl KernelService {
-    pub(in crate::api) async fn restore_persisted_sessions(&self) -> BootResult<usize> {
+    pub(in crate::api) async fn restore_persisted_sessions(
+        &self,
+    ) -> BootResult<SessionRestoreReport> {
         let session_ids = self
             .state
             .session_repository
             .list_session_ids()
             .await
             .map_err(|error| BootError::Internal(error.to_string()))?;
-        let mut restored = 0;
+        let mut report = SessionRestoreReport::default();
         for session_id in session_ids {
             match self.restore_persisted_session(&session_id).await {
-                Ok(true) => restored += 1,
+                Ok(true) => report.restored += 1,
                 Ok(false) => {}
                 Err(error) => {
-                    eprintln!("warning: failed to restore Code Web session `{session_id}`: {error}")
+                    if is_unavailable_session_error(&error) {
+                        report.unavailable += 1;
+                    } else {
+                        report.failed += 1;
+                    }
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "saved Code Web session was not restored"
+                    );
                 }
             }
         }
-        restored += self.migrate_default_workspace_timelines().await;
-        Ok(restored)
+        report.restored += self.migrate_default_workspace_timelines().await;
+        if report.unavailable > 0 {
+            eprintln!(
+                "warning: {} saved Code Web session(s) use models that are unavailable in the \
+                 current configuration; their saved data was kept",
+                report.unavailable
+            );
+        }
+        if report.failed > 0 {
+            eprintln!(
+                "warning: {} saved Code Web session(s) could not be restored; their saved data was \
+                 kept",
+                report.failed
+            );
+        }
+        Ok(report)
     }
 
     async fn restore_persisted_session(&self, session_id: &str) -> BootResult<bool> {
@@ -435,6 +467,13 @@ impl KernelService {
     }
 }
 
+fn is_unavailable_session_error(error: &BootError) -> bool {
+    let message = error.to_string();
+    message.contains("not found in config")
+        || message.contains("was not found in provider")
+        || message.contains("was not found, or has no API key")
+}
+
 pub(super) fn code_web_store_dir(workspace: &Path) -> PathBuf {
     workspace.join(".a3s").join("tui-sessions")
 }
@@ -662,4 +701,25 @@ fn file_timestamp_millis(path: &Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+#[cfg(test)]
+mod restore_report_tests {
+    use super::*;
+
+    #[test]
+    fn missing_model_errors_are_grouped_as_unavailable_sessions() {
+        let error = BootError::Internal(
+            "provider 'fixture' or model 'removed' not found in config".to_string(),
+        );
+
+        assert!(is_unavailable_session_error(&error));
+    }
+
+    #[test]
+    fn storage_failures_are_not_misreported_as_model_availability() {
+        let error = BootError::Internal("persisted session JSON is truncated".to_string());
+
+        assert!(!is_unavailable_session_error(&error));
+    }
 }

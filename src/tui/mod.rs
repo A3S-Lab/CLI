@@ -281,6 +281,8 @@ mod runtime_projection;
 mod transcript;
 
 // Terminal UI support.
+#[path = "app/agent_presence.rs"]
+mod agent_presence;
 #[path = "app/actions.rs"]
 mod app_actions;
 #[path = "app/async_dispatch.rs"]
@@ -291,6 +293,8 @@ mod app_commands;
 mod app_events;
 #[path = "app/launch.rs"]
 mod app_launch;
+#[path = "app/permission_rules.rs"]
+mod app_permission_rules;
 #[path = "app/permissions.rs"]
 mod app_permissions;
 #[path = "app/projections.rs"]
@@ -299,6 +303,8 @@ mod app_projections;
 mod app_research;
 #[path = "app/runtime.rs"]
 mod app_runtime;
+#[path = "app/session_share.rs"]
+mod app_session_share;
 #[path = "app/session_state.rs"]
 mod app_session_state;
 #[path = "app/smoke.rs"]
@@ -333,6 +339,8 @@ mod file_change_view;
 mod image;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
+#[path = "ui/plan_review.rs"]
+mod plan_review;
 #[path = "ui/program_preview.rs"]
 mod program_preview;
 #[path = "ui/render.rs"]
@@ -345,6 +353,7 @@ mod tool_style;
 mod tool_transcript_view;
 #[path = "ui/util.rs"]
 mod util;
+use agent_presence::{agent_presence_tick, AgentIslandLaunchOutcome};
 
 pub(crate) mod panels;
 #[cfg(test)]
@@ -359,6 +368,7 @@ use app_commands::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
 pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
+use app_permission_rules::*;
 use app_permissions::*;
 use app_projections::*;
 pub(crate) use app_session_state::tui_session_state_path;
@@ -387,6 +397,7 @@ use message_chrome::*;
 pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
+use plan_review::*;
 use render::*;
 use runtime_policy::RuntimePolicy;
 use runtime_projection::{
@@ -425,6 +436,7 @@ const STREAM_START_TIMEOUT_MS: u64 = 10_000;
 const STREAM_JOIN_SETTLE_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_STREAM_GRACE_MS: u64 = 2_000;
 const GRACEFUL_QUIT_ABORT_SETTLE_MS: u64 = 250;
+const GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS: u64 = 500;
 const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
@@ -474,6 +486,11 @@ struct App {
     /// `/relay` session picker and its stale-result guard.
     relay_panel: Option<panels::relay::RelayPanel>,
     relay_scan_seq: u64,
+    /// `/permissions` exact session/project grant inspector and revocation surface.
+    permission_panel: Option<panels::permissions::PermissionPanel>,
+    /// `/tasks` / Ctrl+B delegated-work inspector and cancellation surface.
+    task_panel: Option<panels::tasks::TaskPanel>,
+    task_panel_seq: u64,
     /// Picker-visible models advertised for the current Codex login.
     codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
     /// Guards the asynchronous Codex catalog refresh from duplicate commands.
@@ -492,6 +509,10 @@ struct App {
     code_config: Arc<CodeConfig>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
+    /// Component storage and process PATH snapshot resolved at CLI admission.
+    /// `/checkup` reuses this immutable view instead of rediscovering process
+    /// state from a shell command.
+    component_paths: a3s::components::ComponentPaths,
     config_path: PathBuf,
     memory_dir: PathBuf,
     auto_compact_threshold: f64,
@@ -669,6 +690,9 @@ struct App {
     loop_remaining: usize,
     /// ECS-style projection of live runtime tool and subagent entities.
     runtime: RuntimeProjection,
+    /// Exact local lifecycle publishing and the system-level island bridge.
+    /// Rendering belongs to the independent native `a3s-webview` process.
+    agent_presence: agent_presence::AgentPresenceRuntime,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -725,6 +749,9 @@ struct App {
     /// Set while `/update` is upgrading — drives a progress bar + blocks input;
     /// on success the app restarts into the new binary.
     updating: Option<Instant>,
+    /// Host-owned, read-only `/checkup` preflight. The composer stays hidden
+    /// until its typed result is handed to the strict Plan audit.
+    checkup_inflight: bool,
     /// Last time the streaming viewport was rebuilt — throttles the O(n) rebuild
     /// to ~30fps so a flood of deltas doesn't starve animation on the 1 loop.
     last_paint: Option<Instant>,
@@ -752,11 +779,29 @@ struct App {
     host_tool_call_id: Option<String>,
     interrupting: bool,
     /// Manual tool approvals waiting for a decision, in request order.
-    pending_tools: VecDeque<(String, String)>,
-    /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
+    pending_tools: VecDeque<PendingToolApproval>,
+    /// Exact session/project grants shared across model and effort rebuilds.
+    permission_grants: TuiPermissionGrants,
+    /// Mode-aware permission boundary shared with every rebuilt Core session.
+    /// It always tracks the immutable mode of the running turn.
+    execution_policy: TuiExecutionPolicy,
+    /// Dedicated project ACL file for reviewed persistent grants.
+    project_permission_rules_path: PathBuf,
+    /// Project rule write currently in flight. Its request remains at the FIFO
+    /// head until persistence succeeds, so a failed write cannot silently
+    /// broaden the active session.
+    permission_rule_write_inflight: Option<String>,
+    /// Monotonic identity and global lock for atomic project-grant revocation.
+    project_permission_revoke_seq: u64,
+    project_permission_revoke_inflight: Option<(u64, ExactPermissionGrant)>,
+    /// Denial feedback temporarily owns the composer while retaining its draft.
+    approval_feedback: Option<ApprovalFeedback>,
+    /// Selected row in the tool-approval options panel.
     approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
+    /// `/history` / Ctrl+R fuzzy prompt-history search.
+    history_panel: Option<panels::history::HistoryPanel>,
     /// Cursor into `history` while browsing; `None` means "fresh input".
     history_pos: Option<usize>,
     /// Scratch input captured when prompt-history browsing starts.
@@ -779,10 +824,20 @@ struct App {
     /// Host turns submitted while the agent is busy. Ordering and FIFO
     /// semantics come directly from a3s-lane.
     queue: PriorityQueue<Queued>,
+    /// Submission-time execution mode keyed by a3s-lane's stable sequence.
+    /// Keeping this beside the queue avoids mutable footer state changing the
+    /// semantics of a turn that was already submitted.
+    queued_turn_modes: HashMap<u64, Mode>,
+    /// Strict planning requests keyed by the same stable queue sequence.
+    queued_plan_drafts: HashMap<u64, PlanDraftRequest>,
     /// A claimed queued turn remains here until Core admits it. Admission
     /// failure restores this exact item, including its original FIFO sequence.
     active_queued_turn: Option<PriorityItem<Queued>>,
     active_queued_turn_token: Option<u64>,
+    /// Immutable mode of the current stream, retained after queue admission.
+    active_turn_mode: Option<Mode>,
+    /// Planning request owned by the current read-only stream.
+    active_plan_draft: Option<PlanDraftRequest>,
     queue_retry_generation: u64,
     queue_retry_attempt: u8,
     /// Text of the message currently being processed (the running task).
@@ -790,6 +845,11 @@ struct App {
     /// Typed live plan/TODO projection, pinned above the input and updated from
     /// PlanningEnd/TaskUpdated or the Codex-compatible `update_plan` tool.
     plan: PlanProjection,
+    /// Review staged until the completed stream releases Core's single-flight
+    /// lease, then promoted to the modal decision boundary below.
+    pending_plan_review: Option<PlanReviewState>,
+    /// Explicit Approve / Revise / Abandon boundary for a completed plan.
+    plan_review: Option<PlanReviewState>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
     /// `/memory` full-screen timeline panel (Some when open).
@@ -840,9 +900,14 @@ impl App {
     fn composer_input_is_hidden(&self) -> bool {
         self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
+            || (self.plan_review.is_some() && !self.plan_review_input_active())
             || self.transcript_view.is_some()
+            || self.history_panel.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
+            || self.permission_panel.is_some()
+            || self.task_panel.is_some()
+            || self.checkup_inflight
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()
@@ -886,9 +951,22 @@ impl App {
         let session = Arc::clone(&self.session);
         let stream_join = self.stream_join.take();
         let host_tool_abort = self.host_tool_abort.take();
+        let agent_presence = self.agent_presence.publisher.clone();
         self.rx = None;
 
         Some(cmd::cmd(move || async move {
+            // Remove the exact heartbeat before potentially waiting on model
+            // cleanup. A blocked filesystem must not wedge quit; if bounded
+            // removal times out, the normal heartbeat TTL retires the row.
+            if tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS),
+                agent_presence.remove(),
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!("timed out removing the local agent-presence heartbeat");
+            }
             if let Some(abort) = host_tool_abort {
                 abort.abort();
             }
@@ -951,6 +1029,7 @@ impl App {
     }
 }
 
+#[cfg(test)]
 fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
     approval_prompt(label, selected).lines(width)
 }

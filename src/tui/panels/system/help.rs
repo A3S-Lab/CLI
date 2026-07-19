@@ -8,6 +8,14 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "/login <token>",
         "sign in with a copied OS access token instead of browser auth",
     ),
+    (
+        "/copy [transcript]",
+        "copy the latest response or the complete semantic session Markdown",
+    ),
+    (
+        "/export [path]",
+        "atomically create a Markdown session file inside the workspace",
+    ),
     ("/ctx <query>", "search past ctx-indexed agent sessions"),
     (
         "/ctx <n>",
@@ -278,10 +286,17 @@ fn help_panel() -> HelpPanel {
             HelpSection::new("Keys")
                 .row(
                     "Enter",
-                    "send; while busy, queue the message (Esc interrupts and runs it now)",
+                    "send; while busy, append the message to the FIFO queue",
+                )
+                .row(
+                    "Ctrl+O",
+                    "Send now: cancel the active turn and promote this prompt",
                 )
                 .row("Shift+Enter", "insert a newline in the input")
-                .row("Shift+Tab", "cycle run mode: default -> plan -> auto")
+                .row(
+                    "Shift+Tab",
+                    "cycle default -> read-only plan/review -> non-interactive auto",
+                )
                 .row(
                     "Up / Down",
                     "recall input history; inside menus, move selection",
@@ -291,6 +306,11 @@ fn help_panel() -> HelpPanel {
                 .row(
                     "Ctrl+T",
                     "open the complete live semantic transcript with full tool output",
+                )
+                .row("Ctrl+R", "fuzzy-search prompts from the current session")
+                .row(
+                    "Ctrl+B",
+                    "inspect delegated tasks, recent output, and safe cancellation",
                 )
                 .row(
                     "wheel / drag",
@@ -315,6 +335,10 @@ fn help_panel() -> HelpPanel {
                 .row(
                     "/memory",
                     "memory graph with entities, tiers, aliases, and forget candidates",
+                )
+                .row(
+                    "/permissions",
+                    "search exact session/project grants, inspect arguments, and revoke with confirmation",
                 )
                 .row(
                     "/model",

@@ -133,7 +133,31 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
+    (
+        "/checkup",
+        "audit setup, then review proposed fixes before applying them",
+    ),
+    (
+        "/permissions",
+        "inspect and revoke exact session or project grants",
+    ),
+    (
+        "/tasks",
+        "inspect delegated work · search, view output, or cancel safely",
+    ),
+    (
+        "/copy",
+        "copy the latest response · add `transcript` for the semantic session",
+    ),
+    (
+        "/export",
+        "write a new Markdown session file · optional workspace-relative path",
+    ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
+    (
+        "/island",
+        "show or persist Agent Island on/off · /island [on|off|status]",
+    ),
     (
         "/flow",
         "select a workflow asset → OS Workflow as a Service designer (needs /login) · /flow <text> drafts one",
@@ -169,6 +193,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "inspect DeepResearch event state · status, explain, or strict replay",
     ),
     (
+        "/history",
+        "fuzzy-search prompts from the current session",
+    ),
+    (
         "/kb",
         "open the local personal knowledge base · add/import/search/vault",
     ),
@@ -189,7 +217,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/relay",
-        "resume A3S Code or continue a Claude Code, Codex, or WorkBuddy task",
+        "search, inspect, and resume workspace sessions or background work",
     ),
     ("/help", "show commands and shortcuts"),
     (
@@ -197,7 +225,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "branch a new session from this point (original kept)",
     ),
     ("/clear", "reset the conversation"),
-    ("/auto", "switch to auto-approve mode"),
+    ("/auto", "make future turns non-interactive"),
     ("/exit", "quit a3s code"),
 ];
 
@@ -205,7 +233,7 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 pub(super) const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
-    "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
+    "/checkup", "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).

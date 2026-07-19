@@ -7,6 +7,7 @@ use a3s_updater::{
     RECEIPT_SCHEMA_VERSION,
 };
 use anyhow::{bail, Context};
+use serde::{Deserialize, Serialize};
 
 use super::catalog::ReleaseSpec;
 use super::id::ComponentId;
@@ -14,12 +15,26 @@ use super::lifecycle::{InstallRequest, OperationRecord};
 use super::paths::ComponentPaths;
 use super::probe::probe_version;
 
-pub async fn install_release(
+/// One exact release artifact resolved before a component plan is approved.
+///
+/// Passing this value into the installer prevents a second `latest` lookup
+/// from selecting a different release after the plan digest was checked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedRelease {
+    pub version: String,
+    pub tag: String,
+    pub target: String,
+    pub archive_name: String,
+    pub asset_url: String,
+    pub sha256: String,
+}
+
+pub async fn resolve_release(
     id: &ComponentId,
     release_spec: ReleaseSpec,
-    request: &InstallRequest,
-    paths: &ComponentPaths,
-) -> anyhow::Result<OperationRecord> {
+    requested_version: Option<&str>,
+) -> anyhow::Result<ResolvedRelease> {
     let target = release_spec.asset_family.target().with_context(|| {
         format!(
             "component '{}' has no release for {}-{}",
@@ -28,14 +43,10 @@ pub async fn install_release(
             std::env::consts::ARCH
         )
     })?;
-    super::progress(
-        request.progress,
-        format!("a3s: resolving release for '{}'...", id),
-    );
     let release = fetch_release(
         release_spec.github_owner,
         release_spec.github_repo,
-        request.version.as_deref(),
+        requested_version,
     )
     .await?;
     let version = parse_version(&release.tag_name)?.to_string();
@@ -54,13 +65,46 @@ pub async fn install_release(
                 version, archive_name, id
             )
         })?;
-    let checksum = release_checksum(&release, &asset).await?;
+    let sha256 = release_checksum(&release, &asset).await?;
+    Ok(ResolvedRelease {
+        version,
+        tag: release.tag_name,
+        target: target.to_string(),
+        archive_name,
+        asset_url: asset.browser_download_url,
+        sha256,
+    })
+}
+
+pub async fn install_release(
+    id: &ComponentId,
+    release_spec: ReleaseSpec,
+    request: &InstallRequest,
+    resolved: Option<&ResolvedRelease>,
+    paths: &ComponentPaths,
+) -> anyhow::Result<OperationRecord> {
+    let resolved = match resolved {
+        Some(resolved) => {
+            validate_resolved_release(id, release_spec, request, resolved)?;
+            resolved.clone()
+        }
+        None => {
+            super::progress(
+                request.progress,
+                format!("a3s: resolving release for '{}'...", id),
+            );
+            resolve_release(id, release_spec, request.version.as_deref()).await?
+        }
+    };
     super::progress(
         request.progress,
-        format!("a3s: downloading '{}' {} for {}...", id, version, target),
+        format!(
+            "a3s: downloading '{}' {} for {}...",
+            id, resolved.version, resolved.target
+        ),
     );
-    let archive = download_asset(&asset.browser_download_url).await?;
-    verify_sha256(&archive, &checksum)?;
+    let archive = download_asset(&resolved.asset_url).await?;
+    verify_sha256(&archive, &resolved.sha256)?;
 
     let component_root = paths.component_root(id);
     std::fs::create_dir_all(&component_root)?;
@@ -68,38 +112,41 @@ pub async fn install_release(
         .prefix(".staging-")
         .tempdir_in(&component_root)?;
     let unpacked = staging.path().join("unpacked");
-    extract_release_archive(&archive, &unpacked, &archive_name)?;
+    extract_release_archive(&archive, &unpacked, &resolved.archive_name)?;
     let executable_name = release_spec
         .asset_family
-        .executable_name(release_spec.binary, target);
+        .executable_name(release_spec.binary, &resolved.target);
     let staged_executable = find_unique_file(&unpacked, &executable_name)?;
     let actual_version = probe_version(&staged_executable)?;
-    if parse_version(&actual_version)? != parse_version(&version)? {
+    if parse_version(&actual_version)? != parse_version(&resolved.version)? {
         bail!(
             "downloaded '{}' reported version {}, expected {}",
             id,
             actual_version,
-            version
+            resolved.version
         );
     }
     let relative_executable = staged_executable.strip_prefix(&unpacked)?.to_path_buf();
-    let active = paths.version_root(id, &version);
+    let active = paths.version_root(id, &resolved.version);
     let old_receipt = paths.receipt_store().read(id.as_str())?;
     let activation = DirectoryActivation::activate(&unpacked, &active)?;
     let executable = active.join(relative_executable);
     let receipt = ComponentReceipt {
         schema_version: RECEIPT_SCHEMA_VERSION,
         component_id: id.to_string(),
-        version: version.clone(),
+        version: resolved.version.clone(),
         provenance: InstallProvenance::GithubRelease,
         install_root: active.clone(),
         executable_path: Some(executable.clone()),
         owned_paths: vec![active.clone()],
         source: Some(format!(
             "https://github.com/{}/{}/releases/tag/{}",
-            release_spec.github_owner, release_spec.github_repo, release.tag_name
+            release_spec.github_owner, release_spec.github_repo, resolved.tag
         )),
-        artifact_checksums: BTreeMap::from([(archive_name, checksum)]),
+        artifact_checksums: BTreeMap::from([(
+            resolved.archive_name.clone(),
+            resolved.sha256.clone(),
+        )]),
         installed_at: chrono::Utc::now().to_rfc3339(),
     };
     paths.receipt_store().write(&receipt)?;
@@ -112,13 +159,81 @@ pub async fn install_release(
     }
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: true,
-        version: Some(version),
+        version: Some(resolved.version),
         provenance: Some(InstallProvenance::GithubRelease),
         path: Some(executable),
-        message: format!("Installed component '{}' from its verified release.", id),
+        message: format!(
+            "Completed {} for component '{}' from its verified release.",
+            request.intent.action(),
+            id
+        ),
     })
+}
+
+fn validate_resolved_release(
+    id: &ComponentId,
+    release_spec: ReleaseSpec,
+    request: &InstallRequest,
+    resolved: &ResolvedRelease,
+) -> anyhow::Result<()> {
+    let target = release_spec.asset_family.target().with_context(|| {
+        format!(
+            "component '{}' has no release for {}-{}",
+            id,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    if resolved.target != target {
+        bail!(
+            "reviewed release target '{}' does not match current target '{}'",
+            resolved.target,
+            target
+        );
+    }
+    let version = parse_version(&resolved.version)?;
+    if parse_version(&resolved.tag)? != version {
+        bail!(
+            "reviewed release tag '{}' does not match version '{}'",
+            resolved.tag,
+            resolved.version
+        );
+    }
+    if let Some(requested) = request.version.as_deref() {
+        if parse_version(requested)? != version {
+            bail!(
+                "reviewed release version '{}' does not match requested version '{}'",
+                resolved.version,
+                requested
+            );
+        }
+    }
+    let expected_archive = release_spec.asset_family.archive_name(
+        release_spec.binary,
+        &resolved.version,
+        &resolved.target,
+    );
+    if resolved.archive_name != expected_archive {
+        bail!(
+            "reviewed release asset '{}' does not match expected asset '{}'",
+            resolved.archive_name,
+            expected_archive
+        );
+    }
+    if resolved.asset_url.trim().is_empty() {
+        bail!("reviewed release asset URL cannot be empty");
+    }
+    if resolved.sha256.len() != 64
+        || !resolved
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        bail!("reviewed release SHA-256 digest is invalid");
+    }
+    Ok(())
 }
 
 async fn release_checksum(

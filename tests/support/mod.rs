@@ -50,6 +50,7 @@ pub fn configure_component_env(command: &mut std::process::Command, workspace: &
         .env("A3S_DATA_HOME", workspace.path("data"))
         .env("A3S_STATE_HOME", workspace.path("state"))
         .env("A3S_CACHE_HOME", workspace.path("cache"))
+        .env("A3S_RUNTIME_HOME", workspace.path("runtime"))
         .env("HOME", workspace.path("home"))
         .env("PATH", "");
 }
@@ -115,7 +116,18 @@ pub fn start_fake_box_release(
         .expect("failed to run tar for release fixture");
     assert!(status.success(), "failed to create release fixture");
     let archive = std::fs::read(&archive_path).expect("failed to read release fixture");
-    FakeReleaseServer::start(version, &archive_name, archive)
+    FakeReleaseServer::start("Box", version, &archive_name, archive)
+}
+
+pub fn portable_release_target() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "darwin-arm64",
+        ("macos", "x86_64") => "darwin-x86_64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("linux", "x86_64") => "linux-x86_64",
+        ("windows", "x86_64") => "windows-x86_64",
+        _ => return None,
+    })
 }
 
 pub struct FakeReleaseServer {
@@ -126,14 +138,36 @@ pub struct FakeReleaseServer {
 }
 
 impl FakeReleaseServer {
-    fn start(version: &str, asset_name: &str, archive: Vec<u8>) -> Self {
+    pub fn start(repository: &str, version: &str, asset_name: &str, archive: Vec<u8>) -> Self {
+        Self::start_with_advertised_digest(repository, version, asset_name, archive, None)
+    }
+
+    pub fn start_with_digest(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        digest: &str,
+    ) -> Self {
+        Self::start_with_advertised_digest(repository, version, asset_name, archive, Some(digest))
+    }
+
+    fn start_with_advertised_digest(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        advertised_digest: Option<&str>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind release server");
         listener
             .set_nonblocking(true)
             .expect("failed to configure release server");
         let address = listener.local_addr().unwrap();
         let api_base = format!("http://{address}");
-        let digest = format!("{:x}", Sha256::digest(&archive));
+        let digest = advertised_digest
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:x}", Sha256::digest(&archive)));
         let release = serde_json::to_vec(&serde_json::json!({
             "tag_name": format!("v{version}"),
             "body": "fixture",
@@ -149,6 +183,8 @@ impl FakeReleaseServer {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let asset_path = format!("/assets/{asset_name}");
+        let latest_path = format!("/repos/A3S-Lab/{repository}/releases/latest");
+        let tag_path = format!("/repos/A3S-Lab/{repository}/releases/tags/v{version}");
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -163,10 +199,20 @@ impl FakeReleaseServer {
                             .expect("failed to configure release connection");
                         let release = release.clone();
                         let asset_path = asset_path.clone();
+                        let latest_path = latest_path.clone();
+                        let tag_path = tag_path.clone();
                         let archive = archive.clone();
                         let requests = Arc::clone(&thread_requests);
                         std::thread::spawn(move || {
-                            serve_request(stream, &release, &asset_path, &archive, &requests);
+                            serve_request(
+                                stream,
+                                &release,
+                                &asset_path,
+                                &latest_path,
+                                &tag_path,
+                                &archive,
+                                &requests,
+                            );
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -206,6 +252,8 @@ fn serve_request(
     mut stream: TcpStream,
     release: &[u8],
     asset_path: &str,
+    latest_path: &str,
+    tag_path: &str,
     archive: &[u8],
     requests: &Arc<Mutex<Vec<String>>>,
 ) {
@@ -224,7 +272,7 @@ fn serve_request(
     requests.lock().unwrap().push(path.clone());
     let (status, content_type, body) = if path == asset_path {
         ("200 OK", "application/gzip", archive)
-    } else if path.ends_with("/repos/A3S-Lab/Box/releases/latest") {
+    } else if path == latest_path || path == tag_path {
         ("200 OK", "application/json", release)
     } else {
         ("404 Not Found", "text/plain", b"not found".as_slice())

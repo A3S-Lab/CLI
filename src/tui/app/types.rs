@@ -254,6 +254,9 @@ pub(super) enum Msg {
         event: Box<AgentEvent>,
     },
     Submit(String),
+    /// Cancel the active turn and run this immutable submission before normal
+    /// queued follow-ups.
+    SubmitNow(String),
     StreamStarted {
         token: u64,
         session: Arc<AgentSession>,
@@ -303,6 +306,19 @@ pub(super) enum Msg {
     StreamCommitTick,
     /// Advance the welcome-mascot animation frame.
     BannerTick,
+    /// Refresh the independent whole-system coding-agent collector/exporter.
+    AgentPresenceTick,
+    /// Completion of an exact heartbeat plus sanitized shared snapshot export.
+    AgentPresenceRefreshed(crate::system_agents::SystemAgentRefreshResult),
+    /// Best-effort native system-island helper launch result.
+    AgentIslandLaunchFinished(Result<AgentIslandLaunchOutcome, String>),
+    /// One validated, one-shot inline decision submitted by the native island.
+    AgentIslandControl(crate::system_agents::AgentControlRequest),
+    /// Result of routing a child-row cancellation to Core's real task tracker.
+    AgentIslandSubagentCancelFinished {
+        task_id: String,
+        cancelled: bool,
+    },
     /// Drive the short, high-frame-rate Ultracode activation transition.
     UltracodeTick {
         epoch: u64,
@@ -310,7 +326,40 @@ pub(super) enum Msg {
     ModalConfirm {
         tool_id: String,
         approved: bool,
-        approve_all_pending: bool,
+        reason: Option<String>,
+    },
+    PersistProjectPermission {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+    },
+    ProjectPermissionPersisted {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+        result: Result<PathBuf, String>,
+    },
+    /// Result of an explicitly confirmed project-grant revocation.
+    ProjectPermissionRevoked {
+        request_id: u64,
+        stable_key: String,
+        result: Result<ProjectPermissionRevocation, String>,
+    },
+    /// Authoritative delegated-task snapshot for an open `/tasks` panel.
+    TaskPanelData {
+        session_id: String,
+        generation: u64,
+        request_id: u64,
+        tasks: Vec<a3s_code_core::SubagentTaskSnapshot>,
+    },
+    /// Periodic in-memory refresh scoped to one `/tasks` panel generation.
+    TaskPanelTick {
+        generation: u64,
+    },
+    /// Result of the panel's explicitly confirmed task cancellation.
+    TaskPanelCancelFinished {
+        session_id: String,
+        generation: u64,
+        task_id: String,
+        cancelled: bool,
     },
     BackgroundSubagentFinished {
         session_id: String,
@@ -357,6 +406,17 @@ pub(super) enum Msg {
     },
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
+    /// Atomic, no-clobber Markdown export of the current semantic transcript.
+    SessionExported {
+        status_entry: TranscriptEntryId,
+        result: Result<(PathBuf, u64), String>,
+    },
+    /// Typed, secret-free host inspection completed before `/checkup` starts
+    /// its strict read-only workspace audit.
+    CheckupPreflightCompleted {
+        status_entry: TranscriptEntryId,
+        result: Result<panels::checkup::CheckupPreflight, String>,
+    },
     ResearchDiagnostic(Result<String, String>),
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
     DeepResearchWorkflowCompleted {
@@ -434,6 +494,10 @@ pub(super) enum Msg {
     RelayData {
         request_id: u64,
         result: Result<Vec<panels::relay::RelaySession>, String>,
+    },
+    /// Periodic `/relay` refresh scoped to one open-panel generation.
+    RelayRefreshTick {
+        generation: u64,
     },
     /// `/memory` graph data loaded (timeline + details + derived graph).
     MemoryLoaded(MemPanelData),
