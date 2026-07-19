@@ -137,6 +137,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "/permissions",
         "inspect and revoke exact session or project grants",
     ),
+    (
+        "/tasks",
+        "inspect delegated work · search, view output, or cancel safely",
+    ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
     (
         "/flow",

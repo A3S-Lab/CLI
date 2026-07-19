@@ -13,6 +13,26 @@ impl App {
                 self.apply_project_permission_revoke_result(request_id, stable_key, result);
             }
 
+            Msg::TaskPanelData {
+                session_id,
+                generation,
+                request_id,
+                tasks,
+            } => {
+                self.apply_task_panel_data(session_id, generation, request_id, tasks);
+            }
+            Msg::TaskPanelTick { generation } => {
+                return self.handle_task_panel_tick(generation);
+            }
+            Msg::TaskPanelCancelFinished {
+                session_id,
+                generation,
+                task_id,
+                cancelled,
+            } => {
+                return self
+                    .apply_task_panel_cancel_result(session_id, generation, task_id, cancelled);
+            }
             Msg::BackgroundSubagentFinished {
                 session_id,
                 generation,

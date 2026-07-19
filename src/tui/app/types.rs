@@ -330,6 +330,24 @@ pub(super) enum Msg {
         stable_key: String,
         result: Result<ProjectPermissionRevocation, String>,
     },
+    /// Authoritative delegated-task snapshot for an open `/tasks` panel.
+    TaskPanelData {
+        session_id: String,
+        generation: u64,
+        request_id: u64,
+        tasks: Vec<a3s_code_core::SubagentTaskSnapshot>,
+    },
+    /// Periodic in-memory refresh scoped to one `/tasks` panel generation.
+    TaskPanelTick {
+        generation: u64,
+    },
+    /// Result of the panel's explicitly confirmed task cancellation.
+    TaskPanelCancelFinished {
+        session_id: String,
+        generation: u64,
+        task_id: String,
+        cancelled: bool,
+    },
     BackgroundSubagentFinished {
         session_id: String,
         generation: u64,

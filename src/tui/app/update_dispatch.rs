@@ -233,6 +233,12 @@ impl App {
                     self.ide_key(&key);
                     return None;
                 }
+                // `/tasks` / Ctrl+B is a modal delegated-work inspector. It
+                // remains available while a turn streams, but its keys never
+                // leak into the live composer or interrupt the parent turn.
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_key(&key);
+                }
                 // `/relay` is a modal session picker; execution-mode shortcuts
                 // and composer input must not change behind it.
                 if self.relay_panel.is_some() {
@@ -329,6 +335,11 @@ impl App {
                 // `/loop` engineered-loop dashboard: same.
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
+                }
+                // Cross-platform terminal control for delegated work. Higher
+                // decision modals and focused panels retain priority above it.
+                if panels::tasks::is_task_panel_key(&key) {
+                    return self.toggle_task_panel();
                 }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
@@ -581,6 +592,9 @@ impl App {
                 }
                 if self.permission_panel.is_some() {
                     return self.handle_permission_panel_mouse(&m);
+                }
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);

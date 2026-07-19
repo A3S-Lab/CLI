@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `/permissions`, a searchable inspector for exact session and project
   grants. Grant details expose the canonical matching arguments; revocation
   requires a second matching action and affects future checks only.
+- Added `/tasks` and `Ctrl+B` as a live delegated-work control panel. It reads
+  authoritative Core task snapshots without interrupting the parent turn,
+  retains running tasks plus bounded recent history, preserves semantic
+  selection across one-second refreshes, searches progress and output, opens
+  full task details, and requires a second matching action before invoking real
+  subagent cancellation.
 
 ### Changed
 
