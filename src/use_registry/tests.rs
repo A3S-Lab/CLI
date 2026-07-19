@@ -1020,12 +1020,18 @@ esac
             .await
             .unwrap(),
     );
+    assert!(
+        STARTUP_PROJECTION_BUDGET > STARTUP_DISCOVERY_BUDGET,
+        "production startup must reserve more time for initial MCP projection"
+    );
     let started = std::time::Instant::now();
-    let (handle, warning) = start(
+    let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
         CancellationToken::new(),
         Arc::clone(&session),
+        Duration::from_secs(10),
+        Duration::from_secs(10),
     )
     .await;
 

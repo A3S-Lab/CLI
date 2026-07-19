@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-07-19
+
 ### Added
 
+- Added `/checkup`, a secret-free setup audit with typed, read-only checks for
+  component health, duplicate or shadowed PATH installations, ACL semantics,
+  skills, applicable `AGENTS.md` files, MCP state, and terminal capabilities.
+  Findings enter the strict Plan workflow and stop at Approve, Revise, or
+  Abandon before any remediation can change the system.
+- Added the system-wide Agent Island integration. It is enabled by default,
+  can be changed with `/island on|off|status`, aggregates A3S, Claude, Codex,
+  Cursor, Gemini, and WorkBuddy activity into one native singleton, and exposes
+  authenticated one-shot approve, deny, stop, cancel, and reply controls with
+  task status and elapsed time.
+- Added a workspace-scoped `a3s web start|stop|status|logs|open` lifecycle,
+  including `--replace` for gracefully replacing only CLI-managed instances,
+  file-lock convergence for concurrent starts, and structured output for
+  automation.
 - Added strict two-phase Plan turns with an explicit Approve, Revise, or
   Abandon review boundary, plus `Ctrl+O` Send now for promoting a prompt ahead
   of ordinary queued follow-ups after settling the active turn.
@@ -53,6 +69,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refined the bundled A3S Web workspace with more precise Markdown typography,
+  syntax-highlighted tool commands and arguments, live execution previews, and
+  Simplified Chinese Monaco and editor-tab context menus.
+- Updated the release baselines to A3S Code Core 6.0.0, A3S TUI 0.1.13, and
+  A3S Use 0.1.2. `/checkup` uses the TUI's conservative terminal capability
+  profile instead of guessing support from a single environment variable.
 - Expanded `/relay` into a bounded session and background-work dashboard with
   stable selection across manual or 15-second refreshes, multi-field search,
   per-source selection memory, wheel navigation, task preview, and live native
@@ -60,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Made `a3s web` reuse a healthy instance for the same workspace, quarantine
+  stale records, summarize unavailable saved-session models, and refuse to
+  signal an unknown listener or an unmanaged A3S process. Release archives and
+  installation prefixes now serve their packaged Web assets from an otherwise
+  empty workspace.
+- Applied the same blank-row rhythm to completed reasoning in the semantic
+  transcript as live reasoning and assistant Markdown, and revoked Agent
+  Island controls immediately when Send now interrupts the active turn.
 - Made TUI Auto mode genuinely non-interactive for every operation that
   survives explicit policy and workspace hard denials, including tool-owned
   confirmation escalation. Late confirmation events resolve automatically in

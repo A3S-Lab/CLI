@@ -8742,6 +8742,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/mcp",
         "/skill",
         "/research",
+        "/island",
     ]);
     let exact = HashSet::from([
         "/logout",
@@ -8765,6 +8766,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/permissions",
         "/tasks",
         "/history",
+        "/checkup",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -8816,6 +8818,18 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         SlashAuditRow {
             command: "/config",
             handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/checkup",
+            handler: Exact,
+            idle_only: true,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/island",
+            handler: Parameterized,
             idle_only: false,
             scope: Local,
         },
@@ -9054,6 +9068,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/mcp",
         "/skill",
         "/research",
+        "/island",
     ]);
     for row in &rows {
         match row.handler {

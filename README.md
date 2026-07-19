@@ -58,9 +58,10 @@ The initial installation always contains the umbrella CLI and A3S Code. It does
 not download Box, Bench, Search, or Use. This keeps a Code-only installation
 small, while every product still has one public entry point under `a3s`.
 
-The Homebrew `a3s` formula also installs the native RemoteUI helper
-`a3s-webview` on macOS. If a source or Cargo installation does not have that
-helper, `a3s code` falls back immediately to printing the browser URL.
+The Homebrew `a3s` formula also installs the native `a3s-webview` helper on
+macOS. It owns both compact RemoteUI windows and the system-wide Agent Island.
+If a source or Cargo installation does not have that helper, `a3s code` keeps
+working and RemoteUI falls back immediately to printing the browser URL.
 
 ### Components and delayed installation
 
@@ -449,16 +450,41 @@ Start the local Web API and bundled 书小安 frontend:
 ```sh
 a3s web start
 a3s web start --detach
+a3s web status
+a3s web open
+a3s web logs --follow
+a3s web start --detach --replace
+a3s web stop
 a3s -C /path/to/project web start
 a3s web start --host 127.0.0.1 --port 29653
 a3s web start --api-only
 ```
 
 The API is built with `a3s-boot` and reuses the same `config.acl` discovery as
-the TUI. By default it serves the Rsbuild output from `apps/web/dist/workspace`; pass
-`--web-dir` to serve a different frontend build. Background mode returns only
-after the service binds successfully and prints its PID, URL, and log path
-(`~/.a3s/logs/web.log` by default).
+the TUI. Release archives and installed packages serve their bundled Web
+workspace automatically, including when the selected workspace is empty. A
+source checkout can use `apps/web/dist/workspace`; pass `--web-dir` to select a
+different build or `--api-only` to disable frontend serving. Background mode
+returns only after the service binds successfully and prints its PID, URL, and
+log path (`~/.a3s/logs/web.log` by default).
+
+Detached instances are keyed by canonical workspace and protected by a
+cross-process start lock. Repeating `a3s web start --detach` reuses a healthy
+instance for that workspace. `--replace` gracefully stops and replaces only an
+instance created by this CLI; `stop` and `--replace` refuse to signal an
+unmanaged A3S server, an unknown process occupying the requested port, or a
+process referenced by a stale record. Stale records are quarantined, and
+`--port 0` selects an available port. Saved sessions whose provider or model is
+no longer configured remain on disk and produce one bounded startup summary
+instead of one warning per session.
+
+The bundled frontend renders headings, lists, quotes, tables, links, footnotes,
+inline code, and line-numbered code blocks with a consistent Markdown
+typography system. Tool calls show syntax-highlighted commands and arguments,
+working-directory context, live progress, copy actions, and compact execution
+previews. Monaco's editor context menu and the file-tree menu use Simplified
+Chinese, and editor tabs support pointer and keyboard context menus for close,
+close others, close right, copy path, and reveal actions.
 
 Web tasks, visible messages, titles, goals, effort, model selection, and
 execution mode are saved under `~/.a3s/code-web` and restored before the API
@@ -467,7 +493,7 @@ Default mode allows read-only tools and pauses mutating tools for Web HITL
 approval; plan mode denies mutations, while auto mode runs without approval.
 
 Code Web sessions auto-save Core snapshots under `~/.a3s/code-web/sessions`
-and restore when `a3s code serve` starts again. Browser-only metadata such as
+and restore when `a3s web` starts again. Browser-only metadata such as
 titles and a bounded recent UI transcript stays beside them under
 `~/.a3s/code-web/metadata`. The projection preserves Web-only `/help`, shell,
 fork, and structured-event records without adding them to model context;
@@ -855,9 +881,9 @@ changes later. The bottom queue strip contains pending turns only and removes a
 message as soon as Lane claims it for execution.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. User
-surfaces and assistant Markdown each own a blank row above and below their
-content; streaming and finalized assistant cells keep the same vertical rhythm
+reflows semantic arguments, output, diffs, and Markdown after a resize. User,
+reasoning, and assistant message surfaces each own a blank row above and below
+their content; streaming and finalized cells keep the same vertical rhythm
 while adjacent tool activity remains compact. Streamed Markdown commits only
 complete lines, paces stable rows with adaptive catch-up, keeps active tables in
 a replaceable tail, and provisionally completes a candidate table before
@@ -874,13 +900,15 @@ instead of rebuilding the full viewport.
 | Slash menu | Press `/` or type a slash command to open a wheel-browsable, clickable command palette backed by the same command registry used by `/help`. Commands are grouped into model/config, workspace, context, OS, asset, and operations surfaces. |
 | Delegated tasks | `/tasks` or `Ctrl+B` opens the authoritative task catalog while the parent turn keeps streaming. Search, inspect recent progress or full output, refresh, and cancel a running task with a second matching `X` or Delete press. |
 | Approvals | In Default mode, choose allow once, an exact in-memory session grant, an exact project grant in `.a3s/permissions.acl`, or denial feedback. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL for an operation that survives explicit hard denials. |
+| Setup checkup | `/checkup` runs bounded, secret-free host diagnostics for components, PATH, ACL, skills, applicable `AGENTS.md`, MCP, and terminal capabilities, then enters strict Plan mode. Any proposed repair stops at Approve, Revise, or Abandon before it can run. |
+| Agent Island | `/island [on|off|status]` controls the saved, default-on system island preference. One native singleton aggregates supported coding agents and exposes task state, elapsed time, attention reasons, replies, and one-shot HITL controls. |
 | Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
 | Semantic transcript | `Ctrl+T` opens the complete live session transcript in a dedicated full-width viewport, preserving user-surface, tool-state, and diff colors while showing reasoning, plans, every tool lifecycle and full output, subagent state, and the current live Markdown tail. |
 | Workspace editor | `/ide` opens a full-screen file browser/editor. `/config` reuses the editor for the active ACL config. Both surfaces use terminal-safe, type-aware file and folder sigils, semantic icon colors, aligned disclosure rows, icon-bearing breadcrumbs, and a ruled line-number gutter while keeping edits inside the workspace backend and normal permission path. |
 | Memory and knowledge | `/memory` opens the durable memory graph. `/ctx` searches past sessions and can attach or save hits. `/kb` opens the local personal knowledge vault. `/okf` manages shareable knowledge packages. |
 | Asset panels | `/agent`, `/mcp`, `/skill`, and `/okf` keep an active local asset visible while you iterate. `/flow` selects or drafts workflow DAG assets for OS Workflow as a Service rather than entering a persistent local dev mode. |
-| Operations panels | `/model`, `/effort`, `/permissions`, `/tasks`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
+| Operations panels | `/model`, `/effort`, `/permissions`, `/tasks`, `/checkup`, `/island`, `/loop`, `/plugin`, `/theme`, `/help`, and asset `activity` commands open focused panels without losing the current conversation. |
 
 Key interactions:
 
@@ -898,6 +926,34 @@ Key interactions:
 | `Ctrl+B` | Open or close delegated-task control without interrupting the parent turn. |
 | `Esc` | Interrupt the running turn or close the active panel. |
 | `Ctrl+C` twice | Quit the TUI after session persistence runs. |
+
+### Agent Island And Setup Checkup
+
+Agent Island is enabled by default and opens only while at least one supported
+agent is active. A3S Code publishes its exact parent and delegated-task
+lifecycle; bounded process discovery also recognizes A3S, Claude, Codex,
+Cursor, Gemini, and WorkBuddy. All A3S Code processes on the machine write to
+one private per-user snapshot, while `a3s-webview` enforces a single native
+island process. Completed, failed, and cancelled rows remain briefly visible so
+the result does not disappear at the instant a task settles.
+
+Approval and control buttons use short-lived, one-shot tokens scoped to the
+exact task and current approval context. Approve once, approve for the session,
+deny, stop, delegated-task cancel, and reply are revalidated by the owning TUI;
+stale controls are rejected. Raw task text is withheld from the shared system
+snapshot unless `A3S_AGENT_STATUS_SHARE_TASKS=1` is explicitly set. `/island
+off` persists an opt-out, `/island on` restores the default behavior, and
+`/island status` reports launch availability. SSH and headless Linux sessions
+do not auto-open a GUI unless `A3S_AGENT_ISLAND=1` explicitly enables it.
+
+`/checkup` performs a typed host preflight before asking the model to audit
+workspace guidance. The preflight reads only bounded, non-secret health facts:
+installed components, executable/PATH identity, ACL syntax and semantic
+validation, skill and instruction sizes, in-memory MCP status, and conservative
+terminal capabilities. The audit may use only read-only workspace inspection,
+then the normal strict Plan review presents Approve, Revise, or Abandon.
+Nothing is installed, updated, edited, removed, started, stopped, or logged in
+during the audit turn.
 
 ### Startup, Sessions, And Safety
 

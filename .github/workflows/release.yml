@@ -16,9 +16,9 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 18b349aa7e125c197b6121258d40b0ef1899bbf5
-  A3S_CODE_CORE_VERSION: 5.3.5
-  A3S_TUI_VERSION: 0.1.12
+  A3S_WEB_SOURCE_REF: 898f6a55554cf566e81903847c17651250d9c444
+  A3S_CODE_CORE_VERSION: 6.0.0
+  A3S_TUI_VERSION: 0.1.13
 jobs:
   release-gate:
     name: Validate release candidate

@@ -15,6 +15,7 @@ use std::path::{Component, Path, PathBuf};
 use a3s::components::{ComponentHealthReport, ComponentHealthStatus, ComponentPaths};
 use a3s_code_core::mcp::McpServerStatus;
 use a3s_code_core::CodeConfig;
+use a3s_tui::terminal_profile::TerminalProfile;
 
 const MAX_ACL_BYTES: u64 = 1024 * 1024;
 const LARGE_SKILL_BYTES: u64 = 128 * 1024;
@@ -30,6 +31,7 @@ pub(in crate::tui) struct CheckupPreflight {
     skills: SkillAudit,
     instructions: InstructionAudit,
     mcp: McpAudit,
+    terminal: TerminalAudit,
 }
 
 impl CheckupPreflight {
@@ -41,6 +43,7 @@ impl CheckupPreflight {
             self.skills.render(),
             self.instructions.render(),
             self.mcp.render(),
+            self.terminal.render(),
         ]
         .join("\n")
     }
@@ -95,12 +98,14 @@ impl CheckupPreflightInput {
         let skills = SkillAudit::inspect(&skill_dirs);
         let instructions =
             InstructionAudit::inspect(&self.workspace, &self.indexed_instruction_files);
+        let terminal = TerminalAudit::inspect();
         HostPreflight {
             components,
             path,
             config,
             skills,
             instructions,
+            terminal,
             configured_mcp: self.code_config.mcp_servers.len(),
         }
     }
@@ -112,6 +117,7 @@ struct HostPreflight {
     config: ConfigAudit,
     skills: SkillAudit,
     instructions: InstructionAudit,
+    terminal: TerminalAudit,
     configured_mcp: usize,
 }
 
@@ -134,6 +140,7 @@ pub(super) fn command(app: &App, status_entry: TranscriptEntryId) -> Cmd<Msg> {
                     Ok(status) => McpAudit::available(host.configured_mcp, status),
                     Err(_) => McpAudit::timed_out(host.configured_mcp),
                 },
+                terminal: host.terminal,
             });
         Msg::CheckupPreflightCompleted {
             status_entry,
@@ -222,6 +229,63 @@ impl ComponentAudit {
             text.push_str(&self.affected.join(", "));
         }
         text
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TerminalAudit {
+    family: String,
+    multiplexer: String,
+    color_level: String,
+    display_mode: String,
+    enhanced_keyboard: String,
+    hyperlinks: String,
+    clipboard: String,
+    stdin_tty: bool,
+    stdout_tty: bool,
+    stderr_tty: bool,
+    warnings: Vec<String>,
+}
+
+impl TerminalAudit {
+    fn inspect() -> Self {
+        let profile = TerminalProfile::detect();
+        Self {
+            family: profile.family().to_string(),
+            multiplexer: profile.multiplexer().to_string(),
+            color_level: profile.color_level().to_string(),
+            display_mode: profile.display_mode().to_string(),
+            enhanced_keyboard: profile.enhanced_keyboard().to_string(),
+            hyperlinks: profile.hyperlinks().to_string(),
+            clipboard: profile.clipboard().to_string(),
+            stdin_tty: profile.stdin_is_terminal(),
+            stdout_tty: profile.stdout_is_terminal(),
+            stderr_tty: profile.stderr_is_terminal(),
+            warnings: profile.warnings().into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    fn render(&self) -> String {
+        let warnings = if self.warnings.is_empty() {
+            "no evidenced limitations".to_string()
+        } else {
+            self.warnings.join("; ")
+        };
+        format!(
+            "- terminal profile: family={}, multiplexer={}, color={}, display={}; \
+             tty stdin/stdout/stderr={}/{}/{}; enhanced keyboard={}, hyperlinks={}, \
+             clipboard={}; {warnings}",
+            self.family,
+            self.multiplexer,
+            self.color_level,
+            self.display_mode,
+            self.stdin_tty,
+            self.stdout_tty,
+            self.stderr_tty,
+            self.enhanced_keyboard,
+            self.hyperlinks,
+            self.clipboard
+        )
     }
 }
 
@@ -792,5 +856,27 @@ mod tests {
 
         assert!(rendered.contains("1 error state"));
         assert!(!rendered.contains("top-secret-token"));
+    }
+
+    #[test]
+    fn terminal_audit_reports_capabilities_and_actionable_warnings() {
+        let rendered = TerminalAudit {
+            family: "Kitty".to_string(),
+            multiplexer: "tmux".to_string(),
+            color_level: "truecolor".to_string(),
+            display_mode: "fullscreen".to_string(),
+            enhanced_keyboard: "supported".to_string(),
+            hyperlinks: "multiplexer passthrough required".to_string(),
+            clipboard: "multiplexer passthrough required".to_string(),
+            stdin_tty: true,
+            stdout_tty: true,
+            stderr_tty: true,
+            warnings: vec!["clipboard copy depends on multiplexer OSC 52 passthrough".to_string()],
+        }
+        .render();
+
+        assert!(rendered.contains("family=Kitty"));
+        assert!(rendered.contains("stdin/stdout/stderr=true/true/true"));
+        assert!(rendered.contains("OSC 52 passthrough"));
     }
 }
