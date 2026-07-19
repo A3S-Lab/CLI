@@ -101,6 +101,7 @@ jobs:
             "a3s-search 1.4.3"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
+            "a3s-use-extension 0.1.2"
           )
           for requirement in "${required_crates[@]}"; do
             read -r crate version <<<"$requirement"

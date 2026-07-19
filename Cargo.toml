@@ -24,7 +24,7 @@ a3s-tui = "=0.1.13"
 a3s-search = { version = "1.4.3", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "fe4be794c4dd2bdb7e049c6039204fed1fb1d392" }
+a3s-use-extension = { version = "=0.1.2", git = "https://github.com/A3S-Lab/Use", rev = "fe4be794c4dd2bdb7e049c6039204fed1fb1d392" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"
