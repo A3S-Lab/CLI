@@ -212,6 +212,7 @@ expect {
         .args(["-c", expect_script])
         .env("HOME", &home)
         .env("PATH", path)
+        .env("A3S_NO_AUTO_INSTALL", "1")
         .env("A3S_EXIT_TEST_BIN", env!("CARGO_BIN_EXE_a3s"))
         .env("A3S_EXIT_TEST_WORKSPACE", &workspace)
         .env("A3S_EXIT_TEST_CONFIG", &config)

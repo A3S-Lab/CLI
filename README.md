@@ -65,7 +65,7 @@ helper, `a3s code` falls back immediately to printing the browser URL.
 ### Components and delayed installation
 
 The built-in catalog registers `code`, `box`, `bench`, `search`, and `use`.
-Browser and Office are delegated child capabilities owned by Use:
+Browser, native Office, and OCR are capabilities owned by Use:
 
 | Component | Installed with `a3s` | Public command | Installation behavior |
 | --- | --- | --- | --- |
@@ -73,9 +73,10 @@ Browser and Office are delegated child capabilities owned by Use:
 | Box | No | `a3s box ...` | Installs Box on first use, then forwards the arguments to it. |
 | Bench | No | `a3s bench ...` | Requires an explicit compatible Bench installation. |
 | Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
-| Use | No | `a3s use ...` | Installs Use on first real use, then forwards native Browser, Office, Box, or extension arguments. |
+| Use | No | `a3s use ...` / `a3s code` | Installs Use on first real use, including TUI startup when policy allows, then forwards or projects native Browser, Office, OCR, Box, or extension surfaces. |
 | Use/Browser | With Use | `a3s use browser ...` | Reports Browser provider readiness through Use; it is not a second product archive. |
 | Use/Office | With Use | `a3s use office ...` | Delegates OfficeCLI readiness and explicit installation through Use. |
+| Use/OCR | With Use | `a3s use ocr ...` | Projects built-in OCR tools and its Skill; local Tesseract or explicit vision-provider readiness remains separate. |
 
 First-use installation for opted-in components is persistent and user-wide. After a component has been
 installed, subsequent commands reuse it; changing projects does not download it
@@ -232,6 +233,8 @@ a3s list --json
 a3s install use
 a3s install use/browser
 a3s install use/office
+a3s info use/ocr --sources
+a3s doctor use/ocr
 a3s uninstall use/office
 
 a3s use capabilities --json
@@ -239,30 +242,35 @@ a3s use browser render https://example.com
 a3s use browser open https://example.com --session research
 a3s use browser snapshot --session research --json
 a3s use browser close --session research
+a3s use ocr doctor --json
 a3s use box compose up --detach
 a3s use extension disable acme/slack --json
 a3s use extension enable acme/slack --json
 a3s use extension watch --after-generation 3 --timeout-ms 30000 --json
 ```
 
-Browser and Office are built-in Use domains. Independently implemented domains
-can be explicitly installed from A3S ACL packages that declare native CLI,
-standard MCP, and/or `SKILL.md` surfaces. A3S does not define an extension
-JSON-RPC protocol; `--json` remains a one-command CLI result.
+Browser, native Office, and OCR are built-in Use domains. Independently
+implemented domains can be explicitly installed from A3S ACL packages that
+declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
+define an extension JSON-RPC protocol; `--json` remains a one-command CLI
+result.
 
-When an already-ready Use component is present, both `a3s code` and `a3s web`
-consume its unified capability snapshot and keep one watcher for the process.
-Browser, Office, and enabled external MCP/Skill surfaces are projected into
-every active Code session. Code registers a dedicated `use` worker that can
-invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
-delegation tools are denied. The worker's current capability IDs and purpose are
-published in the live `task` and `parallel_task` definitions, so the parent
-model can select it without a hard-coded prompt. Application failures do not
-fall back to another execution surface, and an Office
+The Code TUI treats Use as a first-use component: before terminal takeover it
+reuses a healthy install or installs the verified release when networking and
+automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain
+strict no-network, no-receipt boundaries, and a failed setup does not prevent
+Code from starting. Code Web consumes an already-ready component without
+changing its lifecycle. Both surfaces keep one registry watcher for the
+process. Browser, Office, OCR, and enabled external MCP/Skill surfaces are
+projected into every active Code session. Code registers a dedicated `use`
+worker that can invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP,
+and recursive delegation tools are denied. The worker's current capability IDs
+and purpose are published in the live `task` and `parallel_task` definitions,
+so the parent model can select it without a hard-coded prompt. Application
+failures do not fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
 rebuild replays the current surfaces, and a Web process shares the watcher
-across all concurrent sessions. Starting Code never installs Use as a side
-effect.
+across all concurrent sessions.
 
 The TUI derives capability lifecycle labels only from standard MCP progress
 emitted by the dedicated `use` worker: Browser progress appears as
@@ -1374,7 +1382,10 @@ post-shutdown storage cleanup against a real MicroVM runtime. The ignored
 Use hot-plug E2E builds the independently released `a3s-use` binary in an
 isolated target directory, then crosses its public process/JSON boundary to
 verify installation, MCP invocation, version replacement, TUI session replay,
-disable, and re-enable convergence. The ignored
+disable, and re-enable convergence. It also packages the real binaries and
+Browser, Office, and OCR Skills in release layout, drives Code's first-use
+download and verified install path, and proves those three routes are present
+in the first model turn without exposing raw Use MCP tools. The ignored
 `ctx_compact_real_llm` test drives the configured model (`~/.a3s/config.acl`)
 with matched compressed and uncompressed seeded histories. It asserts that
 streaming usage is reported, compaction shrinks the history, the provider sees
