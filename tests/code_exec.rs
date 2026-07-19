@@ -236,6 +236,7 @@ fn run(project: &std::path::Path, mode: &str, root: &TempWorkspace) -> std::proc
         .env("A3S_DATA_HOME", root.path("data"))
         .env("A3S_STATE_HOME", root.path("state"))
         .env("A3S_CACHE_HOME", root.path("cache"))
+        .env("A3S_NO_AUTO_INSTALL", "1")
         .output()
         .unwrap()
 }
@@ -261,26 +262,21 @@ fn auto_mode_executes_bounded_workspace_edits() {
 }
 
 #[test]
-fn unresolved_default_mode_approval_fails_without_model_retries() {
+fn default_mode_executes_bounded_workspace_edits_without_approval() {
     let (root, project, server) = fixture("code-exec-approval");
     let output = run(&project, "default", &root);
 
-    assert!(!output.status.success());
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["ok"], false);
-    assert_eq!(
-        result["error"]["code"],
-        "approval.required",
-        "result={result} stderr={}",
+    assert!(
+        output.status.success(),
+        "stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
     assert_eq!(
         std::fs::read_to_string(project.join("answer.txt")).unwrap(),
-        "0\n"
+        "42\n"
     );
-    assert_eq!(
-        server.main_calls(),
-        1,
-        "the model must not retry an approval that non-interactive exec cannot resolve"
-    );
+    assert_eq!(server.main_calls(), 2);
 }

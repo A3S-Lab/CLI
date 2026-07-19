@@ -21,7 +21,8 @@ pub use command::{
 pub use id::ComponentId;
 pub use managed_srt::{
     resolve_managed_srt, validate_managed_srt_payload, validate_managed_srt_payload_structure,
-    ManagedSrtResolution, ManagedSrtRuntime, MANAGED_SRT_PAYLOAD_RELATIVE_ROOT,
+    ManagedBashSandboxResolution, ManagedSrtResolution, ManagedSrtRuntime,
+    MANAGED_SRT_PAYLOAD_RELATIVE_ROOT,
 };
 pub use paths::ComponentPaths;
 

@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use a3s_code_core::sandbox::srt::{SrtBashSandbox, MANAGED_SRT_VERSION, SRT_NPM_PACKAGE_NAME};
@@ -266,6 +267,42 @@ fn platform_sandbox_prerequisite_hint() -> &'static str {
 pub struct ManagedSrtResolution {
     pub runtime: Option<ManagedSrtRuntime>,
     pub warning: Option<String>,
+}
+
+/// Fully probed local Bash boundary ready to attach to a Code session.
+pub struct ManagedBashSandboxResolution {
+    pub sandbox: Option<Arc<dyn BashSandbox>>,
+    pub warning: Option<String>,
+}
+
+impl ManagedSrtResolution {
+    /// Convert a resolved runtime into the exact sandbox handle used by Code.
+    ///
+    /// Keeping the native capability probe here prevents interactive and
+    /// non-interactive Code entry points from drifting onto different fallback
+    /// behavior.
+    pub async fn into_probed_bash_sandbox(self, workspace: &Path) -> ManagedBashSandboxResolution {
+        match self.runtime {
+            Some(runtime) => match runtime.build_and_probe_sandbox(workspace).await {
+                Ok(sandbox) => ManagedBashSandboxResolution {
+                    sandbox: Some(Arc::new(sandbox)),
+                    warning: None,
+                },
+                Err(error) => ManagedBashSandboxResolution {
+                    sandbox: None,
+                    warning: Some(format!(
+                        "Local command sandbox failed its bounded OS capability probe: {error}. \
+                         Default mode will ask before exact host Bash execution; Auto mode will \
+                         deny Bash. Repair the reported platform prerequisite and restart A3S Code"
+                    )),
+                },
+            },
+            None => ManagedBashSandboxResolution {
+                sandbox: None,
+                warning: self.warning,
+            },
+        }
+    }
 }
 
 /// Resolve or prepare the exact local command sandbox used by A3S Code.

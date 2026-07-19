@@ -11,6 +11,41 @@ fn runtime(name: &str) -> ManagedSrtRuntime {
 }
 
 #[tokio::test]
+async fn unavailable_runtime_preserves_the_resolution_warning() {
+    let workspace = tempfile::tempdir().unwrap();
+    let resolution = ManagedSrtResolution {
+        runtime: None,
+        warning: Some("managed sandbox unavailable".to_string()),
+    }
+    .into_probed_bash_sandbox(workspace.path())
+    .await;
+
+    assert!(resolution.sandbox.is_none());
+    assert_eq!(
+        resolution.warning.as_deref(),
+        Some("managed sandbox unavailable")
+    );
+}
+
+#[tokio::test]
+async fn failed_runtime_probe_never_returns_an_unprobed_sandbox() {
+    let workspace = tempfile::tempdir().unwrap();
+    let resolution = ManagedSrtResolution {
+        runtime: Some(runtime("missing")),
+        warning: None,
+    }
+    .into_probed_bash_sandbox(workspace.path())
+    .await;
+
+    assert!(resolution.sandbox.is_none());
+    let warning = resolution
+        .warning
+        .expect("probe failure must be actionable");
+    assert!(warning.contains("failed its bounded OS capability probe"));
+    assert!(warning.contains("Auto mode will deny Bash"));
+}
+
+#[tokio::test]
 async fn existing_verified_install_is_reused_without_preparation() {
     let install_called = AtomicBool::new(false);
     let expected = runtime("existing");

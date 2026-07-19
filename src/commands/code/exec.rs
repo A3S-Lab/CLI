@@ -22,7 +22,26 @@ pub(super) async fn run(args: CodeExecArgs, context: &InvocationContext) -> anyh
         .map_err(|error| anyhow::anyhow!("failed to load A3S Code: {error}"))?;
     let session_id = execution_id();
     let workspace = &context.directory;
-    let mut options = super::exec_policy::session_options(args.mode, workspace, &session_id);
+    let managed_srt = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        workspace,
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let sandbox_resolution = managed_srt.into_probed_bash_sandbox(workspace).await;
+    if !context.output.quiet {
+        if let Some(warning) = &sandbox_resolution.warning {
+            eprintln!("warning: {warning}");
+        }
+    }
+    let mut options = super::exec_policy::session_options(
+        args.mode,
+        workspace,
+        &session_id,
+        sandbox_resolution.sandbox,
+    );
     if let Some(model) = args.model {
         options = options.with_model(model);
     }

@@ -491,25 +491,15 @@ pub(crate) async fn run_in(
         context.output.progress,
     )
     .await;
-    let (sandbox_handle, sandbox_load_warning) = match managed_srt.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
-            Ok(sandbox) => (
-                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
-                None,
-            ),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "Local command sandbox failed its bounded OS capability probe: {error}. \
-                     Default mode will ask before exact host Bash execution; Auto mode will deny \
-                     Bash. Repair the reported platform prerequisite and restart `a3s code`"
-                )),
-            ),
-        },
-        None => (None, managed_srt.warning),
-    };
-    let execution_policy =
-        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace), sandbox_handle);
+    let sandbox_resolution = managed_srt
+        .into_probed_bash_sandbox(Path::new(&workspace))
+        .await;
+    let sandbox_load_warning = sandbox_resolution.warning;
+    let execution_policy = TuiExecutionPolicy::for_workspace(
+        initial_mode,
+        PathBuf::from(&workspace),
+        sandbox_resolution.sandbox,
+    );
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);

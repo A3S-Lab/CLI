@@ -375,11 +375,14 @@ a3s code exec --mode auto "Update the focused test and verify it"
 a3s --output json code exec --mode auto --prompt-file ./task.md
 ```
 
-Auto mode runs bounded workspace reads and edits without hidden prompts while
-retaining the shared safety floor. Operations that still require human
-approval terminate immediately in this non-interactive surface with a nonzero
-`approval.required` result. Default and plan modes never silently approve
-workspace mutations in the non-interactive CLI.
+`code exec` resolves and probes the same managed command sandbox and installs
+the same run-scoped permission checker and confirmation provider as the TUI.
+Default runs ordinary workspace writes, edits, and sandboxed Bash quietly; an
+exact host escalation terminates with a nonzero `approval.required` result
+because this surface cannot collect interactive approval. Plan denies side
+effects. Auto never emits an approval request: bounded operations run, while a
+missing sandbox, host escalation, protected metadata, risky Git, and unknown or
+side-effecting external calls are denied at the execution boundary.
 
 Start the local Web API and bundled 书小安 frontend:
 

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
-use a3s_code_core::permissions::{InteractiveToolGuardrail, PermissionPolicy};
+use a3s_code_core::sandbox::BashSandbox;
 use a3s_code_core::{PlanningMode, SessionOptions};
 
 use crate::cli::args::CodeMode;
@@ -11,18 +11,16 @@ pub(super) fn session_options(
     mode: CodeMode,
     workspace: &Path,
     session_id: &str,
+    sandbox: Option<Arc<dyn BashSandbox>>,
 ) -> SessionOptions {
-    let permission_policy = permission_policy();
-    SessionOptions::new()
-        .with_session_id(session_id)
-        .with_planning_mode(planning_mode(mode))
-        .with_confirmation_policy(
-            ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),
-        )
-        .with_permission_policy(permission_policy)
-        .with_permission_checker(Arc::new(
-            InteractiveToolGuardrail::for_mode(mode_name(mode)).with_workspace(workspace),
-        ))
+    crate::tui::governed_code_session_options(
+        mode_name(mode),
+        workspace,
+        sandbox,
+        ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),
+    )
+    .with_session_id(session_id)
+    .with_planning_mode(planning_mode(mode))
 }
 
 fn planning_mode(mode: CodeMode) -> PlanningMode {
@@ -41,50 +39,6 @@ fn mode_name(mode: CodeMode) -> &'static str {
     }
 }
 
-fn permission_policy() -> PermissionPolicy {
-    PermissionPolicy::new()
-        .deny_all(&[
-            "Read(/**)",
-            "Read(**/../**)",
-            "Grep(* /**)",
-            "Grep(* **/../**)",
-            "Glob(/**)",
-            "Glob(**/../**)",
-            "LS(/**)",
-            "LS(**/../**)",
-            "Write(/**)",
-            "Edit(/**)",
-            "Write(**/../**)",
-            "Edit(**/../**)",
-        ])
-        .allow_all(&[
-            "Read(*)",
-            "Grep(*)",
-            "Glob(*)",
-            "LS(*)",
-            "web_search(*)",
-            "web_fetch(*)",
-            "code_symbols(*)",
-            "code_navigation(*)",
-            "code_diagnostics(*)",
-            "search_skills(*)",
-        ])
-        .ask_all(&[
-            "Write(*)",
-            "Edit(*)",
-            "Patch(*)",
-            "Bash(*)",
-            "Git(*)",
-            "batch(*)",
-            "program(*)",
-            "task(*)",
-            "parallel_task(*)",
-            "dynamic_workflow(*)",
-            "Skill(*)",
-            "runtime(*)",
-        ])
-}
-
 #[cfg(test)]
 mod tests {
     use a3s_code_core::permissions::PermissionDecision;
@@ -96,7 +50,12 @@ mod tests {
     #[test]
     fn auto_mode_allows_bounded_edits_but_preserves_the_safety_floor() {
         let workspace = tempfile::tempdir().unwrap();
-        let options = session_options(CodeMode::Auto, workspace.path(), "exec-test");
+        let options = session_options(
+            CodeMode::Auto,
+            workspace.path(),
+            "exec-test",
+            Some(Arc::new(TestSandbox)),
+        );
         let checker = options
             .permission_checker
             .as_ref()
@@ -104,11 +63,8 @@ mod tests {
 
         assert_eq!(options.planning_mode, PlanningMode::Auto);
         assert!(
-            options
-                .confirmation_policy
-                .as_ref()
-                .expect("exec must install a confirmation manager policy")
-                .enabled
+            options.confirmation_manager.is_some(),
+            "exec must install the shared confirmation manager"
         );
         assert_eq!(
             checker.check("write", &json!({"file_path": "answer.txt"})),
@@ -116,7 +72,7 @@ mod tests {
         );
         assert_eq!(
             checker.check("bash", &json!({"command": "cargo test"})),
-            PermissionDecision::Ask
+            PermissionDecision::Allow
         );
         assert_eq!(
             checker.check("bash", &json!({"command": "rm -rf /"})),
@@ -125,13 +81,21 @@ mod tests {
     }
 
     #[test]
-    fn default_and_plan_modes_never_silently_approve_writes() {
+    fn default_allows_bounded_writes_while_plan_denies_them() {
         let workspace = tempfile::tempdir().unwrap();
-        for (mode, planning) in [
-            (CodeMode::Default, PlanningMode::Disabled),
-            (CodeMode::Plan, PlanningMode::Enabled),
+        for (mode, planning, expected) in [
+            (
+                CodeMode::Default,
+                PlanningMode::Disabled,
+                PermissionDecision::Allow,
+            ),
+            (
+                CodeMode::Plan,
+                PlanningMode::Enabled,
+                PermissionDecision::Deny,
+            ),
         ] {
-            let options = session_options(mode, workspace.path(), "exec-test");
+            let options = session_options(mode, workspace.path(), "exec-test", None);
             let checker = options
                 .permission_checker
                 .as_ref()
@@ -140,8 +104,39 @@ mod tests {
             assert_eq!(options.planning_mode, planning);
             assert_eq!(
                 checker.check("write", &json!({"file_path": "answer.txt"})),
-                PermissionDecision::Ask
+                expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn auto_without_a_process_sandbox_denies_bash_without_hitl() {
+        let workspace = tempfile::tempdir().unwrap();
+        let options = session_options(CodeMode::Auto, workspace.path(), "exec-test", None);
+        let checker = options.permission_checker.unwrap();
+        let confirmation = options.confirmation_manager.unwrap();
+        let args = json!({"command": "cargo test"});
+
+        assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
+        assert!(!confirmation.confirmation_available_for("bash", &args).await);
+    }
+
+    struct TestSandbox;
+
+    #[async_trait::async_trait]
+    impl BashSandbox for TestSandbox {
+        async fn exec_command(
+            &self,
+            _command: &str,
+            _guest_workspace: &str,
+        ) -> anyhow::Result<a3s_code_core::sandbox::SandboxOutput> {
+            Ok(a3s_code_core::sandbox::SandboxOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+            })
+        }
+
+        async fn shutdown(&self) {}
     }
 }

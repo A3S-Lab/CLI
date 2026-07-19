@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Made Default mode run bounded workspace edits and sandboxed Bash without
   routine prompts, kept Plan mode read-only, and made Auto mode strictly
   non-interactive with explicit denial at any unavailable or elevated boundary.
+- Routed `a3s code exec` through the same managed sandbox resolver, permission
+  checker, and run-scoped confirmation provider as the TUI, eliminating its
+  legacy Auto-to-HITL path and ungoverned host-command fallback.
 - Made standalone upgrades validate and transactionally activate the matching
   sandbox support payload together with the executable, including rollback when
   binary activation fails.

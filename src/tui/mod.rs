@@ -433,6 +433,30 @@ const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
 #[allow(dead_code)]
 const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
 
+/// Build one governed Code session policy for non-interactive entry points.
+///
+/// The terminal and `code exec` paths intentionally share the same permission
+/// checker and confirmation provider so mode semantics cannot drift.
+pub(crate) fn governed_code_session_options(
+    mode_name: &str,
+    workspace: &Path,
+    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
+    confirmation: a3s_code_core::hitl::ConfirmationPolicy,
+) -> SessionOptions {
+    let mode = match mode_name {
+        "plan" => Mode::Plan,
+        "auto" => Mode::Auto,
+        _ => Mode::Default,
+    };
+    let execution_policy =
+        TuiExecutionPolicy::for_workspace(mode, workspace.to_path_buf(), sandbox);
+    tui_session_options_with_gate_and_execution(
+        confirmation,
+        DeepResearchReportToolGate::default(),
+        execution_policy,
+    )
+}
+
 struct App {
     session: Arc<AgentSession>,
     active_session: SharedActiveSession,
