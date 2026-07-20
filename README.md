@@ -369,6 +369,13 @@ not fall back to another execution surface, and an Office
 rebuild replays the current surfaces, and a Web process shares the watcher
 across all concurrent sessions.
 
+Raw Use MCP definitions remain hidden from the parent model. Ordinary built-in
+Browser, native Office, and OCR operations are pre-authorized only inside the
+dedicated worker. The bounded Browser provider installer, OfficeCLI
+compatibility installer, OCR model installer, and newly projected extension
+tools remain `Ask`: delegated confirmation events are bridged back to the
+parent TUI, and the operation does not start until the user approves it.
+
 The TUI derives capability lifecycle labels only from standard MCP progress
 emitted by the dedicated `use` worker: Browser progress appears as
 `Using Browser` while live and `Used Browser` after completion. Multiple routes
@@ -379,9 +386,12 @@ identity, and raw MCP tool names do not replace the user-facing worker label.
 
 macOS and Linux remain the broad runtime and managed-artifact targets for the
 component platform. Windows x86_64 now supports the native WebView managed
-release and Code first-use installation; broader Windows component coverage,
-Browser persistent-session lifecycle, and full file-lock conformance remain
-roadmap work.
+release and Code first-use installation. A real-process Windows E2E additionally
+covers the verified Use ZIP layout, all 31 Browser core-profile tools against
+Microsoft Edge, every native Office MCP operation and view, confirmed OfficeCLI
+installation, and confirmed PP-OCRv6 model installation plus extraction.
+Advanced Browser profiles, persistent-session promotion, and full file-lock
+conformance remain roadmap work.
 
 `a3s install` manages registered A3S components; it is not a universal frontend
 for Homebrew, APT, DNF, Pacman, Winget, npm, pip, Cargo, or arbitrary package
@@ -1559,7 +1569,13 @@ verify installation, MCP invocation, version replacement, TUI session replay,
 disable, and re-enable convergence. It also packages the real binaries and
 Browser, Office, and OCR Skills in release layout, drives Code's first-use
 download and verified install path, and proves those three routes are present
-in the first model turn without exposing raw Use MCP tools. The ignored
+in the first model turn without exposing raw Use MCP tools. The ignored Windows
+Use E2E (`code_use_windows_e2e`) packages the real Windows binaries, drives
+every projected Browser core, native Office, OCR, and OfficeCLI tool through
+the Code TUI's delegated worker, and verifies that installer prompts settle
+through the parent confirmation bridge. It requires `A3S_USE_E2E_BIN` and
+`A3S_USE_E2E_SOURCE_ROOT` to reference a matching local Use build and checkout.
+The ignored
 `ctx_compact_real_llm` test drives the configured model (`~/.a3s/config.acl`)
 with matched compressed and uncompressed seeded histories. It asserts that
 streaming usage is reported, compaction shrinks the history, the provider sees

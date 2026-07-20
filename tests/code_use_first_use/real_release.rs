@@ -14,7 +14,7 @@ pub(super) fn start(workspace: &TempWorkspace) -> RealUseRelease {
     let browser_driver = binary
         .parent()
         .expect("real Use binary must have a parent directory")
-        .join("a3s-use-browser-driver");
+        .join(host_binary_name("a3s-use-browser-driver"));
     assert!(
         browser_driver.is_file(),
         "real Browser driver is missing at {}",
@@ -27,10 +27,10 @@ pub(super) fn start(workspace: &TempWorkspace) -> RealUseRelease {
     let package_root = release_root.join(&package_name);
     std::fs::create_dir_all(&package_root).expect("create real Use package root");
 
-    copy_executable(&binary, &package_root.join("a3s-use"));
+    copy_executable(&binary, &package_root.join(host_binary_name("a3s-use")));
     copy_executable(
         &browser_driver,
-        &package_root.join("a3s-use-browser-driver"),
+        &package_root.join(host_binary_name("a3s-use-browser-driver")),
     );
     for (source, destination) in [
         ("crates/browser-driver/skills", "skills"),
@@ -53,21 +53,8 @@ pub(super) fn start(workspace: &TempWorkspace) -> RealUseRelease {
         .unwrap_or_else(|error| panic!("failed to package {source}: {error}"));
     }
 
-    let archive_name = format!("{package_name}.tar.gz");
-    let archive_path = workspace.path(&archive_name);
-    let status = Command::new("tar")
-        .arg("czf")
-        .arg(&archive_path)
-        .arg("-C")
-        .arg(&release_root)
-        .arg(&package_name)
-        .status()
-        .expect("create real Use release archive");
-    assert!(
-        status.success(),
-        "failed to create real Use release archive"
-    );
-    let archive = std::fs::read(archive_path).expect("read real Use release archive");
+    let (archive_name, archive) =
+        create_archive(workspace, &release_root, &package_name, &package_root);
     RealUseRelease {
         server: FakeReleaseServer::start("Use", &version, &archive_name, archive),
         version,
@@ -98,6 +85,92 @@ fn use_version(binary: &Path) -> String {
         .filter(|version| !version.is_empty())
         .map(str::to_string)
         .expect("Use version output must end with a version")
+}
+
+fn host_binary_name(binary: &str) -> String {
+    if cfg!(windows) {
+        format!("{binary}.exe")
+    } else {
+        binary.to_string()
+    }
+}
+
+#[cfg(unix)]
+fn create_archive(
+    workspace: &TempWorkspace,
+    release_root: &Path,
+    package_name: &str,
+    _package_root: &Path,
+) -> (String, Vec<u8>) {
+    let archive_name = format!("{package_name}.tar.gz");
+    let archive_path = workspace.path(&archive_name);
+    let status = Command::new("tar")
+        .arg("czf")
+        .arg(&archive_path)
+        .arg("-C")
+        .arg(release_root)
+        .arg(package_name)
+        .status()
+        .expect("create real Use release archive");
+    assert!(
+        status.success(),
+        "failed to create real Use release archive"
+    );
+    let archive = std::fs::read(archive_path).expect("read real Use release archive");
+    (archive_name, archive)
+}
+
+#[cfg(windows)]
+fn create_archive(
+    _workspace: &TempWorkspace,
+    _release_root: &Path,
+    package_name: &str,
+    package_root: &Path,
+) -> (String, Vec<u8>) {
+    use std::io::{Cursor, Write};
+
+    let archive_name = format!("{package_name}.zip");
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let mut files = Vec::new();
+    collect_files(package_root, &mut files);
+    files.sort();
+    for file in files {
+        let relative = file
+            .strip_prefix(package_root)
+            .expect("release file must be inside package root");
+        let entry = Path::new(package_name).join(relative);
+        let entry = entry.to_string_lossy().replace('\\', "/");
+        writer
+            .start_file(entry, zip::write::SimpleFileOptions::default())
+            .expect("start real Use ZIP entry");
+        let bytes = std::fs::read(&file)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
+        writer
+            .write_all(&bytes)
+            .unwrap_or_else(|error| panic!("failed to archive {}: {error}", file.display()));
+    }
+    let archive = writer.finish().expect("finish real Use ZIP").into_inner();
+    (archive_name, archive)
+}
+
+#[cfg(windows)]
+fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+    {
+        let entry = entry.expect("read release entry");
+        let file_type = entry.file_type().expect("inspect release entry");
+        if file_type.is_dir() {
+            collect_files(&entry.path(), files);
+        } else if file_type.is_file() {
+            files.push(entry.path());
+        } else {
+            panic!(
+                "release source contains an unsupported entry: {}",
+                entry.path().display()
+            );
+        }
+    }
 }
 
 fn copy_executable(source: &Path, destination: &Path) {

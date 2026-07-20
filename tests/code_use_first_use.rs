@@ -1,5 +1,3 @@
-#![cfg(unix)]
-
 mod support;
 
 #[path = "code_use_first_use/real_release.rs"]
@@ -14,11 +12,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(unix)]
 use sha2::{Digest, Sha256};
-use support::{
-    a3s_bin, make_executable, portable_release_target, FakeReleaseServer, TempWorkspace,
-};
+use support::{a3s_bin, FakeReleaseServer, TempWorkspace};
+#[cfg(unix)]
+use support::{make_executable, portable_release_target};
 
+#[cfg(unix)]
 const USE_VERSION: &str = "0.1.1";
 
 struct FakeOpenAi {
@@ -256,6 +256,7 @@ fn write_http_response(stream: &mut TcpStream, content_type: &str, body: &[u8]) 
     stream.flush().expect("flush fake OpenAI response");
 }
 
+#[cfg(unix)]
 fn start_fake_use_release(workspace: &TempWorkspace) -> FakeReleaseServer {
     let target = portable_release_target().expect("test host must support a portable Use release");
     let package_name = format!("a3s-use-{USE_VERSION}-{target}");
@@ -295,6 +296,7 @@ Use `mcp__use_ocr__ocr_doctor` to inspect OCR readiness.
     FakeReleaseServer::start("Use", USE_VERSION, &archive_name, archive)
 }
 
+#[cfg(unix)]
 fn fake_use_script(skill_digest: &str) -> String {
     let script = r#"#!/bin/sh
 set -eu
@@ -408,9 +410,13 @@ fn run_tui_smoke(
         .env("A3S_USE_E2E_MCP_MARKER", workspace.path("mcp-started"))
         .env("A3S_USE_E2E_MCP_LOG", workspace.path("mcp.log"))
         .env("A3S_UPDATER_GITHUB_API_BASE", release.api_base())
-        .env("PATH", "/usr/bin:/bin")
+        .env("USERPROFILE", workspace.path("home"))
         .env_remove("A3S_OFFLINE")
         .env_remove("A3S_NO_AUTO_INSTALL");
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
+    #[cfg(windows)]
+    command.env("PATH", "");
     match policy {
         FirstUsePolicy::Online => {}
         FirstUsePolicy::Offline => {
@@ -425,6 +431,7 @@ fn run_tui_smoke(
 }
 
 #[test]
+#[cfg(unix)]
 fn code_tui_first_use_installs_use_and_projects_ocr_before_the_first_turn() {
     let workspace = TempWorkspace::new("code-use-first-use");
     let release = start_fake_use_release(&workspace);
@@ -480,6 +487,7 @@ fn code_tui_first_use_installs_use_and_projects_ocr_before_the_first_turn() {
 }
 
 #[test]
+#[cfg(unix)]
 fn code_tui_offline_and_no_auto_install_never_download_or_write_a_receipt() {
     for (name, policy) in [
         ("offline", FirstUsePolicy::Offline),
@@ -559,7 +567,11 @@ fn code_tui_first_use_installs_a_real_use_release_before_the_first_turn() {
     let executable = PathBuf::from(receipt["executablePath"].as_str().unwrap());
     let install_root = executable.parent().unwrap();
     for path in [
-        "a3s-use-browser-driver",
+        if cfg!(windows) {
+            "a3s-use-browser-driver.exe"
+        } else {
+            "a3s-use-browser-driver"
+        },
         "skills/a3s-use-browser/SKILL.md",
         "office-skills/a3s-use-office/SKILL.md",
         "ocr-skills/a3s-use-ocr/SKILL.md",

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Kept raw A3S Use MCP tools hidden from the primary Code model while allowing
+  the dedicated Use worker to execute its exact built-in Browser, Office, and
+  OCR surface. Provider installers and newly projected extension tools now
+  retain `Ask` policy and settle through the parent TUI confirmation flow.
+- Added a real Windows Code TUI-to-Use regression covering the verified Use ZIP
+  layout, all 31 Browser core tools with Microsoft Edge, every native Office
+  operation and view, confirmed OfficeCLI installation, and confirmed local
+  PP-OCRv6 installation and extraction.
 - Registered `a3s-webview` as a verified first-use component and made
   `a3s code` install its platform release before terminal takeover when policy
   permits. The managed path is passed directly to RemoteUI and Agent Island,

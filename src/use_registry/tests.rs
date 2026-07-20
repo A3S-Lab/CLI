@@ -41,6 +41,14 @@ fn fixture_skill_digest() -> String {
     format!("{:x}", Sha256::digest(fixture_skill().as_bytes()))
 }
 
+#[test]
+fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
+    assert!(
+        MCP_REQUEST_TIMEOUT_SECS >= 15 * 60,
+        "Use MCP calls must outlive the bounded 15-minute Browser installer"
+    );
+}
+
 #[derive(Clone, Default)]
 struct UseCallingLlm {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -157,7 +165,33 @@ fn dedicated_use_worker_allows_only_use_mcp_tools() {
         worker
             .permissions
             .check("mcp__use_browser__browser_open", &serde_json::json!({})),
+        PermissionDecision::Ask
+    );
+    assert_eq!(
+        worker.permissions.check(
+            "mcp__use_browser__agent_browser_open",
+            &serde_json::json!({})
+        ),
         PermissionDecision::Allow
+    );
+    for installer in [
+        "mcp__use_browser__agent_browser_install",
+        "mcp__use_office__office_install_compat",
+        "mcp__use_ocr__ocr_install",
+        "mcp__use_acme_report__install_provider",
+    ] {
+        assert_eq!(
+            worker.permissions.check(installer, &serde_json::json!({})),
+            PermissionDecision::Ask,
+            "{installer} must inherit the parent confirmation path"
+        );
+        assert!(worker.permissions.expose_to_model(installer));
+    }
+    assert_eq!(
+        worker
+            .permissions
+            .check("mcp__use_acme_report__render", &serde_json::json!({})),
+        PermissionDecision::Ask
     );
     assert_eq!(
         worker

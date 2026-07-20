@@ -197,6 +197,10 @@ The worker is a capability boundary, not another package manager:
 - packaged `SKILL.md` text supplies domain guidance but cannot expand those
   permissions or authorize installation; Code verifies its registry-projected
   SHA-256 before loading or replacing the live Skill;
+- ordinary built-in Browser, native Office, and OCR tools are allowed only
+  inside this worker, while bounded provider installers and newly projected
+  extension tools remain `Ask` and surface through the parent confirmation
+  stream;
 - it returns the capability route, observable result, session/object
   references, and typed failures to the parent;
 - it never retries application mutations automatically, and
@@ -214,7 +218,10 @@ stream. The TUI renders ordered capability identities such as `Using Browser`
 and `Used Browser`; Web renders `Use · Browser` and readable action evidence.
 Only an exact worker identity of `use` plus an observed `mcp__use_<route>__*`
 tool can produce those labels, and restored task snapshots replay the same
-projection. This presentation adds no transport or permission surface.
+projection. Raw Use definitions stay hidden from the parent model. Delegated
+confirmation-required, confirmation-received, and confirmation-timeout events
+are forwarded to the parent runtime so an `Ask` decision cannot deadlock inside
+the child. This presentation adds no transport or permission surface.
 
 ## 6. Core Architectural Decisions
 
@@ -315,8 +322,11 @@ a3s uninstall use/acme/slack
 a3s uninstall use --cascade
 ```
 
-`A3S_NO_AUTO_INSTALL=1` disables first-use product installation for CI,
-offline, and hermetic environments. Third-party capability runtimes require an
+Before terminal takeover, Code TUI may install verified Use and WebView product
+releases when networking and first-use setup are allowed. Code Web consumes an
+already-ready Use installation without mutating product lifecycle.
+`A3S_NO_AUTO_INSTALL=1` and offline mode disable first-use product installation
+for CI and hermetic environments. Third-party capability runtimes require an
 explicit install or interactive confirmation; non-interactive library calls do
 not download them implicitly.
 

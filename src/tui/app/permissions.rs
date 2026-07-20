@@ -113,6 +113,11 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
             "LS(*)",
             "web_search(*)",
             "web_fetch(*)",
+            // Core composes this serializable parent policy with the explicit
+            // Use worker policy. The runtime checker still hides these tools
+            // from the primary model, while ordinary child calls and Ask-only
+            // installers retain the worker's own decisions.
+            "mcp__use_*",
         ])
         .ask_all(&[
             "Write(*)",
@@ -511,6 +516,12 @@ impl TuiHitlPermissionChecker {
         let evidence_collection = self.deep_research_report_tool_gate.evidence_collection();
         let report_only = self.deep_research_report_tool_gate.report_only();
         let tool = tool_name.to_ascii_lowercase();
+        if tool.starts_with("mcp__use_") {
+            // The primary model cannot see this route. Returning the neutral
+            // parent Allow lets an explicitly scoped Use worker preserve its
+            // stricter per-tool Allow/Ask/Deny decision during delegation.
+            return a3s_code_core::permissions::PermissionDecision::Allow;
+        }
         if self.deep_research_report_tool_gate.synthesis_only() {
             return a3s_code_core::permissions::PermissionDecision::Deny;
         }
@@ -613,6 +624,12 @@ impl TuiHitlPermissionChecker {
 
 impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker {
     fn expose_to_model(&self, tool_name: &str) -> bool {
+        if tool_name.to_ascii_lowercase().starts_with("mcp__use_") {
+            return false;
+        }
+        if !a3s_code_core::permissions::PermissionChecker::expose_to_model(&self.base, tool_name) {
+            return false;
+        }
         let tool = tool_name.to_ascii_lowercase();
         if self.deep_research_report_tool_gate.synthesis_only() {
             return false;
@@ -754,6 +771,24 @@ mod execution_policy_tests {
             PermissionDecision::Deny
         );
         assert!(!checker.expose_to_model("write"));
+    }
+
+    #[test]
+    fn primary_tui_model_hides_raw_use_tools_without_blocking_the_worker() {
+        let workspace = tempfile::tempdir().unwrap();
+        let (checker, _) = checker(workspace.path(), Mode::Default);
+        let tool = "mcp__use_ocr__ocr_doctor";
+
+        assert!(!checker.expose_to_model(tool));
+        assert_eq!(
+            checker.check(tool, &serde_json::json!({})),
+            PermissionDecision::Allow,
+            "the parent decision must stay neutral so the explicit Use worker policy remains authoritative"
+        );
+        assert_eq!(
+            tui_permission_policy().check(tool, &serde_json::json!({})),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]

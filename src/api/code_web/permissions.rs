@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
-use a3s_code_core::permissions::{InteractiveToolGuardrail, PermissionPolicy};
+use a3s_code_core::permissions::{
+    InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
+};
 
 const HITL_CONFIRM_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
@@ -39,15 +41,46 @@ pub(in crate::api::code_web) fn permission_policy_for_mode(_mode: &str) -> Permi
     // The shared structured checker installed by `permission_checker_for_mode`
     // is authoritative for host-side execution.
     PermissionPolicy::new()
+        .allow("mcp__use_*")
         .allow_all(READ_ONLY_TOOLS)
         .ask_all(INTERACTIVE_TOOLS)
+}
+
+pub(in crate::api::code_web) struct CodeWebPermissionChecker {
+    interactive: InteractiveToolGuardrail,
+}
+
+impl std::ops::Deref for CodeWebPermissionChecker {
+    type Target = InteractiveToolGuardrail;
+
+    fn deref(&self) -> &Self::Target {
+        &self.interactive
+    }
+}
+
+impl PermissionChecker for CodeWebPermissionChecker {
+    fn expose_to_model(&self, tool_name: &str) -> bool {
+        !tool_name.to_ascii_lowercase().starts_with("mcp__use_")
+    }
+
+    fn check(&self, tool_name: &str, args: &serde_json::Value) -> PermissionDecision {
+        if tool_name.to_ascii_lowercase().starts_with("mcp__use_") {
+            // Keep the parent decision neutral for an explicitly scoped Use
+            // worker. The primary Web model never receives this definition.
+            PermissionDecision::Allow
+        } else {
+            self.interactive.check(tool_name, args)
+        }
+    }
 }
 
 pub(in crate::api::code_web) fn permission_checker_for_mode(
     mode: &str,
     workspace: &Path,
-) -> InteractiveToolGuardrail {
-    InteractiveToolGuardrail::for_mode(mode).with_workspace(workspace)
+) -> CodeWebPermissionChecker {
+    CodeWebPermissionChecker {
+        interactive: InteractiveToolGuardrail::for_mode(mode).with_workspace(workspace),
+    }
 }
 
 pub(in crate::api::code_web) fn confirmation_policy_for_mode(_mode: &str) -> ConfirmationPolicy {
@@ -65,7 +98,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn checker(mode: &str) -> InteractiveToolGuardrail {
+    fn checker(mode: &str) -> CodeWebPermissionChecker {
         permission_checker_for_mode(mode, Path::new("."))
     }
 
@@ -230,6 +263,20 @@ mod tests {
                 PermissionDecision::Ask,
                 "the serializable fallback must not silently allow side effects"
             );
+            assert_eq!(
+                policy.check("mcp__use_browser__agent_browser_open", &json!({})),
+                PermissionDecision::Allow,
+                "the serializable parent policy must not erase the explicit Use worker policy"
+            );
         }
+    }
+
+    #[test]
+    fn primary_web_model_hides_raw_use_tools_without_blocking_the_worker() {
+        let checker = checker("default");
+        let tool = "mcp__use_office__office_list";
+
+        assert!(!checker.expose_to_model(tool));
+        assert_eq!(checker.check(tool, &json!({})), PermissionDecision::Allow);
     }
 }
