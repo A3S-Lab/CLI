@@ -5,8 +5,6 @@
 //! never be blocked again by a stale tap clone or a broken `brew upgrade`.
 
 use std::ffi::{OsStr, OsString};
-#[cfg(windows)]
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -56,21 +54,6 @@ const WEBVIEW_BINARY: &str = if cfg!(windows) {
 } else {
     "a3s-webview"
 };
-#[cfg(windows)]
-const AGENT_ISLAND_HELPER_USAGE: &[u8] =
-    b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>";
-#[cfg(windows)]
-const SYSTEM_AGENT_SNAPSHOT_MARKER: &[u8] = b"a3s.system_agent_snapshot.v1";
-#[cfg(windows)]
-const MAX_AGENT_ISLAND_HELPER_BINARY_BYTES: u64 = 128 * 1024 * 1024;
-#[cfg(windows)]
-const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
-#[cfg(windows)]
-const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
-#[cfg(windows)]
-const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
-#[cfg(windows)]
-const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
 const LATEST_RELEASE_REDIRECT_ARGS: &[&str] = &[
     "-fsSL",
     "--connect-timeout",
@@ -91,97 +74,6 @@ const LATEST_RELEASE_API_ARGS: &[&str] = &[
     "12",
     "https://api.github.com/repos/A3S-Lab/Cli/releases/latest",
 ];
-
-pub(crate) fn webview_supports_agent_island_output(stdout: &[u8], stderr: &[u8]) -> bool {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
-    let contract = format!("{stdout}\n{stderr}");
-    contract.contains("usage: a3s-webview --agent-island")
-        && contract.contains("--snapshot")
-        && contract.contains("--lock-file")
-}
-
-/// Validate the Windows helper contract without executing the candidate.
-#[cfg(windows)]
-pub(crate) fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Result<bool> {
-    let file = std::fs::File::open(binary)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_AGENT_ISLAND_HELPER_BINARY_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_AGENT_ISLAND_HELPER_BINARY_BYTES {
-        return Ok(false);
-    }
-    Ok(webview_binary_contains_agent_island_contract(&bytes))
-}
-
-#[cfg(windows)]
-fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
-    if !webview_binary_has_target_pe_header(bytes) {
-        return false;
-    }
-    [AGENT_ISLAND_HELPER_USAGE, SYSTEM_AGENT_SNAPSHOT_MARKER]
-        .into_iter()
-        .all(|needle| {
-            bytes
-                .windows(needle.len())
-                .any(|candidate| candidate == needle)
-        })
-}
-
-#[cfg(windows)]
-fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
-    if bytes.get(..2) != Some(b"MZ") {
-        return false;
-    }
-    let Some(pe_offset_bytes) = bytes.get(0x3c..0x40) else {
-        return false;
-    };
-    let pe_offset = u32::from_le_bytes([
-        pe_offset_bytes[0],
-        pe_offset_bytes[1],
-        pe_offset_bytes[2],
-        pe_offset_bytes[3],
-    ]);
-    let Ok(pe_offset) = usize::try_from(pe_offset) else {
-        return false;
-    };
-    if !(MIN_WINDOWS_PE_HEADER_OFFSET..=MAX_WINDOWS_PE_HEADER_OFFSET).contains(&pe_offset) {
-        return false;
-    }
-    let Some(machine_offset) = pe_offset.checked_add(4) else {
-        return false;
-    };
-    if bytes.get(pe_offset..machine_offset) != Some(b"PE\0\0") {
-        return false;
-    }
-    let Some(machine_end) = machine_offset.checked_add(2) else {
-        return false;
-    };
-    let Some(machine_bytes) = bytes.get(machine_offset..machine_end) else {
-        return false;
-    };
-    let machine = u16::from_le_bytes([machine_bytes[0], machine_bytes[1]]);
-    target_windows_pe_machine().is_some_and(|target| machine == target)
-}
-
-#[cfg(all(windows, target_arch = "x86_64"))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_AMD64)
-}
-
-#[cfg(all(windows, target_arch = "aarch64"))]
-fn target_windows_pe_machine() -> Option<u16> {
-    Some(WINDOWS_PE_MACHINE_ARM64)
-}
-
-#[cfg(all(windows, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
-fn target_windows_pe_machine() -> Option<u16> {
-    None
-}
 
 fn numeric_version_parts(s: &str) -> Vec<u32> {
     let trimmed = s.trim().trim_start_matches('v');

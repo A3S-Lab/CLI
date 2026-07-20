@@ -8,8 +8,8 @@ use anyhow::{bail, Context};
 
 use super::catalog::{self, ComponentKind, ComponentSpec, Distribution, ReleaseSpec};
 use super::id::ComponentId;
-use super::paths::ComponentPaths;
-use super::probe::{is_executable, probe_version, run_bounded};
+use super::paths::{host_binary_name, ComponentPaths};
+use super::probe::{is_executable, probe_release, probe_version, run_bounded};
 use super::state::{
     ComponentReport, ComponentState, ExternalTool, Health, Presence, Trust, UpdateState,
 };
@@ -73,7 +73,7 @@ pub fn discover(paths: &ComponentPaths) -> anyhow::Result<ComponentReport> {
     let registered_binaries = catalog::all()
         .iter()
         .filter_map(catalog::release)
-        .map(|release| release.binary)
+        .map(|release| host_binary_name(release.binary))
         .collect::<BTreeSet<_>>();
     let external_tools = discover_external_tools(paths.path_env.clone(), &registered_binaries);
 
@@ -274,8 +274,18 @@ fn discover_product(
         let executable = receipt.executable_path.clone();
         let probe = executable
             .as_deref()
-            .and_then(|path| probe_version(path).ok());
-        let probe_succeeded = probe.is_some();
+            .context("installed receipt has no executable path")
+            .and_then(|path| probe_release(release, path));
+        let (probe_succeeded, version, message) = match probe {
+            Ok(version) => (true, version.or_else(|| Some(receipt.version.clone())), None),
+            Err(error) => (
+                false,
+                Some(receipt.version.clone()),
+                Some(format!(
+                    "The installed receipt exists, but its executable failed the health probe: {error}"
+                )),
+            ),
+        };
         return ComponentState {
             id,
             kind: spec.kind,
@@ -289,12 +299,9 @@ fn discover_product(
             update: UpdateState::Unknown,
             trust: Trust::FirstParty,
             provenance: Some(receipt.provenance),
-            version: probe.or_else(|| Some(receipt.version.clone())),
+            version,
             path: executable,
-            message: (!probe_succeeded).then(|| {
-                "The installed receipt exists, but its executable failed the version probe."
-                    .to_string()
-            }),
+            message,
         };
     }
 
@@ -308,13 +315,14 @@ fn discover_product(
         if !is_executable(&candidate) {
             continue;
         }
-        let version_probe = probe_version(&candidate);
-        let (version, message) = match version_probe {
-            Ok(version) => (Some(version), None),
+        let probe = probe_release(release, &candidate);
+        let (probe_succeeded, version, message) = match probe {
+            Ok(version) => (true, version, None),
             Err(error) => (
+                false,
                 None,
                 Some(format!(
-                    "The discovered executable failed the version probe: {error}"
+                    "The discovered executable failed the health probe: {error}"
                 )),
             ),
         };
@@ -328,7 +336,7 @@ fn discover_product(
             } else {
                 Presence::External
             },
-            health: if version.is_some() {
+            health: if probe_succeeded {
                 Health::Ready
             } else {
                 Health::Broken
@@ -521,7 +529,7 @@ fn discover_receipt_extension(receipt: &ComponentReceipt, id: ComponentId) -> Co
 
 fn discover_external_tools(
     path_env: Option<OsString>,
-    registered_binaries: &BTreeSet<&str>,
+    registered_binaries: &BTreeSet<String>,
 ) -> Vec<ExternalTool> {
     let Some(path_env) = path_env else {
         return Vec::new();
@@ -545,6 +553,8 @@ fn discover_external_tools(
             let Some(command) = binary.strip_prefix("a3s-") else {
                 continue;
             };
+            #[cfg(windows)]
+            let command = command.strip_suffix(".exe").unwrap_or(command);
             if command.is_empty() {
                 continue;
             }
@@ -564,8 +574,9 @@ fn discover_external_tools(
 
 fn find_on_path(binary: &str, path_env: Option<OsString>) -> Option<PathBuf> {
     let paths = path_env?;
+    let binary = host_binary_name(binary);
     std::env::split_paths(&paths)
-        .map(|directory| directory.join(binary))
+        .map(|directory| directory.join(&binary))
         .find(|path| is_executable(path))
 }
 

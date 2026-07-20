@@ -13,6 +13,11 @@ struct CodeUseResolution {
     warning: Option<String>,
 }
 
+struct CodeWebviewResolution {
+    executable: Option<PathBuf>,
+    warning: Option<String>,
+}
+
 async fn resolve_code_use_with<D, F, Fut>(
     allow_first_use_install: bool,
     offline: bool,
@@ -68,6 +73,70 @@ async fn resolve_code_use(context: &InvocationContext) -> CodeUseResolution {
         || {
             a3s::components::resolve_or_install_with(
                 "use",
+                &context.component_paths,
+                context.network.allow_first_use_install,
+                context.output.progress,
+            )
+        },
+    )
+    .await
+}
+
+async fn resolve_code_webview_with<D, F, Fut>(
+    allow_first_use_install: bool,
+    offline: bool,
+    discover: D,
+    install: F,
+) -> CodeWebviewResolution
+where
+    D: FnOnce() -> anyhow::Result<Option<PathBuf>>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
+{
+    match discover() {
+        Ok(Some(executable)) => CodeWebviewResolution {
+            executable: Some(executable),
+            warning: None,
+        },
+        Ok(None) if allow_first_use_install => match install().await {
+            Ok(executable) => CodeWebviewResolution {
+                executable: Some(executable),
+                warning: None,
+            },
+            Err(error) => CodeWebviewResolution {
+                executable: None,
+                warning: Some(format!(
+                    "A3S WebView first-use setup failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` and `a3s install webview` for recovery"
+                )),
+            },
+        },
+        Ok(None) => CodeWebviewResolution {
+            executable: None,
+            warning: Some(if offline {
+                "A3S WebView is not ready and first-use setup is disabled in offline mode; run `a3s install webview` after going online"
+                    .to_string()
+            } else {
+                "A3S WebView is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run `a3s install webview` for explicit setup"
+                    .to_string()
+            }),
+        },
+        Err(error) => CodeWebviewResolution {
+            executable: None,
+            warning: Some(format!(
+                "A3S WebView discovery failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` for recovery"
+            )),
+        },
+    }
+}
+
+async fn resolve_code_webview(context: &InvocationContext) -> CodeWebviewResolution {
+    resolve_code_webview_with(
+        context.network.allow_first_use_install,
+        context.network.offline,
+        || a3s::components::find_ready_executable_with("webview", &context.component_paths),
+        || {
+            a3s::components::resolve_or_install_with(
+                "webview",
                 &context.component_paths,
                 context.network.allow_first_use_install,
                 context.output.progress,
@@ -766,8 +835,21 @@ pub(crate) async fn run_in(
         ));
     }
 
-    // Headless smoke mode exercises the same Use-projected session that the
-    // interactive TUI receives, without taking over the terminal.
+    // WebView is optional to the terminal UI but required for native RemoteUI
+    // popups and Agent Island. Resolve or install its verified release before
+    // terminal takeover, then pass the exact managed path to both consumers.
+    let webview_resolution = resolve_code_webview(context).await;
+    if let Some(warning) = webview_resolution.warning {
+        initial_messages.push(TranscriptEntry::preformatted(
+            Style::new()
+                .fg(TN_YELLOW)
+                .render(&format!("  鈿?{warning}")),
+        ));
+    }
+
+    // Headless smoke mode exercises the same Use and WebView first-use
+    // preparation that the interactive TUI receives, without taking over the
+    // terminal.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         return run_smoke(
             session,
@@ -816,8 +898,6 @@ pub(crate) async fn run_in(
             Action::ScrollBottom,
             "Scroll to bottom",
         );
-
-    remote_ui::prime_webview_lookup();
 
     let initial_paused_goal = tui_session_state
         .as_ref()
@@ -928,7 +1008,7 @@ pub(crate) async fn run_in(
         deep_research_goal_restore: None,
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
-        agent_presence: agent_presence::AgentPresenceRuntime::new(),
+        agent_presence: agent_presence::AgentPresenceRuntime::new(webview_resolution.executable),
         background_subagent_watches: HashSet::new(),
         subagent_snapshot_request_id: 0,
         deep_research_subagent_settlement_inflight: false,
@@ -1329,5 +1409,65 @@ mod tests {
         let warning = resolution.warning.unwrap();
         assert!(warning.contains("release unavailable"), "{warning}");
         assert!(warning.contains("a3s install use"), "{warning}");
+    }
+
+    #[tokio::test]
+    async fn code_webview_resolution_installs_once_when_the_component_is_missing() {
+        let installed = PathBuf::from("/managed/a3s-webview");
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_webview_with(
+            true,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                Ok(installed.clone())
+            },
+        )
+        .await;
+
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(resolution.executable.as_deref(), Some(installed.as_path()));
+        assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn code_webview_resolution_honors_the_no_auto_install_boundary() {
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_webview_with(
+            false,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                anyhow::bail!("installer must not run")
+            },
+        )
+        .await;
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(resolution.executable.is_none());
+        assert!(resolution
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("A3S_NO_AUTO_INSTALL")));
+    }
+
+    #[tokio::test]
+    async fn code_webview_resolution_keeps_install_failure_non_fatal_and_actionable() {
+        let resolution = resolve_code_webview_with(
+            true,
+            false,
+            || Ok(None),
+            || async { anyhow::bail!("release unavailable") },
+        )
+        .await;
+
+        assert!(resolution.executable.is_none());
+        let warning = resolution.warning.unwrap();
+        assert!(warning.contains("release unavailable"), "{warning}");
+        assert!(warning.contains("a3s install webview"), "{warning}");
     }
 }

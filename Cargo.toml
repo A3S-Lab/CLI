@@ -76,6 +76,7 @@ olpc-cjson = "0.1"
 ring = "0.17"
 tar = "0.4"
 tempfile = "3"
+zip = { version = "2.4", default-features = false, features = ["deflate"] }
 
 [profile.release]
 opt-level = "z"

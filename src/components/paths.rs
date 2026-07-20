@@ -72,6 +72,7 @@ impl ComponentPaths {
                 "A3S_BENCH_INSTALL_DIR",
                 "A3S_SEARCH_INSTALL_DIR",
                 "A3S_USE_INSTALL_DIR",
+                "A3S_WEBVIEW_INSTALL_DIR",
             ]
             .into_iter()
             .filter_map(|name| {
@@ -170,7 +171,7 @@ fn configured_runtime_root(
     state_root.join("runtime")
 }
 
-fn host_binary_name(binary: &str) -> String {
+pub(super) fn host_binary_name(binary: &str) -> String {
     if cfg!(windows) && !binary.ends_with(".exe") {
         format!("{binary}.exe")
     } else {
@@ -315,6 +316,19 @@ mod tests {
                 temp.path()
                     .join("use-bin")
                     .join(host_binary_name("a3s-use"))
+            )
+        );
+        paths.set_install_override("A3S_WEBVIEW_INSTALL_DIR", temp.path().join("webview-bin"));
+        let webview_spec =
+            crate::components::catalog::find(&ComponentId::parse("webview").unwrap())
+                .and_then(crate::components::catalog::release)
+                .unwrap();
+        assert_eq!(
+            paths.configured_binary(webview_spec),
+            Some(
+                temp.path()
+                    .join("webview-bin")
+                    .join(host_binary_name("a3s-webview"))
             )
         );
     }

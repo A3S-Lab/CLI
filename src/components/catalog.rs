@@ -26,6 +26,13 @@ pub struct ReleaseSpec {
     pub homebrew_formula: Option<&'static str>,
     pub install_dir_env: &'static str,
     pub asset_family: AssetFamily,
+    pub probe: ReleaseProbe,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseProbe {
+    Version,
+    AgentIslandContract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +40,7 @@ pub enum AssetFamily {
     BoxPackage,
     PortableBinary,
     BenchPackage,
+    RustTargetBinary,
 }
 
 impl AssetFamily {
@@ -48,6 +56,11 @@ impl AssetFamily {
             (Self::PortableBinary | Self::BenchPackage, "windows", "x86_64") => {
                 Some("windows-x86_64")
             }
+            (Self::RustTargetBinary, "macos", "aarch64") => Some("aarch64-apple-darwin"),
+            (Self::RustTargetBinary, "macos", "x86_64") => Some("x86_64-apple-darwin"),
+            (Self::RustTargetBinary, "linux", "aarch64") => Some("aarch64-unknown-linux-gnu"),
+            (Self::RustTargetBinary, "linux", "x86_64") => Some("x86_64-unknown-linux-gnu"),
+            (Self::RustTargetBinary, "windows", "x86_64") => Some("x86_64-pc-windows-msvc"),
             _ => None,
         }
     }
@@ -65,13 +78,24 @@ impl AssetFamily {
                 };
                 format!("{binary}-{version}-{target}.{extension}")
             }
+            Self::RustTargetBinary => {
+                let extension = if target.contains("-windows-") {
+                    "zip"
+                } else {
+                    "tar.gz"
+                };
+                format!("{binary}-v{version}-{target}.{extension}")
+            }
         }
     }
 
     pub fn executable_name(self, binary: &str, target: &str) -> String {
-        if matches!(self, Self::PortableBinary | Self::BenchPackage)
-            && target.starts_with("windows-")
-        {
+        let windows = match self {
+            Self::PortableBinary | Self::BenchPackage => target.starts_with("windows-"),
+            Self::RustTargetBinary => target.contains("-windows-"),
+            Self::BoxPackage => false,
+        };
+        if windows {
             format!("{binary}.exe")
         } else {
             binary.to_string()
@@ -109,6 +133,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             homebrew_formula: Some("a3s-lab/tap/a3s-box"),
             install_dir_env: "A3S_BOX_INSTALL_DIR",
             asset_family: AssetFamily::BoxPackage,
+            probe: ReleaseProbe::Version,
         }),
         auto_install_on_use: true,
         removable: true,
@@ -124,6 +149,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             homebrew_formula: None,
             install_dir_env: "A3S_BENCH_INSTALL_DIR",
             asset_family: AssetFamily::BenchPackage,
+            probe: ReleaseProbe::Version,
         }),
         auto_install_on_use: false,
         removable: true,
@@ -139,6 +165,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             homebrew_formula: Some("a3s-lab/tap/a3s-search"),
             install_dir_env: "A3S_SEARCH_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
+            probe: ReleaseProbe::Version,
         }),
         auto_install_on_use: false,
         removable: true,
@@ -154,6 +181,7 @@ const COMPONENTS: &[ComponentSpec] = &[
             homebrew_formula: Some("a3s-lab/tap/a3s-use"),
             install_dir_env: "A3S_USE_INSTALL_DIR",
             asset_family: AssetFamily::PortableBinary,
+            probe: ReleaseProbe::Version,
         }),
         auto_install_on_use: true,
         removable: true,
@@ -180,6 +208,22 @@ const COMPONENTS: &[ComponentSpec] = &[
         description: "Native OCR runtime readiness",
         distribution: Distribution::Delegated { parent: "use" },
         auto_install_on_use: false,
+        removable: true,
+    },
+    ComponentSpec {
+        id: "webview",
+        kind: ComponentKind::Capability,
+        description: "Native RemoteUI and Agent Island window helper",
+        distribution: Distribution::Release(ReleaseSpec {
+            binary: "a3s-webview",
+            github_owner: "A3S-Lab",
+            github_repo: "WebView",
+            homebrew_formula: Some("a3s-lab/tap/a3s-webview"),
+            install_dir_env: "A3S_WEBVIEW_INSTALL_DIR",
+            asset_family: AssetFamily::RustTargetBinary,
+            probe: ReleaseProbe::AgentIslandContract,
+        }),
+        auto_install_on_use: true,
         removable: true,
     },
 ];
@@ -224,6 +268,18 @@ mod tests {
     }
 
     #[test]
+    fn catalog_contains_first_use_webview_release() {
+        let webview = find(&ComponentId::parse("webview").unwrap())
+            .expect("webview must be a registered component");
+        assert!(webview.auto_install_on_use);
+        let release = release(webview).expect("webview must own a release");
+        assert_eq!(release.binary, "a3s-webview");
+        assert_eq!(release.github_owner, "A3S-Lab");
+        assert_eq!(release.github_repo, "WebView");
+        assert_eq!(release.install_dir_env, "A3S_WEBVIEW_INSTALL_DIR");
+    }
+
+    #[test]
     fn archive_names_match_existing_release_conventions() {
         assert_eq!(
             AssetFamily::BoxPackage.archive_name("a3s-box", "2.5.2", "linux-x86_64"),
@@ -240,6 +296,18 @@ mod tests {
         assert_eq!(
             AssetFamily::PortableBinary.executable_name("a3s-use", "windows-x86_64"),
             "a3s-use.exe"
+        );
+        assert_eq!(
+            AssetFamily::RustTargetBinary.archive_name(
+                "a3s-webview",
+                "0.1.3",
+                "x86_64-pc-windows-msvc"
+            ),
+            "a3s-webview-v0.1.3-x86_64-pc-windows-msvc.zip"
+        );
+        assert_eq!(
+            AssetFamily::RustTargetBinary.executable_name("a3s-webview", "x86_64-pc-windows-msvc"),
+            "a3s-webview.exe"
         );
     }
 }

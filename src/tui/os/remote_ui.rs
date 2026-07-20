@@ -16,7 +16,6 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-static WEBVIEW_BIN: OnceLock<PathBuf> = OnceLock::new();
 static LOCAL_FILE_SERVER: OnceLock<std::io::Result<LocalFileServer>> = OnceLock::new();
 const WEBVIEW_BIN_ENV: &str = "A3S_WEBVIEW_BIN";
 const MAX_REGISTERED_LOCAL_FILES: usize = 128;
@@ -521,21 +520,20 @@ fn find_existing_webview() -> Option<PathBuf> {
     webview_helper_candidates().1.into_iter().next()
 }
 
-pub(crate) fn webview_helper_path() -> Option<PathBuf> {
-    find_existing_webview().filter(|path| executable_path(path).is_some())
+pub(crate) fn webview_helper_path_with(preferred: Option<&Path>) -> Option<PathBuf> {
+    if let Some(override_path) = env_webview_override() {
+        return executable_path(&override_path);
+    }
+    preferred
+        .and_then(executable_path)
+        .or_else(|| find_existing_webview().filter(|path| executable_path(path).is_some()))
 }
 
-fn resolve_webview_bin() -> PathBuf {
-    find_existing_webview().unwrap_or_else(|| PathBuf::from(webview_binary_name()))
-}
-
-fn webview_bin() -> &'static PathBuf {
-    WEBVIEW_BIN.get_or_init(resolve_webview_bin)
-}
-
-/// Warm the helper lookup so clicking "Open view" only spawns the process.
-pub(crate) fn prime_webview_lookup() {
-    let _ = webview_bin();
+fn resolve_webview_bin(preferred: Option<&Path>) -> PathBuf {
+    env_webview_override()
+        .or_else(|| preferred.map(Path::to_path_buf))
+        .or_else(find_existing_webview)
+        .unwrap_or_else(|| PathBuf::from(webview_binary_name()))
 }
 
 /// Build the `a3s-webview` argv for a view (url + optional size). Split out from
@@ -605,7 +603,14 @@ fn local_view_requires_no_auth(url: &str) -> bool {
 /// The webview inherits the process env so OS views can read `A3S_OS_TOKEN` for
 /// auth; registered local files receive `--no-auth` and ignore it.
 pub(crate) fn open_window(spec: &ViewSpec) -> std::io::Result<OpenedWith> {
-    Command::new(webview_bin())
+    open_window_with(spec, None)
+}
+
+pub(crate) fn open_window_with(
+    spec: &ViewSpec,
+    preferred: Option<&Path>,
+) -> std::io::Result<OpenedWith> {
+    Command::new(resolve_webview_bin(preferred))
         .args(webview_args(spec))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -937,12 +942,12 @@ mod tests {
     }
 
     #[test]
-    fn webview_lookup_can_be_primed_and_reused() {
-        prime_webview_lookup();
-        let first = webview_bin().clone();
-        prime_webview_lookup();
-        assert_eq!(webview_bin(), &first);
-        assert!(!first.as_os_str().to_string_lossy().is_empty());
+    fn managed_webview_path_is_used_when_no_override_is_configured() {
+        let preferred = Path::new("/managed/a3s-webview");
+        assert_eq!(
+            resolve_webview_bin(Some(preferred)),
+            env_webview_override().unwrap_or_else(|| preferred.to_path_buf())
+        );
     }
 
     /// End-to-end: a progressive-API `execute` response carrying a `view` object

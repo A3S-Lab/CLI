@@ -55,22 +55,26 @@ brew install A3S-Lab/tap/a3s
 ```
 
 The initial installation always contains the umbrella CLI and A3S Code. It does
-not download Box, Bench, Search, or Use. This keeps a Code-only installation
-small, while every product still has one public entry point under `a3s`.
+not download Box, Bench, Search, Use, or WebView. This keeps a Code-only
+installation small, while every product still has one public entry point under
+`a3s`.
 Homebrew and GitHub archives bundle the Web workspace. A Cargo installation
 downloads the CLI's exact-version Web asset on the first `a3s web` start,
 verifies its SHA-256, and caches it in the A3S data directory. `--offline` and
 `A3S_NO_AUTO_INSTALL=1` never perform that download; use `--web-dir` for a
 local build or `--api-only` when no frontend is required.
 
-The Homebrew `a3s` formula also installs the native `a3s-webview` helper on
-macOS. It owns both compact RemoteUI windows and the system-wide Agent Island.
-If a source or Cargo installation does not have that helper, `a3s code` keeps
-working and RemoteUI falls back immediately to printing the browser URL.
+The Homebrew `a3s` formula can install the native `a3s-webview` helper alongside
+the CLI. Other installations prepare its verified platform release on the first
+interactive `a3s code` startup when networking and automatic setup are allowed.
+It owns both compact RemoteUI windows and the system-wide Agent Island. Setup
+failure remains non-fatal: Code keeps working and RemoteUI can fall back to the
+system browser.
 
 ### Components and delayed installation
 
-The built-in catalog registers `code`, `box`, `bench`, `search`, and `use`.
+The built-in catalog registers `code`, `box`, `bench`, `search`, `use`, and
+`webview`.
 Browser, native Office, and OCR are capabilities owned by Use:
 
 | Component | Installed with `a3s` | Public command | Installation behavior |
@@ -80,6 +84,7 @@ Browser, native Office, and OCR are capabilities owned by Use:
 | Bench | No | `a3s bench ...` | Requires an explicit compatible Bench installation. |
 | Search | No | `a3s search ...` | Requires an explicit compatible Search installation. |
 | Use | No | `a3s use ...` / `a3s code` | Installs Use on first real use, including TUI startup when policy allows, then forwards or projects native Browser, Office, OCR, Box, or extension surfaces. |
+| WebView | No | `a3s code` | Installs the verified native helper on first interactive Code startup when policy allows, then supplies its managed path to RemoteUI and Agent Island. |
 | Use/Browser | With Use | `a3s use browser ...` | Reports Browser provider readiness through Use; it is not a second product archive. |
 | Use/Office | With Use | `a3s use office ...` | Delegates OfficeCLI readiness and explicit installation through Use. |
 | Use/OCR | With Use | `a3s use ocr ...` | Projects built-in OCR tools and its Skill; local Tesseract or explicit vision-provider readiness remains separate. |
@@ -162,6 +167,7 @@ a3s install box
 a3s install bench
 a3s install search
 a3s install use
+a3s install webview
 a3s install use/browser
 a3s install use/office
 ```
@@ -344,19 +350,21 @@ declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
 define an extension JSON-RPC protocol; `--json` remains a one-command CLI
 result.
 
-The Code TUI treats Use as a first-use component: before terminal takeover it
-reuses a healthy install or installs the verified release when networking and
-automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain
-strict no-network, no-receipt boundaries, and a failed setup does not prevent
-Code from starting. Code Web consumes an already-ready component without
-changing its lifecycle. Both surfaces keep one registry watcher for the
-process. Browser, Office, OCR, and enabled external MCP/Skill surfaces are
-projected into every active Code session. Code registers a dedicated `use`
-worker that can invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP,
-and recursive delegation tools are denied. The worker's current capability IDs
-and purpose are published in the live `task` and `parallel_task` definitions,
-so the parent model can select it without a hard-coded prompt. Application
-failures do not fall back to another execution surface, and an Office
+The Code TUI treats Use and WebView as first-use components: before terminal
+takeover it reuses healthy installs or installs verified releases when
+networking and automatic setup are allowed. Offline mode and
+`A3S_NO_AUTO_INSTALL=1` remain strict no-network, no-receipt boundaries, and a
+failed setup does not prevent Code from starting. The resolved WebView path is
+passed directly to both native-window consumers rather than relying on PATH.
+Code Web consumes an already-ready Use component without changing its
+lifecycle. Both Code surfaces keep one Use registry watcher for the process.
+Browser, Office, OCR, and enabled external MCP/Skill surfaces are projected
+into every active Code session. Code registers a dedicated `use` worker that
+can invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and
+recursive delegation tools are denied. The worker's current capability IDs and
+purpose are published in the live `task` and `parallel_task` definitions, so the
+parent model can select it without a hard-coded prompt. Application failures do
+not fall back to another execution surface, and an Office
 `use.office.outcome_unknown` result is never retried automatically. A session
 rebuild replays the current surfaces, and a Web process shares the watcher
 across all concurrent sessions.
@@ -369,11 +377,11 @@ identity, and raw MCP tool names do not replace the user-facing worker label.
 
 ### Platform support
 
-macOS and Linux are the supported runtime and managed-artifact targets for the
-current component platform. Windows remains a roadmap target: the CLI and
-protocol types should continue to compile there, but managed component
-archives, Browser persistent-session lifecycle, and full file-lock conformance
-are not part of the current runtime support claim.
+macOS and Linux remain the broad runtime and managed-artifact targets for the
+component platform. Windows x86_64 now supports the native WebView managed
+release and Code first-use installation; broader Windows component coverage,
+Browser persistent-session lifecycle, and full file-lock conformance remain
+roadmap work.
 
 `a3s install` manages registered A3S components; it is not a universal frontend
 for Homebrew, APT, DNF, Pacman, Winget, npm, pip, Cargo, or arbitrary package
@@ -806,7 +814,7 @@ input prefixes:
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
 | Runtime activity | Asset-specific `activity` commands (`/agent activity`, `/mcp activity`, `/flow activity`, `/skill activity`, `/okf activity`) inspect OS Runtime jobs/runs for the selected asset. Use the standalone `a3s top` command for local process activity. |
 | Engineered loops | `/loop init`, `/loop run`, `/loop audit`, and `/loop logs` manage durable loops under `.a3s/loops`. Loops use maker/checker separation, reports, budgets, state files, and OS Runtime/RemoteUI evidence when enabled; inside `/agent` mode they stay local and target the active agent package. |
-| OS and RemoteUI | `/login` enables OS capabilities. Shaped OS progressive responses (`.view` or `viewUrl`) surface an inline `Open view` action, using the native `a3s-webview` helper when available and browser fallback otherwise. |
+| OS and RemoteUI | `/login` enables OS capabilities. Shaped OS progressive responses (`.view` or `viewUrl`) surface an inline `Open view` action, using the native `a3s-webview` helper prepared during first-use startup and browser fallback if setup failed. |
 | Operations | `/help` shows the full command guide, `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, and `/fork` branches a new session from the current transcript. |
 
 A terminal DeepResearch report view opens only after every child task observed
@@ -946,6 +954,13 @@ Cursor, Gemini, and WorkBuddy. All A3S Code processes on the machine write to
 one private per-user snapshot, while `a3s-webview` enforces a single native
 island process. Completed, failed, and cancelled rows remain briefly visible so
 the result does not disappear at the instant a task settles.
+
+On a normal online startup, Code automatically installs the verified WebView
+release when the helper is missing. `--offline`, `A3S_OFFLINE=1`, and
+`A3S_NO_AUTO_INSTALL=1` disable that mutation; use `a3s install webview` for
+explicit preparation. GitHub release assets are checksum-verified before
+activation, and the helper must expose the Agent Island protocol before it is
+recorded as healthy.
 
 Approval and control buttons use short-lived, one-shot tokens scoped to the
 exact task and current approval context. Approve once, approve for the session,

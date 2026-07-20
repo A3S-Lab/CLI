@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Registered `a3s-webview` as a verified first-use component and made
+  `a3s code` install its platform release before terminal takeover when policy
+  permits. The managed path is passed directly to RemoteUI and Agent Island,
+  Windows assets use their Rust target ZIP names and protocol-aware health
+  probe, and a release-page/checksum fallback survives GitHub API rate limits.
+- Increased the Windows main-thread stack reserve for the `a3s` executable so
+  `a3s code` can complete TUI session startup without a stack overflow, with a
+  Windows-only startup smoke test covering the regression.
+
 ## [0.9.7] - 2026-07-19
 
 ### Added

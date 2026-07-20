@@ -24,6 +24,7 @@ pub use command::{
 pub use id::ComponentId;
 pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
+pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {

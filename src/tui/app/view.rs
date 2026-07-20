@@ -331,10 +331,11 @@ impl App {
     /// not installed, fall back to the system browser and leave a transcript
     /// hint so the click never feels like a no-op.
     pub(super) fn open_remote_view(&mut self, spec: &remote_ui::ViewSpec) {
-        match remote_ui::open_window(spec) {
+        let webview_binary = self.agent_presence.webview_binary().map(Path::to_path_buf);
+        match remote_ui::open_window_with(spec, webview_binary.as_deref()) {
             Ok(remote_ui::OpenedWith::Webview) => {}
             Ok(remote_ui::OpenedWith::Browser) => {
-                let helper = remote_ui::webview_helper_path()
+                let helper = remote_ui::webview_helper_path_with(webview_binary.as_deref())
                     .map(|path| path.display().to_string())
                     .unwrap_or_else(|| {
                         "missing; install a3s-webview or set A3S_WEBVIEW_BIN".to_string()

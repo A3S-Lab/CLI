@@ -13,7 +13,7 @@ use super::catalog::ReleaseSpec;
 use super::id::ComponentId;
 use super::lifecycle::{InstallRequest, OperationRecord};
 use super::paths::ComponentPaths;
-use super::probe::probe_version;
+use super::probe::probe_release;
 
 /// One exact release artifact resolved before a component plan is approved.
 ///
@@ -31,6 +31,26 @@ pub struct ResolvedRelease {
 }
 
 pub async fn resolve_release(
+    id: &ComponentId,
+    release_spec: ReleaseSpec,
+    requested_version: Option<&str>,
+) -> anyhow::Result<ResolvedRelease> {
+    match resolve_release_from_api(id, release_spec, requested_version).await {
+        Ok(release) => Ok(release),
+        Err(api_error) if direct_release_fallback_allowed() => {
+            resolve_release_from_github(id, release_spec, requested_version)
+                .await
+                .with_context(|| {
+                    format!(
+                        "GitHub API release resolution failed ({api_error}); direct GitHub release resolution also failed"
+                    )
+                })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn resolve_release_from_api(
     id: &ComponentId,
     release_spec: ReleaseSpec,
     requested_version: Option<&str>,
@@ -76,6 +96,124 @@ pub async fn resolve_release(
     })
 }
 
+fn direct_release_fallback_allowed() -> bool {
+    std::env::var_os("A3S_UPDATER_GITHUB_API_BASE").is_none()
+}
+
+async fn resolve_release_from_github(
+    id: &ComponentId,
+    release_spec: ReleaseSpec,
+    requested_version: Option<&str>,
+) -> anyhow::Result<ResolvedRelease> {
+    let target = release_spec.asset_family.target().with_context(|| {
+        format!(
+            "component '{}' has no release for {}-{}",
+            id,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let web_base = "https://github.com";
+    let version = match requested_version {
+        Some(version) => parse_version(version)?.to_string(),
+        None => {
+            fetch_latest_version_from_github(
+                web_base,
+                release_spec.github_owner,
+                release_spec.github_repo,
+            )
+            .await?
+        }
+    };
+    let tag = format!("v{version}");
+    let archive_name =
+        release_spec
+            .asset_family
+            .archive_name(release_spec.binary, &version, target);
+    let download_base = format!(
+        "{web_base}/{}/{}/releases/download/{tag}",
+        release_spec.github_owner, release_spec.github_repo
+    );
+    let asset_url = format!("{download_base}/{archive_name}");
+    let sha256 = direct_release_checksum(&download_base, &archive_name).await?;
+    Ok(ResolvedRelease {
+        version,
+        tag,
+        target: target.to_string(),
+        archive_name,
+        asset_url,
+        sha256,
+    })
+}
+
+async fn fetch_latest_version_from_github(
+    web_base: &str,
+    owner: &str,
+    repo: &str,
+) -> anyhow::Result<String> {
+    let url = format!("{web_base}/{owner}/{repo}/releases/latest");
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("a3s/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .context("failed to build the direct GitHub release client")?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to follow the latest release redirect from {url}"))?;
+    if !response.status().is_success() {
+        bail!(
+            "latest release redirect returned HTTP {} for {}",
+            response.status(),
+            url
+        );
+    }
+    version_from_release_url(response.url().as_str()).with_context(|| {
+        format!(
+            "latest release redirect ended at an invalid tag URL: {}",
+            response.url()
+        )
+    })
+}
+
+fn version_from_release_url(url: &str) -> Option<String> {
+    let tag = url
+        .trim()
+        .rsplit_once("/tag/")
+        .map(|(_, tag)| tag)?
+        .split(['?', '#'])
+        .next()?
+        .trim_start_matches('v');
+    parse_version(tag).ok().map(|version| version.to_string())
+}
+
+async fn direct_release_checksum(
+    download_base: &str,
+    archive_name: &str,
+) -> anyhow::Result<String> {
+    let mut failures = Vec::new();
+    for checksum_name in checksum_asset_names(archive_name) {
+        let url = format!("{download_base}/{checksum_name}");
+        match download_asset(&url).await {
+            Ok(bytes) => {
+                if let Some(checksum) = parse_checksum_file(&bytes, archive_name) {
+                    return Ok(checksum);
+                }
+                failures.push(format!(
+                    "{checksum_name} did not contain a matching SHA-256"
+                ));
+            }
+            Err(error) => failures.push(format!("{checksum_name}: {error}")),
+        }
+    }
+    bail!(
+        "release asset '{}' has no downloadable trusted SHA-256 checksum ({})",
+        archive_name,
+        failures.join("; ")
+    )
+}
+
 pub async fn install_release(
     id: &ComponentId,
     release_spec: ReleaseSpec,
@@ -117,14 +255,15 @@ pub async fn install_release(
         .asset_family
         .executable_name(release_spec.binary, &resolved.target);
     let staged_executable = find_unique_file(&unpacked, &executable_name)?;
-    let actual_version = probe_version(&staged_executable)?;
-    if parse_version(&actual_version)? != parse_version(&resolved.version)? {
-        bail!(
-            "downloaded '{}' reported version {}, expected {}",
-            id,
-            actual_version,
-            resolved.version
-        );
+    if let Some(actual_version) = probe_release(release_spec, &staged_executable)? {
+        if parse_version(&actual_version)? != parse_version(&resolved.version)? {
+            bail!(
+                "downloaded '{}' reported version {}, expected {}",
+                id,
+                actual_version,
+                resolved.version
+            );
+        }
     }
     let relative_executable = staged_executable.strip_prefix(&unpacked)?.to_path_buf();
     let active = paths.version_root(id, &resolved.version);
@@ -246,10 +385,7 @@ async fn release_checksum(
             return Ok(digest.to_ascii_lowercase());
         }
     }
-    for name in [
-        format!("{}.sha256", asset.name),
-        "checksums.txt".to_string(),
-    ] {
+    for name in checksum_asset_names(&asset.name) {
         let Some(checksum_asset) = release
             .assets
             .iter()
@@ -266,6 +402,21 @@ async fn release_checksum(
         "release asset '{}' has no trusted SHA-256 digest or checksum file",
         asset.name
     )
+}
+
+fn checksum_asset_names(asset_name: &str) -> Vec<String> {
+    let mut names = vec![format!("{asset_name}.sha256")];
+    let base_name = asset_name
+        .strip_suffix(".tar.gz")
+        .or_else(|| asset_name.strip_suffix(".zip"));
+    if let Some(base_name) = base_name {
+        let companion = format!("{base_name}.sha256");
+        if !names.contains(&companion) {
+            names.push(companion);
+        }
+    }
+    names.push("checksums.txt".to_string());
+    names
 }
 
 fn parse_checksum_file(bytes: &[u8], asset_name: &str) -> Option<String> {
@@ -334,6 +485,33 @@ mod tests {
                 format!("{}  other.tar.gz\n", "b".repeat(64)).as_bytes(),
                 "asset.tar.gz"
             ),
+            None
+        );
+    }
+
+    #[test]
+    fn checks_the_webview_release_companion_checksum_name() {
+        assert_eq!(
+            checksum_asset_names("a3s-webview-v0.1.3-x86_64-pc-windows-msvc.zip"),
+            vec![
+                "a3s-webview-v0.1.3-x86_64-pc-windows-msvc.zip.sha256",
+                "a3s-webview-v0.1.3-x86_64-pc-windows-msvc.sha256",
+                "checksums.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_a_latest_release_redirect_without_accepting_other_pages() {
+        assert_eq!(
+            version_from_release_url(
+                "https://github.com/A3S-Lab/WebView/releases/tag/v0.1.3?expanded=true"
+            )
+            .as_deref(),
+            Some("0.1.3")
+        );
+        assert_eq!(
+            version_from_release_url("https://github.com/A3S-Lab/WebView/releases/latest"),
             None
         );
     }
