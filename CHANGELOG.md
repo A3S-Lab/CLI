@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.8] - 2026-07-21
+
+### Changed
+
+- Updated the bundled Code runtime to A3S Code Core 6.1.0 and A3S Search 2.0.0.
+  `web_search` now uses AnySearch by default when neither the request nor ACL
+  configuration selects engines, while explicit AnySearch, Tavily, and
+  conventional engine selections remain available.
+
 ### Fixed
 
 - Kept raw A3S Use MCP tools hidden from the primary Code model while allowing

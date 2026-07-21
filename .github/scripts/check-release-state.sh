@@ -2,9 +2,10 @@
 
 set -euo pipefail
 
-expected_version="${1:?usage: check-release-state.sh <cli-version> <core-version> <tui-version>}"
-expected_core="${2:?usage: check-release-state.sh <cli-version> <core-version> <tui-version>}"
-expected_tui="${3:?usage: check-release-state.sh <cli-version> <core-version> <tui-version>}"
+expected_version="${1:?usage: check-release-state.sh <cli-version> <core-version> <tui-version> <search-version>}"
+expected_core="${2:?usage: check-release-state.sh <cli-version> <core-version> <tui-version> <search-version>}"
+expected_tui="${3:?usage: check-release-state.sh <cli-version> <core-version> <tui-version> <search-version>}"
+expected_search="${4:?usage: check-release-state.sh <cli-version> <core-version> <tui-version> <search-version>}"
 
 if ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "invalid CLI release version: $expected_version" >&2
@@ -56,6 +57,10 @@ grep -Fqx "a3s-tui = \"=$expected_tui\"" Cargo.toml || {
   echo "Cargo.toml must pin a3s-tui exactly to $expected_tui" >&2
   exit 1
 }
+grep -Fqx "a3s-search = { version = \"=$expected_search\", features = [\"lightpanda\"] }" Cargo.toml || {
+  echo "Cargo.toml must pin a3s-search exactly to $expected_search" >&2
+  exit 1
+}
 
 if ! awk -v header="## [$expected_version]" '
   index($0, header) == 1 { found = 1; next }
@@ -67,4 +72,4 @@ if ! awk -v header="## [$expected_version]" '
   exit 1
 fi
 
-echo "release state is consistent at CLI $expected_version, Core $expected_core, TUI $expected_tui"
+echo "release state is consistent at CLI $expected_version, Core $expected_core, TUI $expected_tui, Search $expected_search"
