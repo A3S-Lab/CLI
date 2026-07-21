@@ -1554,7 +1554,7 @@ esac
 
 #[cfg(unix)]
 #[tokio::test]
-async fn timed_out_startup_discovery_converges_from_the_watch_generation() {
+async fn timed_out_startup_discovery_converges_within_the_projection_budget() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1636,12 +1636,13 @@ esac
             .await
             .unwrap(),
     );
-    let (handle, warning) = start_with_budget(
+    let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
         CancellationToken::new(),
         Arc::clone(&session),
         Duration::from_millis(20),
+        Duration::from_secs(2),
     )
     .await;
 
@@ -1651,21 +1652,13 @@ esac
             .is_some_and(|message| message.contains("exceeded 20 ms")),
         "{warning:?}"
     );
-    // This bounds eventual background convergence, not the 20 ms startup SLA
-    // asserted above. The full test binary starts many external processes in
-    // parallel, so leave enough scheduling headroom without changing any
-    // production command or retry timeout.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !session
+    assert!(
+        session
             .skill_names()
             .iter()
-            .any(|name| name == "fixture-report")
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the watch loop must recover the generation skipped at startup");
+            .any(|name| name == "fixture-report"),
+        "the projection budget must include background discovery and Skill replay"
+    );
 
     drop(handle);
     session.close().await;

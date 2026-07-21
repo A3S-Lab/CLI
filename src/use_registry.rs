@@ -1483,11 +1483,10 @@ async fn start_with_budgets(
 ) -> (UseRegistryHandle, Option<String>) {
     let (handle, mut warnings) =
         start_detached_with_budget(executable, directory, cancellation, discovery_budget).await;
-    let desired = handle.inner.desired_tx.borrow().clone();
     handle.replace_session(Arc::clone(&session));
-    if !wait_for_initial_projection(session.as_ref(), desired.as_ref(), projection_budget).await {
+    if !wait_for_initial_projection(&handle, session.as_ref(), projection_budget).await {
         warnings.push(format!(
-            "A3S Use initial MCP projection is still converging after {} ms; capabilities will continue loading in the background",
+            "A3S Use initial capability projection is still converging after {} ms; capabilities will continue loading in the background",
             projection_budget.as_millis()
         ));
     }
@@ -1495,32 +1494,61 @@ async fn start_with_budgets(
 }
 
 async fn wait_for_initial_projection(
+    handle: &UseRegistryHandle,
     session: &AgentSession,
-    desired: &DesiredCapabilities,
     budget: Duration,
 ) -> bool {
-    if desired.mcp.is_empty() {
-        return true;
-    }
-    let prefixes = desired
-        .mcp
-        .keys()
-        .map(|name| format!("mcp__{name}__"))
-        .collect::<Vec<_>>();
-    tokio::time::timeout(budget, async {
+    let mut desired_rx = handle.inner.desired_tx.subscribe();
+    tokio::time::timeout(budget, async move {
         loop {
-            let tools = session.tool_names();
-            if prefixes
-                .iter()
-                .all(|prefix| tools.iter().any(|tool| tool.starts_with(prefix)))
-            {
-                break;
+            let desired = desired_rx.borrow_and_update().clone();
+            if initial_projection_is_visible(session, desired.as_ref()) {
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                changed = desired_rx.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
         }
     })
     .await
-    .is_ok()
+    .unwrap_or(false)
+}
+
+fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabilities) -> bool {
+    if desired.revision.is_empty() {
+        return false;
+    }
+
+    let loaded_skills = session.skill_names().into_iter().collect::<BTreeSet<_>>();
+    if !desired
+        .skills
+        .keys()
+        .all(|name| loaded_skills.contains(name))
+    {
+        return false;
+    }
+
+    let tools = session.tool_names();
+    if !desired.mcp.keys().all(|name| {
+        let prefix = format!("mcp__{name}__");
+        tools.iter().any(|tool| tool.starts_with(&prefix))
+    }) {
+        return false;
+    }
+
+    let ready = ready_capability_ids(desired);
+    ready.is_empty()
+        || session.tool_definitions().into_iter().any(|tool| {
+            tool.name == "task"
+                && ready
+                    .iter()
+                    .all(|capability| tool.description.contains(capability))
+        })
 }
 
 /// Start a shared registry watcher without installing A3S Use as a side
