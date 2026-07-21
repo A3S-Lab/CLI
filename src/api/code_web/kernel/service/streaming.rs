@@ -203,6 +203,11 @@ impl KernelService {
             self.maybe_auto_compact(session_id, session, result.last_prompt_tokens, None)
                 .await;
         }
+        if let Err(error) =
+            refresh_evolution_runtime_after_turn(self.state.as_ref(), session.workspace()).await
+        {
+            tracing::warn!(%error, session_id, "could not refresh learned Web session assets after streamed turn");
+        }
         Ok(())
     }
 }

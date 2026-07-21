@@ -3,6 +3,7 @@ mod code_intelligence;
 pub(crate) mod config;
 mod context;
 mod dto;
+mod evolution;
 mod health;
 mod kernel;
 mod knowledge;

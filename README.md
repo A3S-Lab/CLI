@@ -559,6 +559,15 @@ read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
 
+Durable memory extraction may attach a validated, LLM-authored
+`a3s.evolution.signal.v1` description for a reusable preference, Skill, or OKF
+knowledge package. Code never promotes ordinary memory through keyword
+matching. The local `/api/v1/evolution` API lists evidence-backed candidates,
+rescans the durable store, materializes reviewed workspace assets, records
+rejection/reopen decisions, and rolls back immutable versions while preserving
+a recovery copy. Nothing is published automatically. Preference and Skill
+changes rebuild affected sessions before they are reported as active.
+
 Code Web also exposes a VS Code-style package contribution boundary under
 `/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
 digest-verified A3S Use registry. The Marketplace enumerates configured TUF
@@ -1595,6 +1604,7 @@ These commands are available outside the asset-specific flows:
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |
 | `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
+| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence and versions; materialize, reject, reopen, or roll back local assets. |
 | `/ctx <query>` | Search past ctx-indexed sessions. |
 | `/ctx <n>` | Attach a previous search result to the next message. |
 | `/ctx save <n>` | Promote a previous session hit into durable memory. |

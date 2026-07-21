@@ -48,6 +48,9 @@ impl Model for App {
         if let Some(m) = &self.memory {
             return self.overlay_decision_modals(self.render_memory(m));
         }
+        if let Some(panel) = &self.evolution {
+            return self.overlay_decision_modals(self.render_evolution(panel));
+        }
         if let Some(panel) = &self.asset_list {
             return self.overlay_decision_modals(self.render_asset_list(panel));
         }

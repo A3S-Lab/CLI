@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added local Memory Evolution for LLM-authored durable-memory signals. Code
+  accepts only the validated `a3s.evolution.signal.v1` metadata emitted by
+  Core memory extraction; it does not infer reusable preferences, Skills, or
+  OKF packages from keyword overlap. Candidates retain evidence and maturity,
+  materialize as workspace-local versioned assets, preserve recovery copies
+  during rollback, and never publish automatically. `/evolution` provides TUI
+  review, while `/api/v1/evolution` exposes the same scan, review,
+  materialize, reject, reopen, and rollback lifecycle to Code Web. Active
+  preferences and Skills enter both TUI and Web sessions only after the
+  required session refresh completes.
 - Added the Core local workspace credential boundary to every Code TUI
   manifest backend. Built-in reads, range reads, writes, edits, patches, and
   grep now enforce the same sensitive-file and source-hardlink rules as
