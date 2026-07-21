@@ -37,6 +37,7 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_JSON_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_ACTIVITY_HTML_BYTES: u64 = 2 * 1024 * 1024;
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 5;
 const COMMAND_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -171,6 +172,8 @@ struct CapabilityBinding {
     mcp: Option<ProjectedMcpSurface>,
     #[serde(default)]
     skills: Vec<ProjectedSkillSurface>,
+    #[serde(default)]
+    activity_bar: Vec<ProjectedActivityBarContribution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +225,27 @@ struct ProjectedSkillSurface {
     sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedManagedAsset {
+    path: PathBuf,
+    sha256: String,
+    media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedActivityBarContribution {
+    id: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    icon: String,
+    entry: ProjectedManagedAsset,
+    skill: String,
+    order: i32,
+}
+
 #[derive(Debug, Deserialize)]
 struct SnapshotData {
     registry: RegistrySnapshot,
@@ -250,12 +274,58 @@ struct DesiredSkill {
     skill: Arc<Skill>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityCatalogItem {
+    pub(crate) key: String,
+    pub(crate) package_id: String,
+    pub(crate) route: String,
+    pub(crate) version: String,
+    pub(crate) enabled: bool,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) icon: String,
+    pub(crate) skill: String,
+    pub(crate) order: i32,
+    pub(crate) sha256: String,
+    pub(crate) media_type: String,
+}
+
+#[derive(Clone)]
+struct DesiredActivity {
+    catalog: UseActivityCatalogItem,
+    html: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityCatalog {
+    pub(crate) schema_version: u32,
+    pub(crate) generation: u64,
+    pub(crate) revision: String,
+    pub(crate) items: Vec<UseActivityCatalogItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityContent {
+    pub(crate) key: String,
+    pub(crate) package_id: String,
+    pub(crate) skill: String,
+    pub(crate) registry_revision: String,
+    pub(crate) sha256: String,
+    pub(crate) media_type: String,
+    pub(crate) html: String,
+}
+
 #[derive(Clone, Default)]
 struct DesiredCapabilities {
     generation: u64,
     revision: String,
     mcp: BTreeMap<String, DesiredMcp>,
     skills: BTreeMap<String, DesiredSkill>,
+    activities: BTreeMap<String, DesiredActivity>,
     warnings: Vec<String>,
 }
 
@@ -358,11 +428,7 @@ impl UseRegistryClient {
             revision: snapshot.revision.clone(),
             ..DesiredCapabilities::default()
         };
-        for binding in snapshot
-            .capabilities
-            .iter()
-            .filter(|binding| binding.enabled)
-        {
+        for binding in &snapshot.capabilities {
             self.add_projected_capabilities(&mut desired, binding)
                 .await?;
         }
@@ -385,33 +451,36 @@ impl UseRegistryClient {
         desired: &mut DesiredCapabilities,
         binding: &CapabilityBinding,
     ) -> anyhow::Result<()> {
-        if let Some(mcp) = &binding.mcp {
-            match mcp.transport {
-                ProjectedMcpTransport::Stdio => {
-                    let server_name = format!("use_{}", binding.route);
-                    let fingerprint = mcp_fingerprint(binding, mcp)?;
-                    let replaced = desired.mcp.insert(
-                        server_name.clone(),
-                        DesiredMcp {
-                            server_name: server_name.clone(),
-                            capability_id: binding.id.clone(),
-                            target: mcp.target.clone(),
-                            fingerprint,
-                        },
-                    );
-                    if replaced.is_some() {
-                        bail!("duplicate A3S Use MCP server name '{server_name}'");
+        if binding.enabled {
+            if let Some(mcp) = &binding.mcp {
+                match mcp.transport {
+                    ProjectedMcpTransport::Stdio => {
+                        let server_name = format!("use_{}", binding.route);
+                        let fingerprint = mcp_fingerprint(binding, mcp)?;
+                        let replaced = desired.mcp.insert(
+                            server_name.clone(),
+                            DesiredMcp {
+                                server_name: server_name.clone(),
+                                capability_id: binding.id.clone(),
+                                target: mcp.target.clone(),
+                                fingerprint,
+                            },
+                        );
+                        if replaced.is_some() {
+                            bail!("duplicate A3S Use MCP server name '{server_name}'");
+                        }
                     }
-                }
-                ProjectedMcpTransport::StreamableHttp => {
-                    desired.warnings.push(format!(
+                    ProjectedMcpTransport::StreamableHttp => {
+                        desired.warnings.push(format!(
                         "A3S Use capability '{}' declares streamable-http MCP without an attachable endpoint; its MCP surface was skipped",
                         binding.id
                     ));
+                    }
                 }
             }
         }
 
+        let mut binding_skill_names = BTreeSet::new();
         for skill_surface in &binding.skills {
             let expected_sha256 =
                 (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
@@ -419,6 +488,10 @@ impl UseRegistryClient {
                 load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256)
                     .await?;
             let name = skill.name.clone();
+            binding_skill_names.insert(name.clone());
+            if !binding.enabled {
+                continue;
+            }
             let fingerprint = skill_fingerprint(binding, skill_surface)?;
             let candidate = DesiredSkill {
                 package_id: binding.id.clone(),
@@ -432,6 +505,51 @@ impl UseRegistryClient {
                     binding.id,
                     name
                 );
+            }
+        }
+
+        for activity in &binding.activity_bar {
+            if !binding_skill_names.contains(&activity.skill) {
+                bail!(
+                    "A3S Use Activity Bar contribution '{}:{}' references missing same-package Skill '{}'",
+                    binding.route,
+                    activity.id,
+                    activity.skill
+                );
+            }
+            let html = validation::load_managed_activity(
+                &binding.package_root,
+                &activity.entry.path,
+                &activity.entry.sha256,
+                &activity.entry.media_type,
+                MAX_ACTIVITY_HTML_BYTES,
+            )
+            .await?;
+            let key = format!("{}:{}", binding.route, activity.id);
+            let desired_activity = DesiredActivity {
+                catalog: UseActivityCatalogItem {
+                    key: key.clone(),
+                    package_id: binding.id.clone(),
+                    route: binding.route.clone(),
+                    version: binding.version.clone(),
+                    enabled: binding.enabled,
+                    id: activity.id.clone(),
+                    title: activity.title.clone(),
+                    description: activity.description.clone(),
+                    icon: activity.icon.clone(),
+                    skill: activity.skill.clone(),
+                    order: activity.order,
+                    sha256: activity.entry.sha256.clone(),
+                    media_type: activity.entry.media_type.clone(),
+                },
+                html,
+            };
+            if desired
+                .activities
+                .insert(key.clone(), desired_activity)
+                .is_some()
+            {
+                bail!("duplicate A3S Use Activity Bar key '{key}'");
             }
         }
         Ok(())
@@ -1045,6 +1163,42 @@ pub(crate) struct UseRegistryHandle {
 }
 
 impl UseRegistryHandle {
+    /// Return the immutable Activity Bar catalog already verified against the
+    /// current A3S Use registry revision. Disabled contributions remain listed
+    /// for management UI but cannot be opened through `activity_content`.
+    pub(crate) fn activity_catalog(&self) -> UseActivityCatalog {
+        let desired = self.inner.desired_tx.borrow().clone();
+        UseActivityCatalog {
+            schema_version: SCHEMA_VERSION,
+            generation: desired.generation,
+            revision: desired.revision.clone(),
+            items: desired
+                .activities
+                .values()
+                .map(|activity| activity.catalog.clone())
+                .collect(),
+        }
+    }
+
+    /// Resolve one enabled, digest-verified Activity document by its stable
+    /// route-qualified key.
+    pub(crate) fn activity_content(&self, key: &str) -> Option<UseActivityContent> {
+        let desired = self.inner.desired_tx.borrow().clone();
+        let activity = desired.activities.get(key)?;
+        if !activity.catalog.enabled {
+            return None;
+        }
+        Some(UseActivityContent {
+            key: activity.catalog.key.clone(),
+            package_id: activity.catalog.package_id.clone(),
+            skill: activity.catalog.skill.clone(),
+            registry_revision: desired.revision.clone(),
+            sha256: activity.catalog.sha256.clone(),
+            media_type: activity.catalog.media_type.clone(),
+            html: activity.html.to_string(),
+        })
+    }
+
     /// Build a live, read-only diagnostic for the `/use` TUI command.
     pub(crate) async fn status_text(
         &self,
@@ -1542,6 +1696,7 @@ fn worker_capabilities_for_applied(
             .filter(|(name, skill)| applied.skills.get(*name) == Some(&skill.fingerprint))
             .map(|(name, skill)| (name.clone(), skill.clone()))
             .collect(),
+        activities: BTreeMap::new(),
         warnings: desired.warnings.clone(),
     }
 }

@@ -36,6 +36,16 @@ fn fixture_skill_digest() -> String {
     format!("{:x}", Sha256::digest(fixture_skill().as_bytes()))
 }
 
+fn fixture_activity() -> &'static str {
+    "<!doctype html><title>Reports</title><main>Fixture reports</main>"
+}
+
+fn fixture_activity_digest() -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(fixture_activity().as_bytes()))
+}
+
 #[derive(Clone, Default)]
 struct UseCallingLlm {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -314,6 +324,8 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         fixture_skill(),
     )
     .unwrap();
+    std::fs::create_dir_all(package.join("web")).unwrap();
+    std::fs::write(package.join("web/activity.html"), fixture_activity()).unwrap();
 
     let binding = serde_json::json!({
         "id": "use/acme/report",
@@ -326,6 +338,19 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         "skills": [{
             "path": package.join("skills/fixture-report/SKILL.md"),
             "sha256": fixture_skill_digest()
+        }],
+        "activityBar": [{
+            "id": "reports",
+            "title": "Reports",
+            "description": "Build fixture reports",
+            "icon": "file-chart",
+            "entry": {
+                "path": package.join("web/activity.html"),
+                "sha256": fixture_activity_digest(),
+                "mediaType": "text/html"
+            },
+            "skill": "fixture-report",
+            "order": 110
         }]
     });
     let snapshot = serde_json::json!({
@@ -359,6 +384,10 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
         desired.skills["fixture-report"].skill.description,
         "Build fixture reports"
     );
+    let activity = &desired.activities["report:reports"];
+    assert_eq!(activity.catalog.package_id, "use/acme/report");
+    assert_eq!(activity.catalog.skill, "fixture-report");
+    assert_eq!(&*activity.html, fixture_activity());
 }
 
 #[cfg(unix)]
@@ -487,6 +516,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
             path: skill_path,
             sha256: digest,
         }],
+        activity_bar: Vec::new(),
     };
     let client = UseRegistryClient::for_test(
         temp.path().join("unused-a3s-use"),
@@ -528,6 +558,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
             transport: ProjectedMcpTransport::Stdio,
         }),
         skills: Vec::new(),
+        activity_bar: Vec::new(),
     };
     let office_compat = CapabilityBinding {
         id: "use/office-compat".to_string(),
@@ -540,6 +571,7 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         surfaces: vec!["mcp".to_string()],
         mcp: None,
         skills: Vec::new(),
+        activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -625,6 +657,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
             transport: ProjectedMcpTransport::Stdio,
         }),
         skills: Vec::new(),
+        activity_bar: Vec::new(),
     };
     let snapshot = RegistrySnapshot {
         schema_version: SCHEMA_VERSION,
@@ -1684,6 +1717,7 @@ async fn partial_reconciliation_never_advances_the_generation() {
                 skill,
             },
         )]),
+        activities: BTreeMap::new(),
         warnings: Vec::new(),
     };
 
@@ -1789,6 +1823,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(mcp.clone()),
         skills: vec![skill.clone()],
+        activity_bar: Vec::new(),
     };
 
     let mcp_before = mcp_fingerprint(&binding, &mcp).unwrap();

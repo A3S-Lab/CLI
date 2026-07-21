@@ -169,6 +169,15 @@ impl CodeWebState {
             .unwrap_or_else(|poison| poison.into_inner()) = Some(registry);
     }
 
+    pub(in crate::api::code_web) fn use_registry(
+        &self,
+    ) -> Option<crate::use_registry::UseRegistryHandle> {
+        self.use_registry
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
     pub(in crate::api::code_web) fn attach_use_session(&self, session: Arc<AgentSession>) {
         let registry = self
             .use_registry

@@ -92,6 +92,55 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                 );
             }
         }
+        if !binding.activity_bar.is_empty() {
+            if binding.skills.is_empty() {
+                bail!(
+                    "A3S Use capability '{}' projects Activity Bar entries without a Skill",
+                    binding.id
+                );
+            }
+            if binding.package_root.as_os_str().is_empty() || !binding.package_root.is_absolute() {
+                bail!(
+                    "A3S Use capability '{}' has Activity Bar entries without an absolute package root",
+                    binding.id
+                );
+            }
+        }
+        let mut activity_ids = std::collections::BTreeSet::new();
+        for activity in &binding.activity_bar {
+            if !activity_ids.insert(&activity.id) {
+                bail!(
+                    "A3S Use capability '{}' projects duplicate Activity Bar ID '{}'",
+                    binding.id,
+                    activity.id
+                );
+            }
+            if !valid_segment(&activity.id)
+                || !valid_segment(&activity.icon)
+                || !valid_segment(&activity.skill)
+            {
+                bail!(
+                    "A3S Use capability '{}' projects invalid Activity Bar identifiers",
+                    binding.id
+                );
+            }
+            let title_chars = activity.title.trim().chars().count();
+            if title_chars == 0 || title_chars > 64 || activity.description.chars().count() > 240 {
+                bail!(
+                    "A3S Use capability '{}' projects invalid Activity Bar text",
+                    binding.id
+                );
+            }
+            if !activity.entry.path.is_absolute()
+                || activity.entry.media_type != "text/html"
+                || !is_lower_sha256(&activity.entry.sha256)
+            {
+                bail!(
+                    "A3S Use capability '{}' projects an invalid Activity Bar asset",
+                    binding.id
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -146,6 +195,79 @@ pub(super) async fn load_managed_skill(
         .map(Arc::new)
 }
 
+pub(super) async fn load_managed_activity(
+    package_root: &Path,
+    entry_path: &Path,
+    expected_sha256: &str,
+    media_type: &str,
+    max_bytes: u64,
+) -> anyhow::Result<Arc<str>> {
+    if media_type != "text/html" {
+        bail!("A3S Use Activity Bar assets must use text/html");
+    }
+    if !is_lower_sha256(expected_sha256) {
+        bail!("A3S Use Activity Bar asset has an invalid SHA-256 digest");
+    }
+    if !package_root.is_absolute() || !entry_path.is_absolute() {
+        bail!("A3S Use Activity Bar paths and package roots must be absolute");
+    }
+    let root = tokio::fs::canonicalize(package_root)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to resolve Activity Bar package root {}",
+                package_root.display()
+            )
+        })?;
+    let metadata = tokio::fs::symlink_metadata(entry_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to inspect A3S Use Activity Bar asset {}",
+                entry_path.display()
+            )
+        })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        bail!(
+            "A3S Use Activity Bar asset '{}' is not a regular package file",
+            entry_path.display()
+        );
+    }
+    if metadata.len() == 0 || metadata.len() > max_bytes {
+        bail!(
+            "A3S Use Activity Bar asset '{}' exceeds the supported size",
+            entry_path.display()
+        );
+    }
+    let canonical = tokio::fs::canonicalize(entry_path).await.with_context(|| {
+        format!(
+            "failed to resolve A3S Use Activity Bar asset {}",
+            entry_path.display()
+        )
+    })?;
+    if !canonical.starts_with(&root) {
+        bail!(
+            "A3S Use Activity Bar asset '{}' escapes its managed package",
+            entry_path.display()
+        );
+    }
+    let bytes = tokio::fs::read(&canonical).await.with_context(|| {
+        format!(
+            "failed to read A3S Use Activity Bar asset {}",
+            canonical.display()
+        )
+    })?;
+    let actual_sha256 = format!("{:x}", Sha256::digest(&bytes));
+    if actual_sha256 != expected_sha256 {
+        bail!(
+            "A3S Use Activity Bar asset '{}' digest does not match the capability registry",
+            canonical.display()
+        );
+    }
+    let html = String::from_utf8(bytes).context("A3S Use Activity Bar asset must be UTF-8")?;
+    Ok(Arc::from(html))
+}
+
 fn parse_skill_bytes(path: &Path, bytes: Vec<u8>) -> anyhow::Result<Skill> {
     let content = String::from_utf8(bytes).context("A3S Use Skill must be UTF-8")?;
     let mut skill = Skill::parse(&content).context("failed to parse skill file")?;
@@ -162,6 +284,14 @@ fn is_lower_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn valid_segment(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some(first) if first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 pub(super) fn concise_stderr_suffix(stderr: &str) -> String {
