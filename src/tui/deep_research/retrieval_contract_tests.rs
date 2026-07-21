@@ -42,10 +42,8 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
         assert_eq!(contract["cardinality"][field], 1, "{field}");
     }
     assert_eq!(contract["planner"]["agent"], "research-planner");
-    assert_eq!(contract["planner"]["max_steps"], 6);
-    assert_eq!(contract["planner"]["outline_timeout_ms"], 240_000);
-    assert_eq!(contract["planner"]["track_timeout_ms"], 300_000);
-    assert_eq!(contract["planner"]["retrieval_timeout_ms"], 240_000);
+    assert_eq!(contract["planner"]["max_steps"], 1);
+    assert_eq!(contract["planner"]["timeout_ms"], 90_000);
     assert_eq!(contract["hard_caps"]["max_searches"], 4);
     assert_eq!(contract["hard_caps"]["max_fetches"], 8);
     assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 2);
@@ -67,10 +65,6 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
         "freshness_required",
         "workspace_evidence_required",
         "tracks",
-        "search_queries",
-        "seed_urls",
-        "budget",
-        "stop_conditions",
     ];
     let actual = properties
         .as_object()
@@ -79,66 +73,29 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(actual, expected.into_iter().collect());
-    assert_eq!(
-        properties["budget"]["properties"]
-            .as_object()
-            .expect("budget properties")
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        [
-            "direct_fetches",
-            "direct_searches",
-            "retrieval_timeout_secs"
-        ]
-        .into_iter()
-        .collect()
-    );
+    assert!(properties.get("budget").is_none());
+    assert!(properties.get("search_queries").is_none());
+    assert!(properties.get("stop_conditions").is_none());
 }
 
 #[test]
-fn planner_prompt_is_language_agnostic_and_provider_queries_are_authoritative() {
+fn outline_prompt_is_language_agnostic_and_provider_query_is_host_owned() {
     let args = super::deep_research_workflow_args_with_scope(
         "¿Qué demuestra la evidencia?",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
     );
-    let outline_prompt = args["input"]["loop_contract"]["planner"]["outline_prompt"]
+    let outline_prompt = args["input"]["loop_contract"]["planner"]["prompt"]
         .as_str()
         .expect("outline planner prompt");
-    let track_prompt = args["input"]["loop_contract"]["planner"]["track_prompt"]
-        .as_str()
-        .expect("track planner prompt");
-    let retrieval_prompt = args["input"]["loop_contract"]["planner"]["retrieval_prompt"]
-        .as_str()
-        .expect("retrieval planner prompt");
     assert!(outline_prompt.chars().count() < 3_000);
-    assert!(track_prompt.chars().count() < 3_000);
-    assert!(retrieval_prompt.chars().count() < 3_000);
-    let prompt = format!("{outline_prompt}\n{track_prompt}\n{retrieval_prompt}");
 
-    assert!(prompt.contains("Do not route by keywords"));
-    assert!(prompt.contains("Use the query language"));
-    assert!(prompt.contains("sent to search providers unchanged"));
-    assert!(prompt.contains("one material track for each coherent evidence family"));
-    assert!(prompt.contains("directly resolvable from one fetched source"));
-    assert!(prompt.contains("name only one independently published target"));
-    assert!(prompt.contains("never computed intervals, frequency, totals, response speed"));
-    assert!(prompt.contains("question i maps to criterion i"));
-    assert!(prompt.contains("required eight direct_fetches slots"));
-    assert!(prompt.contains("source counts"));
-    assert!(prompt.contains("concise provider-friendly search_queries"));
-    assert!(prompt.contains("absence can be disclosed"));
-    assert!(prompt.contains("typed-coverage supplemental pass"));
-    assert!(prompt.contains("does not rewrite or generate provider queries"));
-    assert!(prompt.contains("every material evidence target before dedicating a query"));
-    assert!(prompt.contains("Never combine an HTTP-library documentation target"));
-    assert!(prompt.contains("free provider-query slots for other material criteria"));
-    assert!(prompt.contains("do not seed a bare homepage"));
+    assert!(outline_prompt.contains("Do not route by keywords"));
+    assert!(outline_prompt.contains("Use the query language"));
+    assert!(outline_prompt.contains("original provider query"));
+    assert!(outline_prompt.contains("one material track for each coherent evidence family"));
+    assert!(outline_prompt.contains("absence can be disclosed"));
     assert!(outline_prompt.contains("Do not return focus, questions"));
-    assert!(outline_prompt.contains("supplies universal stop conditions"));
-    assert!(track_prompt.contains("closed track target appended by the Host"));
-    assert!(track_prompt.contains("the track id"));
-    assert!(retrieval_prompt.contains("closed semantic contract appended by the Host"));
+    assert!(outline_prompt.contains("universal stop conditions"));
     for obsolete in [
         "research_method",
         "execution_route",
@@ -147,7 +104,7 @@ fn planner_prompt_is_language_agnostic_and_provider_queries_are_authoritative() 
         "maker",
     ] {
         assert!(
-            !prompt.contains(obsolete),
+            !outline_prompt.contains(obsolete),
             "obsolete planner field: {obsolete}"
         );
     }
@@ -290,6 +247,7 @@ fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
     let loop_source = include_str!("workflow/retrieval_loop.js");
     let local = include_str!("workflow/retrieval_local.js");
     let execution = include_str!("workflow/retrieval_execution.js");
+    let dispatch = include_str!("workflow/retrieval_dispatch.js");
 
     assert!(foundation.lines().count() < 1_000);
     assert!(web.lines().count() < 1_000);
@@ -297,7 +255,8 @@ fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
     assert!(loop_source.lines().count() < 1_000);
     assert!(local.lines().count() < 1_000);
     assert!(execution.lines().count() < 1_000);
-    let combined = format!("{foundation}{web}{selection}{loop_source}{local}{execution}");
+    assert!(dispatch.lines().count() < 1_000);
+    let combined = format!("{foundation}{web}{selection}{loop_source}{local}{execution}{dispatch}");
     assert!(combined.starts_with("async function run(ctx, inputs)"));
     assert!(combined.trim_end().ends_with('}'));
     assert_eq!(

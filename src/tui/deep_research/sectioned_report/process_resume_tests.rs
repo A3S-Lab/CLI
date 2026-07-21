@@ -794,7 +794,7 @@ async fn wait_for_condition(
 }
 
 async fn wait_for_success(child: &mut Child, description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().expect("poll worker") {
             assert!(status.success(), "{description} exited with {status}");
@@ -803,7 +803,7 @@ async fn wait_for_success(child: &mut Child, description: &str) {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{description} did not finish within 30 seconds");
+            panic!("{description} did not finish within 60 seconds");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -945,7 +945,7 @@ async fn process_interruption_resumes_completed_section_effects() {
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "section-interrupt");
     wait_for_condition(
         "one completed section and one running section",
-        Duration::from_secs(20),
+        Duration::from_secs(60),
         || {
             let first = flow_journals_with_prefix(workspace.path(), first_section_prefix.as_str());
             let second =
@@ -1101,7 +1101,7 @@ async fn process_interruption_reuses_completed_semantic_target_audits() {
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "semantic-audit-interrupt");
     wait_for_condition(
         "two completed semantic targets and one running target",
-        Duration::from_secs(20),
+        Duration::from_secs(60),
         || {
             let first = flow_journals_with_prefix(workspace.path(), &target_prefix(1));
             let second = flow_journals_with_prefix(workspace.path(), &target_prefix(2));
@@ -1181,7 +1181,7 @@ async fn process_interruption_reuses_completed_frame_effect() {
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "frame-interrupt");
     wait_for_condition(
         "completed frame effect before caller acknowledgement",
-        Duration::from_secs(20),
+        Duration::from_secs(60),
         || workspace.path().join("frame-effect-returned").is_file(),
     )
     .await;

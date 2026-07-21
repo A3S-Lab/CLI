@@ -164,9 +164,11 @@ fn automatic_loop_contract_is_unlimited_and_coverage_driven() {
 
     assert!(planner["output_schema"].is_object());
     assert_eq!(
-        planner["output_schema"]["properties"]["budget"]["properties"]["direct_fetches"]["enum"],
-        serde_json::json!([8])
+        planner["output_schema"]["properties"]["tracks"]["maxItems"],
+        4
     );
+    assert_eq!(planner["max_steps"], 1);
+    assert_eq!(planner["timeout_ms"], 90_000);
     assert_eq!(contract["quota"]["mode"], "unlimited");
     assert_eq!(contract["execution"]["mode"], "coverage_driven");
     assert_eq!(
@@ -243,18 +245,18 @@ fn one_optional_outline_becomes_a_complete_host_owned_plan() {
 
 #[test]
 fn local_only_loop_contract_reserves_no_web_fetches() {
-    let contract = crate::tui::loop_engineering::deep_research_loop_contract(
+    let mut args = automatic_loop_workflow_args("inspect this workspace");
+    args["input"]["evidence_scope"] = serde_json::json!("local_only");
+    args["input"]["loop_contract"] = crate::tui::loop_engineering::deep_research_loop_contract(
         "inspect this workspace",
         "2026-07-19",
         "offline/local-only evidence",
         4,
     );
+    let fallback = host_fallback_plan(&args).expect("local-only host fallback plan");
 
-    assert_eq!(
-        contract["planner"]["output_schema"]["properties"]["budget"]["properties"]
-            ["direct_fetches"]["enum"],
-        serde_json::json!([0])
-    );
+    assert_eq!(fallback.value["budget"]["direct_fetches"], 0);
+    assert_eq!(fallback.value["budget"]["direct_searches"], 0);
 }
 
 #[test]

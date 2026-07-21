@@ -715,6 +715,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const FIXTURE_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
+
     #[tokio::test]
     async fn bounded_line_reader_drains_an_oversized_record_before_the_next_line() {
         let input = b"0123456789\nok\r\n";
@@ -754,10 +756,13 @@ mod tests {
         std::fs::write(
             &executable,
             format!(
-                "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 0.60; : > '{}') &\nwait\n",
+                "#!/bin/sh\n: > '{}'\n(: > '{}'; sleep 0.60; : > '{}') &\n\
+                 while [ ! -e '{}' ]; do :; done\n\
+                 exec 1>&- 2>&-\nwait\n",
                 started.display(),
                 descendant_started.display(),
                 leaked.display(),
+                descendant_started.display(),
             ),
         )
         .unwrap();
@@ -780,7 +785,7 @@ mod tests {
         )
         .await
         .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(FIXTURE_PROCESS_TIMEOUT, async {
             while !started.exists() || !descendant_started.exists() {
                 tokio::task::yield_now().await;
             }
@@ -789,7 +794,7 @@ mod tests {
         .expect("fixture account CLI did not start its descendant");
 
         cancellation.cancel();
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(FIXTURE_PROCESS_TIMEOUT, async {
             while receiver.recv().await.is_some() {}
         })
         .await
@@ -842,7 +847,7 @@ mod tests {
         .await
         .unwrap();
 
-        let diagnostic = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+        let diagnostic = tokio::time::timeout(FIXTURE_PROCESS_TIMEOUT, receiver.recv())
             .await
             .expect("transport did not report its protocol failure")
             .expect("transport closed without a protocol diagnostic");

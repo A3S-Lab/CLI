@@ -226,27 +226,21 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             "agent",
             "description",
             "max_steps",
-            "outline_timeout_ms",
-            "track_timeout_ms",
-            "retrieval_timeout_ms",
-            "outline_prompt",
-            "track_prompt",
-            "retrieval_prompt",
+            "timeout_ms",
+            "prompt",
             "output_schema",
         ],
         "Loop Engineering planner",
     )?;
-    if planner.get("agent").and_then(Value::as_str) != Some("research-planner") {
+    if planner.get("agent").and_then(Value::as_str) != Some("research-planner")
+        || planner.get("max_steps").and_then(Value::as_u64) != Some(1)
+    {
         return Err(
-            "DeepResearch Loop Engineering planner has an unsupported agent identity".to_string(),
+            "DeepResearch Loop Engineering planner must contain exactly one optional outline effect"
+                .to_string(),
         );
     }
-    for field in [
-        "description",
-        "outline_prompt",
-        "track_prompt",
-        "retrieval_prompt",
-    ] {
+    for field in ["description", "prompt"] {
         if planner
             .get(field)
             .and_then(Value::as_str)
@@ -257,13 +251,13 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             ));
         }
     }
-    for field in [
-        "outline_timeout_ms",
-        "track_timeout_ms",
-        "retrieval_timeout_ms",
-    ] {
-        required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")?;
-    }
+    required_integer_in_range(
+        planner,
+        "timeout_ms",
+        1_000,
+        600_000,
+        "Loop Engineering planner",
+    )?;
     if !planner.get("output_schema").is_some_and(Value::is_object) {
         return Err(
             "DeepResearch Loop Engineering planner omitted its object output schema".to_string(),
@@ -277,14 +271,6 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         .ok_or_else(|| {
             "DeepResearch planner output schema omitted a bounded track maximum".to_string()
         })?;
-    let planner_max_steps =
-        required_integer_in_range(planner, "max_steps", 3, 6, "Loop Engineering planner")?;
-    if planner_max_steps != schema_max_tracks + 2 {
-        return Err(
-            "DeepResearch Loop Engineering planner must reserve one outline, one effect per possible track, and one retrieval effect".to_string(),
-        );
-    }
-
     let hard_caps = contract
         .get("hard_caps")
         .and_then(Value::as_object)
@@ -345,60 +331,6 @@ fn required_planner_timeout(planner: &Map<String, Value>, field: &str) -> Result
     required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")
 }
 
-pub(super) fn planner_fragment_schema(
-    full_schema: &Value,
-    fields: &[&str],
-) -> Result<Value, String> {
-    if fields.is_empty() {
-        return Err("DeepResearch planner fragment requires at least one field".to_string());
-    }
-    let mut schema = full_schema.clone();
-    let object = schema
-        .as_object_mut()
-        .ok_or_else(|| "DeepResearch full planner schema is not an object".to_string())?;
-    let properties = object
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "DeepResearch full planner schema omitted object properties".to_string())?;
-    let missing = fields
-        .iter()
-        .filter(|field| !properties.contains_key(**field))
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!(
-            "DeepResearch planner fragment requested unknown schema fields: {}",
-            missing.join(", ")
-        ));
-    }
-    properties.retain(|field, _| fields.contains(&field.as_str()));
-    object.insert(
-        "required".to_string(),
-        Value::Array(
-            fields
-                .iter()
-                .map(|field| Value::String((*field).to_string()))
-                .collect(),
-        ),
-    );
-    Ok(schema)
-}
-
-pub(super) fn planner_semantic_outline_schema(full_schema: &Value) -> Result<Value, String> {
-    let mut schema = planner_fragment_schema(full_schema, &GENERATED_SEMANTIC_OUTLINE_FIELDS)?;
-    let track_schema = schema
-        .pointer_mut("/properties/tracks/items")
-        .ok_or_else(|| {
-            "DeepResearch full planner schema omitted its track item schema".to_string()
-        })?;
-    retain_object_schema_fields(
-        track_schema,
-        &TRACK_IDENTITY_FIELDS,
-        "planner track identity",
-    )?;
-    Ok(schema)
-}
-
 pub(super) fn close_semantic_outline(mut outline: Value) -> Result<Value, String> {
     let object = outline
         .as_object_mut()
@@ -416,42 +348,6 @@ pub(super) fn close_semantic_outline(mut outline: Value) -> Result<Value, String
         ]),
     );
     Ok(outline)
-}
-
-fn retain_object_schema_fields(
-    schema: &mut Value,
-    fields: &[&str],
-    resource: &str,
-) -> Result<(), String> {
-    let object = schema
-        .as_object_mut()
-        .ok_or_else(|| format!("DeepResearch {resource} schema is not an object"))?;
-    let properties = object
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| format!("DeepResearch {resource} schema omitted object properties"))?;
-    let missing = fields
-        .iter()
-        .filter(|field| !properties.contains_key(**field))
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!(
-            "DeepResearch {resource} schema omitted fields: {}",
-            missing.join(", ")
-        ));
-    }
-    properties.retain(|field, _| fields.contains(&field.as_str()));
-    object.insert(
-        "required".to_string(),
-        Value::Array(
-            fields
-                .iter()
-                .map(|field| Value::String((*field).to_string()))
-                .collect(),
-        ),
-    );
-    Ok(())
 }
 
 fn semantic_outline_track_targets(outline: &Value) -> Result<Vec<Value>, String> {

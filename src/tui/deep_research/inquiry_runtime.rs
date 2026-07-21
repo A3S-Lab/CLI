@@ -111,7 +111,7 @@ pub(super) fn inquiry_projection_from_workflow(
         .map_err(|error| format!("decode DeepResearch inquiry projection: {error}"))?;
     match validated_inquiry_projection(&value)? {
         ValidatedInquiryProjection::LegacyCheckedLoop => Ok(None),
-        ValidatedInquiryProjection::Inquiry { events, state } => Ok(Some((events, state))),
+        ValidatedInquiryProjection::Inquiry { events, state } => Ok(Some((events, *state))),
     }
 }
 

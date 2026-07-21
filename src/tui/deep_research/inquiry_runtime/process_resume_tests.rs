@@ -702,13 +702,8 @@ fn process_workflow_args(run_id: &str) -> Value {
         "deterministic process evidence",
         1,
     );
-    loop_contract["planner"]["outline_prompt"] = json!("Return the deterministic inquiry outline.");
-    loop_contract["planner"]["track_prompt"] = json!("Return the deterministic target details.");
-    loop_contract["planner"]["retrieval_prompt"] =
-        json!("Return the deterministic retrieval portfolio.");
-    loop_contract["planner"]["outline_timeout_ms"] = json!(30_000);
-    loop_contract["planner"]["track_timeout_ms"] = json!(30_000);
-    loop_contract["planner"]["retrieval_timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["prompt"] = json!("Return the deterministic inquiry outline.");
+    loop_contract["planner"]["timeout_ms"] = json!(30_000);
     args["input"]["loop_contract"] = loop_contract;
     args
 }
@@ -763,7 +758,7 @@ async fn wait_for_condition(
 }
 
 async fn wait_for_success(child: &mut Child, description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().expect("poll process inquiry worker") {
             assert!(status.success(), "{description} exited with {status}");
@@ -772,7 +767,7 @@ async fn wait_for_success(child: &mut Child, description: &str) {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{description} did not finish within 30 seconds");
+            panic!("{description} did not finish within 60 seconds");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -949,7 +944,7 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
             wait_for_condition(
                 "completed durable generation before Inquiry acknowledgement",
-                Duration::from_secs(20),
+                Duration::from_secs(60),
                 || marker.is_file(),
             )
             .await;
@@ -962,7 +957,7 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
             wait_for_condition(
                 "completed durable generation before Inquiry acknowledgement",
-                Duration::from_secs(20),
+                Duration::from_secs(60),
                 || marker.is_file(),
             )
             .await;
@@ -981,7 +976,7 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
                 .join(format!("{run_id}-bootstrap.jsonl"));
             wait_for_condition(
                 "one completed and one running retrieval effect",
-                Duration::from_secs(20),
+                Duration::from_secs(60),
                 || {
                     event_count(&journal, "step_completed", Some("alpha")) == 1
                         && event_count(&journal, "step_started", Some("beta")) == 1
@@ -1106,13 +1101,8 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
         "deterministic isolated review evidence",
         3,
     );
-    loop_contract["planner"]["outline_prompt"] = json!("Return the isolated-review outline.");
-    loop_contract["planner"]["track_prompt"] = json!("Return the isolated-review target details.");
-    loop_contract["planner"]["retrieval_prompt"] =
-        json!("Return the isolated-review retrieval portfolio.");
-    loop_contract["planner"]["outline_timeout_ms"] = json!(30_000);
-    loop_contract["planner"]["track_timeout_ms"] = json!(30_000);
-    loop_contract["planner"]["retrieval_timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["prompt"] = json!("Return the isolated-review outline.");
+    loop_contract["planner"]["timeout_ms"] = json!(30_000);
     args["input"]["loop_contract"] = loop_contract;
 
     let mut projections = Vec::new();

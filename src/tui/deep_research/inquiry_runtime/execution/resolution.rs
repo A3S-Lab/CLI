@@ -112,6 +112,7 @@ fn exhaust_if_material_evidence_floor_missing(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn resolve_queued_questions(
     session: &AgentSession,
     progress_tx: &mpsc::Sender<AgentEvent>,

@@ -23,6 +23,7 @@ pub(super) fn validate_section_candidate(
     audit_section_generation(section, evidence)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn revise_invalid_sections_once(
     session: &AgentSession,
     query: &str,
@@ -71,6 +72,7 @@ pub(super) fn ensure_sections_valid_after_revision(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn revise_targets(
     session: &AgentSession,
     query: &str,

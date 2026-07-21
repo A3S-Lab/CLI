@@ -72,6 +72,7 @@ impl App {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_stream_inner_with_runtime_and_images(
         &mut self,
         prompt: String,

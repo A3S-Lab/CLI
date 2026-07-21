@@ -22,6 +22,7 @@ struct ReportPresentationFrame {
     presentation: ReportPresentation,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn generate_frame(
     session: &AgentSession,
     query: &str,
@@ -693,10 +694,10 @@ fn insert_disclosure(entries: &mut BTreeSet<(String, String)>, label: &str, deta
     ));
 }
 
-fn assessment_status_disclosure<'a>(
+fn assessment_status_disclosure(
     status: ContractAssessmentStatus,
-    labels: &'a ReportReaderLabels,
-) -> &'a str {
+    labels: &ReportReaderLabels,
+) -> &str {
     match status {
         ContractAssessmentStatus::Satisfied => &labels.established_boundary,
         ContractAssessmentStatus::Bounded => &labels.qualified_boundary,

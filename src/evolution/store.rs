@@ -64,6 +64,7 @@ pub(super) fn mutate_catalog<R>(
         .with_context(|| format!("could not create {}", paths.root.display()))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&paths.lock)
@@ -89,6 +90,7 @@ fn with_locked_catalog<R>(
         .with_context(|| format!("could not create {}", paths.root.display()))?;
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&paths.lock)

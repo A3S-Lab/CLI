@@ -162,6 +162,7 @@ impl TaskPanel {
     fn open_selected(&mut self) -> TaskPanelAction {
         self.selected_task()
             .cloned()
+            .map(Box::new)
             .map_or(TaskPanelAction::None, TaskPanelAction::Open)
     }
 
@@ -271,7 +272,7 @@ enum TaskPanelAction {
     None,
     Refresh,
     Cancel(String),
-    Open(SubagentTaskSnapshot),
+    Open(Box<SubagentTaskSnapshot>),
     Close,
 }
 

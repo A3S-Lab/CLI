@@ -16,6 +16,7 @@ pub(super) fn deep_research_workflow_source() -> &'static str {
             include_str!("workflow/retrieval_loop.js"),
             include_str!("workflow/retrieval_local.js"),
             include_str!("workflow/retrieval_execution.js"),
+            include_str!("workflow/retrieval_dispatch.js"),
         ))
     })
 }

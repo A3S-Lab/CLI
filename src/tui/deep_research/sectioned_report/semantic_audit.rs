@@ -130,6 +130,7 @@ impl SemanticReportReview {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn audit_report_semantics(
     session: &AgentSession,
     query: &str,
