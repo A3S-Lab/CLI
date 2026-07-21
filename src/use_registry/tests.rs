@@ -531,6 +531,7 @@ Call mcp__use_ocr__ocr_doctor before extraction.
     let ocr = desired.mcp.get("use_ocr").unwrap();
     assert_eq!(ocr.capability_id, "use/ocr");
     assert_eq!(ocr.target, "ocr-native");
+    assert_eq!(desired.packages.get("use/ocr"), Some(&true));
     assert_eq!(desired.skills["a3s-use-ocr"].package_id, "use/ocr");
     let worker = use_worker_spec(&desired).into_agent_definition();
     assert!(worker
@@ -1700,6 +1701,7 @@ async fn partial_reconciliation_never_advances_the_generation() {
     let desired = DesiredCapabilities {
         generation: 9,
         revision: "9999999999999999999999999999999999999999999999999999999999999999".to_string(),
+        packages: BTreeMap::new(),
         mcp: BTreeMap::from([(
             "use_broken".to_string(),
             DesiredMcp {

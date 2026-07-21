@@ -182,6 +182,62 @@ fn detached_web_process_serves_health_until_stopped() {
 }
 
 #[test]
+fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
+    let root = temp_directory("web-plugin-api");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S plugin API test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+
+    let activities = http_json(&address, "GET", "/api/v1/plugins/activities", None, "200");
+    assert_eq!(activities["schemaVersion"], 1);
+    assert!(activities["available"].is_boolean());
+    assert!(activities["items"].is_array());
+
+    let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None, "200");
+    assert_eq!(marketplace["schemaVersion"], 1);
+    assert!(marketplace["registries"]
+        .as_array()
+        .is_some_and(|registries| registries
+            .iter()
+            .all(|registry| registry["verified"] == false)));
+    assert_eq!(marketplace["items"], serde_json::json!([]));
+
+    let invalid_key = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/activities/not-a-key",
+        None,
+        "400",
+    );
+    assert!(invalid_key["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Activity Bar contribution key")));
+
+    let invalid_plan = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/operations/plan",
+        Some(r#"{"action":"install","componentId":"science"}"#),
+        "400",
+    );
+    assert!(invalid_plan["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("use/<publisher>/<name>")));
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean plugin API fixture");
+}
+
+#[test]
 fn packaged_web_assets_work_from_an_empty_workspace() {
     let root = temp_directory("packaged-web-assets");
     let workspace = root.join("workspace");

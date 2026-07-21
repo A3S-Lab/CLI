@@ -323,6 +323,7 @@ pub(crate) struct UseActivityContent {
 struct DesiredCapabilities {
     generation: u64,
     revision: String,
+    packages: BTreeMap<String, bool>,
     mcp: BTreeMap<String, DesiredMcp>,
     skills: BTreeMap<String, DesiredSkill>,
     activities: BTreeMap<String, DesiredActivity>,
@@ -451,6 +452,13 @@ impl UseRegistryClient {
         desired: &mut DesiredCapabilities,
         binding: &CapabilityBinding,
     ) -> anyhow::Result<()> {
+        if desired
+            .packages
+            .insert(binding.id.clone(), binding.enabled)
+            .is_some()
+        {
+            bail!("duplicate A3S Use package identity '{}'", binding.id);
+        }
         if binding.enabled {
             if let Some(mcp) = &binding.mcp {
                 match mcp.transport {
@@ -1163,6 +1171,12 @@ pub(crate) struct UseRegistryHandle {
 }
 
 impl UseRegistryHandle {
+    /// Return every package in the verified registry snapshot, including
+    /// packages that do not contribute an Activity Bar view.
+    pub(crate) fn package_statuses(&self) -> BTreeMap<String, bool> {
+        self.inner.desired_tx.borrow().packages.clone()
+    }
+
     /// Return the immutable Activity Bar catalog already verified against the
     /// current A3S Use registry revision. Disabled contributions remain listed
     /// for management UI but cannot be opened through `activity_content`.
@@ -1684,6 +1698,7 @@ fn worker_capabilities_for_applied(
     DesiredCapabilities {
         generation: applied.generation,
         revision: applied.revision.clone(),
+        packages: desired.packages.clone(),
         mcp: desired
             .mcp
             .iter()

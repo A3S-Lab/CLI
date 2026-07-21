@@ -136,16 +136,8 @@ impl PluginsService {
         let installed = self
             .state
             .use_registry()
-            .map(|registry| registry.activity_catalog().items)
-            .unwrap_or_default()
-            .into_iter()
-            .fold(BTreeMap::<String, bool>::new(), |mut packages, activity| {
-                packages
-                    .entry(activity.package_id)
-                    .and_modify(|enabled| *enabled |= activity.enabled)
-                    .or_insert(activity.enabled);
-                packages
-            });
+            .map(|registry| registry.package_statuses())
+            .unwrap_or_default();
 
         let mut registries = Vec::new();
         let mut items = Vec::new();
