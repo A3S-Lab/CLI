@@ -124,24 +124,35 @@ fn deep_research_report_sources_trace_workflow(
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> bool {
-    let anchors = deep_research_workflow_source_anchors(workflow_output, workflow_metadata);
-    if anchors.is_empty() {
-        // A DeepResearch report is only "completed" when it can be traced to
-        // evidence gathered by this run. Failing open here lets a polished
-        // model answer—or an old deterministic-slug report—mask a collection
-        // failure that captured no source at all. Callers will materialize an
-        // explicit recovery report instead.
-        return false;
-    }
-
     let markdown = read_small_utf8_file(&artifacts.markdown);
     let html = read_small_utf8_file(&artifacts.html);
     let (Some(markdown), Some(html)) = (markdown, html) else {
         return false;
     };
+
+    deep_research_report_content_sources_trace_workflow(
+        &markdown,
+        &html,
+        query,
+        workflow_output,
+        workflow_metadata,
+    )
+}
+
+fn deep_research_report_content_sources_trace_workflow(
+    markdown: &str,
+    html: &str,
+    query: &str,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    let anchors = deep_research_workflow_source_anchors(workflow_output, workflow_metadata);
+    if anchors.is_empty() {
+        return false;
+    }
     let observed = anchors.into_iter().collect::<HashSet<_>>();
-    let (cited, has_explicit_source_citation) = markdown_report_source_anchors(&markdown, query);
-    let html_cited = html_report_source_anchors(&html, query);
+    let (cited, has_explicit_source_citation) = markdown_report_source_anchors(markdown, query);
+    let html_cited = html_report_source_anchors(html, query);
     has_explicit_source_citation
         && !html_cited.is_empty()
         && cited.iter().chain(html_cited.iter()).all(|citation| {
@@ -202,7 +213,6 @@ fn html_report_source_anchors(html: &str, query: &str) -> Vec<String> {
     let without_query_heading = remove_matching_html_element(&without_query_title, "h1", query);
     collect_http_source_anchors(&without_query_heading, &mut anchors, &mut seen);
     collect_html_link_anchors(&without_query_heading, &mut anchors, &mut seen);
-    collect_html_code_anchors(&without_query_heading, &mut anchors, &mut seen);
     collect_html_source_section_local_anchors(&without_query_heading, &mut anchors, &mut seen);
     anchors
 }
@@ -474,19 +484,6 @@ fn html_link_targets(html: &str) -> Vec<String> {
         }
     }
     targets
-}
-
-fn collect_html_code_anchors(html: &str, anchors: &mut Vec<String>, seen: &mut HashSet<String>) {
-    let lower = html.to_ascii_lowercase();
-    let mut cursor = 0;
-    while let Some(start) = lower[cursor..].find("<code>") {
-        let value_start = cursor + start + "<code>".len();
-        let Some(end) = lower[value_start..].find("</code>") else {
-            break;
-        };
-        push_canonical_source_anchor(&html[value_start..value_start + end], anchors, seen);
-        cursor = value_start + end + "</code>".len();
-    }
 }
 
 fn collect_html_source_section_local_anchors(

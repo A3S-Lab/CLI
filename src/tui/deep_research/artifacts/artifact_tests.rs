@@ -301,8 +301,14 @@ mod source_anchor_tests {
             "{markdown}"
         );
         assert!(!markdown.contains("Verified finding"), "{markdown}");
-        assert!(!markdown.contains("simulated checker timeout"), "{markdown}");
-        assert!(!markdown.contains("DeepResearch Recovery Report"), "{markdown}");
+        assert!(
+            !markdown.contains("simulated checker timeout"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("DeepResearch Recovery Report"),
+            "{markdown}"
+        );
 
         let _ = std::fs::remove_dir_all(&workspace);
     }
@@ -1010,6 +1016,98 @@ mod artifact_boundary_tests {
         );
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn inline_code_outside_sources_is_not_a_local_source_citation() {
+        let query = "Compare two runtimes";
+        let observed = "https://example.com/runtime-status";
+        let markdown = format!(
+            "# Runtime report\n\n## Findings\n\nThe unavailable candidate `crates.io/crates/missing` is a limitation, and `owner/repository` is a repository slug rather than a citation.\n\n## Sources\n\n- [Runtime status]({observed})\n\n## Limitations\n\nConfidence is limited by the unavailable candidate.\n"
+        );
+        let html = deep_research_completed_report_html(query, &markdown);
+        let citations = html_report_source_anchors(&html, query);
+
+        assert!(citations.contains(&observed.to_string()), "{citations:?}");
+        assert!(!citations.contains(&"crates.io/crates/missing".to_string()));
+        assert!(!citations.contains(&"owner/repository".to_string()));
+    }
+
+    #[test]
+    fn rejected_answer_text_does_not_publish_unvalidated_artifacts() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-prepublish-validation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let query = "prepublish validation";
+        let workflow_output = serde_json::json!({
+            "mode": "direct_web",
+            "checker": { "decision": "finalize" },
+            "research": {
+                "status": "success",
+                "results": [{
+                    "success": true,
+                    "structured": {
+                        "summary": "Observed evidence",
+                        "sources": [{
+                            "title": "Observed source",
+                            "url_or_path": "https://example.com/observed",
+                            "quote_or_fact": "Observed fact",
+                            "reliability": "Primary source"
+                        }],
+                        "key_evidence": ["Observed fact"],
+                        "contradictions": [],
+                        "confidence": "high",
+                        "gaps": []
+                    }
+                }]
+            }
+        })
+        .to_string();
+        let answer = "# Report\n\n## Findings\n\nA substantive but untraceable conclusion is presented here with enough detail for the report quality gate.\n\n## Sources\n\n- https://example.com/unobserved\n\n## Limitations\n\nConfidence is limited because this fixture intentionally cites the wrong source.\n";
+
+        assert!(materialize_deep_research_completed_report_from_answer_text(
+            &workspace,
+            query,
+            answer,
+            &workflow_output,
+            None,
+        )
+        .is_none());
+        let report_dir = workspace
+            .join(".a3s/research")
+            .join(deep_research_report_slug(query));
+        assert!(!report_dir.join("report.md").exists());
+        assert!(!report_dir.join("index.html").exists());
+
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    #[ignore = "requires paths to a captured local run"]
+    fn captured_report_passes_source_trace_after_inline_code_fix() {
+        let markdown = std::fs::read_to_string(std::env::var("A3S_DIAG_REPORT").unwrap()).unwrap();
+        let journal = std::fs::read_to_string(std::env::var("A3S_DIAG_WORKFLOW").unwrap()).unwrap();
+        let workflow_output = journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter_map(|line| line.pointer("/event/output").cloned())
+            .last()
+            .unwrap()
+            .to_string();
+        let query = "截至 2026 年 7 月，比较 Tokio 与 async-std 的维护状态、生态采用和迁移建议，引用官方及独立来源";
+        let html = deep_research_completed_report_html(query, &markdown);
+        assert!(deep_research_report_content_sources_trace_workflow(
+            &markdown,
+            &html,
+            query,
+            &workflow_output,
+            None,
+        ));
     }
 
     #[test]

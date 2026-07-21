@@ -382,17 +382,20 @@ pub(crate) fn materialize_deep_research_completed_report_from_markdown(
     }
 
     let html = deep_research_completed_report_html(query, &markdown);
+    if !deep_research_report_content_sources_trace_workflow(
+        &markdown,
+        &html,
+        query,
+        workflow_output,
+        workflow_metadata,
+    ) {
+        return None;
+    }
     write_research_report_file(&report_dir.join("index.html"), html).ok()?;
 
     let rel_html = format!(".a3s/research/{slug}/index.html");
     let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    deep_research_report_sources_trace_workflow(
-        &artifacts,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .then_some(artifacts)
+    completed_research_report_artifacts(&artifacts).then_some(artifacts)
 }
 
 pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
@@ -404,7 +407,15 @@ pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
 ) -> Option<ResearchReportArtifacts> {
     let markdown = completed_report_markdown_from_answer_text(query, answer_text)?;
     let html = deep_research_completed_report_html(query, &markdown);
-    if !has_research_report_substance(&markdown, &html) {
+    if !has_research_report_substance(&markdown, &html)
+        || !deep_research_report_content_sources_trace_workflow(
+            &markdown,
+            &html,
+            query,
+            workflow_output,
+            workflow_metadata,
+        )
+    {
         return None;
     }
 
@@ -420,13 +431,7 @@ pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
 
     let rel_html = format!(".a3s/research/{slug}/index.html");
     let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    deep_research_report_sources_trace_workflow(
-        &artifacts,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .then_some(artifacts)
+    completed_research_report_artifacts(&artifacts).then_some(artifacts)
 }
 
 pub(crate) fn materialize_deep_research_completed_report_from_workflow_evidence(
@@ -451,11 +456,9 @@ pub(crate) fn materialize_deep_research_completed_report_from_workflow_evidence(
         return None;
     }
 
-    let finalized_checker = workflow
-        .get("checker")
-        .filter(|checker| {
-            checker.get("decision").and_then(serde_json::Value::as_str) == Some("finalize")
-        });
+    let finalized_checker = workflow.get("checker").filter(|checker| {
+        checker.get("decision").and_then(serde_json::Value::as_str) == Some("finalize")
+    });
     let report_title = workflow
         .pointer("/plan/report_title")
         .and_then(serde_json::Value::as_str);

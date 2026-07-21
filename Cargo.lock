@@ -6,7 +6,7 @@ version = 4
 name = "a3s"
 version = "0.9.0"
 dependencies = [
- "a3s-acl 0.2.1",
+ "a3s-acl",
  "a3s-boot",
  "a3s-code-core",
  "a3s-memory",
@@ -41,11 +41,6 @@ name = "a3s-acl"
 version = "0.2.1"
 
 [[package]]
-name = "a3s-acl"
-version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22#6e2a6469edc0f4c61b1e588d0ace873aaf15ce22"
-
-[[package]]
 name = "a3s-boot"
 version = "0.1.1"
 dependencies = [
@@ -74,8 +69,10 @@ dependencies = [
 [[package]]
 name = "a3s-code-core"
 version = "5.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "059e9eefe6f2d0b816b9ec9f906878413a2f30fd1bc90a751c53b77972ff84a7"
 dependencies = [
- "a3s-acl 0.2.1 (git+https://github.com/A3S-Lab/ACL.git?rev=6e2a6469edc0f4c61b1e588d0ace873aaf15ce22)",
+ "a3s-acl",
  "a3s-common",
  "a3s-flow",
  "a3s-lane",
@@ -146,6 +143,8 @@ dependencies = [
 [[package]]
 name = "a3s-flow"
 version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "699f3b680a1d4c5cb08e178ebab3d4b9c37fc3a31b9348ddb980ae9dceb48e10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -160,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-lane"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -196,7 +195,7 @@ dependencies = [
 name = "a3s-search"
 version = "1.4.3"
 dependencies = [
- "a3s-acl 0.2.1",
+ "a3s-acl",
  "a3s-updater 0.2.0",
  "a3s-use-browser",
  "anyhow",
@@ -5617,6 +5616,10 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
+
+[[patch.unused]]
+name = "a3s-code-core"
+version = "5.3.0"
 
 [[patch.unused]]
 name = "a3s-use-browser"

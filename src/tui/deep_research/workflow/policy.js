@@ -58,9 +58,12 @@
       }
       const sections = batchOutputSections(searchBatch && searchBatch.output, searchQueries.length);
       const fallbackSearches = [];
+      let configuredEngineSelection = false;
       for (let index = 0; index < searchQueries.length; index += 1) {
         const searchQuery = searchQueries[index];
         const child = batchChildResult(searchBatch, sections, index);
+        configuredEngineSelection = configuredEngineSelection ||
+          child.metadata.engine_selection_source === "config";
         if (!child.success) {
           fallbackSearches.push({
             index,
@@ -74,7 +77,7 @@
           fallbackSearches.push({
             index,
             query: searchQuery,
-            primary_error: `web_search failed for "${searchQuery}" after all configured engines failed`
+            primary_error: `web_search failed for "${searchQuery}": ${compactText(child.output, 300)}`
           });
           continue;
         }
@@ -100,7 +103,11 @@
         }
         searches.push({ query: searchQuery, results });
       }
-      if (fallbackSearches.length > 0 && directWebEngines.length === 0) {
+      if (
+        fallbackSearches.length > 0 &&
+        directWebEngines.length === 0 &&
+        !configuredEngineSelection
+      ) {
         const fallbackInvocations = fallbackSearches.map((item, index) => ({
           id: `search-fallback-${index + 1}`,
           tool: "web_search",
@@ -109,7 +116,7 @@
             format: "json",
             limit: directWebMaxResults,
             timeout: directWebSearchTimeoutSecs,
-            engines: ["brave"]
+            engines: ["bing_cn", "brave"]
           }
         }));
         let fallbackBatch = null;
@@ -137,7 +144,7 @@
           }
           collectionErrors.push(pending.primary_error);
           collectionErrors.push(
-            `web_search Brave fallback returned no usable results for "${pending.query}"`
+            `web_search automatic fallback returned no usable results for "${pending.query}": ${compactText(child.output, 300)}`
           );
           searches.push({ query: pending.query, results: [] });
         }
