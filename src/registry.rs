@@ -564,7 +564,7 @@ fn registry_error(
 }
 
 #[cfg(test)]
-#[path = "../../use/crates/extension/src/tuf_test_support.rs"]
+#[path = "../tests/support/tuf_test_support.rs"]
 mod tuf_test_support;
 
 #[cfg(test)]

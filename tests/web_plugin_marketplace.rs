@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
 
-#[path = "../../use/crates/extension/src/tuf_test_support.rs"]
+#[path = "support/tuf_test_support.rs"]
 mod tuf_test_support;
 
 use tuf_test_support::{extension_archive, TestRepository, TestServer, FUTURE, PACKAGE_VERSION};

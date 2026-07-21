@@ -7,7 +7,7 @@ use std::process::{Command, Output};
 use a3s_use_extension::ResolvedRemotePackage;
 use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
 
-#[path = "../../use/crates/extension/src/tuf_test_support.rs"]
+#[path = "support/tuf_test_support.rs"]
 mod tuf_test_support;
 
 use tuf_test_support::{
