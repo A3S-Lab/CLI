@@ -6,6 +6,7 @@ use super::capabilities::CapabilitiesModule;
 use super::code_intelligence::CodeIntelligenceModule;
 use super::config::ConfigModule;
 use super::context::ContextModule;
+use super::evolution::EvolutionModule;
 use super::health::HealthModule;
 use super::kernel::KernelModule;
 use super::knowledge::KnowledgeModule;
@@ -43,6 +44,7 @@ impl Module for CodeWebModule {
             Arc::new(CapabilitiesModule),
             Arc::new(KnowledgeModule),
             Arc::new(ContextModule),
+            Arc::new(EvolutionModule),
             Arc::new(KernelModule),
             Arc::new(ProcessesModule),
             Arc::new(LoopsModule),

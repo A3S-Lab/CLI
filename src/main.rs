@@ -11,6 +11,7 @@ mod cli;
 mod commands;
 mod compact;
 mod config;
+mod evolution;
 mod model;
 mod runtime_tool;
 mod session_llm;

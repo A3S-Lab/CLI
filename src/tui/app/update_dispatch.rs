@@ -238,6 +238,9 @@ impl App {
                 if self.memory.is_some() {
                     return self.memory_key(&key);
                 }
+                if self.evolution.is_some() {
+                    return self.evolution_key(&key);
+                }
                 // Asset resource panels take all keys while open.
                 if self.asset_list.is_some() {
                     return self.handle_asset_list_key(&key);
@@ -669,6 +672,7 @@ impl App {
                 // (a drag would silently copy hidden text).
                 if self.ide.is_some()
                     || self.kb.is_some()
+                    || self.evolution.is_some()
                     || self.asset_list.is_some()
                     || self.runtime_activity.is_some()
                 {
@@ -832,7 +836,18 @@ impl App {
                 }
                 self.stream_join_settling = false;
                 self.stream_settle_abort = None;
-                return self.start_rewind_checkpoint_finalization(token, synthesis);
+                let workspace = self.cwd.clone();
+                return Some(cmd::cmd(move || async move {
+                    let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+                    Msg::EvolutionRuntimeChecked {
+                        stream_token: token,
+                        synthesis,
+                        result: evolution
+                            .pending_session_reload_count()
+                            .await
+                            .map_err(|error| error.to_string()),
+                    }
+                }));
             }
 
             Msg::RewindCheckpointFinalized {

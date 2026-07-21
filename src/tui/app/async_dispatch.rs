@@ -546,9 +546,25 @@ impl App {
                         panels::model::SessionRebuildResult::Success(..)
                     ),
                 );
+                let rebuild_succeeded = matches!(
+                    result.as_ref(),
+                    panels::model::SessionRebuildResult::Success(..)
+                );
                 let previous_gradient_start = self.gradient_until;
                 let follow_up = self.finish_session_rebuild(request_id, action, *result);
                 let mut commands = vec![self.request_subagent_snapshots()];
+                if rebuild_succeeded {
+                    let workspace = self.cwd.clone();
+                    commands.push(cmd::cmd(move || async move {
+                        let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+                        Msg::EvolutionSkillsActivated(
+                            evolution
+                                .mark_session_assets_activated()
+                                .await
+                                .map_err(|error| error.to_string()),
+                        )
+                    }));
+                }
                 if starts_ultracode_border
                     && self.gradient_until.is_some()
                     && self.gradient_until != previous_gradient_start
@@ -682,6 +698,93 @@ impl App {
                             m.note = format!("forget failed: {error}");
                         }
                     }
+                }
+            }
+            Msg::EvolutionLoaded(result) => {
+                if let Some(panel) = self.evolution.as_mut() {
+                    panel.busy = false;
+                    match result {
+                        Ok(overview) => {
+                            let total = overview.stats.total;
+                            let ready = overview.stats.ready;
+                            panel.apply_overview(overview);
+                            panel.note = format!("{total} candidates · {ready} ready for review");
+                        }
+                        Err(error) => panel.note = format!("evolution load failed: {error}"),
+                    }
+                }
+            }
+            Msg::EvolutionMutated(result) => {
+                let mut reload = false;
+                if let Some(panel) = self.evolution.as_mut() {
+                    panel.busy = false;
+                    match result {
+                        Ok(result) => {
+                            reload = result.requires_session_reload;
+                            panel.apply_overview(result.overview);
+                            panel.note = result.message;
+                        }
+                        Err(error) => panel.note = format!("evolution action failed: {error}"),
+                    }
+                }
+                if reload {
+                    let dirs =
+                        agent_skill_dirs_with_configured(&self.cwd, &self.asset_directories.skill);
+                    self.skills = load_skills(&dirs);
+                    self.skill_count = count_skill_files(&dirs);
+                    let profile = self.session_rebuild_profile();
+                    return self.start_session_rebuild(
+                        profile,
+                        SessionRebuildAction::Reload {
+                            skill_count: self.skills.len(),
+                        },
+                    );
+                }
+            }
+            Msg::EvolutionRuntimeChecked {
+                stream_token,
+                synthesis,
+                result,
+            } => {
+                if stream_token != self.stream_start_token || self.state != State::Streaming {
+                    return None;
+                }
+                match result {
+                    Ok(0) => {
+                        return self.start_rewind_checkpoint_finalization(stream_token, synthesis)
+                    }
+                    Ok(pending_assets) => {
+                        let dirs = self.skill_dirs();
+                        self.skills = load_skills(&dirs);
+                        self.skill_count = count_skill_files(&dirs);
+                        let profile = self.session_rebuild_profile();
+                        return self.start_session_rebuild(
+                            profile,
+                            SessionRebuildAction::EvolutionRuntime {
+                                pending_assets,
+                                stream_token,
+                                synthesis,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not inspect post-turn evolution activation state");
+                        return self.start_rewind_checkpoint_finalization(stream_token, synthesis);
+                    }
+                }
+            }
+            Msg::EvolutionSkillsActivated(result) => {
+                if let Some(panel) = self.evolution.as_mut() {
+                    match result {
+                        Ok(count) if count > 0 => {
+                            panel.note = format!("{count} learned asset(s) active in this session")
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            panel.note = format!("session asset activation audit failed: {error}")
+                        }
+                    }
+                    return Some(self.load_evolution_panel());
                 }
             }
             Msg::AssetListLoaded(result) => self.on_asset_list(result),

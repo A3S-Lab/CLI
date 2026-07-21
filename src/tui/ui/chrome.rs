@@ -205,6 +205,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "browse memory as an event/entity graph with tiers and forget candidates",
     ),
     (
+        "/evolution",
+        "review learned preferences, recurring skills, and versioned OKF candidates",
+    ),
+    (
         "/research",
         "inspect DeepResearch event state · status, explain, or strict replay",
     ),

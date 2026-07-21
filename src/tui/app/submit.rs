@@ -961,6 +961,11 @@ impl App {
                 });
                 return Some(self.load_memory_panel(dir));
             }
+            "/evolution" => {
+                self.textarea.clear();
+                self.evolution = Some(panels::evolution::EvolutionPanel::loading());
+                return Some(self.load_evolution_panel());
+            }
             _ => {}
         }
 

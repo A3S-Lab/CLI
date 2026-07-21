@@ -252,6 +252,141 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
 }
 
 #[test]
+fn evolution_api_reviews_versions_and_rolls_back_local_assets() {
+    let root = temp_directory("web-evolution-api");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S evolution API test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    seed_evolution_catalog(&root);
+    let evolution_state = root.join(".a3s/evolution/state.json");
+    let state_before_overview = fs::read(&evolution_state).expect("read seeded evolution state");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+
+    let overview = http_json(&address, "GET", "/api/v1/evolution", None, "200");
+    assert_eq!(
+        fs::read(&evolution_state).expect("read evolution state after overview"),
+        state_before_overview,
+        "GET evolution overview must not mutate the catalog"
+    );
+    let overview = api_data(&overview);
+    assert_eq!(overview["schema"], "a3s.code.evolution.v1");
+    assert_eq!(overview["stats"]["total"], 2);
+    assert_eq!(
+        overview["skillRoot"],
+        root.join(".a3s/skills").display().to_string()
+    );
+    assert_eq!(overview["okfRoot"], root.join("okf").display().to_string());
+    assert_eq!(overview["policy"]["localOnly"], true);
+
+    let scan = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/scan",
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(api_data(&scan)["observed"], 0);
+
+    let first = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/materialize",
+        Some(r#"{"force":false}"#),
+        "200",
+    );
+    let first = api_data(&first);
+    assert_eq!(first["result"]["candidate"]["currentVersion"], 1);
+    let asset_path = first["result"]["candidate"]["assetPath"]
+        .as_str()
+        .expect("materialized preference path");
+    assert!(root.join(asset_path).is_file());
+
+    append_evolution_update(&root, "preference-api-test");
+    let second = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/materialize",
+        Some(r#"{"force":false}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&second)["result"]["candidate"]["currentVersion"],
+        2
+    );
+
+    let rollback = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":1}"#),
+        "200",
+    );
+    let rollback = api_data(&rollback);
+    assert_eq!(rollback["result"]["candidate"]["state"], "rolledBack");
+    assert_eq!(rollback["result"]["candidate"]["currentVersion"], 1);
+    assert!(rollback["result"]["recoveryPath"]
+        .as_str()
+        .is_some_and(|path| root.join(path).exists()));
+
+    let baseline = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":0}"#),
+        "200",
+    );
+    let baseline = api_data(&baseline);
+    assert_eq!(baseline["result"]["candidate"]["state"], "rolledBack");
+    assert!(baseline["result"]["candidate"]["currentVersion"].is_null());
+    assert!(!root.join(asset_path).exists());
+
+    let restored = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":1}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&restored)["result"]["candidate"]["currentVersion"],
+        1
+    );
+    assert!(root.join(asset_path).is_file());
+
+    let rejected = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/okf-api-test/reject",
+        Some(r#"{"reason":"Not reusable in this workspace"}"#),
+        "200",
+    );
+    assert_eq!(api_data(&rejected)["state"], "rejected");
+    assert_eq!(
+        api_data(&rejected)["rejectionReason"],
+        "Not reusable in this workspace"
+    );
+    let reopened = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/okf-api-test/reopen",
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(api_data(&reopened)["state"], "observing");
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean evolution API fixture");
+}
+
+#[test]
 fn packaged_web_assets_work_from_an_empty_workspace() {
     let root = temp_directory("packaged-web-assets");
     let workspace = root.join("workspace");
@@ -1062,6 +1197,137 @@ fn http_json(
         .unwrap_or_else(|| panic!("HTTP response has no body separator: {response}"));
     serde_json::from_str(body)
         .unwrap_or_else(|error| panic!("HTTP response body is not JSON ({error}): {response}"))
+}
+
+fn api_data(value: &serde_json::Value) -> &serde_json::Value {
+    value.get("data").unwrap_or(value)
+}
+
+fn seed_evolution_catalog(workspace: &std::path::Path) {
+    let root = workspace.join(".a3s/evolution");
+    fs::create_dir_all(&root).expect("create evolution state directory");
+    let now = "2026-07-21T08:00:00Z";
+    let candidate = |id: &str, kind: &str, pattern: &str, title: &str| {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "patternKey": pattern,
+            "patternAliases": [],
+            "title": title,
+            "summary": format!("Reusable local guidance for {title}."),
+            "instructions": ["Review current workspace evidence before applying this guidance."],
+            "state": "ready",
+            "evidence": [{
+                "id": format!("{id}-evidence-one"),
+                "memoryId": format!("{id}-memory-one"),
+                "sessionId": "session-one",
+                "source": if kind == "preference" { "preference" } else { "project_fact" },
+                "content": format!("Stable evidence for {title}."),
+                "reason": "This pattern changes future task execution.",
+                "timestamp": now,
+                "importance": 0.9,
+                "confidence": 0.95,
+                "conflictsWith": [],
+                "explicitSignal": true
+            }],
+            "occurrences": 1,
+            "distinctSessions": 1,
+            "confidence": 0.95,
+            "importance": 0.9,
+            "maturity": 0.86,
+            "hasConflicts": false,
+            "updateAvailable": false,
+            "activationPending": false,
+            "createdAt": now,
+            "updatedAt": now,
+            "readyAt": now,
+            "materializedAt": null,
+            "rejectedAt": null,
+            "rolledBackAt": null,
+            "rejectionReason": null,
+            "assetPath": null,
+            "currentVersion": null,
+            "versions": [],
+            "audit": [{
+                "action": "ready",
+                "at": now,
+                "version": null,
+                "note": "Seeded for API integration verification.",
+                "recoveryPath": null
+            }]
+        })
+    };
+    let catalog = serde_json::json!({
+        "schema": "a3s.code.evolution.v1",
+        "revision": 1,
+        "workspaceRoot": workspace.display().to_string(),
+        "updatedAt": now,
+        "candidates": [
+            candidate(
+                "preference-api-test",
+                "preference",
+                "preference.response.evidence",
+                "Evidence-backed responses"
+            ),
+            candidate(
+                "okf-api-test",
+                "okf",
+                "okf.workspace.architecture",
+                "Workspace architecture"
+            )
+        ]
+    });
+    fs::write(
+        root.join("state.json"),
+        serde_json::to_vec_pretty(&catalog).expect("serialize evolution catalog"),
+    )
+    .expect("write evolution catalog");
+}
+
+fn append_evolution_update(workspace: &std::path::Path, candidate_id: &str) {
+    let state_path = workspace.join(".a3s/evolution/state.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&state_path).expect("read evolution state"))
+            .expect("parse evolution state");
+    let candidate = catalog["candidates"]
+        .as_array_mut()
+        .and_then(|candidates| {
+            candidates
+                .iter_mut()
+                .find(|candidate| candidate["id"] == candidate_id)
+        })
+        .expect("evolution candidate to update");
+    candidate["instructions"]
+        .as_array_mut()
+        .expect("candidate instructions")
+        .push(serde_json::json!(
+            "Preserve concrete evidence in the final response."
+        ));
+    candidate["evidence"]
+        .as_array_mut()
+        .expect("candidate evidence")
+        .push(serde_json::json!({
+            "id": "preference-api-test-evidence-two",
+            "memoryId": "preference-api-test-memory-two",
+            "sessionId": "session-two",
+            "source": "preference",
+            "content": "A second session repeated the evidence-backed response preference.",
+            "reason": "Repeated explicit guidance should update the local preference.",
+            "timestamp": "2026-07-21T09:00:00Z",
+            "importance": 0.92,
+            "confidence": 0.96,
+            "conflictsWith": [],
+            "explicitSignal": true
+        }));
+    candidate["occurrences"] = serde_json::json!(2);
+    candidate["distinctSessions"] = serde_json::json!(2);
+    candidate["updateAvailable"] = serde_json::json!(true);
+    candidate["updatedAt"] = serde_json::json!("2026-07-21T09:00:00Z");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&catalog).expect("serialize updated evolution state"),
+    )
+    .expect("write updated evolution state");
 }
 
 fn http_request(address: &str, method: &str, path: &str, body: Option<&str>) -> String {

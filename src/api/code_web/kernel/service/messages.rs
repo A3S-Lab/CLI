@@ -137,6 +137,11 @@ impl KernelService {
             )
             .await;
         }
+        if let Err(error) =
+            refresh_evolution_runtime_after_turn(self.state.as_ref(), session.workspace()).await
+        {
+            tracing::warn!(%error, session_id, "could not refresh learned Web session assets after turn");
+        }
         Ok(json!({
             "sessionId": session_id,
             "accepted": true,
@@ -206,6 +211,11 @@ impl KernelService {
                 None,
             )
             .await;
+        }
+        if let Err(error) =
+            refresh_evolution_runtime_after_turn(self.state.as_ref(), session.workspace()).await
+        {
+            tracing::warn!(%error, %session_id, "could not refresh learned Web session assets after turn");
         }
 
         Ok(ChatResponse {

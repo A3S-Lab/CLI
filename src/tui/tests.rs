@@ -6281,6 +6281,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/reload",
         "/update",
         "/memory",
+        "/evolution",
         "/relay",
         "/permissions",
         "/tasks",
@@ -6474,6 +6475,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
         },
         SlashAuditRow {
             command: "/memory",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
+            command: "/evolution",
             handler: Exact,
             idle_only: false,
             scope: Local,

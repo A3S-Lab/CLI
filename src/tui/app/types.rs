@@ -198,6 +198,11 @@ pub(super) enum SessionRebuildAction {
     Reload {
         skill_count: usize,
     },
+    EvolutionRuntime {
+        pending_assets: usize,
+        stream_token: u64,
+        synthesis: Option<(String, String)>,
+    },
     Refresh {
         failure_context: Option<&'static str>,
     },
@@ -559,6 +564,19 @@ pub(super) enum Msg {
     MemoryLoaded(MemPanelData),
     /// A `/memory` forget-candidate deletion finished, with fresh graph data.
     MemoryForgotten(Result<(String, MemPanelData), String>),
+    /// `/evolution` loaded the current memory-derived candidate catalog.
+    EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
+    /// A candidate review/materialize/rollback action completed.
+    EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
+    /// Post-turn check for automatically materialized session assets. This
+    /// remains a queue barrier until a required session rebuild has settled.
+    EvolutionRuntimeChecked {
+        stream_token: u64,
+        synthesis: Option<(String, String)>,
+        result: Result<usize, String>,
+    },
+    /// A rebuilt session loaded materialized local skills.
+    EvolutionSkillsActivated(Result<usize, String>),
     /// Asset-scoped OS asset list loaded.
     AssetListLoaded(Result<panels::asset_resources::AssetListFetch, String>),
     /// Runtime activity rows loaded for an asset-scoped activity panel.

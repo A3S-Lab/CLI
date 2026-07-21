@@ -26,7 +26,7 @@ use crate::api::code_web::dto::{
 };
 use crate::api::code_web::session_runtime::{
     activate_session_runtime, code_web_context_limit_for_model, code_web_os_status,
-    code_web_session_options, effective_session_model,
+    code_web_session_options, effective_session_model, refresh_evolution_runtime_after_turn,
 };
 use crate::api::code_web::session_store::{
     CodeWebSessionMetadata, CodeWebStoredContext, CodeWebStoredSession,

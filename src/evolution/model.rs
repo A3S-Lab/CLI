@@ -71,6 +71,7 @@ pub(crate) enum EvolutionAuditAction {
     Reopened,
     RolledBack,
     Activated,
+    Deactivated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

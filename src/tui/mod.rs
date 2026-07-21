@@ -52,7 +52,7 @@ use tokio::sync::{mpsc, Mutex};
 #[path = "assets/clone.rs"]
 pub(crate) mod asset_clone;
 #[path = "assets/lifecycle.rs"]
-mod asset_lifecycle;
+pub(crate) mod asset_lifecycle;
 use crate::commands::code::naming as asset_naming;
 
 // DeepResearch.
@@ -991,6 +991,8 @@ struct App {
     ide: Option<Ide>,
     /// `/memory` full-screen timeline panel (Some when open).
     memory: Option<MemPanel>,
+    /// `/evolution` memory-derived candidate review and asset lifecycle panel.
+    evolution: Option<panels::evolution::EvolutionPanel>,
     /// Asset-scoped OS digital-asset browser.
     asset_list: Option<panels::asset_resources::AssetListPanel>,
     /// Asset-scoped OS Runtime activity panel.
@@ -1051,6 +1053,7 @@ impl App {
             || self.plugins_panel.is_some()
             || self.review_open
             || self.memory.is_some()
+            || self.evolution.is_some()
             || self.asset_list.is_some()
             || self.runtime_activity.is_some()
             || self.kb.is_some()

@@ -753,6 +753,9 @@ impl App {
             .with_max_context_tokens(profile.context_limit as usize)
             .with_auto_compact_threshold(self.auto_compact_threshold as f32)
             .with_file_memory(self.memory_dir.clone())
+            .with_memory_observer(crate::evolution::EvolutionMemoryObserver::new(
+                crate::evolution::WorkspaceEvolution::new(&self.cwd),
+            ))
             // The numeric cap remains available to explicit `parallel_task`
             // calls at every effort. Runtime-driven fan-out is a separate
             // ultracode orchestration capability, not a Codex reasoning level.
@@ -784,6 +787,13 @@ impl App {
         }
         if let Some(s) = &self.os_session {
             extra_parts.push(os_platform_guide(&s.address));
+        }
+        match crate::evolution::WorkspaceEvolution::new(&self.cwd).session_preference_prompt() {
+            Ok(Some(preferences)) => extra_parts.push(preferences),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not load learned preferences while rebuilding TUI session")
+            }
         }
         let extra = (!extra_parts.is_empty()).then(|| extra_parts.join("\n\n"));
         let ultra = profile.effort == ULTRACODE;
@@ -960,103 +970,120 @@ impl App {
         }
         self.session_rebuild_pending = None;
 
-        let (session, thinking_dropped) =
-            match result {
-                SessionRebuildResult::Success(session, thinking_dropped) => {
-                    (session, thinking_dropped)
+        let (session, thinking_dropped) = match result {
+            SessionRebuildResult::Success(session, thinking_dropped) => (session, thinking_dropped),
+            SessionRebuildResult::Failed { error, recovered } => {
+                if let Some(session) = recovered {
+                    self.replace_session(session);
                 }
-                SessionRebuildResult::Failed { error, recovered } => {
-                    if let Some(session) = recovered {
-                        self.replace_session(session);
-                    }
-                    match &action {
-                        SessionRebuildAction::GoalStart {
-                            generation,
-                            previous_effort,
-                            previous_goal,
-                            previous_goal_since,
-                        } => {
-                            let still_active = self
-                                .goal_run
-                                .as_ref()
-                                .is_some_and(|run| run.is_generation(*generation));
-                            self.goal_run = None;
-                            self.effort = *previous_effort;
-                            if still_active {
-                                self.goal = previous_goal.clone();
-                                self.goal_since = *previous_goal_since;
-                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                match &action {
+                    SessionRebuildAction::GoalStart {
+                        generation,
+                        previous_effort,
+                        previous_goal,
+                        previous_goal_since,
+                    } => {
+                        let still_active = self
+                            .goal_run
+                            .as_ref()
+                            .is_some_and(|run| run.is_generation(*generation));
+                        self.goal_run = None;
+                        self.effort = *previous_effort;
+                        if still_active {
+                            self.goal = previous_goal.clone();
+                            self.goal_since = *previous_goal_since;
+                            self.push_line(
+                                &Style::new().fg(TN_RED).render(&format!(
                                     "  /goal could not enable Ultracode: {error}"
-                                )));
-                            }
-                            return self.drain_queue();
+                                )),
+                            );
                         }
-                        SessionRebuildAction::GoalResume { generation, paused } => {
-                            let still_active = self
-                                .goal_run
-                                .as_ref()
-                                .is_some_and(|run| run.is_generation(*generation));
-                            if still_active {
-                                self.goal_run = None;
-                                self.goal = None;
-                                self.goal_since = None;
-                                self.paused_goal = Some(paused.clone());
-                                self.goal_resume_prompt = Some(0);
-                                self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                        return self.drain_queue();
+                    }
+                    SessionRebuildAction::GoalResume { generation, paused } => {
+                        let still_active = self
+                            .goal_run
+                            .as_ref()
+                            .is_some_and(|run| run.is_generation(*generation));
+                        if still_active {
+                            self.goal_run = None;
+                            self.goal = None;
+                            self.goal_since = None;
+                            self.paused_goal = Some(paused.clone());
+                            self.goal_resume_prompt = Some(0);
+                            self.push_line(
+                                &Style::new().fg(TN_RED).render(&format!(
                                     "  paused goal could not be resumed: {error}"
-                                )));
-                            }
-                            return self.drain_queue();
+                                )),
+                            );
                         }
-                        SessionRebuildAction::GoalRestore => {
-                            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
-                                "  goal stopped, but session mode refresh failed: {error}"
-                            )));
-                            return self.drain_queue();
-                        }
-                        SessionRebuildAction::Rewind {
-                            session_id,
-                            files_rewound,
-                            ..
-                        } => {
-                            let file_note = if *files_rewound {
-                                " Workspace files were rewound safely."
-                            } else {
-                                ""
-                            };
-                            self.push_line(&Style::new().fg(TN_RED).render(&format!(
-                                "  rewound session could not be opened: {error}.{file_note} \
+                        return self.drain_queue();
+                    }
+                    SessionRebuildAction::GoalRestore => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                            "  goal stopped, but session mode refresh failed: {error}"
+                        )));
+                        return self.drain_queue();
+                    }
+                    SessionRebuildAction::Rewind {
+                        session_id,
+                        files_rewound,
+                        ..
+                    } => {
+                        let file_note = if *files_rewound {
+                            " Workspace files were rewound safely."
+                        } else {
+                            ""
+                        };
+                        self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                            "  rewound session could not be opened: {error}.{file_note} \
                                  Resume the saved conversation with: a3s code resume {session_id}"
+                        )));
+                        return self.drain_queue();
+                    }
+                    SessionRebuildAction::EvolutionRuntime {
+                        stream_token,
+                        synthesis,
+                        ..
+                    } => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                                "  learned assets were saved, but the current session could not refresh: {error}"
                             )));
-                            return self.drain_queue();
-                        }
-                        _ => {}
+                        return self.start_rewind_checkpoint_finalization(
+                            *stream_token,
+                            synthesis.clone(),
+                        );
                     }
-                    if matches!(action, SessionRebuildAction::Compact { .. }) {
-                        self.compacting = None;
-                    }
-                    let context = match action {
-                        SessionRebuildAction::Model { .. } => "switch model",
-                        SessionRebuildAction::Effort { .. } => "set effort",
-                        SessionRebuildAction::GoalStart { .. } => unreachable!("handled above"),
-                        SessionRebuildAction::GoalResume { .. } => unreachable!("handled above"),
-                        SessionRebuildAction::GoalRestore => unreachable!("handled above"),
-                        SessionRebuildAction::Compact { .. } => "compact context",
-                        SessionRebuildAction::Fork { .. } => "fork session",
-                        SessionRebuildAction::Rewind { .. } => "resume rewound session",
-                        SessionRebuildAction::Relay { .. } => "resume relay session",
-                        SessionRebuildAction::Clear { .. } => "clear session",
-                        SessionRebuildAction::Reload { .. } => "reload session",
-                        SessionRebuildAction::Refresh { failure_context } => failure_context?,
-                    };
-                    self.push_line(
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  failed to {context}: {error}")),
-                    );
-                    return None;
+                    _ => {}
                 }
-            };
+                if matches!(action, SessionRebuildAction::Compact { .. }) {
+                    self.compacting = None;
+                }
+                let context = match action {
+                    SessionRebuildAction::Model { .. } => "switch model",
+                    SessionRebuildAction::Effort { .. } => "set effort",
+                    SessionRebuildAction::GoalStart { .. } => unreachable!("handled above"),
+                    SessionRebuildAction::GoalResume { .. } => unreachable!("handled above"),
+                    SessionRebuildAction::GoalRestore => unreachable!("handled above"),
+                    SessionRebuildAction::Compact { .. } => "compact context",
+                    SessionRebuildAction::Fork { .. } => "fork session",
+                    SessionRebuildAction::Rewind { .. } => "resume rewound session",
+                    SessionRebuildAction::Relay { .. } => "resume relay session",
+                    SessionRebuildAction::Clear { .. } => "clear session",
+                    SessionRebuildAction::Reload { .. } => "reload session",
+                    SessionRebuildAction::EvolutionRuntime { .. } => {
+                        "activate learned session assets"
+                    }
+                    SessionRebuildAction::Refresh { failure_context } => failure_context?,
+                };
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  failed to {context}: {error}")),
+                );
+                return None;
+            }
+        };
 
         match action {
             SessionRebuildAction::Model {
@@ -1291,6 +1318,17 @@ impl App {
                         .fg(TN_GREEN)
                         .render(&format!("  ↻ reloaded — {skill_count} skills available")),
                 );
+            }
+            SessionRebuildAction::EvolutionRuntime {
+                pending_assets,
+                stream_token,
+                synthesis,
+            } => {
+                self.replace_session(session);
+                self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                    "  ↻ activated {pending_assets} learned session asset(s)"
+                )));
+                return self.start_rewind_checkpoint_finalization(stream_token, synthesis);
             }
             SessionRebuildAction::Refresh { .. } => self.replace_session(session),
         }

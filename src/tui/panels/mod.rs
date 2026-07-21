@@ -42,6 +42,8 @@ pub(crate) mod transcript;
 // Context and memory.
 #[path = "context/ctx.rs"]
 pub(crate) mod ctx;
+#[path = "context/evolution.rs"]
+pub(crate) mod evolution;
 #[path = "context/memory.rs"]
 mod memory;
 #[path = "context/sleep.rs"]

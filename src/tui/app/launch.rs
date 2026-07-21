@@ -8,6 +8,33 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
+fn with_tui_prompt_context(
+    options: SessionOptions,
+    instructions: Option<&str>,
+    os_address: Option<&str>,
+    ctx_ready: bool,
+    learned_preferences: Option<&str>,
+) -> SessionOptions {
+    let mut parts = Vec::new();
+    if let Some(instructions) = instructions {
+        parts.push(instructions.to_string());
+    }
+    if let Some(address) = os_address {
+        parts.push(os_platform_guide(address));
+    }
+    if ctx_ready {
+        parts.push(panels::ctx::ctx_history_guide());
+    }
+    if let Some(preferences) = learned_preferences {
+        parts.push(preferences.to_string());
+    }
+    if parts.is_empty() {
+        options
+    } else {
+        options.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
+    }
+}
+
 struct CodeUseResolution {
     executable: Option<PathBuf>,
     warning: Option<String>,
@@ -446,6 +473,18 @@ pub(crate) async fn run_in(
             .map_err(|error| anyhow::anyhow!("failed to load effective agent config: {error}"))?,
     );
     let workspace = workspace.to_string_lossy().into_owned();
+    let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+    if let Err(error) = evolution.synchronize_memory_store(&memory_dir).await {
+        tracing::warn!(%error, "could not synchronize memory evolution before TUI session startup");
+    }
+    let learned_preferences = match evolution.session_preference_prompt() {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            tracing::warn!(%error, "could not load learned preferences before TUI session startup");
+            None
+        }
+    };
+    let evolution_observer = crate::evolution::EvolutionMemoryObserver::new(evolution.clone());
 
     // Configured "provider/model" ids (+ context windows) + the default model.
     let mut models: Vec<String> = Vec::new();
@@ -673,21 +712,13 @@ pub(crate) async fn run_in(
     // search local agent history before re-deriving prior work.
     let ctx_ready = panels::ctx::ctx_available();
     let with_instr = |o: SessionOptions| {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(i) = &instructions {
-            parts.push(i.clone());
-        }
-        if let Some(addr) = &os_address {
-            parts.push(os_platform_guide(addr));
-        }
-        if ctx_ready {
-            parts.push(panels::ctx::ctx_history_guide());
-        }
-        if parts.is_empty() {
-            o
-        } else {
-            o.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
-        }
+        with_tui_prompt_context(
+            o,
+            instructions.as_deref(),
+            os_address.as_deref(),
+            ctx_ready,
+            learned_preferences.as_deref(),
+        )
     };
     let manifest_backend = tui_manifest_backend(Path::new(&workspace));
     let workspace_manifest = manifest_backend.manifest();
@@ -726,6 +757,7 @@ pub(crate) async fn run_in(
                     .with_max_context_tokens(context_limit as usize)
                     .with_auto_compact_threshold(auto_compact_threshold as f32)
                     .with_file_memory(memory_dir.clone())
+                    .with_memory_observer(evolution_observer.clone())
                     .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                     .with_max_tool_rounds(initial_budget.max_tool_rounds)
                     .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -770,6 +802,7 @@ pub(crate) async fn run_in(
                             .with_max_context_tokens(context_limit as usize)
                             .with_auto_compact_threshold(auto_compact_threshold as f32)
                             .with_file_memory(memory_dir.clone())
+                            .with_memory_observer(evolution_observer.clone())
                             .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                             .with_max_tool_rounds(initial_budget.max_tool_rounds)
                             .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -791,6 +824,9 @@ pub(crate) async fn run_in(
     let _ = session
         .memory()
         .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?;
+    if let Err(error) = evolution.mark_session_assets_activated().await {
+        tracing::warn!(%error, "could not mark learned session assets active after TUI session startup");
+    }
 
     // DynamicWorkflowRuntime is always available in the TUI because built-in
     // `?` deep research and ultracode dynamic workflows both route through it.
@@ -1122,6 +1158,7 @@ pub(crate) async fn run_in(
         plan_review: None,
         ide: None,
         memory: None,
+        evolution: None,
         asset_list: None,
         runtime_activity: None,
         kb: None,
@@ -1342,6 +1379,66 @@ mod tests {
 
         assert!(!rendered.contains("\x1b["));
         assert!(rendered.contains("a3s code resume session-42"));
+    }
+
+    #[tokio::test]
+    async fn initial_tui_options_inject_and_remove_materialized_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+        let item = a3s_memory::MemoryItem::new(
+            "Keep completion claims concise and backed by current evidence.",
+        )
+        .with_type(a3s_memory::MemoryType::Semantic)
+        .with_importance(0.94)
+        .with_metadata("source", "preference")
+        .with_metadata("scope", "workspace")
+        .with_metadata("workspace", workspace.display().to_string())
+        .with_metadata("session_id", "session-one")
+        .with_metadata("confidence", "0.97")
+        .with_metadata("evolution_schema", "a3s.evolution.signal.v1")
+        .with_metadata("evolution_kind", "preference")
+        .with_metadata("evolution_pattern", "preference.response.concise-evidence")
+        .with_metadata("evolution_title", "Concise evidence-backed completion")
+        .with_metadata(
+            "evolution_summary",
+            "Keep completion claims concise while retaining current supporting evidence.",
+        )
+        .with_metadata(
+            "evolution_instructions",
+            r#"["Keep completion claims concise.","Retain concrete current evidence."]"#,
+        );
+        let observation = a3s_code_core::memory::MemoryObservation {
+            incoming: item.clone(),
+            stored: item,
+            merged: false,
+        };
+        evolution.observe(observation).await.unwrap();
+        let candidate_id = evolution.overview().await.unwrap().candidates[0].id.clone();
+        evolution.materialize(&candidate_id, false).await.unwrap();
+
+        let learned = evolution.session_preference_prompt().unwrap().unwrap();
+        let options =
+            with_tui_prompt_context(SessionOptions::new(), None, None, false, Some(&learned));
+        let extra = options
+            .prompt_slots
+            .as_ref()
+            .and_then(|slots| slots.extra.as_deref())
+            .unwrap();
+        assert!(extra.contains("# Learned Local Preferences"));
+        assert!(extra.contains("Keep completion claims concise."));
+        assert!(!extra.contains("Keep completion claims concise and backed"));
+
+        evolution.rollback(&candidate_id, Some(0)).await.unwrap();
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            evolution.session_preference_prompt().unwrap().as_deref(),
+        );
+        assert!(options.prompt_slots.is_none());
     }
 
     #[test]
