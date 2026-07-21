@@ -745,13 +745,29 @@ struct ProbeDescendantCleanup {
 
 #[cfg(unix)]
 impl ProbeDescendantCleanup {
-    fn new(pid_file: &Path) -> Self {
-        let pid = std::fs::read_to_string(pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        Self { pid: Some(pid) }
+    async fn from_pid_file(pid_file: &Path) -> Self {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            match std::fs::read_to_string(pid_file) {
+                Ok(pid) => {
+                    return Self {
+                        pid: Some(pid.trim().parse().unwrap()),
+                    };
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+                Err(error) => {
+                    panic!(
+                        "failed to read probe descendant pid from {}: {error}",
+                        pid_file.display()
+                    );
+                }
+            }
+        }
     }
 
     fn is_running(&self) -> bool {
@@ -823,7 +839,8 @@ exit 0
         probe_agent_island_capability(&helper, temp.path()),
     )
     .await;
-    let descendant = ProbeDescendantCleanup::new(&temp.path().join("descendant.pid"));
+    let descendant =
+        ProbeDescendantCleanup::from_pid_file(&temp.path().join("descendant.pid")).await;
     let supported = result
         .expect("descendant-held output pipes exceeded the probe bound")
         .unwrap();
@@ -858,7 +875,8 @@ sleep 30
         probe_agent_island_capability(&helper, temp.path()),
     )
     .await;
-    let descendant = ProbeDescendantCleanup::new(&temp.path().join("descendant.pid"));
+    let descendant =
+        ProbeDescendantCleanup::from_pid_file(&temp.path().join("descendant.pid")).await;
     let error = result
         .expect("hanging helper exceeded the probe's termination bound")
         .unwrap_err();
