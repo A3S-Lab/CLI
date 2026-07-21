@@ -40,15 +40,21 @@ use super::{
 };
 
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
-// Planning is one logical semantic step with one durable retry. The retry
-// reuses the exact hashed Flow input; it does not create another plan or widen
-// the research contract.
-const PLANNER_GENERATION_ATTEMPT_TIMEOUT_MS: u64 = 480_000;
+// Planning is one logical Host-validated plan built from two durable effects.
+// Each effect reuses its exact hashed Flow input across retry and process
+// recovery; neither can independently publish or widen the final contract.
+const PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS: u64 = 480_000;
+const PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS: u64 = 240_000;
 const PLANNER_GENERATION_MAX_ATTEMPTS: u8 = 2;
 const DURABLE_GENERATION_WORKFLOW_GRACE_MS: u64 = 15_000;
-pub(crate) const DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS: u64 = PLANNER_GENERATION_ATTEMPT_TIMEOUT_MS
+const PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS
     * PLANNER_GENERATION_MAX_ATTEMPTS as u64
     + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
+const PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS
+    * PLANNER_GENERATION_MAX_ATTEMPTS as u64
+    + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
+pub(crate) const DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS: u64 =
+    PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS + PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS;
 // Active model time only; admission queue time remains outside each attempt.
 // Closed review packets now carry explicit reasoning and language guardrails;
 // Real material reviews have repeatedly reached the five-minute active fuse

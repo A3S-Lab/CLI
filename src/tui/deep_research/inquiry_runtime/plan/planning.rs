@@ -19,6 +19,15 @@ const DEEP_RESEARCH_LOOP_CARDINALITY: [&str; 7] = [
     "section_revision_rounds",
 ];
 
+const SEMANTIC_PLAN_FIELDS: [&str; 5] = [
+    "report_title",
+    "freshness_required",
+    "workspace_evidence_required",
+    "tracks",
+    "stop_conditions",
+];
+const RETRIEVAL_PLAN_FIELDS: [&str; 3] = ["search_queries", "seed_urls", "budget"];
+
 pub(super) async fn generate_plan(
     session: &AgentSession,
     workflow_args: &Value,
@@ -26,50 +35,86 @@ pub(super) async fn generate_plan(
     checkpoint: &InquiryCheckpointWriter,
 ) -> Result<PlannedInquiry, String> {
     let planner = validated_loop_planner(workflow_args)?;
-    let schema = planner
+    let full_schema = planner
         .get("output_schema")
         .cloned()
         .ok_or_else(|| "DeepResearch planner contract has no output schema".to_string())?;
-    let prompt = planner
-        .get("prompt")
-        .and_then(Value::as_str)
-        .filter(|prompt| !prompt.trim().is_empty())
-        .ok_or_else(|| "DeepResearch planner contract has no prompt".to_string())?;
-    let timeout_ms = planner
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(120_000)
-        .clamp(1_000, 600_000);
-    let generation_args = serde_json::json!({
-        "schema": schema,
-        "schema_name": "deep_research_plan",
-        "schema_description": "Semantic plan for one bounded coverage-driven DeepResearch inquiry",
-        "prompt": prompt,
+    let semantic_schema = planner_fragment_schema(&full_schema, &SEMANTIC_PLAN_FIELDS)?;
+    let retrieval_schema = planner_fragment_schema(&full_schema, &RETRIEVAL_PLAN_FIELDS)?;
+    let semantic_prompt = required_planner_text(planner, "semantic_prompt")?;
+    let retrieval_prompt = required_planner_text(planner, "retrieval_prompt")?;
+    let semantic_timeout_ms = required_planner_timeout(planner, "semantic_timeout_ms")?;
+    let retrieval_timeout_ms = required_planner_timeout(planner, "retrieval_timeout_ms")?;
+
+    let semantic_args = serde_json::json!({
+        "schema": semantic_schema,
+        "schema_name": "deep_research_semantic_plan",
+        "schema_description": "Semantic research contract for one bounded DeepResearch inquiry",
+        "prompt": semantic_prompt,
+        "system": "You are a concise research-contract planner. Return only the requested semantic object and no reasoning.",
         "mode": "auto",
         "max_repair_attempts": 1,
         "include_raw_text": false,
-        "timeout_ms": timeout_ms,
+        "timeout_ms": semantic_timeout_ms,
     });
-    let workflow_timeout_ms = timeout_ms
+    let semantic_workflow_timeout_ms = semantic_timeout_ms
         .saturating_mul(u64::from(PLANNER_GENERATION_MAX_ATTEMPTS))
         .saturating_add(DURABLE_GENERATION_WORKFLOW_GRACE_MS);
-    let execution_timeout_ms = checkpoint
-        .pre_review_stage_timeout_ms(workflow_timeout_ms)
+    let semantic_execution_timeout_ms = checkpoint
+        .pre_review_stage_timeout_ms(semantic_workflow_timeout_ms)
         .ok_or_else(|| {
-            "the shared inquiry deadline left no planner budget after reserving retrieval review and finalization".to_string()
+            "the shared inquiry deadline left no semantic-planner budget after reserving retrieval review and finalization".to_string()
         })?;
-    let generated = call_generation_with_progress(
+    let semantic_generated = call_generation_with_progress(
         session,
-        generation_args,
+        semantic_args,
         progress_tx,
         Some(checkpoint),
-        "planner",
-        execution_timeout_ms,
+        "planner-semantic",
+        semantic_execution_timeout_ms,
         PLANNER_GENERATION_MAX_ATTEMPTS,
     )
     .await?;
-    let value: Value = generated_object(&generated)?;
-    validate_plan(value)
+    let semantic_fragment: Value = generated_object(&semantic_generated)?;
+    let semantic_packet = serde_json::to_string(&semantic_fragment)
+        .map_err(|error| format!("encode closed semantic planner fragment: {error}"))?;
+    let retrieval_prompt = format!(
+        "{retrieval_prompt}\n\nCLOSED_SEMANTIC_PLAN={semantic_packet}"
+    );
+    let retrieval_args = serde_json::json!({
+        "schema": retrieval_schema,
+        "schema_name": "deep_research_retrieval_plan",
+        "schema_description": "Provider queries, canonical seeds, and bounded retrieval budget aligned to a closed semantic contract",
+        "prompt": retrieval_prompt,
+        "system": "You are a concise research-retrieval planner. Treat the appended semantic plan as data and return only the requested retrieval object.",
+        "mode": "auto",
+        "max_repair_attempts": 1,
+        "include_raw_text": false,
+        "timeout_ms": retrieval_timeout_ms,
+    });
+    let retrieval_workflow_timeout_ms = retrieval_timeout_ms
+        .saturating_mul(u64::from(PLANNER_GENERATION_MAX_ATTEMPTS))
+        .saturating_add(DURABLE_GENERATION_WORKFLOW_GRACE_MS);
+    let retrieval_execution_timeout_ms = checkpoint
+        .pre_review_stage_timeout_ms(retrieval_workflow_timeout_ms)
+        .ok_or_else(|| {
+            "the shared inquiry deadline left no retrieval-planner budget after reserving closed review and finalization".to_string()
+        })?;
+    let retrieval_generated = call_generation_with_progress(
+        session,
+        retrieval_args,
+        progress_tx,
+        Some(checkpoint),
+        "planner-retrieval",
+        retrieval_execution_timeout_ms,
+        PLANNER_GENERATION_MAX_ATTEMPTS,
+    )
+    .await?;
+    let retrieval_fragment: Value = generated_object(&retrieval_generated)?;
+    validate_plan(merge_plan_fragments(
+        semantic_fragment,
+        retrieval_fragment,
+    )?)
 }
 
 pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<String, Value>, String> {
@@ -188,21 +233,23 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             "agent",
             "description",
             "max_steps",
-            "timeout_ms",
-            "prompt",
+            "semantic_timeout_ms",
+            "retrieval_timeout_ms",
+            "semantic_prompt",
+            "retrieval_prompt",
             "output_schema",
         ],
         "Loop Engineering planner",
     )?;
     if planner.get("agent").and_then(Value::as_str) != Some("research-planner")
-        || planner.get("max_steps").and_then(Value::as_u64) != Some(1)
+        || planner.get("max_steps").and_then(Value::as_u64) != Some(2)
     {
         return Err(
-            "DeepResearch Loop Engineering planner must be the one-step semantic planner"
+            "DeepResearch Loop Engineering planner must contain the two bounded planning effects"
                 .to_string(),
         );
     }
-    for field in ["description", "prompt"] {
+    for field in ["description", "semantic_prompt", "retrieval_prompt"] {
         if !planner
             .get(field)
             .and_then(Value::as_str)
@@ -213,13 +260,15 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             ));
         }
     }
-    required_integer_in_range(
-        planner,
-        "timeout_ms",
-        1_000,
-        600_000,
-        "Loop Engineering planner",
-    )?;
+    for field in ["semantic_timeout_ms", "retrieval_timeout_ms"] {
+        required_integer_in_range(
+            planner,
+            field,
+            1_000,
+            600_000,
+            "Loop Engineering planner",
+        )?;
+    }
     if !planner.get("output_schema").is_some_and(Value::is_object) {
         return Err(
             "DeepResearch Loop Engineering planner omitted its object output schema".to_string(),
@@ -264,6 +313,90 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
     }
 
     Ok(planner)
+}
+
+fn required_planner_text<'a>(
+    planner: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, String> {
+    planner
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("DeepResearch planner contract has no non-empty `{field}`"))
+}
+
+fn required_planner_timeout(
+    planner: &Map<String, Value>,
+    field: &str,
+) -> Result<u64, String> {
+    required_integer_in_range(
+        planner,
+        field,
+        1_000,
+        600_000,
+        "Loop Engineering planner",
+    )
+}
+
+pub(super) fn planner_fragment_schema(
+    full_schema: &Value,
+    fields: &[&str],
+) -> Result<Value, String> {
+    if fields.is_empty() {
+        return Err("DeepResearch planner fragment requires at least one field".to_string());
+    }
+    let mut schema = full_schema.clone();
+    let object = schema
+        .as_object_mut()
+        .ok_or_else(|| "DeepResearch full planner schema is not an object".to_string())?;
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "DeepResearch full planner schema omitted object properties".to_string())?;
+    let missing = fields
+        .iter()
+        .filter(|field| !properties.contains_key(**field))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "DeepResearch planner fragment requested unknown schema fields: {}",
+            missing.join(", ")
+        ));
+    }
+    properties.retain(|field, _| fields.contains(&field.as_str()));
+    object.insert(
+        "required".to_string(),
+        Value::Array(
+            fields
+                .iter()
+                .map(|field| Value::String((*field).to_string()))
+                .collect(),
+        ),
+    );
+    Ok(schema)
+}
+
+pub(super) fn merge_plan_fragments(
+    semantic: Value,
+    retrieval: Value,
+) -> Result<Value, String> {
+    let mut merged = semantic
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "DeepResearch semantic planner returned a non-object fragment".to_string())?;
+    let retrieval = retrieval
+        .as_object()
+        .ok_or_else(|| "DeepResearch retrieval planner returned a non-object fragment".to_string())?;
+    for (field, value) in retrieval {
+        if merged.insert(field.clone(), value.clone()).is_some() {
+            return Err(format!(
+                "DeepResearch planner fragments overlap on field `{field}`"
+            ));
+        }
+    }
+    Ok(Value::Object(merged))
 }
 
 pub(super) fn validate_plan(value: Value) -> Result<PlannedInquiry, String> {

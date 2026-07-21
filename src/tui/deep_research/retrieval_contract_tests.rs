@@ -42,8 +42,9 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
         assert_eq!(contract["cardinality"][field], 1, "{field}");
     }
     assert_eq!(contract["planner"]["agent"], "research-planner");
-    assert_eq!(contract["planner"]["max_steps"], 1);
-    assert_eq!(contract["planner"]["timeout_ms"], 480_000);
+    assert_eq!(contract["planner"]["max_steps"], 2);
+    assert_eq!(contract["planner"]["semantic_timeout_ms"], 480_000);
+    assert_eq!(contract["planner"]["retrieval_timeout_ms"], 240_000);
     assert_eq!(contract["hard_caps"]["max_searches"], 4);
     assert_eq!(contract["hard_caps"]["max_fetches"], 8);
     assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 2);
@@ -100,9 +101,15 @@ fn planner_prompt_is_language_agnostic_and_provider_queries_are_authoritative() 
         "¿Qué demuestra la evidencia?",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
     );
-    let prompt = args["input"]["loop_contract"]["planner"]["prompt"]
+    let semantic_prompt = args["input"]["loop_contract"]["planner"]["semantic_prompt"]
         .as_str()
-        .expect("planner prompt");
+        .expect("semantic planner prompt");
+    let retrieval_prompt = args["input"]["loop_contract"]["planner"]["retrieval_prompt"]
+        .as_str()
+        .expect("retrieval planner prompt");
+    assert!(semantic_prompt.chars().count() < 4_000);
+    assert!(retrieval_prompt.chars().count() < 3_000);
+    let prompt = format!("{semantic_prompt}\n{retrieval_prompt}");
 
     assert!(prompt.contains("Do not use keyword counts"));
     assert!(prompt.contains("language-specific routing"));
@@ -120,10 +127,11 @@ fn planner_prompt_is_language_agnostic_and_provider_queries_are_authoritative() 
     assert!(prompt.contains("typed-coverage supplemental pass"));
     assert!(prompt.contains("does not rewrite or generate provider queries"));
     assert!(prompt.contains("every material evidence target before dedicating a query"));
-    assert!(prompt.contains("never combine an HTTP-library documentation target"));
+    assert!(prompt.contains("Never combine an HTTP-library documentation target"));
     assert!(prompt.contains("free provider-query slots for other material criteria"));
-    assert!(prompt.contains("while any material criterion lacks its own query"));
-    assert!(prompt.contains("Do not seed a bare homepage"));
+    assert!(prompt.contains("do not seed a bare homepage"));
+    assert!(semantic_prompt.contains("Do not return search queries"));
+    assert!(retrieval_prompt.contains("closed semantic contract appended by the Host"));
     for obsolete in [
         "research_method",
         "execution_route",

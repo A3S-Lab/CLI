@@ -45,7 +45,7 @@ impl Scenario {
 
     fn pause_stage(self) -> Option<&'static str> {
         match self {
-            Self::Planner => Some("planner"),
+            Self::Planner => Some("planner-retrieval"),
             Self::Retrieval => None,
             Self::Resolution => Some("question-review"),
         }
@@ -123,13 +123,26 @@ impl ProcessInquiryClient {
 
     fn classify(&self, messages: &[Message]) -> anyhow::Result<Value> {
         let prompt = Self::prompt(messages);
-        if prompt.contains("Return the deterministic process inquiry plan.") {
-            let prior_invocations = invocation_count(&self.workspace, "planner");
-            append_invocation(&self.workspace, "planner")?;
+        if prompt.contains("Return the deterministic semantic inquiry plan.") {
+            let prior_invocations = invocation_count(&self.workspace, "planner-semantic");
+            append_invocation(&self.workspace, "planner-semantic")?;
             if self.workspace.join(FAIL_FIRST_PLANNER_MARKER).is_file() && prior_invocations == 0 {
                 anyhow::bail!("synthetic transient planner failure");
             }
-            return Ok(inquiry_plan());
+            return Ok(plan_fragment(
+                inquiry_plan(),
+                &[
+                    "report_title",
+                    "freshness_required",
+                    "workspace_evidence_required",
+                    "tracks",
+                    "stop_conditions",
+                ],
+            ));
+        }
+        if prompt.contains("Return the deterministic retrieval portfolio.") {
+            append_invocation(&self.workspace, "planner-retrieval")?;
+            return Ok(retrieval_plan_fragment(inquiry_plan()));
         }
         if prompt.contains("CLOSED_QUESTION_EVIDENCE_PACKET=") {
             append_invocation(&self.workspace, "resolution")?;
@@ -157,6 +170,40 @@ impl ProcessInquiryClient {
             meta: None,
         }
     }
+}
+
+fn plan_fragment(plan: Value, fields: &[&str]) -> Value {
+    let plan = plan.as_object().expect("fixture plan object");
+    Value::Object(
+        fields
+            .iter()
+            .map(|field| {
+                (
+                    (*field).to_string(),
+                    plan.get(*field)
+                        .cloned()
+                        .unwrap_or_else(|| panic!("fixture plan omitted {field}")),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn retrieval_plan_fragment(plan: Value) -> Value {
+    let mut fragment = plan_fragment(plan, &["search_queries", "seed_urls", "budget"]);
+    let budget = fragment["budget"]
+        .as_object_mut()
+        .expect("fixture retrieval budget");
+    let timeout_ms = budget
+        .remove("retrieval_timeout_ms")
+        .and_then(|value| value.as_u64())
+        .expect("fixture retrieval timeout milliseconds");
+    budget.insert(
+        "retrieval_timeout_secs".to_string(),
+        Value::from(timeout_ms / 1_000),
+    );
+    budget.insert("direct_fetches".to_string(), Value::from(8));
+    fragment
 }
 
 #[async_trait::async_trait]
@@ -195,9 +242,22 @@ struct IsolatedReviewInquiryClient {
 impl IsolatedReviewInquiryClient {
     fn classify(&self, messages: &[Message]) -> anyhow::Result<Value> {
         let prompt = ProcessInquiryClient::prompt(messages);
-        if prompt.contains("Return the isolated-review inquiry plan.") {
-            append_invocation(&self.workspace, "isolated:planner")?;
-            return Ok(isolated_review_plan());
+        if prompt.contains("Return the isolated-review semantic plan.") {
+            append_invocation(&self.workspace, "isolated:planner-semantic")?;
+            return Ok(plan_fragment(
+                isolated_review_plan(),
+                &[
+                    "report_title",
+                    "freshness_required",
+                    "workspace_evidence_required",
+                    "tracks",
+                    "stop_conditions",
+                ],
+            ));
+        }
+        if prompt.contains("Return the isolated-review retrieval portfolio.") {
+            append_invocation(&self.workspace, "isolated:planner-retrieval")?;
+            return Ok(retrieval_plan_fragment(isolated_review_plan()));
         }
         if prompt.contains("CLOSED_QUESTION_EVIDENCE_PACKET=") {
             let question_ids = [
@@ -502,9 +562,12 @@ fn process_workflow_args(run_id: &str) -> Value {
         "deterministic process evidence",
         1,
     );
-    loop_contract["planner"]["output_schema"] = json!({ "type": "object" });
-    loop_contract["planner"]["prompt"] = json!("Return the deterministic process inquiry plan.");
-    loop_contract["planner"]["timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["semantic_prompt"] =
+        json!("Return the deterministic semantic inquiry plan.");
+    loop_contract["planner"]["retrieval_prompt"] =
+        json!("Return the deterministic retrieval portfolio.");
+    loop_contract["planner"]["semantic_timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["retrieval_timeout_ms"] = json!(30_000);
     args["input"]["loop_contract"] = loop_contract;
     args
 }
@@ -644,9 +707,11 @@ async fn transient_planner_failure_retries_the_same_durable_effect() {
         .expect("the second planner attempt should complete the inquiry");
 
     assert_eq!(result.exit_code, 0, "{}", result.output);
-    assert_eq!(invocation_count(workspace.path(), "planner"), 2);
-    let journal = flow_journal_with_prefix(workspace.path(), &format!("{run_id}-planner-"))
-        .expect("one stable planner Flow journal");
+    assert_eq!(invocation_count(workspace.path(), "planner-semantic"), 2);
+    assert_eq!(invocation_count(workspace.path(), "planner-retrieval"), 1);
+    let journal =
+        flow_journal_with_prefix(workspace.path(), &format!("{run_id}-planner-semantic-"))
+            .expect("one stable semantic-planner Flow journal");
     assert_eq!(event_count(&journal, "run_created", None), 1);
     assert_eq!(event_count(&journal, "step_started", Some("generation")), 2);
     assert_eq!(
@@ -658,6 +723,15 @@ async fn transient_planner_failure_retries_the_same_durable_effect() {
         1
     );
     assert_eq!(event_count(&journal, "run_completed", None), 1);
+    let retrieval =
+        flow_journal_with_prefix(workspace.path(), &format!("{run_id}-planner-retrieval-"))
+            .expect("one stable retrieval-planner Flow journal");
+    assert_eq!(event_count(&retrieval, "run_created", None), 1);
+    assert_eq!(
+        event_count(&retrieval, "step_started", Some("generation")),
+        1
+    );
+    assert_eq!(event_count(&retrieval, "run_completed", None), 1);
     session.close().await;
 }
 
@@ -701,7 +775,22 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
         scenario.pause_stage(),
     );
     match scenario {
-        Scenario::Planner | Scenario::Resolution => {
+        Scenario::Planner => {
+            let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
+            wait_for_condition(
+                "completed durable generation before Inquiry acknowledgement",
+                Duration::from_secs(20),
+                || marker.is_file(),
+            )
+            .await;
+            for label in ["planner-semantic", "planner-retrieval"] {
+                let journal =
+                    flow_journal_with_prefix(workspace.path(), &format!("{run_id}-{label}-"))
+                        .unwrap_or_else(|| panic!("durable {label} Flow journal"));
+                assert_eq!(event_count(&journal, "run_completed", None), 1);
+            }
+        }
+        Scenario::Resolution => {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
             wait_for_condition(
                 "completed durable generation before Inquiry acknowledgement",
@@ -760,7 +849,8 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
         result_value(baseline.path()),
         "resumed Inquiry projection must match uninterrupted execution"
     );
-    assert_eq!(invocation_count(workspace.path(), "planner"), 1);
+    assert_eq!(invocation_count(workspace.path(), "planner-semantic"), 1);
+    assert_eq!(invocation_count(workspace.path(), "planner-retrieval"), 1);
     assert_eq!(invocation_count(workspace.path(), "resolution"), 1);
     assert_eq!(invocation_count(workspace.path(), "contract"), 0);
     assert_eq!(invocation_count(workspace.path(), "retrieval:alpha"), 1);
@@ -844,9 +934,12 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
         "deterministic isolated review evidence",
         3,
     );
-    loop_contract["planner"]["output_schema"] = json!({ "type": "object" });
-    loop_contract["planner"]["prompt"] = json!("Return the isolated-review inquiry plan.");
-    loop_contract["planner"]["timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["semantic_prompt"] =
+        json!("Return the isolated-review semantic plan.");
+    loop_contract["planner"]["retrieval_prompt"] =
+        json!("Return the isolated-review retrieval portfolio.");
+    loop_contract["planner"]["semantic_timeout_ms"] = json!(30_000);
+    loop_contract["planner"]["retrieval_timeout_ms"] = json!(30_000);
     args["input"]["loop_contract"] = loop_contract;
 
     let mut projections = Vec::new();
@@ -903,7 +996,14 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
             if question_id == "question:plan-3-1"
     )));
 
-    assert_eq!(invocation_count(workspace.path(), "isolated:planner"), 1);
+    assert_eq!(
+        invocation_count(workspace.path(), "isolated:planner-semantic"),
+        1
+    );
+    assert_eq!(
+        invocation_count(workspace.path(), "isolated:planner-retrieval"),
+        1
+    );
     assert_eq!(
         invocation_count(workspace.path(), "isolated:review:question:plan-1-1"),
         1

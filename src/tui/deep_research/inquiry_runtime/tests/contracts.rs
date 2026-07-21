@@ -14,8 +14,9 @@ use super::execution::{
     prepare_question_evidence_packet, question_group_evidence, question_review_groups,
 };
 use super::plan::{
-    bound_questions, commit_plan_research_contract, queue_plan_questions, validate_plan,
-    validated_loop_planner, workflow_args_with_plan,
+    bound_questions, commit_plan_research_contract, merge_plan_fragments,
+    planner_fragment_schema, queue_plan_questions, validate_plan, validated_loop_planner,
+    workflow_args_with_plan,
 };
 
 fn minimal_plan() -> Value {
@@ -114,6 +115,66 @@ fn automatic_loop_contract_is_unlimited_and_coverage_driven() {
     assert_eq!(contract["cardinality"]["semantic_selections"], 2);
     assert_eq!(contract["cardinality"]["question_reviews"], 1);
     assert_eq!(contract["cardinality"]["contract_assessments"], 1);
+}
+
+#[test]
+fn split_planner_schemas_merge_into_one_host_validated_plan() {
+    let args = automatic_loop_workflow_args("跨语言核实公开结论");
+    let planner = validated_loop_planner(&args).expect("valid split planner contract");
+    let full_schema = &planner["output_schema"];
+    let semantic_fields = [
+        "report_title",
+        "freshness_required",
+        "workspace_evidence_required",
+        "tracks",
+        "stop_conditions",
+    ];
+    let retrieval_fields = ["search_queries", "seed_urls", "budget"];
+    let semantic_schema =
+        planner_fragment_schema(full_schema, &semantic_fields).expect("semantic plan schema");
+    let retrieval_schema =
+        planner_fragment_schema(full_schema, &retrieval_fields).expect("retrieval plan schema");
+    assert_eq!(
+        semantic_schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        semantic_fields.into_iter().collect()
+    );
+    assert_eq!(
+        retrieval_schema["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        retrieval_fields.into_iter().collect()
+    );
+
+    let plan = minimal_plan();
+    let semantic = serde_json::json!({
+        "report_title": plan["report_title"],
+        "freshness_required": plan["freshness_required"],
+        "workspace_evidence_required": plan["workspace_evidence_required"],
+        "tracks": plan["tracks"],
+        "stop_conditions": plan["stop_conditions"],
+    });
+    let retrieval = serde_json::json!({
+        "search_queries": plan["search_queries"],
+        "seed_urls": plan["seed_urls"],
+        "budget": plan["budget"],
+    });
+    let merged = merge_plan_fragments(semantic, retrieval).expect("merge disjoint plan fragments");
+    validate_plan(merged).expect("Host validates the merged full plan");
+
+    let overlap = merge_plan_fragments(
+        serde_json::json!({"tracks": []}),
+        serde_json::json!({"tracks": []}),
+    )
+    .expect_err("overlapping fragments fail closed");
+    assert!(overlap.contains("overlap"), "{overlap}");
 }
 
 #[test]
@@ -612,9 +673,12 @@ fn regressed_wall_clock_cannot_grant_a_fresh_inquiry_budget() {
 
 #[test]
 fn inquiry_budget_keeps_the_full_closed_review_reserve_after_retrieval() {
-    assert_eq!(super::PLANNER_GENERATION_ATTEMPT_TIMEOUT_MS, 480_000);
+    assert_eq!(super::PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS, 480_000);
+    assert_eq!(super::PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS, 240_000);
     assert_eq!(super::PLANNER_GENERATION_MAX_ATTEMPTS, 2);
-    assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 975_000);
+    assert_eq!(super::PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS, 975_000);
+    assert_eq!(super::PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS, 495_000);
+    assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 1_470_000);
     let accounted = super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
