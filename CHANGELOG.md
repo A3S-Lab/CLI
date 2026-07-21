@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.9] - 2026-07-21
+
+### Added
+
+- Bundled the unified A3S Web Work workspace with Finder-style local file
+  management, independent Chinese AI-assistant sessions, full WebIDE editing,
+  split Markdown preview, and aligned document, spreadsheet, presentation, and
+  PDF editing surfaces backed by PDFium.
+- Integrated the convergent DeepResearch runtime, managed Web lifecycle, and
+  projected A3S Use activity and plugin capabilities prepared on the release
+  branch.
+
+### Fixed
+
+- Preserved streamed file response bodies in the Web API gateway instead of
+  interpreting PDF and other ordinary binary streams as server-sent events.
+
+## [0.9.8] - 2026-07-21
+
+### Changed
+
+- Updated the bundled Code runtime to A3S Code Core 6.1.0 and A3S Search 2.0.0.
+  `web_search` now uses AnySearch by default when neither the request nor ACL
+  configuration selects engines, while explicit AnySearch, Tavily, and
+  conventional engine selections remain available.
+
+### Fixed
+
+- Kept raw A3S Use MCP tools hidden from the primary Code model while allowing
+  the dedicated Use worker to execute its exact built-in Browser, Office, and
+  OCR surface. Provider installers and newly projected extension tools now
+  retain `Ask` policy and settle through the parent TUI confirmation flow.
+- Added a real Windows Code TUI-to-Use regression covering the verified Use ZIP
+  layout, all 31 Browser core tools with Microsoft Edge, every native Office
+  operation and view, confirmed OfficeCLI installation, and confirmed local
+  PP-OCRv6 installation and extraction.
+- Registered `a3s-webview` as a verified first-use component and made
+  `a3s code` install its platform release before terminal takeover when policy
+  permits. The managed path is passed directly to RemoteUI and Agent Island,
+  Windows assets use their Rust target ZIP names and protocol-aware health
+  probe, and a release-page/checksum fallback survives GitHub API rate limits.
+- Increased the Windows main-thread stack reserve for the `a3s` executable so
+  `a3s code` can complete TUI session startup without a stack overflow, with a
+  Windows-only startup smoke test covering the regression.
+
+## [0.9.7] - 2026-07-19
+
 ### Added
 
 - Added the Core local workspace credential boundary to every Code TUI

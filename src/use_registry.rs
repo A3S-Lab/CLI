@@ -38,7 +38,11 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_JSON_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_ACTIVITY_HTML_BYTES: u64 = 2 * 1024 * 1024;
-const MCP_REQUEST_TIMEOUT_SECS: u64 = 5;
+// Browser installation has a bounded 15-minute HTTP timeout, while Office
+// and OCR installations are bounded at five minutes. Keep the host request
+// alive slightly longer than the longest supported Use operation so the
+// provider can return its typed outcome instead of a misleading MCP timeout.
+const MCP_REQUEST_TIMEOUT_SECS: u64 = 15 * 60 + 30;
 const COMMAND_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 // Built-in application operations run inside the dedicated Use boundary.
