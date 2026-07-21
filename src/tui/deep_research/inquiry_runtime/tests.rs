@@ -1,0 +1,1 @@
+include!("tests/contracts.rs");

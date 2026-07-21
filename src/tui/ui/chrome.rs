@@ -129,21 +129,25 @@ automatically shows a one-click `Open view` button that opens the authenticated 
 pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/model",
-        "switch model (←/→ for Claude/GPT accounts if signed in)",
+        "switch configured/account models (←/→ provider)",
     ),
     ("/init", "analyze the project and generate AGENTS.md"),
     ("/config", "edit config.acl in the built-in editor"),
+    (
+        "/terminal",
+        "inspect terminal capabilities, fallbacks, and multiplexer passthrough",
+    ),
     (
         "/checkup",
         "audit setup, then review proposed fixes before applying them",
     ),
     (
-        "/permissions",
-        "inspect and revoke exact session or project grants",
+        "/queue",
+        "inspect pending follow-ups · send now, remove, or clear",
     ),
     (
-        "/tasks",
-        "inspect delegated work · search, view output, or cancel safely",
+        "/history",
+        "fuzzy-search prompts from the current session",
     ),
     (
         "/copy",
@@ -152,6 +156,18 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/export",
         "write a new Markdown session file · optional workspace-relative path",
+    ),
+    (
+        "/tasks",
+        "inspect delegated work · search, view output, or cancel safely",
+    ),
+    (
+        "/permissions",
+        "inspect and revoke exact session or project grants",
+    ),
+    (
+        "/use",
+        "inspect Browser/Office/OCR readiness · /use [status|repair]",
     ),
     ("/theme", "cycle the code-highlight theme (Codex Dark …)"),
     (
@@ -189,12 +205,12 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
         "browse memory as an event/entity graph with tiers and forget candidates",
     ),
     (
-        "/research",
-        "inspect DeepResearch event state · status, explain, or strict replay",
+        "/evolution",
+        "review learned preferences, recurring skills, and versioned OKF candidates",
     ),
     (
-        "/history",
-        "fuzzy-search prompts from the current session",
+        "/research",
+        "inspect DeepResearch event state · status, explain, or strict replay",
     ),
     (
         "/kb",
@@ -222,7 +238,11 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/help", "show commands and shortcuts"),
     (
         "/fork",
-        "branch a new session from this point (original kept)",
+        "branch this session · add `worktree` for an isolated workspace",
+    ),
+    (
+        "/rewind",
+        "undo the last completed turn when its files still match",
     ),
     ("/clear", "reset the conversation"),
     ("/auto", "make future turns non-interactive"),
@@ -233,7 +253,8 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
 /// mid-stream — hidden from the menu and rejected while a turn is in flight.
 pub(super) const IDLE_ONLY: &[&str] = &[
     "/clear", "/compact", "/model", "/effort", "/goal", "/loop", "/reload", "/update", "/init",
-    "/checkup", "/fork", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill", "/okf", "/kb",
+    "/checkup", "/fork", "/rewind", "/sleep", "/relay", "/flow", "/agent", "/mcp", "/skill",
+    "/okf", "/kb",
 ];
 
 /// Slash commands whose name starts with `input` (input begins with `/`).

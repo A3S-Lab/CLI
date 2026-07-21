@@ -120,6 +120,11 @@ impl KernelService {
         self.state.session_controls.lock().await.remove(session_id);
         self.state.session_contexts.lock().await.remove(session_id);
         self.state.session_settings.lock().await.remove(session_id);
+        self.state
+            .session_turn_queues
+            .lock()
+            .await
+            .remove(session_id);
         Ok(())
     }
 
@@ -180,6 +185,12 @@ impl KernelService {
                     .await
                     .entry(id.to_string())
                     .or_default();
+                self.state
+                    .session_turn_queues
+                    .lock()
+                    .await
+                    .entry(id.to_string())
+                    .or_default();
                 return Ok(session);
             }
         }
@@ -211,7 +222,7 @@ impl KernelService {
                 &workspace,
                 requested_session_id,
                 &settings,
-                &default_controls.effort,
+                &default_controls,
             )
             .await?;
         self.state
@@ -255,6 +266,12 @@ impl KernelService {
             .await
             .entry(session.session_id().to_string())
             .or_insert(settings);
+        self.state
+            .session_turn_queues
+            .lock()
+            .await
+            .entry(session.session_id().to_string())
+            .or_default();
         session
             .save()
             .await
@@ -412,14 +429,14 @@ impl KernelService {
         workspace: &Path,
         session_id: Option<&str>,
         settings: &CodeWebSessionSettings,
-        effort: &str,
+        controls: &CodeWebSessionControls,
     ) -> BootResult<(Arc<AgentSession>, Arc<dyn a3s_code_core::LlmClient>)> {
         let (options, runtime, llm_client) = code_web_session_options(
             self.state.as_ref(),
             workspace,
             session_id,
             self.effective_model(settings),
-            effort,
+            controls,
             settings,
         )
         .await?;
@@ -518,7 +535,7 @@ impl KernelService {
             &workspace,
             Some(session_id),
             self.effective_model(settings),
-            &controls.effort,
+            &controls,
             settings,
         )
         .await?;

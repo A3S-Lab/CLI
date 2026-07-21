@@ -142,7 +142,15 @@ fn to_axum_response(response: BootResponse) -> Response {
         Err(message) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, message),
     };
 
-    let body = if is_streaming {
+    let body = if is_streaming && response.is_file_stream() {
+        let Some(stream) = response.into_body_stream() else {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "streaming response body has already been consumed".to_string(),
+            );
+        };
+        Body::from_stream(stream)
+    } else if is_streaming {
         let Some(stream) = response.into_sse_stream() else {
             return error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -239,4 +247,31 @@ fn error_response(status: StatusCode, message: String) -> Response {
         HeaderValue::from_static("text/plain; charset=utf-8"),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use a3s_boot::StreamableFile;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn streams_file_responses_without_treating_them_as_sse() {
+        let response = to_axum_response(BootResponse::streamable_file(
+            StreamableFile::stream(futures::stream::iter([
+                Ok(Vec::from("hello ")),
+                Ok(Vec::from("pdf")),
+            ]))
+            .with_content_type("application/pdf")
+            .with_content_length(9),
+        ));
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            "application/pdf"
+        );
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(body.as_ref(), b"hello pdf");
+    }
 }

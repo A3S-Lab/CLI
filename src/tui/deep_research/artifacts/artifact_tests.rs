@@ -3,349 +3,7 @@ mod source_anchor_tests {
     use super::*;
 
     #[test]
-    fn recovery_does_not_replace_an_existing_completed_report() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-recovery-quality-monotonic-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let query = "quality monotonic report";
-        let completed_output = serde_json::json!({
-            "mode": "direct_web",
-            "research": {
-                "status": "success",
-                "results": [{
-                    "success": true,
-                    "structured": {
-                        "summary": "The completed report preserves a source-backed finding across later degraded retries.",
-                        "sources": [{
-                            "title": "Completed source",
-                            "url_or_path": "https://example.com/completed",
-                            "date": "2026-07-12",
-                            "quote_or_fact": "This completed evidence must not be replaced by a recovery artifact.",
-                            "reliability": "Deterministic fixture."
-                        }],
-                        "key_evidence": ["The completed report passed its evidence gate."],
-                        "contradictions": [],
-                        "confidence": "high",
-                        "gaps": []
-                    }
-                }]
-            }
-        })
-        .to_string();
-        let completed = materialize_deep_research_completed_report_from_workflow_evidence(
-            &workspace,
-            query,
-            &completed_output,
-            None,
-        )
-        .expect("completed fixture should materialize");
-        let previous_markdown = std::fs::read_to_string(&completed.markdown).unwrap();
-        let previous_html = std::fs::read_to_string(&completed.html).unwrap();
-
-        let recovery = materialize_deep_research_recovery_report(
-            &workspace,
-            query,
-            "A later collection attempt degraded.",
-            r#"{"mode":"direct_web","research":{"status":"failed","results":[]}}"#,
-            None,
-        )
-        .expect("the degraded attempt should still write a diagnostic artifact");
-
-        assert!(recovery
-            .html
-            .parent()
-            .unwrap()
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .ends_with("-recovery"));
-        assert_eq!(
-            std::fs::read_to_string(&completed.markdown).unwrap(),
-            previous_markdown
-        );
-        assert_eq!(
-            std::fs::read_to_string(&completed.html).unwrap(),
-            previous_html
-        );
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-
-    #[test]
-    fn completed_report_materializer_accepts_reportable_evidence_from_all_runtime_modes() {
-        for mode in ["direct_web", "local_parallel_task"] {
-            let workspace = std::env::temp_dir().join(format!(
-                "a3s-deepresearch-materializer-{mode}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::create_dir_all(&workspace).unwrap();
-            let output = serde_json::json!({
-                "mode": mode,
-                "research": {
-                    "status": "success",
-                    "results": [{
-                        "success": true,
-                        "structured": {
-                            "summary": "The official source confirms the reportable finding.",
-                            "sources": [{
-                                "title": "Official evidence",
-                                "url_or_path": "https://example.com/official-evidence",
-                                "quote_or_fact": "The official evidence directly supports the material finding used in this report.",
-                                "reliability": "Primary fixture source."
-                            }],
-                            "key_evidence": ["The material finding is directly supported."],
-                            "contradictions": [],
-                            "confidence": "High for the cited finding.",
-                            "gaps": ["The fixture intentionally covers one bounded claim."]
-                        }
-                    }]
-                }
-            })
-            .to_string();
-
-            let parsed = serde_json::from_str::<serde_json::Value>(&output).unwrap();
-            assert_eq!(
-                deep_research_collection_status(&parsed),
-                "completed",
-                "unexpected collection status for {mode}: {output}"
-            );
-            let evidence = deep_research_structured_evidence_from_workflow(&output, None);
-            assert!(
-                !evidence.is_empty(),
-                "no compact evidence for {mode}: {output}"
-            );
-            let markdown = evidence::completed_report_markdown_from_workflow_evidence(
-                &format!("{mode} deterministic report"),
-                &evidence,
-            )
-            .expect("structured evidence should produce report markdown");
-            assert!(
-                !deep_research_output_has_internal_leak(&markdown),
-                "materialized markdown leaked internals for {mode}: {markdown}"
-            );
-
-            let artifacts = materialize_deep_research_completed_report_from_workflow_evidence(
-                &workspace,
-                &format!("{mode} deterministic report"),
-                &output,
-                None,
-            )
-            .expect("valid structured evidence should materialize without model synthesis");
-            let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-            assert!(markdown.contains("Official evidence"), "{markdown}");
-            assert!(artifacts.html.is_file());
-
-            let _ = std::fs::remove_dir_all(&workspace);
-        }
-    }
-
-    #[test]
-    fn completed_report_materializer_preserves_checker_report_context() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-checker-context-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let output = serde_json::json!({
-            "mode": "hybrid_direct_web_parallel",
-            "plan": {
-                "report_title": "Runtime Adoption Decision Guide",
-                "execution_route": "direct_then_maker"
-            },
-            "checker": {
-                "decision": "finalize",
-                "coverage_summary": "The cumulative package is reportable with one explicit gap.",
-                "report_summary": "The evidence supports a bounded production pilot.",
-                "verified_findings": [
-                    "The runtime documents production-ready component support."
-                ],
-                "unresolved_gaps": [
-                    "Independent interoperability benchmarks remain unavailable."
-                ],
-                "contradictions": [
-                    "Source terminology differs on the maturity label."
-                ],
-                "next_action": "none"
-            },
-            "research": {
-                "status": "success",
-                "results": [{
-                    "success": true,
-                    "structured": {
-                        "summary": "Direct collection found one traceable source.",
-                        "sources": [{
-                            "title": "Official runtime documentation",
-                            "url_or_path": "https://example.com/runtime",
-                            "quote_or_fact": "The runtime documents component support.",
-                            "reliability": "Official documentation"
-                        }],
-                        "key_evidence": ["The runtime documents component support."],
-                        "contradictions": [],
-                        "confidence": "Medium-high",
-                        "gaps": []
-                    }
-                }]
-            }
-        })
-        .to_string();
-
-        let artifacts = materialize_deep_research_completed_report_from_workflow_evidence(
-            &workspace,
-            "A deliberately verbose raw query that should not become the report heading",
-            &output,
-            None,
-        )
-        .expect("checker context should materialize as a completed report");
-        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-
-        assert!(
-            markdown.starts_with("# Runtime Adoption Decision Guide\n"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("The evidence supports a bounded production pilot."),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("Independent interoperability benchmarks remain unavailable."),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("Source terminology differs on the maturity label."),
-            "{markdown}"
-        );
-        assert!(
-            !markdown.contains("No material contradictions or gaps were captured"),
-            "{markdown}"
-        );
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-
-    #[test]
-    fn completed_report_materializer_uses_evidence_when_verification_is_degraded() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-degraded-verification-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let output = serde_json::json!({
-            "mode": "direct_web",
-            "verification": {
-                "status": "degraded",
-                "checker_completed": false,
-                "error": "simulated checker timeout"
-            },
-            "research": {
-                "status": "partial_success",
-                "results": [{
-                    "success": true,
-                    "structured": {
-                        "summary": "Direct collection found one traceable source.",
-                        "sources": [{
-                            "title": "Runtime documentation",
-                            "url_or_path": "https://example.com/runtime-docs",
-                            "quote_or_fact": "The runtime provides an event-driven scheduler.",
-                            "reliability": "Primary documentation."
-                        }],
-                        "key_evidence": ["The runtime provides an event-driven scheduler."],
-                        "contradictions": [],
-                        "confidence": "Medium pending independent verification.",
-                        "gaps": []
-                    }
-                }, {
-                    "success": false,
-                    "error": "one unrelated source fetch failed"
-                }]
-            }
-        })
-        .to_string();
-
-        let parsed = serde_json::from_str::<serde_json::Value>(&output).unwrap();
-        assert_eq!(deep_research_collection_status(&parsed), "completed");
-        assert!(!deep_research_workflow_needs_recovery_report(&output));
-
-        let artifacts = materialize_deep_research_completed_report_from_workflow_evidence(
-            &workspace,
-            "Assess the runtime",
-            &output,
-            None,
-        )
-        .expect("traceable evidence should survive an unavailable checker");
-        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-
-        assert!(
-            markdown.contains("The runtime provides an event-driven scheduler"),
-            "{markdown}"
-        );
-        assert!(
-            markdown.contains("Independent verification did not complete in this run"),
-            "{markdown}"
-        );
-        assert!(!markdown.contains("Verified finding"), "{markdown}");
-        assert!(
-            !markdown.contains("simulated checker timeout"),
-            "{markdown}"
-        );
-        assert!(
-            !markdown.contains("DeepResearch Recovery Report"),
-            "{markdown}"
-        );
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-
-    #[test]
-    fn completed_report_materializer_rejects_success_without_reportable_evidence() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-empty-success-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let output = serde_json::json!({
-            "mode": "local_parallel_task",
-            "research": { "status": "success", "results": [] }
-        })
-        .to_string();
-
-        assert!(
-            materialize_deep_research_completed_report_from_workflow_evidence(
-                &workspace,
-                "empty success",
-                &output,
-                None,
-            )
-            .is_none()
-        );
-        assert!(!workspace.join(".a3s/research").exists());
-
-        let _ = std::fs::remove_dir_all(&workspace);
-    }
-
-    #[test]
-    fn recovery_report_preserves_direct_web_seed_when_parallel_fanout_fails() {
+    fn recovery_report_preserves_an_observed_seed_from_legacy_failed_output() {
         let workspace = std::env::temp_dir().join(format!(
             "a3s-deepresearch-seed-recovery-{}-{}",
             std::process::id(),
@@ -415,10 +73,6 @@ mod source_anchor_tests {
             "{markdown}"
         );
         assert!(
-            markdown.contains("captured 0/3 delegated research tasks"),
-            "{markdown}"
-        );
-        assert!(
             markdown.contains("only 0 of 3 planned research tasks produced validated evidence"),
             "{markdown}"
         );
@@ -438,12 +92,9 @@ mod source_anchor_tests {
                     "host_count": 2,
                     "fetched_count": 1,
                     "fetched_host_count": 1,
-                    "query_term_count": 3,
-                    "matched_query_term_count": 3,
-                    "fetched_query_term_count": 2,
+                    "evidence_selection_mode": "semantic_chunk_ids",
                     "freshness_required": true,
-                    "dated_source_count": 0,
-                    "query_terms_truncated": true
+                    "dated_source_count": 0
                 }
             }
         })
@@ -451,15 +102,10 @@ mod source_anchor_tests {
 
         let summary = workflow_evidence_summary(&direct).expect("direct summary");
         assert!(
-            summary.contains("2 source(s) across 2 host(s), 1 fetched across 1 host(s)"),
+            summary.contains("2 semantically selected source(s) across 2 host(s), 1 fetched across 1 host(s)"),
             "{summary}"
         );
-        assert!(summary.contains("topic 3/3, fetched text 2/3"), "{summary}");
         assert!(summary.contains("0/2 source(s) are dated"), "{summary}");
-        assert!(
-            summary.contains("direct completion was disabled"),
-            "{summary}"
-        );
 
         let hybrid = serde_json::json!({
             "mode": "hybrid_direct_web_parallel",
@@ -470,9 +116,7 @@ mod source_anchor_tests {
                     "host_count": 3,
                     "fetched_count": 2,
                     "fetched_host_count": 2,
-                    "query_term_count": 2,
-                    "matched_query_term_count": 2,
-                    "fetched_query_term_count": 2
+                    "evidence_selection_mode": "semantic_chunk_ids"
                 }
             }
         })
@@ -483,7 +127,7 @@ mod source_anchor_tests {
             "{summary}"
         );
         assert!(
-            summary.contains("4 source(s) across 3 host(s), 2 fetched across 2 host(s)"),
+            summary.contains("4 semantically selected source(s) across 3 host(s), 2 fetched across 2 host(s)"),
             "{summary}"
         );
     }
@@ -533,74 +177,27 @@ mod source_anchor_tests {
         for removed in ["utm_", "token", "secret", "fragment"] {
             assert!(!sanitized.contains(removed), "{sanitized}");
         }
-
-        let markdown = format!("# Report\n\n## Sources\n\n- {kbs}\n");
-        let (anchors, explicit) = markdown_report_source_anchors(&markdown, "report query");
-        assert!(explicit);
-        assert!(anchors.contains(
-            &"https://world.kbs.co.kr/service/news_view.htm?lang=e&seq_code=155851".to_string()
-        ));
-        assert!(!anchors.contains(&"untrusted-report-url".to_string()));
     }
 
     #[test]
-    fn report_source_candidates_do_not_use_substring_or_case_folded_matches() {
-        let observed = HashSet::from([
-            "https://example.com/report".to_string(),
-            "https://example.com/report/".to_string(),
-            "docs/Secrets.md".to_string(),
-            "docs/archive/".to_string(),
-        ]);
-        for reported in [
-            "https://example.com/report-fabricated",
-            "https://example.com/Report",
-            "docs/secrets.md",
-            "docs/archive",
-        ] {
-            assert!(
-                reported_research_source_candidates(reported)
-                    .iter()
-                    .all(|candidate| !observed.contains(candidate)),
-                "{reported:?} must not match a distinct observed resource"
-            );
-        }
+    fn report_citations_are_structural_and_do_not_depend_on_heading_language() {
+        let markdown = "# Report\n\n## 任意标题\n\n| Value |\n| --- |\n| docs/plain-text.md |\n\n[证据](docs/cited.md)\n";
+        let targets =
+            super::super::deep_research_report_audit::report_citation_targets(markdown, "");
+        assert!(targets.contains("docs/cited.md"), "{targets:?}");
+        assert!(!targets.contains("docs/plain-text.md"), "{targets:?}");
     }
 
     #[test]
-    fn report_citation_collectors_cover_plain_local_table_cells() {
-        let markdown =
-            "# Report\n\n## Sources\n\n| Source | Note |\n| --- | --- |\n| docs/unobserved.md | fixture |\n";
-        let (anchors, explicit) = markdown_report_source_anchors(markdown, "report query");
-        assert!(explicit);
-        assert!(anchors.contains(&"docs/unobserved.md".to_string()));
-
-        let html = "<html><body><h2>Sources</h2><table><tr><td>docs/html-source.md</td></tr></table></body></html>";
-        let mut anchors = Vec::new();
-        let mut seen = HashSet::new();
-        collect_html_source_section_local_anchors(html, &mut anchors, &mut seen);
-        assert_eq!(anchors, vec!["docs/html-source.md"]);
-    }
-
-    #[test]
-    fn report_citation_collector_marks_unsanitized_urls_untrusted() {
+    fn report_citation_targets_do_not_authorize_a_sanitized_variant() {
         let markdown = "# Report\n\n## Sources\n\n- https://user:password@example.com/source?token=secret#fragment\n";
-        let (anchors, explicit) = markdown_report_source_anchors(markdown, "report query");
-        assert!(explicit);
-        assert!(
-            anchors.contains(&"untrusted-report-url".to_string()),
-            "{anchors:?}"
-        );
-        assert!(!anchors.contains(&"https://example.com/source".to_string()));
+        let targets =
+            super::super::deep_research_report_audit::report_citation_targets(markdown, "");
+        assert!(!targets.contains("https://example.com/source"), "{targets:?}");
     }
 
     #[test]
-    fn html_link_targets_require_exact_attribute_names() {
-        let html = "<a data-href=\"https://example.com/metadata\" xhref=\"https://example.com/lookalike\" href=\"https://example.com/source\">source</a>";
-        assert_eq!(html_link_targets(html), vec!["https://example.com/source"]);
-    }
-
-    #[test]
-    fn source_target_scanners_preserve_balanced_url_parentheses() {
+    fn structural_target_scanners_preserve_balanced_url_parentheses() {
         let target = "https://example.com/spec_(v2)";
         assert_eq!(http_source_targets(&format!("See {target}.")), vec![target]);
         assert_eq!(
@@ -608,66 +205,19 @@ mod source_anchor_tests {
             vec!["https://example.com/plain"]
         );
 
-        let mut anchors = Vec::new();
-        let mut seen = HashSet::new();
-        collect_markdown_link_anchors(
+        let targets = super::super::deep_research_report_audit::report_citation_targets(
             &format!("[specification]({target})"),
-            &mut anchors,
-            &mut seen,
+            "",
         );
-        assert_eq!(anchors, vec![target]);
+        assert!(targets.contains(target), "{targets:?}");
 
-        anchors.clear();
-        seen.clear();
-        collect_markdown_link_anchors(
+        let plain_targets = super::super::deep_research_report_audit::report_citation_targets(
             "[plain](https://example.com/plain))",
-            &mut anchors,
-            &mut seen,
-        );
-        assert_eq!(anchors, vec!["https://example.com/plain"]);
-
-        let query = format!("Analyze {target}");
-        let markdown = format!("# {}\n", markdown_plain_text(&query));
-        let html = deep_research_completed_report_html(&query, &markdown);
-        assert!(
-            html_report_source_anchors(&html, &query).is_empty(),
-            "the exact balanced-parenthesis query URL should remain title-only: {html}"
-        );
-        let derived_markdown = format!("# {target} — Research Report\n");
-        let derived_html = deep_research_completed_report_html(&query, &derived_markdown);
-        assert!(
-            markdown_report_source_anchors(&derived_markdown, &query)
-                .0
-                .is_empty(),
-            "a query-derived report title must not become a citation"
+            "",
         );
         assert!(
-            html_report_source_anchors(&derived_html, &query).is_empty(),
-            "a query-derived HTML title must not become a citation: {derived_html}"
-        );
-        let markdown_with_body = format!("{derived_markdown}\nBody citation: {target}\n");
-        assert!(
-            !markdown_report_source_anchors(&markdown_with_body, &query)
-                .0
-                .is_empty(),
-            "the same URL must still be validated when cited in the report body"
-        );
-        let html_with_body = derived_html.replace(
-            "</article>",
-            &format!("<p>Body citation: {target}</p></article>"),
-        );
-        assert!(
-            !html_report_source_anchors(&html_with_body, &query).is_empty(),
-            "the same URL must still be validated in the HTML body"
-        );
-
-        let unicode_target = "https://example.com/研究_(v2)";
-        let unicode_query = format!("Analyze {unicode_target}");
-        let unicode_markdown = format!("# {}\n", markdown_plain_text(&unicode_query));
-        let unicode_html = deep_research_completed_report_html(&unicode_query, &unicode_markdown);
-        assert!(
-            html_report_source_anchors(&unicode_html, &unicode_query).is_empty(),
-            "percent-encoded HTML href must match its Unicode query URL: {unicode_html}"
+            plain_targets.contains("https://example.com/plain"),
+            "{plain_targets:?}"
         );
 
         let qualified_query =
@@ -683,21 +233,8 @@ mod source_anchor_tests {
             qualified_markdown.contains("https://example.com/resource"),
             "{qualified_markdown}"
         );
-        assert!(
-            html_report_source_anchors(&qualified_html, &qualified_query).is_empty(),
-            "the sanitized query URL should remain title-only: {qualified_html}"
-        );
         let title_end = "Analyze https://example.com/resource</h1>";
         assert!(qualified_html.contains(title_end), "{qualified_html}");
-        let changed_query = qualified_html.replacen(
-            title_end,
-            "Analyze <a href=\"https://example.com/other\">https://example.com/resource</a></h1>",
-            1,
-        );
-        assert!(
-            !html_report_source_anchors(&changed_query, &qualified_query).is_empty(),
-            "sanitizing the query must not authorize a different title target"
-        );
     }
 
     #[test]
@@ -908,7 +445,7 @@ mod source_anchor_tests {
             "Source-backed analysis with explicit limitations and caveats. ".repeat(4)
         );
 
-        let markdown = completed_report_markdown_from_answer_text(query, &answer)
+        let markdown = normalize_report_markdown_candidate(query, &answer)
             .expect("substantive answer should produce report Markdown");
 
         assert_eq!(markdown.matches("\n## Sources\n").count(), 1, "{markdown}");
@@ -1026,71 +563,18 @@ mod artifact_boundary_tests {
             "# Runtime report\n\n## Findings\n\nThe unavailable candidate `crates.io/crates/missing` is a limitation, and `owner/repository` is a repository slug rather than a citation.\n\n## Sources\n\n- [Runtime status]({observed})\n\n## Limitations\n\nConfidence is limited by the unavailable candidate.\n"
         );
         let html = deep_research_completed_report_html(query, &markdown);
-        let citations = html_report_source_anchors(&html, query);
+        let citations =
+            super::super::deep_research_report_audit::report_citation_targets(&markdown, &html);
 
-        assert!(citations.contains(&observed.to_string()), "{citations:?}");
+        assert!(citations.contains(observed), "{citations:?}");
         assert!(
-            !citations.contains(&"crates.io/crates/missing".to_string()),
+            !citations.contains("crates.io/crates/missing"),
             "{citations:?}"
         );
         assert!(
-            !citations.contains(&"owner/repository".to_string()),
+            !citations.contains("owner/repository"),
             "{citations:?}"
         );
-    }
-
-    #[test]
-    fn rejected_answer_text_does_not_publish_unvalidated_artifacts() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-prepublish-validation-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let query = "prepublish validation";
-        let workflow_output = serde_json::json!({
-            "mode": "direct_web",
-            "checker": { "decision": "finalize" },
-            "research": {
-                "status": "success",
-                "results": [{
-                    "success": true,
-                    "structured": {
-                        "summary": "Observed evidence",
-                        "sources": [{
-                            "title": "Observed source",
-                            "url_or_path": "https://example.com/observed",
-                            "quote_or_fact": "Observed fact",
-                            "reliability": "Primary source"
-                        }],
-                        "key_evidence": ["Observed fact"],
-                        "contradictions": [],
-                        "confidence": "high",
-                        "gaps": []
-                    }
-                }]
-            }
-        })
-        .to_string();
-        let answer = "# Report\n\n## Findings\n\nA substantive but untraceable conclusion is presented here with enough detail for the report quality gate.\n\n## Sources\n\n- https://example.com/unobserved\n\n## Limitations\n\nConfidence is limited because this fixture intentionally cites the wrong source.\n";
-
-        assert!(materialize_deep_research_completed_report_from_answer_text(
-            &workspace,
-            query,
-            answer,
-            &workflow_output,
-            None,
-        )
-        .is_none());
-        let report_dir = workspace
-            .join(".a3s/research")
-            .join(deep_research_report_slug(query));
-        assert!(!report_dir.join("report.md").exists());
-        assert!(!report_dir.join("index.html").exists());
-
-        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -1129,68 +613,165 @@ mod artifact_boundary_tests {
         let _ = std::fs::remove_dir_all(&workspace);
     }
 
-    #[test]
-    fn generated_report_depth_gate_accounts_for_every_semantic_plan_track() {
-        let workflow = serde_json::json!({
-            "plan": {
-                "answer_shape": "investigation",
-                "tracks": ["Mechanism and causes", "Counterevidence and consequences"]
+    fn assessed_report_depth_workflow() -> String {
+        use a3s::research::{
+            replay, CompletionCriterionAssessment, ContractAssessmentStatus, EvidenceRef,
+            InquiryEvent, InquiryLimits, Question, ResearchContractAssessment, ResearchMethod,
+            ResearchObligation, ResearchObligationAssessment, StopConditionAssessment,
+        };
+
+        let obligations = vec![
+            ResearchObligation::new(
+                "obligation:mechanism",
+                "Mechanism and causes",
+                "Establish the documented mechanism and causes",
+                true,
+                vec!["The mechanism is supported by traceable evidence".to_string()],
+            ),
+            ResearchObligation::new(
+                "obligation:consequences",
+                "Counterevidence and consequences",
+                "Establish counterevidence and consequences",
+                true,
+                vec!["Consequences are supported by traceable evidence".to_string()],
+            ),
+        ];
+        let mut mechanism = Question::queued(
+            "question:mechanism",
+            None,
+            "What does the evidence establish about the mechanism?",
+        );
+        mechanism.obligation_ids = vec!["obligation:mechanism".to_string()];
+        let mut consequences = Question::queued(
+            "question:consequences",
+            None,
+            "What does the evidence establish about the consequences?",
+        );
+        consequences.obligation_ids = vec!["obligation:consequences".to_string()];
+        let events = vec![
+            InquiryEvent::StrategySelected {
+                method: ResearchMethod::Focused,
+            },
+            InquiryEvent::ResearchObligationsCommitted {
+                obligations,
+                stop_conditions: vec![
+                    "Both material obligations are closed by accepted evidence".to_string(),
+                ],
+            },
+            InquiryEvent::QuestionsQueued {
+                questions: vec![mechanism, consequences],
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: EvidenceRef::new(
+                    "evidence:mechanism",
+                    vec!["claim:mechanism".to_string()],
+                    vec!["source:mechanism".to_string()],
+                ),
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: EvidenceRef::new(
+                    "evidence:consequences",
+                    vec!["claim:consequences".to_string()],
+                    vec!["source:consequences".to_string()],
+                ),
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: "question:mechanism".to_string(),
+                answer: "The accepted evidence establishes the mechanism.".to_string(),
+                evidence_ids: vec!["evidence:mechanism".to_string()],
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: "question:consequences".to_string(),
+                answer: "The accepted evidence establishes the consequences.".to_string(),
+                evidence_ids: vec!["evidence:consequences".to_string()],
+            },
+            InquiryEvent::ResearchContractAssessed {
+                assessment: ResearchContractAssessment {
+                    obligations: vec![
+                        ResearchObligationAssessment {
+                            obligation_id: "obligation:mechanism".to_string(),
+                            criteria: vec![CompletionCriterionAssessment {
+                                criterion_index: 0,
+                                status: ContractAssessmentStatus::Satisfied,
+                                rationale: "The mechanism evidence satisfies the criterion."
+                                    .to_string(),
+                                evidence_ids: vec!["evidence:mechanism".to_string()],
+                            }],
+                            primary_source: None,
+                            independent_corroboration: None,
+                        },
+                        ResearchObligationAssessment {
+                            obligation_id: "obligation:consequences".to_string(),
+                            criteria: vec![CompletionCriterionAssessment {
+                                criterion_index: 0,
+                                status: ContractAssessmentStatus::Satisfied,
+                                rationale: "The consequences evidence satisfies the criterion."
+                                    .to_string(),
+                                evidence_ids: vec!["evidence:consequences".to_string()],
+                            }],
+                            primary_source: None,
+                            independent_corroboration: None,
+                        },
+                    ],
+                    stop_conditions: vec![StopConditionAssessment {
+                        condition_index: 0,
+                        status: ContractAssessmentStatus::Satisfied,
+                        rationale: "Both material obligations are evidence-answered.".to_string(),
+                        evidence_ids: vec![
+                            "evidence:mechanism".to_string(),
+                            "evidence:consequences".to_string(),
+                        ],
+                    }],
+                    diagnostics: Vec::new(),
+                },
+            },
+        ];
+        let state =
+            replay(&events, &InquiryLimits::default()).expect("valid report-depth inquiry fixture");
+        serde_json::json!({
+            "mode": "inquiry_collection_wave",
+            "execution": {
+                "mode": "collect_only",
+                "terminal_authority": "host_inquiry_reducer"
+            },
+            "inquiry": {
+                "events": events,
+                "state": state
             }
         })
-        .to_string();
-        let coverage = |track: &str| ReportTrackCoverage {
-            track: track.to_string(),
-            status: ReportTrackStatus::Answered,
-            finding: format!("A supported finding for {track}."),
-            interpretation: format!("The evidence explains why {track} matters."),
-            implication: "The finding changes the reader's decision boundary.".to_string(),
-            uncertainty: "The conclusion remains bounded by source recency.".to_string(),
-        };
-        let mut generated = GeneratedDeepResearchReport {
-            markdown: "# Report\n\nA substantive source-backed report body with analysis, implications, confidence, and limitations.\n\n## Sources\n\n- https://example.com/source"
-                .to_string(),
-            editorial: ReportEditorialPlan {
-                thesis: "The evidence supports a bounded answer to the investigation.".to_string(),
-                track_coverage: vec![coverage("Mechanism and causes")],
-            },
-            presentation: ReportPresentation {
-                rationale: "An analytical composition fits the causal comparison and decision audience."
-                    .to_string(),
-                ..ReportPresentation::default()
-            },
-        };
-
-        let error = validate_generated_report_depth(&generated, &workflow).unwrap_err();
-        assert!(
-            error.contains("Counterevidence and consequences"),
-            "{error}"
-        );
-
-        generated
-            .editorial
-            .track_coverage
-            .push(coverage("Counterevidence and consequences"));
-        validate_generated_report_depth(&generated, &workflow).unwrap();
+        .to_string()
     }
 
-    #[test]
-    fn generated_report_publication_rejects_an_unsupported_decision_threshold() {
-        let workspace = std::env::temp_dir().join(format!(
-            "a3s-deepresearch-quantity-gate-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&workspace).unwrap();
-        let query = "Compare the documented benchmark boundary";
-        let workflow = serde_json::json!({
+    fn benchmark_publication_workflow(qualified: bool) -> String {
+        use a3s::research::{
+            replay, CompletionCriterionAssessment, ContractAssessmentStatus, EvidenceRef,
+            InquiryEvent, InquiryLimits, OutlineSection, Question, ResearchContractAssessment,
+            ResearchMethod, ResearchObligation, ResearchObligationAssessment, ResearchOutline,
+            StopConditionAssessment,
+        };
+
+        let mut workflow = serde_json::json!({
             "plan": {
-                "answer_shape": "briefing",
-                "tracks": ["Benchmark boundary"]
+                "report_title": "Benchmark boundary",
+                "tracks": [{
+                    "id": "obligation:benchmark-boundary",
+                    "title": "Benchmark boundary",
+                    "focus": "Establish only the documented benchmark boundary",
+                    "material": true,
+                    "completion_criteria": [
+                        "The documented range is retained without inventing a product threshold"
+                    ],
+                    "evidence_requirements": {
+                        "primary_source_required": false,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "stop_conditions": [
+                    "The documented range is established and any decision threshold remains bounded"
+                ]
             },
             "research": {
+                "status": "success",
                 "results": [{
                     "success": true,
                     "structured": {
@@ -1208,8 +789,201 @@ mod artifact_boundary_tests {
                     }
                 }]
             }
-        })
-        .to_string();
+        });
+        let accepted = accepted_evidence_ledger(&workflow.to_string(), None)
+            .into_iter()
+            .next()
+            .expect("benchmark evidence");
+        let claim_ids = accepted
+            .claims
+            .iter()
+            .map(|claim| claim.id.clone())
+            .collect::<Vec<_>>();
+        let source_ids = accepted
+            .sources
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<Vec<_>>();
+        let evidence_id = accepted.id.clone();
+        let obligation_id = "obligation:benchmark-boundary";
+        let question_id = "question:benchmark-boundary";
+        let section_id = "section:benchmark-boundary";
+        let mut question = Question::queued(
+            question_id,
+            None,
+            "What benchmark boundary does the accepted source establish?",
+        );
+        question.obligation_ids = vec![obligation_id.to_string()];
+        let status = if qualified {
+            ContractAssessmentStatus::Bounded
+        } else {
+            ContractAssessmentStatus::Satisfied
+        };
+        let events = vec![
+            InquiryEvent::StrategySelected {
+                method: ResearchMethod::Focused,
+            },
+            InquiryEvent::ResearchObligationsCommitted {
+                obligations: vec![ResearchObligation::new(
+                    obligation_id,
+                    "Benchmark boundary",
+                    "Establish only the documented benchmark boundary",
+                    true,
+                    vec![
+                        "The documented range is retained without inventing a product threshold"
+                            .to_string(),
+                    ],
+                )],
+                stop_conditions: vec![
+                    "The documented range is established and any decision threshold remains bounded"
+                        .to_string(),
+                ],
+            },
+            InquiryEvent::QuestionsQueued {
+                questions: vec![question],
+            },
+            InquiryEvent::EvidenceAccepted {
+                evidence: EvidenceRef::new(
+                    evidence_id.clone(),
+                    claim_ids.clone(),
+                    source_ids.clone(),
+                ),
+            },
+            InquiryEvent::QuestionAnswered {
+                question_id: question_id.to_string(),
+                answer: "The accepted evidence establishes a 1M-10M benchmark range.".to_string(),
+                evidence_ids: vec![evidence_id.clone()],
+            },
+            InquiryEvent::ResearchContractAssessed {
+                assessment: ResearchContractAssessment {
+                    obligations: vec![ResearchObligationAssessment {
+                        obligation_id: obligation_id.to_string(),
+                        criteria: vec![CompletionCriterionAssessment {
+                            criterion_index: 0,
+                            status,
+                            rationale: if qualified {
+                                "The range is supported, but it does not establish a product decision threshold."
+                            } else {
+                                "The accepted evidence establishes the requested documented range."
+                            }
+                            .to_string(),
+                            evidence_ids: vec![evidence_id.clone()],
+                        }],
+                        primary_source: None,
+                        independent_corroboration: None,
+                    }],
+                    stop_conditions: vec![StopConditionAssessment {
+                        condition_index: 0,
+                        status,
+                        rationale: if qualified {
+                            "No accepted evidence establishes a below-range product threshold."
+                        } else {
+                            "The requested documented range is established."
+                        }
+                        .to_string(),
+                        evidence_ids: vec![evidence_id.clone()],
+                    }],
+                    diagnostics: Vec::new(),
+                },
+            },
+            InquiryEvent::OutlineCommitted {
+                outline: ResearchOutline {
+                    sections: vec![OutlineSection {
+                        id: section_id.to_string(),
+                        heading: "Evidence".to_string(),
+                        purpose: "State the supported range and its decision boundary.".to_string(),
+                        perspective_ids: Vec::new(),
+                        question_ids: vec![question_id.to_string()],
+                        claim_ids: claim_ids.clone(),
+                        source_ids: source_ids.clone(),
+                        composition_hint: "Lead with the supported range.".to_string(),
+                    }],
+                },
+            },
+            InquiryEvent::SectionDrafted {
+                section_id: section_id.to_string(),
+                content: "The published benchmark covers 1M-10M vectors.".to_string(),
+                citation_ids: claim_ids
+                    .iter()
+                    .chain(source_ids.iter())
+                    .cloned()
+                    .collect(),
+            },
+            InquiryEvent::AuditCompleted {
+                passed: true,
+                issues: Vec::new(),
+            },
+        ];
+        let state = replay(&events, &InquiryLimits::default())
+            .expect("valid benchmark publication inquiry");
+        workflow["mode"] = serde_json::json!("inquiry_collection_wave");
+        workflow["execution"] = serde_json::json!({
+            "mode": "collect_only",
+            "terminal_authority": "host_inquiry_reducer"
+        });
+        workflow["inquiry"] = serde_json::json!({
+            "events": events,
+            "state": state
+        });
+        workflow.to_string()
+    }
+
+    #[test]
+    fn generated_report_depth_gate_requires_every_exact_inquiry_obligation_id() {
+        let workflow = assessed_report_depth_workflow();
+        let coverage = |obligation_id: &str| ReportTrackCoverage {
+            obligation_id: obligation_id.to_string(),
+            status: ReportTrackStatus::Answered,
+            finding: format!("A supported finding for {obligation_id}."),
+            interpretation: format!("The evidence explains why {obligation_id} matters."),
+            implication: "The finding changes the reader's decision boundary.".to_string(),
+            uncertainty: "The conclusion remains bounded by source recency.".to_string(),
+        };
+        let mut generated = GeneratedDeepResearchReport {
+            markdown: "# Report\n\nA substantive source-backed report body with analysis, implications, confidence, and limitations.\n\n## Sources\n\n- https://example.com/source"
+                .to_string(),
+            editorial: ReportEditorialPlan {
+                thesis: "The evidence supports a bounded answer to the investigation.".to_string(),
+                track_coverage: vec![coverage("obligation:mechanism")],
+            },
+            presentation: ReportPresentation {
+                rationale: "An analytical composition fits the causal comparison and decision audience."
+                    .to_string(),
+                ..ReportPresentation::default()
+            },
+        };
+
+        let error = validate_generated_report_depth(&generated, &workflow).unwrap_err();
+        assert!(
+            error.contains("obligation:consequences"),
+            "{error}"
+        );
+
+        generated
+            .editorial
+            .track_coverage
+            .push(coverage("obligation:consequences"));
+        validate_generated_report_depth(&generated, &workflow).unwrap();
+
+        generated.editorial.track_coverage[1].obligation_id =
+            "counterevidence-and-consequences".to_string();
+        let error = validate_generated_report_depth(&generated, &workflow).unwrap_err();
+        assert!(error.contains("unknown obligation ID"), "{error}");
+    }
+
+    #[test]
+    fn generated_report_publication_does_not_rewrite_closed_evidence_prose_lexically() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-quantity-gate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&workspace).unwrap();
+        let query = "Compare the documented benchmark boundary";
+        let workflow = benchmark_publication_workflow(false);
         let generated = GeneratedDeepResearchReport {
             markdown: "# Benchmark boundary\n\nUse the product below 1M vectors.\n\n## Evidence\n\nThe published benchmark covers 1M-10M vectors.\n\n## Sources\n\n- https://example.com/benchmark"
                 .to_string(),
@@ -1217,7 +991,7 @@ mod artifact_boundary_tests {
                 thesis: "The retained evidence supports a bounded benchmark comparison."
                     .to_string(),
                 track_coverage: vec![ReportTrackCoverage {
-                    track: "Benchmark boundary".to_string(),
+                    obligation_id: "obligation:benchmark-boundary".to_string(),
                     status: ReportTrackStatus::Bounded,
                     finding: "The benchmark publishes a tested range.".to_string(),
                     interpretation: "The tested range does not establish a lower threshold."
@@ -1233,99 +1007,16 @@ mod artifact_boundary_tests {
             },
         };
 
-        let error = materialize_deep_research_completed_report_from_generation(
+        let artifacts = materialize_deep_research_completed_report_from_generation(
             &workspace, query, &generated, &workflow, None,
         )
-        .expect_err("an unsupported threshold must not reach the artifact head");
-        assert!(error.contains("<1m"), "{error}");
-        let report_dir = workspace
-            .join(".a3s/research")
-            .join(deep_research_report_slug(query));
-        assert!(!report_dir.exists());
-
-        let mut qualified_workflow: serde_json::Value = serde_json::from_str(&workflow).unwrap();
-        qualified_workflow["checker"] = serde_json::json!({
-            "decision": "degrade",
-            "coverage_summary": "The benchmark is useful, but no decision threshold is supported."
-        });
-        let artifacts = materialize_deep_research_completed_report_from_generation(
-            &workspace,
-            query,
-            &generated,
-            &qualified_workflow.to_string(),
-            None,
-        )
-        .expect("a qualified report should converge after deterministic claim removal");
+        .expect("closed-evidence publication should not use language-specific text matching");
         let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-        assert!(!markdown.contains("below 1M"), "{markdown}");
+        assert!(markdown.contains("below 1M"), "{markdown}");
         assert!(markdown.contains("covers 1M-10M"), "{markdown}");
-        assert!(markdown.contains("## Evidence boundary"), "{markdown}");
+        assert!(!markdown.contains("## Evidence boundary"), "{markdown}");
 
         let _ = std::fs::remove_dir_all(workspace);
-    }
-
-    #[test]
-    fn generated_report_depth_gate_matches_concise_semantic_track_labels() {
-        let planned = vec![
-            (
-                normalize_report_track("调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界"),
-                "调度模型对比：多线程工作窃取与轻量执行器的机制和性能边界".to_string(),
-            ),
-            (
-                normalize_report_track("生态成熟度评估：依赖网络、兼容性与社区治理"),
-                "生态成熟度评估：依赖网络、兼容性与社区治理".to_string(),
-            ),
-            (
-                normalize_report_track(
-                    "Production observability and runtime diagnostics comparison",
-                ),
-                "Production observability and runtime diagnostics comparison".to_string(),
-            ),
-        ];
-        let coverage = vec![
-            (
-                normalize_report_track("调度模型对比"),
-                "调度模型对比".to_string(),
-            ),
-            (
-                normalize_report_track("生态成熟度"),
-                "生态成熟度".to_string(),
-            ),
-            (
-                normalize_report_track("Runtime diagnostics and production observability"),
-                "Runtime diagnostics and production observability".to_string(),
-            ),
-        ];
-
-        assert_eq!(
-            matched_planned_report_tracks(&planned, &coverage).len(),
-            planned.len(),
-            "concise labels and genuine paraphrases should satisfy the semantic coverage gate"
-        );
-    }
-
-    #[test]
-    fn generated_report_depth_gate_does_not_reuse_one_generic_coverage_label() {
-        let planned = vec![
-            (
-                normalize_report_track("Operational risk and migration"),
-                "Operational risk and migration".to_string(),
-            ),
-            (
-                normalize_report_track("Operational risk and security"),
-                "Operational risk and security".to_string(),
-            ),
-        ];
-        let coverage = vec![(
-            normalize_report_track("Operational risk"),
-            "Operational risk".to_string(),
-        )];
-
-        assert_eq!(
-            matched_planned_report_tracks(&planned, &coverage).len(),
-            1,
-            "one broad treatment must not satisfy multiple planned obligations"
-        );
     }
 
     #[test]
@@ -1357,13 +1048,12 @@ mod artifact_boundary_tests {
     }
 
     #[test]
-    fn recovery_report_preserves_the_host_publication_rejection_reason() {
+    fn recovery_report_preserves_safe_validation_feedback_without_classifying_its_words() {
         let result = deep_research_recovery_result_text(
-            "content rejected: report introduced ungrounded quantitative claim(s): <1m",
+            "report does not cite every source declared by its closed evidence plan",
             r#"{"mode":"direct_web_degraded","research":{"status":"partial_success"}}"#,
         );
-        assert!(result.contains("Host publication validation"), "{result}");
-        assert!(result.contains("<1m"), "{result}");
+        assert!(result.contains("does not cite every source"), "{result}");
     }
 
     #[test]

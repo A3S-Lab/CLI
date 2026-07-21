@@ -115,7 +115,7 @@ impl CapabilitiesService {
                 "skills",
                 "Skills",
                 "skill",
-                config::skill_dir(),
+                self.skill_dir(),
                 "Local skill packages",
             ),
             CapabilityDir::new(
@@ -147,7 +147,11 @@ impl CapabilitiesService {
     }
 
     fn okf_dir(&self) -> PathBuf {
-        self.state.default_workspace.join(".a3s").join("okf")
+        self.state.default_workspace.join("okf")
+    }
+
+    fn skill_dir(&self) -> PathBuf {
+        self.state.default_workspace.join(".a3s").join("skills")
     }
 }
 

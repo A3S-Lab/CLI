@@ -267,11 +267,6 @@ fn persist_project_permission_grants(
         ));
     }
     let source = generate_project_permission_grants(grants)?;
-    if source.len() as u64 > MAX_PERMISSION_RULES_BYTES {
-        return Err(format!(
-            "generated project permission rules exceed {MAX_PERMISSION_RULES_BYTES} bytes"
-        ));
-    }
     let parent = path
         .parent()
         .ok_or_else(|| format!("permission rule path has no parent: {}", path.display()))?;
@@ -478,7 +473,7 @@ fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
         }
         serde_json::Value::Object(values) => {
             let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by_key(|(left, _)| *left);
+            entries.sort_by_key(|(key, _)| *key);
             serde_json::Value::Object(
                 entries
                     .into_iter()
@@ -689,33 +684,6 @@ mod tests {
             .filter(|entry| entry.path() != path)
             .collect::<Vec<_>>();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-    }
-
-    #[test]
-    fn oversized_project_rule_is_rejected_without_replacing_existing_acl() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = project_permission_rules_path(temp.path());
-        persist_project_permission_grant(
-            &path,
-            ExactPermissionGrant::from_invocation(
-                "bash",
-                &serde_json::json!({"command": "cargo test"}),
-            ),
-        )
-        .unwrap();
-        let before = std::fs::read(&path).unwrap();
-
-        let error = persist_project_permission_grant(
-            &path,
-            ExactPermissionGrant::from_invocation(
-                "mcp__example__large",
-                &serde_json::json!({"payload": "x".repeat(MAX_PERMISSION_RULES_BYTES as usize)}),
-            ),
-        )
-        .unwrap_err();
-
-        assert!(error.contains("exceed"), "{error}");
-        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[test]

@@ -107,6 +107,26 @@ impl ComponentPaths {
             .join(format!("{family}.lock"))
     }
 
+    pub fn batch_operation_lock_path(&self) -> PathBuf {
+        self.runtime_root.join("locks/component-batch.lock")
+    }
+
+    pub(crate) fn operation_journal_root(&self) -> PathBuf {
+        self.state_root.join("component-operations")
+    }
+
+    pub(crate) fn active_operation_journal_path(&self) -> PathBuf {
+        self.operation_journal_root().join("active.json")
+    }
+
+    pub(crate) fn last_operation_journal_path(&self) -> PathBuf {
+        self.operation_journal_root().join("last.json")
+    }
+
+    pub(crate) fn interrupted_operation_journal_path(&self) -> PathBuf {
+        self.operation_journal_root().join("last-interrupted.json")
+    }
+
     pub fn configured_binary(&self, release: ReleaseSpec) -> Option<PathBuf> {
         self.install_overrides
             .get(release.install_dir_env)
@@ -305,6 +325,14 @@ mod tests {
         assert_eq!(
             paths.operation_lock_path(&id),
             temp.path().join("runtime/locks/use.lock")
+        );
+        assert_eq!(
+            paths.batch_operation_lock_path(),
+            temp.path().join("runtime/locks/component-batch.lock")
+        );
+        assert_eq!(
+            paths.active_operation_journal_path(),
+            temp.path().join("state/component-operations/active.json")
         );
         paths.set_install_override("A3S_USE_INSTALL_DIR", temp.path().join("use-bin"));
         let use_spec = crate::components::catalog::find(&ComponentId::parse("use").unwrap())

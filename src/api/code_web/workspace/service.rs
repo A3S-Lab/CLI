@@ -96,6 +96,13 @@ impl WorkspaceService {
         }))
     }
 
+    pub(in crate::api::code_web) async fn pick_directory(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        super::picker::pick_directory(&self.state.default_workspace, request).await
+    }
+
     pub(in crate::api::code_web) async fn create_dir(
         &self,
         request: Value,

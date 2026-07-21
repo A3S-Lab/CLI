@@ -42,6 +42,8 @@ pub(crate) mod transcript;
 // Context and memory.
 #[path = "context/ctx.rs"]
 pub(crate) mod ctx;
+#[path = "context/evolution.rs"]
+pub(crate) mod evolution;
 #[path = "context/memory.rs"]
 mod memory;
 #[path = "context/sleep.rs"]
@@ -70,6 +72,8 @@ pub(crate) mod permissions;
 mod plan;
 #[path = "system/plugins.rs"]
 mod plugins;
+#[path = "system/queue.rs"]
+pub(crate) mod queue;
 #[path = "system/relay.rs"]
 pub(crate) mod relay;
 #[path = "system/relay_scan.rs"]
@@ -78,5 +82,7 @@ mod relay_scan;
 pub(crate) mod spf;
 #[path = "system/tasks.rs"]
 pub(crate) mod tasks;
+#[path = "system/terminal.rs"]
+pub(crate) mod terminal;
 #[path = "system/theme.rs"]
 mod theme;

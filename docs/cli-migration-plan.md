@@ -166,7 +166,7 @@ deleted entry by entry and must not become a second permanent parser.
 | `a3s code config check` | `a3s config validate` | Deprecated alias |
 | `a3s code config dirs`, `code dirs` | `a3s config paths` | Deprecated aliases |
 | `a3s code deepresearch`, `deep-research` | `a3s code research` | Deprecated aliases |
-| research `--local`, `--os` | `--runtime local`, `--runtime os` | Deprecated aliases |
+| research `--local`, `--os`, `--runtime` | `--local-only`, `--web` | Runtime selection removed; evidence scope remains explicit |
 | `<family> local`, `<family> ls` | `<family> list --location local` | Deprecated aliases |
 | `<family> list [query]` | `<family> list --location os [query]` | Bare form deprecated as ambiguous |
 | Agent `publish|run|open|logs|status <kind> [path]` | `<action> [path] --kind <kind>` | Deprecated positional grammar |

@@ -31,7 +31,9 @@ impl ContextService {
     pub(in crate::api::code_web) async fn memory(
         &self,
         query: Option<String>,
+        offset: Option<usize>,
         limit: Option<usize>,
+        include_graph: Option<bool>,
     ) -> BootResult<serde_json::Value> {
         let root = config::memory_dir();
         let data = load_memory_store(&root).await?;
@@ -39,7 +41,7 @@ impl ContextService {
         let limit = limit
             .unwrap_or(DEFAULT_MEMORY_LIMIT)
             .clamp(1, MAX_MEMORY_LIMIT);
-        let mut entries = data
+        let matching_entries = data
             .entries
             .iter()
             .filter(|entry| {
@@ -48,19 +50,33 @@ impl ContextService {
                         .to_ascii_lowercase()
                         .contains(&query)
             })
-            .take(limit)
+            .collect::<Vec<_>>();
+        let total = matching_entries.len();
+        let (offset, end, has_more) = memory_page_bounds(total, offset.unwrap_or(0), limit);
+        let mut entries = matching_entries[offset..end]
+            .iter()
             .map(|entry| memory_entry_json(entry, data.details.get(&entry.id)))
             .collect::<Vec<_>>();
         entries
             .sort_by(|left, right| value_str(right, "timestamp").cmp(value_str(left, "timestamp")));
-        let graph = memory_graph_json(&data);
-
-        Ok(json!({
+        let returned = entries.len();
+        let mut response = json!({
             "root": root.display().to_string(),
             "entries": entries,
             "stats": memory_stats(&data),
-            "graph": graph,
-        }))
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "returned": returned,
+                "total": total,
+                "hasMore": has_more,
+            },
+        });
+        if include_graph.unwrap_or(true) {
+            response["graph"] = memory_graph_json(&data);
+        }
+
+        Ok(response)
     }
 
     pub(in crate::api::code_web) async fn memory_detail(
@@ -298,6 +314,12 @@ async fn load_memory_detail(root: &Path, id: &str) -> BootResult<Option<MemoryDe
     }
 }
 
+fn memory_page_bounds(total: usize, offset: usize, limit: usize) -> (usize, usize, bool) {
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    (start, end, end < total)
+}
+
 fn memory_stats(data: &MemoryStoreData) -> serde_json::Value {
     let mut types = BTreeMap::<String, usize>::new();
     let mut tags = BTreeSet::<String>::new();
@@ -380,7 +402,7 @@ fn memory_graph_json(data: &MemoryStoreData) -> serde_json::Value {
         let event_id = format!("event:{}", entry.id);
         let mut entity_ids = BTreeSet::<String>::new();
         let mut relation_ids = Vec::<usize>::new();
-        add_graph_entity(
+        if let Some(source_id) = add_graph_entity(
             &mut entities,
             "source",
             &source,
@@ -388,19 +410,20 @@ fn memory_graph_json(data: &MemoryStoreData) -> serde_json::Value {
             entry,
             timestamp,
             &mut entity_ids,
-        );
-        push_graph_relation(
-            &mut relations,
-            &mut relation_ids,
-            &event_id,
-            &format!("source:{}", canonical_key(&source)),
-            "from",
-            &entry.id,
-            1.0,
-        );
+        ) {
+            push_graph_relation(
+                &mut relations,
+                &mut relation_ids,
+                &event_id,
+                &source_id,
+                "from",
+                &entry.id,
+                1.0,
+            );
+        }
 
         for tag in &entry.tags {
-            add_graph_entity(
+            if let Some(tag_id) = add_graph_entity(
                 &mut entities,
                 "tag",
                 tag,
@@ -408,16 +431,17 @@ fn memory_graph_json(data: &MemoryStoreData) -> serde_json::Value {
                 entry,
                 timestamp,
                 &mut entity_ids,
-            );
-            push_graph_relation(
-                &mut relations,
-                &mut relation_ids,
-                &event_id,
-                &format!("tag:{}", canonical_key(tag)),
-                "tagged",
-                &entry.id,
-                0.8,
-            );
+            ) {
+                push_graph_relation(
+                    &mut relations,
+                    &mut relation_ids,
+                    &event_id,
+                    &tag_id,
+                    "tagged",
+                    &entry.id,
+                    0.8,
+                );
+            }
         }
 
         if let Some(detail) = detail {
@@ -437,7 +461,7 @@ fn memory_graph_json(data: &MemoryStoreData) -> serde_json::Value {
         }
 
         for extracted in extract_graph_entities(content) {
-            add_graph_entity(
+            if let Some(entity_id) = add_graph_entity(
                 &mut entities,
                 extracted.kind,
                 &extracted.name,
@@ -445,16 +469,17 @@ fn memory_graph_json(data: &MemoryStoreData) -> serde_json::Value {
                 entry,
                 timestamp,
                 &mut entity_ids,
-            );
-            push_graph_relation(
-                &mut relations,
-                &mut relation_ids,
-                &event_id,
-                &format!("{}:{}", extracted.kind, canonical_key(&extracted.name)),
-                extracted.relation,
-                &entry.id,
-                extracted.weight,
-            );
+            ) {
+                push_graph_relation(
+                    &mut relations,
+                    &mut relation_ids,
+                    &event_id,
+                    &entity_id,
+                    extracted.relation,
+                    &entry.id,
+                    extracted.weight,
+                );
+            }
         }
 
         let ids = entity_ids.into_iter().collect::<Vec<_>>();
@@ -607,10 +632,10 @@ fn add_graph_entity(
     entry: &MemoryEntry,
     timestamp: chrono::DateTime<chrono::Utc>,
     entity_ids: &mut BTreeSet<String>,
-) {
+) -> Option<String> {
     let canonical = canonical_key(name);
     if canonical.is_empty() {
-        return;
+        return None;
     }
     let id = format!("{kind}:{canonical}");
     let display = display_entity_name(name);
@@ -636,7 +661,8 @@ fn add_graph_entity(
             entity.aliases.insert(alias);
         }
     }
-    entity_ids.insert(id);
+    entity_ids.insert(id.clone());
+    Some(id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -665,26 +691,29 @@ fn add_metadata_graph_entities(
         "source" => ("source", "from"),
         "tools" => {
             for tool in split_graph_list(value) {
-                add_graph_entity(entities, "tool", tool, None, entry, timestamp, entity_ids);
-                push_graph_relation(
-                    relations,
-                    relation_ids,
-                    event_id,
-                    &format!("tool:{}", canonical_key(tool)),
-                    "used",
-                    &entry.id,
-                    0.9,
-                );
+                if let Some(tool_id) =
+                    add_graph_entity(entities, "tool", tool, None, entry, timestamp, entity_ids)
+                {
+                    push_graph_relation(
+                        relations,
+                        relation_ids,
+                        event_id,
+                        &tool_id,
+                        "used",
+                        &entry.id,
+                        0.9,
+                    );
+                }
             }
             return;
         }
         "aliases" | "entity_aliases" => {
             let canonical = event_label(&entry.content_lower, &entry.id);
-            add_graph_entity(
+            let topic_id = add_graph_entity(
                 entities, "topic", &canonical, None, entry, timestamp, entity_ids,
             );
             for alias in split_graph_list(value) {
-                add_graph_entity(
+                let _ = add_graph_entity(
                     entities,
                     "topic",
                     &canonical,
@@ -694,29 +723,34 @@ fn add_metadata_graph_entities(
                     entity_ids,
                 );
             }
-            push_graph_relation(
-                relations,
-                relation_ids,
-                event_id,
-                &format!("topic:{}", canonical_key(&canonical)),
-                "aliases",
-                &entry.id,
-                0.7,
-            );
+            if let Some(topic_id) = topic_id {
+                push_graph_relation(
+                    relations,
+                    relation_ids,
+                    event_id,
+                    &topic_id,
+                    "aliases",
+                    &entry.id,
+                    0.7,
+                );
+            }
             return;
         }
         _ => return,
     };
-    add_graph_entity(entities, kind, value, None, entry, timestamp, entity_ids);
-    push_graph_relation(
-        relations,
-        relation_ids,
-        event_id,
-        &format!("{kind}:{}", canonical_key(value)),
-        relation,
-        &entry.id,
-        0.8,
-    );
+    if let Some(entity_id) =
+        add_graph_entity(entities, kind, value, None, entry, timestamp, entity_ids)
+    {
+        push_graph_relation(
+            relations,
+            relation_ids,
+            event_id,
+            &entity_id,
+            relation,
+            &entry.id,
+            0.8,
+        );
+    }
 }
 
 fn push_graph_relation(
@@ -940,7 +974,7 @@ fn canonical_key(value: &str) -> String {
     let mut out = String::new();
     let mut last_space = false;
     for ch in value.trim().chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':' | '@') {
+        if ch.is_alphanumeric() || matches!(ch, '/' | '_' | '-' | '.' | ':' | '@') {
             out.push(ch);
             last_space = false;
         } else if ch.is_whitespace() && !last_space && !out.is_empty() {
@@ -1331,6 +1365,8 @@ mod tests {
                             ("source".to_string(), "ctx".to_string()),
                             ("provider".to_string(), "Codex".to_string()),
                             ("ctx_session_id".to_string(), "session-1".to_string()),
+                            ("prompt".to_string(), "分析记忆图谱".to_string()),
+                            ("error".to_string(), "！！！".to_string()),
                         ]),
                         access_count: 1,
                         last_accessed: None,
@@ -1364,13 +1400,34 @@ mod tests {
         assert!(entities
             .iter()
             .any(|entity| entity["id"] == "command:/memory"));
+        assert!(entities
+            .iter()
+            .any(|entity| entity["id"] == "prompt:分析记忆图谱"));
         assert!(entities.iter().any(|entity| {
             entity["id"] == "file:apps/web/src/desktop/pages/context/contextpage.tsx"
         }));
+        let node_ids = graph["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(entities.iter())
+            .map(|node| node["id"].as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+        for relation in graph["relations"].as_array().unwrap() {
+            assert!(node_ids.contains(relation["from"].as_str().unwrap()));
+            assert!(node_ids.contains(relation["to"].as_str().unwrap()));
+        }
     }
 
     #[test]
     fn flatten_text_strips_terminal_controls() {
         assert_eq!(flatten_text("\u{1b}[31mred\u{1b}[0m\ntext"), "red text");
+    }
+
+    #[test]
+    fn memory_page_bounds_handles_final_and_out_of_range_pages() {
+        assert_eq!(memory_page_bounds(501, 0, 500), (0, 500, true));
+        assert_eq!(memory_page_bounds(501, 500, 500), (500, 501, false));
+        assert_eq!(memory_page_bounds(501, 900, 500), (501, 501, false));
     }
 }

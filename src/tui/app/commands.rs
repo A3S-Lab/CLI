@@ -148,40 +148,6 @@ pub(super) fn host_progress_event_is_terminal(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::End { .. } | AgentEvent::Error { .. })
 }
 
-pub(super) fn deep_research_synthesis_timeout_delay(
-    run_started_at: Instant,
-    phase_started_at: Instant,
-    now: Instant,
-    phase_timeout: Duration,
-    active_tool_count: usize,
-    report_tool_buffer_empty: bool,
-) -> Option<Duration> {
-    let run_remaining = Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
-        .saturating_sub(now.saturating_duration_since(run_started_at));
-    let phase_remaining =
-        phase_timeout.saturating_sub(now.saturating_duration_since(phase_started_at));
-    let remaining = run_remaining.min(phase_remaining);
-    if remaining.is_zero() {
-        return None;
-    }
-    if active_tool_count > 0 || !report_tool_buffer_empty {
-        return Some(remaining.min(Duration::from_millis(
-            DEEP_RESEARCH_TOOL_COMPLETION_GRACE_MS,
-        )));
-    }
-    Some(remaining)
-}
-
-pub(super) fn deep_research_planned_synthesis_timeout_ms(
-    workflow_output: Option<&str>,
-) -> Option<u64> {
-    serde_json::from_str::<serde_json::Value>(workflow_output?.trim())
-        .ok()?
-        .pointer("/plan/budget/synthesis_timeout_ms")
-        .and_then(serde_json::Value::as_u64)
-        .map(|timeout_ms| timeout_ms.clamp(10_000, DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS))
-}
-
 pub(super) fn deep_research_plan_status(workflow_output: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(workflow_output.trim()).ok()?;
     let shape = value.pointer("/plan/answer_shape")?.as_str()?;

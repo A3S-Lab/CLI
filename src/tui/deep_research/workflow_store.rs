@@ -6,6 +6,8 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_WORKFLOW_STORE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID: &str = "checkpoint_bootstrap_acquisition";
+const INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID: &str = "checkpoint_initial_retrieval";
 
 fn safe_existing_workflow_store(workspace: &Path, store: &Path) -> bool {
     let Ok(root_metadata) = std::fs::symlink_metadata(workspace) else {
@@ -78,6 +80,66 @@ pub(crate) fn recover_deep_research_workflow_run_from_store(
         run_id,
         expected_query,
     )
+}
+
+/// Recover the last complete initial evidence portfolio when the optional
+/// supplemental pass is still running as the shared retrieval deadline fires.
+/// The checkpoint is an ordinary durable Flow step, so recovery remains tied
+/// to the exact run ID and query rather than becoming a query-result cache.
+pub(crate) fn recover_deep_research_initial_retrieval_from_store(
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Option<DeepResearchWorkflowStoreRun> {
+    recover_deep_research_checkpoint_from_store(
+        workspace,
+        args,
+        INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID,
+        "recovered_initial_retrieval",
+    )
+}
+
+/// Recover raw search/fetch output independently of planner completion. The
+/// exact root run and query still identify the Flow journal, so this is durable
+/// process recovery rather than a cross-run query cache.
+pub(crate) fn recover_deep_research_bootstrap_acquisition_from_store(
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Option<DeepResearchWorkflowStoreRun> {
+    recover_deep_research_checkpoint_from_store(
+        workspace,
+        args,
+        BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID,
+        "recovered_bootstrap_acquisition",
+    )
+}
+
+fn recover_deep_research_checkpoint_from_store(
+    workspace: &Path,
+    args: &serde_json::Value,
+    step_id: &str,
+    metadata_flag: &str,
+) -> Option<DeepResearchWorkflowStoreRun> {
+    let mut recovered = recover_deep_research_workflow_run_from_store(workspace, args)?;
+    let checkpoint = recovered
+        .metadata
+        .pointer(&format!("/dynamic_workflow/snapshot/steps/{step_id}"))?;
+    if checkpoint.get("status").and_then(serde_json::Value::as_str) != Some("completed") {
+        return None;
+    }
+    let output = checkpoint
+        .get("output")
+        .filter(|output| output.is_object())?
+        .clone();
+    recovered.output = Some(workflow_output_text(&output));
+    recovered.exit_code = 0;
+    if let Some(dynamic_workflow) = recovered
+        .metadata
+        .get_mut("dynamic_workflow")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        dynamic_workflow.insert(metadata_flag.to_string(), serde_json::Value::Bool(true));
+    }
+    Some(recovered)
 }
 
 fn recover_deep_research_workflow_run_from_path(
@@ -361,7 +423,7 @@ fn workflow_output_text(output: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::materialize_deep_research_completed_report_from_workflow_evidence;
+    use crate::tui::accepted_evidence_ledger;
 
     #[test]
     fn workflow_store_stays_under_project_a3s_root() {
@@ -521,16 +583,272 @@ mod tests {
         let parsed_output = serde_json::from_str::<serde_json::Value>(workflow_output).unwrap();
         assert_eq!(parsed_output["collection_status"], "completed");
 
-        let artifacts = materialize_deep_research_completed_report_from_workflow_evidence(
+        let ledger = accepted_evidence_ledger(workflow_output, Some(&recovered.metadata));
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].sources[0].anchor,
+            "https://example.com/durable-flow"
+        );
+        assert!(
+            !workspace
+                .join(".a3s/research/durable-timeout-evidence/report.md")
+                .exists(),
+            "retrieval recovery must not bypass closed-evidence review and report generation"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn running_optional_supplement_recovers_the_completed_initial_portfolio() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-initial-checkpoint-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = dynamic_workflow_store_path(&workspace);
+        std::fs::create_dir_all(&store).unwrap();
+        let run_id = "deepresearch-running-supplement";
+        let initial_output = serde_json::json!({
+            "query": "recover initial evidence",
+            "mode": "inquiry_collection",
+            "plan": {"tracks": []},
+            "research": {
+                "status": "success",
+                "results": [{
+                    "success": true,
+                    "structured": {
+                        "summary": "The initial pass retained traceable material evidence.",
+                        "sources": [{
+                            "title": "Initial Source",
+                            "url": "https://example.com/initial",
+                            "evidence": "The initial source directly supports the finding."
+                        }],
+                        "key_evidence": ["The initial source directly supports the finding."],
+                        "contradictions": [],
+                        "gaps": []
+                    }
+                }]
+            },
+            "execution": {
+                "mode": "collect_only",
+                "terminal_authority": "host_inquiry_reducer"
+            }
+        });
+        let lines = [
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 1,
+                "event": {
+                    "type": "run_created",
+                    "spec": {"version": "source-hash"},
+                    "input": {"query": "recover initial evidence"}
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 2,
+                "event": {"type": "run_started"}
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 3,
+                "event": {
+                    "type": "step_created",
+                    "step_id": INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID,
+                    "step_name": INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID,
+                    "input": initial_output.clone()
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 4,
+                "event": {
+                    "type": "step_started",
+                    "step_id": INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID,
+                    "attempt": 1
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 5,
+                "event": {
+                    "type": "step_completed",
+                    "step_id": INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID,
+                    "output": initial_output
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 6,
+                "event": {
+                    "type": "step_created",
+                    "step_id": "select_supplemental_evidence_chunks",
+                    "step_name": "generate_object",
+                    "input": {}
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 7,
+                "event": {
+                    "type": "step_started",
+                    "step_id": "select_supplemental_evidence_chunks",
+                    "attempt": 1
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|line| serde_json::to_string(&line).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(store.join(format!("{run_id}.jsonl")), format!("{lines}\n")).unwrap();
+
+        let recovered = recover_deep_research_initial_retrieval_from_store(
             &workspace,
-            "durable timeout evidence",
-            workflow_output,
-            Some(&recovered.metadata),
+            &serde_json::json!({
+                "run_id": run_id,
+                "input": {"query": "recover initial evidence"}
+            }),
         )
-        .expect("source-backed completed durable run should become a completed report");
-        let markdown = std::fs::read_to_string(&artifacts.markdown).unwrap();
-        assert!(markdown.contains("https://example.com/durable-flow"));
-        assert!(!markdown.contains("DeepResearch Recovery Report"));
+        .expect("completed initial checkpoint");
+
+        assert_eq!(recovered.exit_code, 0);
+        assert_eq!(recovered.metadata["dynamic_workflow"]["status"], "Running");
+        assert_eq!(
+            recovered.metadata["dynamic_workflow"]["recovered_initial_retrieval"],
+            true
+        );
+        let output = recovered.output.as_deref().expect("checkpoint output");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output).unwrap()["query"],
+            "recover initial evidence"
+        );
+        assert_eq!(accepted_evidence_ledger(output, None).len(), 1);
+        assert_eq!(
+            accepted_evidence_ledger(output, Some(&recovered.metadata)).len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn running_planner_recovers_the_completed_bootstrap_acquisition() {
+        let workspace = std::env::temp_dir().join(format!(
+            "a3s-deepresearch-bootstrap-checkpoint-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = dynamic_workflow_store_path(&workspace);
+        std::fs::create_dir_all(&store).unwrap();
+        let run_id = "deepresearch-running-bootstrap";
+        let bootstrap_output = serde_json::json!({
+            "query": "recover bootstrap evidence",
+            "mode": "bootstrap_acquisition",
+            "acquisition": {
+                "status": "success",
+                "packet": {
+                    "version": 1,
+                    "focuses": [],
+                    "sources": [{
+                        "source_id": "bootstrap-web-source-1",
+                        "title": "Bootstrap Source",
+                        "url_or_path": "https://example.com/bootstrap",
+                        "reliability": "Fetched before semantic planning settled.",
+                        "chunks": [{
+                            "chunk_id": "bootstrap-web-source-1:chunk:1",
+                            "text": "The bootstrap source contains durable raw evidence."
+                        }]
+                    }]
+                },
+                "errors": [],
+                "metadata": {"source_selection_mode": "provider_round_robin"}
+            },
+            "execution": {
+                "mode": "acquire_only",
+                "terminal_authority": "host_inquiry_reducer"
+            }
+        });
+        let lines = [
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 1,
+                "event": {
+                    "type": "run_created",
+                    "spec": {"version": "source-hash"},
+                    "input": {"query": "recover bootstrap evidence"}
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 2,
+                "event": {"type": "run_started"}
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 3,
+                "event": {
+                    "type": "step_created",
+                    "step_id": BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID,
+                    "step_name": BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID,
+                    "input": bootstrap_output.clone()
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 4,
+                "event": {
+                    "type": "step_started",
+                    "step_id": BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID,
+                    "attempt": 1
+                }
+            }),
+            serde_json::json!({
+                "run_id": run_id,
+                "sequence": 5,
+                "event": {
+                    "type": "step_completed",
+                    "step_id": BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID,
+                    "output": bootstrap_output
+                }
+            }),
+        ]
+        .into_iter()
+        .map(|line| serde_json::to_string(&line).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        std::fs::write(store.join(format!("{run_id}.jsonl")), format!("{lines}\n")).unwrap();
+
+        let recovered = recover_deep_research_bootstrap_acquisition_from_store(
+            &workspace,
+            &serde_json::json!({
+                "run_id": run_id,
+                "input": {"query": "recover bootstrap evidence"}
+            }),
+        )
+        .expect("completed bootstrap checkpoint");
+
+        assert_eq!(recovered.exit_code, 0);
+        assert_eq!(recovered.metadata["dynamic_workflow"]["status"], "Running");
+        assert_eq!(
+            recovered.metadata["dynamic_workflow"]["recovered_bootstrap_acquisition"],
+            true
+        );
+        let output = recovered.output.as_deref().expect("checkpoint output");
+        let output = serde_json::from_str::<serde_json::Value>(output).unwrap();
+        assert_eq!(output["query"], "recover bootstrap evidence");
+        assert_eq!(output["mode"], "bootstrap_acquisition");
+        assert_eq!(
+            output["acquisition"]["packet"]["sources"][0]["url_or_path"],
+            "https://example.com/bootstrap"
+        );
 
         let _ = std::fs::remove_dir_all(&workspace);
     }

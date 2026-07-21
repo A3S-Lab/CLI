@@ -7,6 +7,8 @@ fn spec() -> ResearchSpec {
         evidence_scope: "web_and_workspace".to_string(),
         required_claims: vec!["architecture".to_string()],
         total_budget_ms: 60_000,
+        retrieval_stage_budget_ms: 30_000,
+        question_review_stage_budget_ms: 15_000,
         finalization_reserve_ms: 9_000,
         host_pid: 0,
     }
@@ -60,6 +62,124 @@ async fn duplicate_external_event_is_idempotent() {
     assert!(journal.append(scheduled.clone()).await.unwrap());
     assert!(!journal.append(scheduled).await.unwrap());
     assert_eq!(journal.projection().unwrap().active_steps.len(), 1);
+}
+
+#[tokio::test]
+async fn report_start_is_idempotent_and_keeps_its_original_timestamp() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-report-start";
+    record_workflow_started(temp.path(), run_id, spec())
+        .await
+        .unwrap();
+
+    let first = record_report_started_at_ms(temp.path(), run_id)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    let resumed = record_report_started_at_ms(temp.path(), run_id)
+        .await
+        .unwrap();
+
+    assert_eq!(resumed, first);
+    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let report_starts = journal
+        .runtime
+        .events()
+        .iter()
+        .filter(|record| {
+            matches!(
+                &record.event,
+                GraphEvent::ExternalEventObserved {
+                    source,
+                    stream_id,
+                    name,
+                    ..
+                } if source == REPORT_EVENT_SOURCE
+                    && stream_id == run_id
+                    && name == REPORT_STARTED_EVENT_NAME
+            )
+        })
+        .count();
+    assert_eq!(report_starts, 1);
+}
+
+#[tokio::test]
+async fn reopening_workflow_requires_the_same_research_spec_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-spec-identity";
+    let original = spec();
+    record_workflow_started(temp.path(), run_id, original.clone())
+        .await
+        .unwrap();
+
+    let mut same_identity = original.clone();
+    same_identity.host_pid = 42;
+    record_workflow_started(temp.path(), run_id, same_identity)
+        .await
+        .expect("host process identity is not part of the research request");
+
+    let cases = [
+        ("query", {
+            let mut changed = original.clone();
+            changed.query = "different research question".to_string();
+            changed
+        }),
+        ("current_date", {
+            let mut changed = original.clone();
+            changed.current_date = "2026-07-13".to_string();
+            changed
+        }),
+        ("evidence_scope", {
+            let mut changed = original.clone();
+            changed.evidence_scope = "local_only".to_string();
+            changed
+        }),
+        ("required_claims", {
+            let mut changed = original.clone();
+            changed.required_claims = vec!["different claim".to_string()];
+            changed
+        }),
+        ("total_budget_ms", {
+            let mut changed = original.clone();
+            changed.total_budget_ms += 1;
+            changed
+        }),
+        ("retrieval_stage_budget_ms", {
+            let mut changed = original.clone();
+            changed.retrieval_stage_budget_ms += 1;
+            changed
+        }),
+        ("question_review_stage_budget_ms", {
+            let mut changed = original.clone();
+            changed.question_review_stage_budget_ms += 1;
+            changed
+        }),
+        ("finalization_reserve_ms", {
+            let mut changed = original;
+            changed.finalization_reserve_ms += 1;
+            changed
+        }),
+    ];
+    for (field, changed) in cases {
+        let error = record_workflow_started(temp.path(), run_id, changed)
+            .await
+            .expect_err("a changed research identity must fail closed");
+        let detail = format!("{error:#}");
+        assert!(detail.contains(field), "{field}: {detail}");
+    }
+
+    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.spec().unwrap(), spec());
+    assert_eq!(
+        journal.projection().unwrap().active_steps,
+        ["evidence-collection"]
+    );
 }
 
 #[tokio::test]
@@ -188,10 +308,41 @@ async fn terminal_helper_publishes_artifact_head_and_clears_activity() {
     let temp = tempfile::tempdir().unwrap();
     let markdown = temp.path().join("report.md");
     let html = temp.path().join("index.html");
-    std::fs::write(&markdown, "# Verified report").unwrap();
-    std::fs::write(&html, "<!doctype html><h1>Verified report</h1>").unwrap();
+    let source = "https://example.gov/verified";
+    std::fs::write(
+        &markdown,
+        format!("# Verified report\n\n## Finding\n\n[Source]({source})"),
+    )
+    .unwrap();
+    std::fs::write(
+        &html,
+        format!(
+            "<!doctype html><h1>Verified report</h1><h2>Finding</h2><a href=\"{source}\">Source</a>"
+        ),
+    )
+    .unwrap();
     let artifacts = super::super::ResearchReportArtifacts { markdown, html };
     record_workflow_started(temp.path(), "run-terminal", spec())
+        .await
+        .unwrap();
+    let raw = serde_json::json!({
+        "structured": {
+            "summary": "The source was verified.",
+            "sources": [{
+                "url_or_path": source,
+                "quote_or_fact": "The source supports the report."
+            }],
+            "key_evidence": ["The source supports the report."],
+            "contradictions": [],
+            "gaps": [],
+            "confidence": "bounded"
+        }
+    });
+    let evidence = super::super::deep_research_evidence_ledger::accepted_evidence_ledger(
+        &raw.to_string(),
+        None,
+    );
+    record_evidence_ledger(temp.path(), "run-terminal", &evidence)
         .await
         .unwrap();
     record_workflow_completed(temp.path(), "run-terminal", true)
@@ -279,21 +430,12 @@ async fn convergence_reason_survives_strict_replay() {
     record_workflow_started(temp.path(), "run-convergence", spec())
         .await
         .unwrap();
-    let decision = super::super::deep_research_convergence::evaluate_convergence(
-        super::super::deep_research_convergence::ConvergenceInput {
-            accepted_evidence: 0,
-            traceable_sources: 0,
-            authoritative_sources: 0,
-            unresolved_contradictions: 0,
-            unresolved_gaps: 1,
-            completed_rounds: 1,
-            max_rounds: 1,
-            rounds_without_material_gain: 1,
-            remaining_ms: 20_000,
-            finalization_reserve_ms: 10_000,
-            evidence_package_complete: false,
-        },
-    );
+    let decision = super::super::deep_research_convergence::ConvergenceDecision {
+        action: super::super::deep_research_convergence::ConvergenceAction::Degrade,
+        reason:
+            "the coverage-driven retrieval contract ended without a publishable Inquiry projection"
+                .to_string(),
+    };
     record_convergence(temp.path(), "run-convergence", &decision)
         .await
         .unwrap();
@@ -305,7 +447,9 @@ async fn convergence_reason_survives_strict_replay() {
         .unwrap();
     assert_eq!(
         restored.convergence_reason.as_deref(),
-        Some("bounded research round limit reached")
+        Some(
+            "the coverage-driven retrieval contract ended without a publishable Inquiry projection"
+        )
     );
 }
 
@@ -351,6 +495,13 @@ async fn accepted_evidence_materializes_typed_objects_and_relations() {
                 "title": "Release notice",
                 "url_or_path": "https://example.gov/release",
                 "quote_or_fact": "Published July 12",
+                "evidence_excerpts": [{
+                    "focus": "Release timing",
+                    "quote_or_fact": "The release notice says Published July 12."
+                }, {
+                    "focus": "Release authority",
+                    "quote_or_fact": "The government publisher issued the notice."
+                }],
                 "reliability": "official"
             }],
             "key_evidence": ["The release was published July 12."],
@@ -392,11 +543,26 @@ async fn accepted_evidence_materializes_typed_objects_and_relations() {
     assert_eq!(projection.accepted_evidence_count, 1);
     assert_eq!(projection.source_count, 1);
     assert_eq!(projection.claim_count, 1);
+    let source = journal
+        .runtime
+        .graph()
+        .objects()
+        .find(|object| object.object_type == SOURCE_OBJECT_TYPE)
+        .expect("typed source object");
+    let source = serde_json::from_value::<
+        super::super::deep_research_evidence_ledger::AcceptedSource,
+    >(source.data.clone())
+    .unwrap();
+    assert_eq!(
+        source.evidence_excerpts.len(),
+        2,
+        "focused excerpts remain nested under one graph source identity"
+    );
     GraphRuntime::strict_replay(journal.runtime.events()).unwrap();
 }
 
 #[tokio::test]
-async fn failed_claim_audit_downgrades_and_does_not_publish_artifact_head() {
+async fn failed_exact_source_audit_downgrades_and_does_not_publish_artifact_head() {
     let temp = tempfile::tempdir().unwrap();
     record_workflow_started(temp.path(), "run-audit", spec())
         .await
@@ -427,7 +593,7 @@ async fn failed_claim_audit_downgrades_and_does_not_publish_artifact_head() {
     let html = temp.path().join("index.html");
     std::fs::write(
         &markdown,
-        "# Report\n\nUnrelated conclusion.\n\nhttps://example.gov/release",
+        "# Report\n\nEvidence-bound conclusion.\n\nhttps://example.gov/release-notes",
     )
     .unwrap();
     std::fs::write(&html, "<h1>Report</h1><p>Unrelated conclusion.</p>").unwrap();
@@ -441,12 +607,12 @@ async fn failed_claim_audit_downgrades_and_does_not_publish_artifact_head() {
     .unwrap();
     assert_eq!(projection.outcome, ResearchOutcome::Degraded);
     assert!(projection.artifact_evidence_head.is_none());
-    assert_eq!(projection.report_claim_coverage_basis_points, Some(0));
+    assert_eq!(projection.report_cited_source_count, Some(0));
     assert!(projection
         .report_audit_reason
         .as_deref()
         .unwrap()
-        .contains("less than half"));
+        .contains("cites none"));
 }
 
 #[tokio::test]

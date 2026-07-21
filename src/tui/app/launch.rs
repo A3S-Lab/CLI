@@ -8,6 +8,33 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
+fn with_tui_prompt_context(
+    options: SessionOptions,
+    instructions: Option<&str>,
+    os_address: Option<&str>,
+    ctx_ready: bool,
+    learned_preferences: Option<&str>,
+) -> SessionOptions {
+    let mut parts = Vec::new();
+    if let Some(instructions) = instructions {
+        parts.push(instructions.to_string());
+    }
+    if let Some(address) = os_address {
+        parts.push(os_platform_guide(address));
+    }
+    if ctx_ready {
+        parts.push(panels::ctx::ctx_history_guide());
+    }
+    if let Some(preferences) = learned_preferences {
+        parts.push(preferences.to_string());
+    }
+    if parts.is_empty() {
+        options
+    } else {
+        options.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
+    }
+}
+
 struct CodeUseResolution {
     executable: Option<PathBuf>,
     warning: Option<String>,
@@ -42,24 +69,24 @@ where
             Err(error) => CodeUseResolution {
                 executable: None,
                 warning: Some(format!(
-                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run `a3s doctor use` and `a3s install use` for recovery"
+                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` and `a3s install use` for recovery"
                 )),
             },
         },
         Ok(None) => CodeUseResolution {
             executable: None,
             warning: Some(if offline {
-                "A3S Use is not ready and first-use setup is disabled in offline mode; run `a3s install use` after going online"
+                "A3S Use is not ready and first-use setup is disabled in offline mode; run /use repair after going online, or use `a3s install use`"
                     .to_string()
             } else {
-                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run `a3s install use` for explicit setup"
+                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run /use repair, or use `a3s install use` for explicit setup"
                     .to_string()
             }),
         },
         Err(error) => CodeUseResolution {
             executable: None,
             warning: Some(format!(
-                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run `a3s doctor use` for recovery"
+                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` for recovery"
             )),
         },
     }
@@ -144,6 +171,13 @@ async fn resolve_code_webview(context: &InvocationContext) -> CodeWebviewResolut
         },
     )
     .await
+}
+
+fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
+    ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    )
 }
 
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
@@ -439,6 +473,18 @@ pub(crate) async fn run_in(
             .map_err(|error| anyhow::anyhow!("failed to load effective agent config: {error}"))?,
     );
     let workspace = workspace.to_string_lossy().into_owned();
+    let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+    if let Err(error) = evolution.synchronize_memory_store(&memory_dir).await {
+        tracing::warn!(%error, "could not synchronize memory evolution before TUI session startup");
+    }
+    let learned_preferences = match evolution.session_preference_prompt() {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            tracing::warn!(%error, "could not load learned preferences before TUI session startup");
+            None
+        }
+    };
+    let evolution_observer = crate::evolution::EvolutionMemoryObserver::new(evolution.clone());
 
     // Configured "provider/model" ids (+ context windows) + the default model.
     let mut models: Vec<String> = Vec::new();
@@ -628,7 +674,33 @@ pub(crate) async fn run_in(
         Err(error) => (Vec::new(), Some(error)),
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
-    let execution_policy = TuiExecutionPolicy::new(initial_mode);
+    let managed_srt = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        Path::new(&workspace),
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let (sandbox_handle, sandbox_load_warning) = match managed_srt.runtime {
+        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
+            Ok(sandbox) => (
+                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
+                None,
+            ),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Local command sandbox failed its bounded OS capability probe: {error}. \
+                     Default mode will ask before exact host Bash execution; Auto mode will deny \
+                     Bash. Repair the reported platform prerequisite and restart `a3s code`"
+                )),
+            ),
+        },
+        None => (None, managed_srt.warning),
+    };
+    let execution_policy =
+        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace), sandbox_handle);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -640,23 +712,15 @@ pub(crate) async fn run_in(
     // search local agent history before re-deriving prior work.
     let ctx_ready = panels::ctx::ctx_available();
     let with_instr = |o: SessionOptions| {
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(i) = &instructions {
-            parts.push(i.clone());
-        }
-        if let Some(addr) = &os_address {
-            parts.push(os_platform_guide(addr));
-        }
-        if ctx_ready {
-            parts.push(panels::ctx::ctx_history_guide());
-        }
-        if parts.is_empty() {
-            o
-        } else {
-            o.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
-        }
+        with_tui_prompt_context(
+            o,
+            instructions.as_deref(),
+            os_address.as_deref(),
+            ctx_ready,
+            learned_preferences.as_deref(),
+        )
     };
-    let manifest_backend = ManifestWorkspaceBackend::new(std::path::PathBuf::from(&workspace));
+    let manifest_backend = tui_manifest_backend(Path::new(&workspace));
     let workspace_manifest = manifest_backend.manifest();
     let initial_manifest = workspace_manifest.snapshot();
     let initial_files = initial_manifest.file_paths();
@@ -693,6 +757,7 @@ pub(crate) async fn run_in(
                     .with_max_context_tokens(context_limit as usize)
                     .with_auto_compact_threshold(auto_compact_threshold as f32)
                     .with_file_memory(memory_dir.clone())
+                    .with_memory_observer(evolution_observer.clone())
                     .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                     .with_max_tool_rounds(initial_budget.max_tool_rounds)
                     .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -737,6 +802,7 @@ pub(crate) async fn run_in(
                             .with_max_context_tokens(context_limit as usize)
                             .with_auto_compact_threshold(auto_compact_threshold as f32)
                             .with_file_memory(memory_dir.clone())
+                            .with_memory_observer(evolution_observer.clone())
                             .with_max_parallel_tasks(initial_budget.max_parallel_tasks)
                             .with_max_tool_rounds(initial_budget.max_tool_rounds)
                             .with_max_continuation_turns(initial_budget.max_continuation_turns)
@@ -758,6 +824,9 @@ pub(crate) async fn run_in(
     let _ = session
         .memory()
         .ok_or_else(|| anyhow::anyhow!("session memory was not initialized"))?;
+    if let Err(error) = evolution.mark_session_assets_activated().await {
+        tracing::warn!(%error, "could not mark learned session assets active after TUI session startup");
+    }
 
     // DynamicWorkflowRuntime is always available in the TUI because built-in
     // `?` deep research and ultracode dynamic workflows both route through it.
@@ -811,7 +880,7 @@ pub(crate) async fn run_in(
     // A3S Use is a first-use component. Resolve an existing healthy install or
     // prepare the verified release before terminal takeover, while preserving
     // offline/A3S_NO_AUTO_INSTALL as strict no-mutation policies. Setup failure
-    // is non-fatal to Code and points to explicit component diagnostics.
+    // is non-fatal to Code and remains diagnosable through `/use`.
     let use_resolution = resolve_code_use(context).await;
     let (use_registry, registry_warning) = match use_resolution.executable {
         Some(executable) => {
@@ -841,9 +910,7 @@ pub(crate) async fn run_in(
     let webview_resolution = resolve_code_webview(context).await;
     if let Some(warning) = webview_resolution.warning {
         initial_messages.push(TranscriptEntry::preformatted(
-            Style::new()
-                .fg(TN_YELLOW)
-                .render(&format!("  鈿?{warning}")),
+            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
         ));
     }
 
@@ -854,7 +921,6 @@ pub(crate) async fn run_in(
         return run_smoke(
             session,
             Path::new(&workspace),
-            os_session.is_some(),
             deep_research_report_tool_gate,
         )
         .await;
@@ -926,9 +992,9 @@ pub(crate) async fn run_in(
         model_tab: 0,
         relay_panel: None,
         relay_scan_seq: 0,
-        permission_panel: None,
         task_panel: None,
         task_panel_seq: 0,
+        permission_panel: None,
         codex_account_models: crate::account_providers::codex::cached_codex_models(),
         codex_models_loading: false,
         codex_models_refreshed_at: None,
@@ -951,11 +1017,10 @@ pub(crate) async fn run_in(
         last_view: None,
         pending_deep_research_report_view: None,
         deep_research_loop: None,
-        deep_research_report_repair_used: false,
+        deep_research_report_resume_used: false,
         deep_research_workflow: DeepResearchWorkflowSnapshot::default(),
         deep_research_outcome: DeepResearchRunOutcome::Active,
-        pending_deep_research_report_repair_prompt: None,
-        pending_deep_research_synthesis: None,
+        pending_deep_research_report_resume: false,
         deep_research_stream_timeout_token: 0,
         stream_start_token: 0,
         interrupted_stream_start_token: None,
@@ -1037,7 +1102,6 @@ pub(crate) async fn run_in(
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
         streaming: StreamingMarkdown::new(transcript_markdown_width_for(width)),
-        deep_research_report_tools: ReportPhaseToolBuffer::default(),
         got_delta: false,
         compacting: None,
         updating: None,
@@ -1076,6 +1140,12 @@ pub(crate) async fn run_in(
         queue: PriorityQueue::new(),
         queued_turn_modes: HashMap::new(),
         queued_plan_drafts: HashMap::new(),
+        send_now_queued_sequence: None,
+        queue_panel: None,
+        active_rewind_checkpoint: None,
+        rewind_checkpoints: VecDeque::new(),
+        next_rewind_checkpoint_id: 0,
+        rewind_finalization_pending: None,
         active_queued_turn: None,
         active_queued_turn_token: None,
         active_turn_mode: None,
@@ -1088,6 +1158,7 @@ pub(crate) async fn run_in(
         plan_review: None,
         ide: None,
         memory: None,
+        evolution: None,
         asset_list: None,
         runtime_activity: None,
         kb: None,
@@ -1117,6 +1188,9 @@ pub(crate) async fn run_in(
             NoticeKind::Warning,
             format!("Project permission rules were ignored: {error}"),
         );
+    }
+    if let Some(warning) = sandbox_load_warning {
+        app.push_notice(NoticeKind::Warning, warning);
     }
 
     match interrupted_research_recovery {
@@ -1284,6 +1358,10 @@ pub(crate) async fn run_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::workspace::{
+        WorkspaceFileSystem, WorkspaceGrepRequest, WorkspacePath, WorkspacePathResolver,
+        WorkspaceSearch,
+    };
     use a3s_tui::style::strip_ansi;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -1303,6 +1381,66 @@ mod tests {
         assert!(rendered.contains("a3s code resume session-42"));
     }
 
+    #[tokio::test]
+    async fn initial_tui_options_inject_and_remove_materialized_preferences() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+        let item = a3s_memory::MemoryItem::new(
+            "Keep completion claims concise and backed by current evidence.",
+        )
+        .with_type(a3s_memory::MemoryType::Semantic)
+        .with_importance(0.94)
+        .with_metadata("source", "preference")
+        .with_metadata("scope", "workspace")
+        .with_metadata("workspace", workspace.display().to_string())
+        .with_metadata("session_id", "session-one")
+        .with_metadata("confidence", "0.97")
+        .with_metadata("evolution_schema", "a3s.evolution.signal.v1")
+        .with_metadata("evolution_kind", "preference")
+        .with_metadata("evolution_pattern", "preference.response.concise-evidence")
+        .with_metadata("evolution_title", "Concise evidence-backed completion")
+        .with_metadata(
+            "evolution_summary",
+            "Keep completion claims concise while retaining current supporting evidence.",
+        )
+        .with_metadata(
+            "evolution_instructions",
+            r#"["Keep completion claims concise.","Retain concrete current evidence."]"#,
+        );
+        let observation = a3s_code_core::memory::MemoryObservation {
+            incoming: item.clone(),
+            stored: item,
+            merged: false,
+        };
+        evolution.observe(observation).await.unwrap();
+        let candidate_id = evolution.overview().await.unwrap().candidates[0].id.clone();
+        evolution.materialize(&candidate_id, false).await.unwrap();
+
+        let learned = evolution.session_preference_prompt().unwrap().unwrap();
+        let options =
+            with_tui_prompt_context(SessionOptions::new(), None, None, false, Some(&learned));
+        let extra = options
+            .prompt_slots
+            .as_ref()
+            .and_then(|slots| slots.extra.as_deref())
+            .unwrap();
+        assert!(extra.contains("# Learned Local Preferences"));
+        assert!(extra.contains("Keep completion claims concise."));
+        assert!(!extra.contains("Keep completion claims concise and backed"));
+
+        evolution.rollback(&candidate_id, Some(0)).await.unwrap();
+        let options = with_tui_prompt_context(
+            SessionOptions::new(),
+            None,
+            None,
+            false,
+            evolution.session_preference_prompt().unwrap().as_deref(),
+        );
+        assert!(options.prompt_slots.is_none());
+    }
+
     #[test]
     fn saved_sessions_are_sorted_newest_first_with_a_stable_tie_breaker() {
         let mut saved = vec![
@@ -1318,6 +1456,47 @@ mod tests {
             saved.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
             ["newest", "same-b", "same-a", "older"]
         );
+    }
+
+    #[tokio::test]
+    async fn tui_workspace_backend_enforces_the_direct_credential_boundary() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join(".env"), "TUI_BOUNDARY_TOKEN=secret\n").unwrap();
+        std::fs::write(
+            workspace.path().join("README.md"),
+            "TUI_BOUNDARY_TOKEN is supplied externally\n",
+        )
+        .unwrap();
+        let backend = tui_manifest_backend(workspace.path());
+
+        let secret = backend.normalize(".env").unwrap();
+        let read_error = backend
+            .read_text(&secret)
+            .await
+            .expect_err("the TUI backend must deny direct credential reads");
+        assert!(read_error.to_string().contains("credential boundary"));
+
+        let mut snapshots = backend.manifest().subscribe();
+        tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let grep = backend
+            .grep(WorkspaceGrepRequest {
+                base: WorkspacePath::root(),
+                pattern: "TUI_BOUNDARY_TOKEN".to_string(),
+                glob: None,
+                context_lines: 0,
+                case_insensitive: false,
+                max_output_size: 1024,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(grep.match_count, 1);
+        assert!(grep.output.contains("README.md"));
+        assert!(!grep.output.contains("secret"));
+        assert!(!grep.output.contains(".env"));
     }
 
     #[test]
@@ -1408,66 +1587,6 @@ mod tests {
         assert!(resolution.executable.is_none());
         let warning = resolution.warning.unwrap();
         assert!(warning.contains("release unavailable"), "{warning}");
-        assert!(warning.contains("a3s install use"), "{warning}");
-    }
-
-    #[tokio::test]
-    async fn code_webview_resolution_installs_once_when_the_component_is_missing() {
-        let installed = PathBuf::from("/managed/a3s-webview");
-        let called = AtomicBool::new(false);
-
-        let resolution = resolve_code_webview_with(
-            true,
-            false,
-            || Ok(None),
-            || async {
-                called.store(true, Ordering::SeqCst);
-                Ok(installed.clone())
-            },
-        )
-        .await;
-
-        assert!(called.load(Ordering::SeqCst));
-        assert_eq!(resolution.executable.as_deref(), Some(installed.as_path()));
-        assert!(resolution.warning.is_none());
-    }
-
-    #[tokio::test]
-    async fn code_webview_resolution_honors_the_no_auto_install_boundary() {
-        let called = AtomicBool::new(false);
-
-        let resolution = resolve_code_webview_with(
-            false,
-            false,
-            || Ok(None),
-            || async {
-                called.store(true, Ordering::SeqCst);
-                anyhow::bail!("installer must not run")
-            },
-        )
-        .await;
-
-        assert!(!called.load(Ordering::SeqCst));
-        assert!(resolution.executable.is_none());
-        assert!(resolution
-            .warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("A3S_NO_AUTO_INSTALL")));
-    }
-
-    #[tokio::test]
-    async fn code_webview_resolution_keeps_install_failure_non_fatal_and_actionable() {
-        let resolution = resolve_code_webview_with(
-            true,
-            false,
-            || Ok(None),
-            || async { anyhow::bail!("release unavailable") },
-        )
-        .await;
-
-        assert!(resolution.executable.is_none());
-        let warning = resolution.warning.unwrap();
-        assert!(warning.contains("release unavailable"), "{warning}");
-        assert!(warning.contains("a3s install webview"), "{warning}");
+        assert!(warning.contains("/use repair"), "{warning}");
     }
 }

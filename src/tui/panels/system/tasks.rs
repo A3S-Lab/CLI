@@ -162,9 +162,8 @@ impl TaskPanel {
     fn open_selected(&mut self) -> TaskPanelAction {
         self.selected_task()
             .cloned()
-            .map_or(TaskPanelAction::None, |task| {
-                TaskPanelAction::Open(Box::new(task))
-            })
+            .map(Box::new)
+            .map_or(TaskPanelAction::None, TaskPanelAction::Open)
     }
 
     fn arm_or_cancel_selected(&mut self) -> TaskPanelAction {

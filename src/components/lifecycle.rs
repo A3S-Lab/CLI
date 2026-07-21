@@ -80,6 +80,8 @@ pub struct OperationRecord {
     pub component: ComponentId,
     pub action: &'static str,
     pub changed: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    pub recovered: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -87,6 +89,10 @@ pub struct OperationRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<PathBuf>,
     pub message: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub async fn install_component(
@@ -125,7 +131,7 @@ pub(super) async fn install_component_locked(
             );
         }
         return match spec.distribution {
-            Distribution::Bundled => install_bundled(id, spec, paths),
+            Distribution::Bundled => install_bundled(id, spec, request, paths),
             Distribution::Release(release) => {
                 if request.package.is_some() {
                     bail!("--from is valid only for external Use extensions");
@@ -265,6 +271,7 @@ pub(super) fn uninstall_component_locked(
         component: id.clone(),
         action: "uninstall",
         changed: true,
+        recovered: false,
         version: Some(receipt.version),
         provenance: Some(receipt.provenance),
         path: receipt.executable_path,
@@ -300,6 +307,7 @@ async fn ensure_parent(
 fn install_bundled(
     id: &ComponentId,
     spec: &ComponentSpec,
+    request: &InstallRequest,
     paths: &ComponentPaths,
 ) -> anyhow::Result<OperationRecord> {
     let state = find_state(id, paths)?;
@@ -308,8 +316,9 @@ fn install_bundled(
     }
     Ok(OperationRecord {
         component: id.clone(),
-        action: "install",
+        action: request.intent.action(),
         changed: false,
+        recovered: false,
         version: state.version,
         provenance: state.provenance,
         path: state.path,
@@ -334,8 +343,9 @@ async fn install_product(
     if state.is_ready() && requested_version_is_ready && !request.force {
         return Ok(OperationRecord {
             component: id.clone(),
-            action: "install",
+            action: request.intent.action(),
             changed: false,
+            recovered: false,
             version: state.version,
             provenance: state.provenance,
             path: state.path,
@@ -457,6 +467,7 @@ fn install_homebrew(
         component: id.clone(),
         action: request.intent.action(),
         changed: true,
+        recovered: false,
         version: Some(version),
         provenance: Some(InstallProvenance::Homebrew),
         path: Some(executable),
@@ -542,6 +553,7 @@ fn delegate_install(
             .get("changed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        recovered: false,
         version: component
             .and_then(|value| value.get("version"))
             .and_then(serde_json::Value::as_str)
@@ -611,6 +623,7 @@ fn delegate_uninstall(
             .get("changed")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true),
+        recovered: false,
         version: None,
         provenance: Some(InstallProvenance::Delegated),
         path: None,

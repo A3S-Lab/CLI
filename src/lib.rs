@@ -2,6 +2,7 @@
 
 pub mod components;
 pub mod registry;
+pub mod research;
 
 // Compile the process adapter in the library test target as well, so its
 // hermetic fake-process contract tests do not depend on the TUI test graph.

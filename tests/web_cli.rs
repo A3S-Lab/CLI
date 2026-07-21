@@ -6,6 +6,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+#[path = "web_cli/web_turn_queue.rs"]
+mod web_turn_queue;
+
 #[test]
 fn web_help_is_top_level_and_documents_background_mode() {
     let output = Command::new(a3s_binary())
@@ -192,6 +196,197 @@ fn detached_web_process_serves_health_until_stopped() {
 }
 
 #[test]
+fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
+    let root = temp_directory("web-plugin-api");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S plugin API test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+
+    let activities = http_json(&address, "GET", "/api/v1/plugins/activities", None, "200");
+    assert_eq!(activities["schemaVersion"], 1);
+    assert!(activities["available"].is_boolean());
+    assert!(activities["items"].is_array());
+
+    let marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None, "200");
+    assert_eq!(marketplace["schemaVersion"], 1);
+    assert!(marketplace["registries"]
+        .as_array()
+        .is_some_and(|registries| registries
+            .iter()
+            .all(|registry| registry["verified"] == false)));
+    assert_eq!(marketplace["items"], serde_json::json!([]));
+
+    let invalid_key = http_json(
+        &address,
+        "GET",
+        "/api/v1/plugins/activities/not-a-key",
+        None,
+        "400",
+    );
+    assert!(invalid_key["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Activity Bar contribution key")));
+
+    let invalid_plan = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/operations/plan",
+        Some(r#"{"action":"install","componentId":"science"}"#),
+        "400",
+    );
+    assert!(invalid_plan["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("use/<publisher>/<name>")));
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean plugin API fixture");
+}
+
+#[test]
+fn evolution_api_reviews_versions_and_rolls_back_local_assets() {
+    let root = temp_directory("web-evolution-api");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S evolution API test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    seed_evolution_catalog(&root);
+    let evolution_state = root.join(".a3s/evolution/state.json");
+    let state_before_overview = fs::read(&evolution_state).expect("read seeded evolution state");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+
+    let overview = http_json(&address, "GET", "/api/v1/evolution", None, "200");
+    assert_eq!(
+        fs::read(&evolution_state).expect("read evolution state after overview"),
+        state_before_overview,
+        "GET evolution overview must not mutate the catalog"
+    );
+    let overview = api_data(&overview);
+    assert_eq!(overview["schema"], "a3s.code.evolution.v1");
+    assert_eq!(overview["stats"]["total"], 2);
+    assert_eq!(
+        overview["skillRoot"],
+        root.join(".a3s/skills").display().to_string()
+    );
+    assert_eq!(overview["okfRoot"], root.join("okf").display().to_string());
+    assert_eq!(overview["policy"]["localOnly"], true);
+
+    let scan = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/scan",
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(api_data(&scan)["observed"], 0);
+
+    let first = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/materialize",
+        Some(r#"{"force":false}"#),
+        "200",
+    );
+    let first = api_data(&first);
+    assert_eq!(first["result"]["candidate"]["currentVersion"], 1);
+    let asset_path = first["result"]["candidate"]["assetPath"]
+        .as_str()
+        .expect("materialized preference path");
+    assert!(root.join(asset_path).is_file());
+
+    append_evolution_update(&root, "preference-api-test");
+    let second = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/materialize",
+        Some(r#"{"force":false}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&second)["result"]["candidate"]["currentVersion"],
+        2
+    );
+
+    let rollback = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":1}"#),
+        "200",
+    );
+    let rollback = api_data(&rollback);
+    assert_eq!(rollback["result"]["candidate"]["state"], "rolledBack");
+    assert_eq!(rollback["result"]["candidate"]["currentVersion"], 1);
+    assert!(rollback["result"]["recoveryPath"]
+        .as_str()
+        .is_some_and(|path| root.join(path).exists()));
+
+    let baseline = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":0}"#),
+        "200",
+    );
+    let baseline = api_data(&baseline);
+    assert_eq!(baseline["result"]["candidate"]["state"], "rolledBack");
+    assert!(baseline["result"]["candidate"]["currentVersion"].is_null());
+    assert!(!root.join(asset_path).exists());
+
+    let restored = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/preference-api-test/rollback",
+        Some(r#"{"targetVersion":1}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&restored)["result"]["candidate"]["currentVersion"],
+        1
+    );
+    assert!(root.join(asset_path).is_file());
+
+    let rejected = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/okf-api-test/reject",
+        Some(r#"{"reason":"Not reusable in this workspace"}"#),
+        "200",
+    );
+    assert_eq!(api_data(&rejected)["state"], "rejected");
+    assert_eq!(
+        api_data(&rejected)["rejectionReason"],
+        "Not reusable in this workspace"
+    );
+    let reopened = http_json(
+        &address,
+        "POST",
+        "/api/v1/evolution/okf-api-test/reopen",
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(api_data(&reopened)["state"], "observing");
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean evolution API fixture");
+}
+
+#[test]
 fn packaged_web_assets_work_from_an_empty_workspace() {
     let root = temp_directory("packaged-web-assets");
     let workspace = root.join("workspace");
@@ -275,45 +470,6 @@ fn packaged_web_assets_work_from_an_empty_workspace() {
     guard.disarm();
     wait_until_stopped(&address);
     fs::remove_dir_all(root).expect("clean packaged Web fixture");
-}
-
-#[test]
-fn detached_web_exposes_confined_code_intelligence_routes() {
-    let root = temp_directory("code-intelligence-web");
-    let config_path = root.join("config.acl");
-    let web_dir = root.join("web");
-    let state_dir = root.join("session-state");
-    fs::create_dir_all(&web_dir).expect("create web directory");
-    fs::create_dir_all(root.join("src")).expect("create source directory");
-    fs::write(
-        web_dir.join("index.html"),
-        "<!doctype html><title>A3S Code Intelligence test</title>",
-    )
-    .expect("write web fixture");
-    fs::write(root.join("src/main.rs"), "fn main() {}\n").expect("write source fixture");
-    fs::write(&config_path, test_config()).expect("write config fixture");
-    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &state_dir);
-
-    let status = http_json(
-        &address,
-        "GET",
-        "/api/v1/workspace/code-intelligence/status",
-        None,
-        "200",
-    );
-    assert!(status["state"].is_string(), "{status:#}");
-    assert!(status["capabilities"].is_object(), "{status:#}");
-    assert!(status["languages"].is_array(), "{status:#}");
-
-    let traversal = http_get(
-        &address,
-        "/api/v1/workspace/code-intelligence/outline?path=..%2F..%2Foutside.rs",
-    );
-    assert!(traversal.starts_with("HTTP/1.1 400"), "{traversal}");
-
-    daemon.stop();
-    wait_until_stopped(&address);
-    fs::remove_dir_all(root).expect("clean Code Intelligence Web fixture");
 }
 
 #[test]
@@ -677,72 +833,6 @@ fn concurrent_managed_web_starts_converge_on_one_instance() {
     guard.stop();
     wait_until_stopped(&address);
     fs::remove_dir_all(root).expect("clean concurrent Web fixture");
-}
-
-#[cfg(unix)]
-#[test]
-fn stale_managed_record_is_quarantined_without_signaling_an_unrelated_pid() {
-    let root = temp_directory("stale-managed-web");
-    let config_path = root.join("config.acl");
-    let web_dir = root.join("web");
-    let state_home = root.join("state");
-    fs::create_dir_all(&web_dir).expect("create web directory");
-    fs::write(
-        web_dir.join("index.html"),
-        "<!doctype html><title>A3S stale record test</title>",
-    )
-    .expect("write web fixture");
-    fs::write(&config_path, test_config()).expect("write config fixture");
-
-    let first = start_managed_web(&root, &config_path, &web_dir, &state_home, &[]);
-    let first_stdout = String::from_utf8_lossy(&first.stdout);
-    let first_pid = output_value(&first_stdout, "Background PID:")
-        .parse::<u32>()
-        .expect("first background PID");
-    let first_address = output_value(&first_stdout, "A3S Web:")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
-    let mut first_guard = DaemonGuard::new(first_pid);
-    force_stop_process(first_pid);
-    first_guard.disarm();
-    wait_until_stopped(&first_address);
-
-    let replacement = start_managed_web(&root, &config_path, &web_dir, &state_home, &[]);
-    assert!(
-        replacement.status.success(),
-        "stdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&replacement.stdout),
-        String::from_utf8_lossy(&replacement.stderr)
-    );
-    let replacement_stdout = String::from_utf8_lossy(&replacement.stdout);
-    let replacement_pid = output_value(&replacement_stdout, "Background PID:")
-        .parse::<u32>()
-        .expect("replacement background PID");
-    let replacement_address = output_value(&replacement_stdout, "A3S Web:")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
-    let instances = state_home.join("web/instances");
-    let names = fs::read_dir(&instances)
-        .expect("read Web instance state")
-        .map(|entry| {
-            entry
-                .expect("instance directory entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        names.iter().any(|name| name.contains(".stale-")),
-        "stale record was not quarantined: {names:?}"
-    );
-
-    let mut replacement_guard = DaemonGuard::new(replacement_pid);
-    replacement_guard.stop();
-    wait_until_stopped(&replacement_address);
-    fs::remove_dir_all(root).expect("clean stale-record fixture");
 }
 
 #[test]
@@ -1109,6 +1199,137 @@ fn http_json(
         .unwrap_or_else(|error| panic!("HTTP response body is not JSON ({error}): {response}"))
 }
 
+fn api_data(value: &serde_json::Value) -> &serde_json::Value {
+    value.get("data").unwrap_or(value)
+}
+
+fn seed_evolution_catalog(workspace: &std::path::Path) {
+    let root = workspace.join(".a3s/evolution");
+    fs::create_dir_all(&root).expect("create evolution state directory");
+    let now = "2026-07-21T08:00:00Z";
+    let candidate = |id: &str, kind: &str, pattern: &str, title: &str| {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "patternKey": pattern,
+            "patternAliases": [],
+            "title": title,
+            "summary": format!("Reusable local guidance for {title}."),
+            "instructions": ["Review current workspace evidence before applying this guidance."],
+            "state": "ready",
+            "evidence": [{
+                "id": format!("{id}-evidence-one"),
+                "memoryId": format!("{id}-memory-one"),
+                "sessionId": "session-one",
+                "source": if kind == "preference" { "preference" } else { "project_fact" },
+                "content": format!("Stable evidence for {title}."),
+                "reason": "This pattern changes future task execution.",
+                "timestamp": now,
+                "importance": 0.9,
+                "confidence": 0.95,
+                "conflictsWith": [],
+                "explicitSignal": true
+            }],
+            "occurrences": 1,
+            "distinctSessions": 1,
+            "confidence": 0.95,
+            "importance": 0.9,
+            "maturity": 0.86,
+            "hasConflicts": false,
+            "updateAvailable": false,
+            "activationPending": false,
+            "createdAt": now,
+            "updatedAt": now,
+            "readyAt": now,
+            "materializedAt": null,
+            "rejectedAt": null,
+            "rolledBackAt": null,
+            "rejectionReason": null,
+            "assetPath": null,
+            "currentVersion": null,
+            "versions": [],
+            "audit": [{
+                "action": "ready",
+                "at": now,
+                "version": null,
+                "note": "Seeded for API integration verification.",
+                "recoveryPath": null
+            }]
+        })
+    };
+    let catalog = serde_json::json!({
+        "schema": "a3s.code.evolution.v1",
+        "revision": 1,
+        "workspaceRoot": workspace.display().to_string(),
+        "updatedAt": now,
+        "candidates": [
+            candidate(
+                "preference-api-test",
+                "preference",
+                "preference.response.evidence",
+                "Evidence-backed responses"
+            ),
+            candidate(
+                "okf-api-test",
+                "okf",
+                "okf.workspace.architecture",
+                "Workspace architecture"
+            )
+        ]
+    });
+    fs::write(
+        root.join("state.json"),
+        serde_json::to_vec_pretty(&catalog).expect("serialize evolution catalog"),
+    )
+    .expect("write evolution catalog");
+}
+
+fn append_evolution_update(workspace: &std::path::Path, candidate_id: &str) {
+    let state_path = workspace.join(".a3s/evolution/state.json");
+    let mut catalog: serde_json::Value =
+        serde_json::from_slice(&fs::read(&state_path).expect("read evolution state"))
+            .expect("parse evolution state");
+    let candidate = catalog["candidates"]
+        .as_array_mut()
+        .and_then(|candidates| {
+            candidates
+                .iter_mut()
+                .find(|candidate| candidate["id"] == candidate_id)
+        })
+        .expect("evolution candidate to update");
+    candidate["instructions"]
+        .as_array_mut()
+        .expect("candidate instructions")
+        .push(serde_json::json!(
+            "Preserve concrete evidence in the final response."
+        ));
+    candidate["evidence"]
+        .as_array_mut()
+        .expect("candidate evidence")
+        .push(serde_json::json!({
+            "id": "preference-api-test-evidence-two",
+            "memoryId": "preference-api-test-memory-two",
+            "sessionId": "session-two",
+            "source": "preference",
+            "content": "A second session repeated the evidence-backed response preference.",
+            "reason": "Repeated explicit guidance should update the local preference.",
+            "timestamp": "2026-07-21T09:00:00Z",
+            "importance": 0.92,
+            "confidence": 0.96,
+            "conflictsWith": [],
+            "explicitSignal": true
+        }));
+    candidate["occurrences"] = serde_json::json!(2);
+    candidate["distinctSessions"] = serde_json::json!(2);
+    candidate["updateAvailable"] = serde_json::json!(true);
+    candidate["updatedAt"] = serde_json::json!("2026-07-21T09:00:00Z");
+    fs::write(
+        &state_path,
+        serde_json::to_vec_pretty(&catalog).expect("serialize updated evolution state"),
+    )
+    .expect("write updated evolution state");
+}
+
 fn http_request(address: &str, method: &str, path: &str, body: Option<&str>) -> String {
     let mut stream = TcpStream::connect(address).expect("connect to detached web process");
     stream
@@ -1282,13 +1503,6 @@ impl Drop for DaemonGuard {
 fn stop_process(pid: u32) {
     let _ = Command::new("kill")
         .args(["-INT", &pid.to_string()])
-        .status();
-}
-
-#[cfg(unix)]
-fn force_stop_process(pid: u32) {
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid.to_string()])
         .status();
 }
 

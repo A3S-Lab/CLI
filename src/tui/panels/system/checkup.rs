@@ -52,9 +52,11 @@ impl CheckupHostFacts {
             } else {
                 "not attached".to_string()
             },
-            local_command_sandbox:
-                "not attached; Default requires exact host approval and Auto denies Bash"
-                    .to_string(),
+            local_command_sandbox: if app.execution_policy.sandbox_available() {
+                "managed runtime attached".to_string()
+            } else {
+                "unavailable; Default requires exact host approval and Auto denies Bash".to_string()
+            },
             os_account: match (app.os_config.is_some(), app.os_session.is_some()) {
                 (true, true) => "endpoint configured; signed in".to_string(),
                 (true, false) => "endpoint configured; signed out".to_string(),
@@ -126,10 +128,11 @@ impl App {
         }
         self.textarea.clear();
         self.checkup_inflight = true;
-        let status_entry =
-            self.push_tracked_line(&Style::new().fg(TN_GRAY).render(
-                "  ◇ checkup · inspecting components, PATH, ACL, skills, MCP, and terminal…",
-            ));
+        let status_entry = self.push_tracked_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  ◇ checkup · inspecting components, PATH, ACL, skills, and MCP…"),
+        );
         self.relayout();
         Some(preflight::command(self, status_entry))
     }
@@ -199,8 +202,7 @@ fn checkup_audit_prompt(facts: &CheckupHostFacts) -> String {
            delete, move, chmod, log in/out, change permissions or modes, start \
            or stop services, or contact an external service to mutate state.\n\
          - The host has already completed the typed installation, PATH, ACL, \
-           skill/plugin, instruction-size, in-memory MCP, and terminal-capability \
-           preflight below. \
+           skill/plugin, instruction-size, and in-memory MCP preflight below. \
            Do not invoke shell commands or rerun CLI diagnostics. Treat these \
            typed facts as the source of truth for host-level findings.\n\
          - Workspace inspection is limited to read, grep, glob, and ls. Use \
@@ -326,7 +328,7 @@ mod tests {
             runtime_policy: "online; verified first-use installation enabled".to_string(),
             composer_mode: "default".to_string(),
             permission_grants: "1 exact session grant(s); 2 exact project grant(s)".to_string(),
-            typed_preflight: "- component health: 4 checked; 4 ready, 0 broken, 0 missing, 0 unknown\n- executable/PATH: 1 candidate location(s), 1 distinct binary/binaries; active executable is the first resolved PATH binary\n- ACL configuration: 1 inspected layer(s): effective=/workspace/.a3s/config.acl (valid); effective semantic validation passed\n- skill/plugin context: 5 file(s) across 2 source dir(s), 24.0 KiB; 0 duplicate name(s), 0 file(s) over 128 KiB, 0 metadata failure(s)\n- workspace instructions: 1 indexed AGENTS.md file(s), 8.0 KiB; 0 file(s) over 256 KiB, 0 metadata failure(s)\n- MCP runtime: 1 configured, 1 registered, 1 enabled, 1 connected, 4 tool(s), 0 error state(s); error text withheld\n- terminal profile: family=Kitty, multiplexer=none, color=truecolor, display=fullscreen; tty stdin/stdout/stderr=true/true/true; enhanced keyboard=supported, hyperlinks=supported, clipboard=supported; no evidenced limitations".to_string(),
+            typed_preflight: "- component health: 4 checked; 4 ready, 0 broken, 0 missing, 0 unknown\n- executable/PATH: 1 candidate location(s), 1 distinct binary/binaries; active executable is the first resolved PATH binary\n- ACL configuration: 1 inspected layer(s): effective=/workspace/.a3s/config.acl (valid); effective semantic validation passed\n- skill/plugin context: 5 file(s) across 2 source dir(s), 24.0 KiB; 0 duplicate name(s), 0 file(s) over 128 KiB, 0 metadata failure(s)\n- workspace instructions: 1 indexed AGENTS.md file(s), 8.0 KiB; 0 file(s) over 256 KiB, 0 metadata failure(s)\n- MCP runtime: 1 configured, 1 registered, 1 enabled, 1 connected, 4 tool(s), 0 error state(s); error text withheld".to_string(),
         }
     }
 
@@ -339,7 +341,6 @@ mod tests {
         assert!(prompt.contains("AGENTS.md"), "{prompt}");
         assert!(prompt.contains("skills/plugins"), "{prompt}");
         assert!(prompt.contains("MCP"), "{prompt}");
-        assert!(prompt.contains("terminal-capability"), "{prompt}");
         assert!(prompt.contains("local command sandbox"), "{prompt}");
         assert!(prompt.contains("Optional preferences"), "{prompt}");
         assert!(prompt.contains("never infer or widen a grant"), "{prompt}");

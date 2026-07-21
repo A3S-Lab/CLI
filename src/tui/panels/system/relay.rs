@@ -757,7 +757,6 @@ impl App {
         self.model = restore.model;
         self.model_source = restore.model_source;
         self.effort = restore.effort;
-        self.active_turn_mode = None;
         self.set_composer_mode(restore.mode);
         self.context_limit = restore.context_limit;
         self.llm_override = restore.llm_override;
@@ -786,10 +785,15 @@ impl App {
         self.queue.clear();
         self.queued_turn_modes.clear();
         self.queued_plan_drafts.clear();
+        self.send_now_queued_sequence = None;
+        self.queue_panel = None;
         self.active_queued_turn = None;
         self.active_queued_turn_token = None;
         self.active_turn_mode = None;
         self.active_plan_draft = None;
+        self.active_rewind_checkpoint = None;
+        self.rewind_checkpoints.clear();
+        self.rewind_finalization_pending = None;
         self.pending_plan_review = None;
         self.plan_review = None;
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);

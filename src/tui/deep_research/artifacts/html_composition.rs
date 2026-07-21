@@ -12,7 +12,6 @@ pub(super) struct ReportComposition {
 
 pub(super) fn compose_report_fragment(
     fragment: &str,
-    language: &str,
     section_plan: &[ReportSectionTreatment],
 ) -> ReportComposition {
     let Some(first_heading) = fragment.find("<h2>") else {
@@ -32,13 +31,7 @@ pub(super) fn compose_report_fragment(
         ));
     }
 
-    let mut toc = String::from("<nav class=\"toc\" aria-label=\"");
-    toc.push_str(if language == "zh-CN" {
-        "报告目录"
-    } else {
-        "Report contents"
-    });
-    toc.push_str("\">");
+    let mut toc = String::from("<nav class=\"toc\" aria-label=\"Report contents\">");
 
     let mut remaining = &fragment[first_heading..];
     let mut section_count = 0usize;
@@ -59,14 +52,14 @@ pub(super) fn compose_report_fragment(
         section_count += 1;
         let section_id = format!("section-{section_count}");
         let heading_text = decode_basic_entities(&strip_html_tags(heading_html));
-        let kind = section_kind(&heading_text);
         let treatment = matching_section_treatment(&heading_text, section_plan);
         let composition = treatment
             .map(|treatment| treatment.composition)
-            .unwrap_or_else(|| default_section_composition(kind));
+            .unwrap_or(ReportSectionComposition::Prose);
         let rhythm = treatment
             .map(|treatment| treatment.rhythm)
-            .unwrap_or_else(|| default_section_rhythm(kind, composition));
+            .unwrap_or_else(|| default_section_rhythm(composition));
+        let kind = section_kind(composition);
         let (content, section_findings) =
             compose_section_content(raw_content, &heading_text, composition);
         finding_count = finding_count.saturating_add(section_findings);
@@ -96,11 +89,7 @@ pub(super) fn compose_report_fragment(
     let hero_guide = if hero_links.is_empty() {
         String::new()
     } else {
-        let label = if language == "zh-CN" {
-            "阅读路径"
-        } else {
-            "Reading path"
-        };
+        let label = "Reading path";
         format!(
             "<aside class=\"hero-map\" aria-label=\"{label}\"><p class=\"profile-label\">{label}</p><ol>{hero_links}</ol></aside>"
         )
@@ -203,41 +192,30 @@ fn matching_section_treatment<'a>(
     heading: &str,
     section_plan: &'a [ReportSectionTreatment],
 ) -> Option<&'a ReportSectionTreatment> {
-    let heading = normalize_heading(heading);
     section_plan
         .iter()
-        .find(|treatment| normalize_heading(&treatment.heading) == heading)
+        .find(|treatment| treatment.heading.trim() == heading.trim())
 }
 
-fn normalize_heading(value: &str) -> String {
-    value
-        .chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
-fn default_section_composition(kind: &str) -> ReportSectionComposition {
-    match kind {
-        "findings" => ReportSectionComposition::KeyPoints,
-        "matrix" => ReportSectionComposition::Comparison,
-        "sources" => ReportSectionComposition::SourceLedger,
-        _ => ReportSectionComposition::Prose,
+fn default_section_rhythm(composition: ReportSectionComposition) -> ReportSectionRhythm {
+    match composition {
+        ReportSectionComposition::Comparison
+        | ReportSectionComposition::KeyPoints
+        | ReportSectionComposition::Evidence
+        | ReportSectionComposition::SourceLedger => ReportSectionRhythm::Dense,
+        _ => ReportSectionRhythm::Breathing,
     }
 }
 
-fn default_section_rhythm(
-    kind: &str,
-    composition: ReportSectionComposition,
-) -> ReportSectionRhythm {
-    match (kind, composition) {
-        ("summary" | "confidence", _) => ReportSectionRhythm::Anchor,
-        ("caveats", _) => ReportSectionRhythm::Breathing,
-        (_, ReportSectionComposition::Comparison)
-        | (_, ReportSectionComposition::KeyPoints)
-        | (_, ReportSectionComposition::Evidence)
-        | (_, ReportSectionComposition::SourceLedger) => ReportSectionRhythm::Dense,
-        _ => ReportSectionRhythm::Breathing,
+fn section_kind(composition: ReportSectionComposition) -> &'static str {
+    match composition {
+        ReportSectionComposition::KeyPoints => "findings",
+        ReportSectionComposition::Comparison => "matrix",
+        ReportSectionComposition::Evidence => "evidence",
+        ReportSectionComposition::SourceLedger => "sources",
+        ReportSectionComposition::Prose
+        | ReportSectionComposition::Timeline
+        | ReportSectionComposition::Process => "narrative",
     }
 }
 
@@ -254,38 +232,6 @@ fn wrap_tables(content: &str, label: &str) -> String {
             ),
         )
         .replace("</table>", "</table></div>")
-}
-
-fn section_kind(heading: &str) -> &'static str {
-    let lower = heading.to_ascii_lowercase();
-    if lower.contains("summary") || heading.contains("摘要") {
-        "summary"
-    } else if lower.contains("finding") || heading.contains("发现") {
-        "findings"
-    } else if lower.contains("matrix") || heading.contains("矩阵") {
-        "matrix"
-    } else if lower.contains("caveat")
-        || lower.contains("gap")
-        || lower.contains("limit")
-        || heading.contains("局限")
-        || heading.contains("注意")
-    {
-        "caveats"
-    } else if lower.contains("confidence")
-        || lower.contains("quality")
-        || heading.contains("置信")
-        || heading.contains("质量")
-    {
-        "confidence"
-    } else if lower.contains("source")
-        || lower.contains("reference")
-        || heading.contains("来源")
-        || heading.contains("参考")
-    {
-        "sources"
-    } else {
-        "narrative"
-    }
 }
 
 fn strip_html_tags(value: &str) -> String {
@@ -324,15 +270,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn report_sections_gain_distinct_compositions_and_navigation() {
+    fn report_sections_default_to_neutral_composition_without_heading_classification() {
         let fragment = "<h2>Executive Summary</h2><ul><li>One</li><li>Two</li></ul><h2>Key Findings</h2><h3>First</h3><p>Detail.</p><h3>Second</h3><p>Detail.</p><h2>Evidence Matrix</h2><table><tr><td>A</td></tr></table><h2>Sources</h2><ul><li>Source</li></ul>";
-        let composition = compose_report_fragment(fragment, "en", &[]);
+        let composition = compose_report_fragment(fragment, &[]);
 
-        assert_eq!(composition.finding_count, 2);
-        assert!(composition.body.contains("section--summary"));
-        assert!(composition.body.contains("class=\"key-point\""));
+        assert_eq!(composition.finding_count, 0);
+        assert_eq!(composition.body.matches("section--narrative").count(), 4);
+        assert!(!composition.body.contains("class=\"key-point\""));
         assert!(composition.body.contains("class=\"table-wrap\""));
-        assert!(composition.body.contains("section--sources"));
         assert!(composition.toc.contains("href=\"#section-4\""));
         assert!(composition.hero_guide.contains("Reading path"));
     }
@@ -353,7 +298,7 @@ mod tests {
             },
         ];
 
-        let composition = compose_report_fragment(fragment, "en", &plan);
+        let composition = compose_report_fragment(fragment, &plan);
 
         assert!(composition
             .body

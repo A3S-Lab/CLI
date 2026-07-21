@@ -364,3 +364,48 @@ fn component_mutation_waits_for_the_existing_cross_process_lock() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn component_batch_waits_for_the_global_lock_before_journaling() {
+    let temp = TempWorkspace::new("component-batch-lock");
+    let lock_path = temp.path("runtime/locks/component-batch.lock");
+    std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .unwrap();
+    lock.lock_exclusive().unwrap();
+
+    let mut install = Command::new(a3s_bin());
+    configure_component_env(&mut install, &temp);
+    let mut child = install
+        .args(["install", "code", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "component command did not wait for the global batch lock"
+    );
+    assert!(
+        !temp.path("state/component-operations/active.json").exists(),
+        "component command journaled before acquiring the global batch lock"
+    );
+
+    FileExt::unlock(&lock).unwrap();
+    drop(lock);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "status: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

@@ -48,6 +48,9 @@ impl Model for App {
         if let Some(m) = &self.memory {
             return self.overlay_decision_modals(self.render_memory(m));
         }
+        if let Some(panel) = &self.evolution {
+            return self.overlay_decision_modals(self.render_evolution(panel));
+        }
         if let Some(panel) = &self.asset_list {
             return self.overlay_decision_modals(self.render_asset_list(panel));
         }
@@ -224,8 +227,8 @@ impl Model for App {
         let composed = self.overlay_file_menu(composed);
         let composed = self.overlay_model_menu(composed);
         let composed = self.overlay_relay_menu(composed);
-        let composed = self.overlay_permission_menu(composed);
         let composed = self.overlay_task_menu(composed);
+        let composed = self.overlay_permission_menu(composed);
         let composed = self.overlay_history_menu(composed);
         let composed = self.overlay_review_menu(composed);
         let composed = self.overlay_flow_menu(composed);

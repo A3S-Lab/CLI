@@ -118,6 +118,7 @@ fn completed_research_report_artifacts(artifacts: &ResearchReportArtifacts) -> b
         && has_research_report_substance(&markdown, &html)
 }
 
+#[cfg(test)]
 fn deep_research_report_sources_trace_workflow(
     artifacts: &ResearchReportArtifacts,
     query: &str,
@@ -139,6 +140,7 @@ fn deep_research_report_sources_trace_workflow(
     )
 }
 
+#[cfg(test)]
 fn deep_research_report_content_sources_trace_workflow(
     markdown: &str,
     html: &str,
@@ -159,7 +161,7 @@ fn deep_research_report_content_sources_trace_workflow(
 fn deep_research_report_source_trace_diagnostic(
     markdown: &str,
     html: &str,
-    query: &str,
+    _query: &str,
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> Result<(), String> {
@@ -176,31 +178,37 @@ fn deep_research_report_source_trace_diagnostic(
         );
     }
 
-    let observed = anchors.into_iter().collect::<HashSet<_>>();
-    let (cited, has_explicit_source_citation) = markdown_report_source_anchors(markdown, query);
-    let html_cited = html_report_source_anchors(html, query);
-    if !has_explicit_source_citation {
-        return Err(
-            "source trace rejected: the report has no explicit citation item under a Sources, References, 来源, 参考文献, or 引用 section"
-                .to_string(),
-        );
-    }
-    if html_cited.is_empty() {
-        return Err(
-            "source trace rejected: the rendered HTML contains no traceable source citation"
-                .to_string(),
-        );
+    let sources = anchors
+        .iter()
+        .enumerate()
+        .map(
+            |(index, anchor)| super::deep_research_report_audit::ReportSourceReference {
+                source_id: format!("source:{index}"),
+                anchor: anchor.clone(),
+            },
+        )
+        .collect::<Vec<_>>();
+    let audit = super::deep_research_report_audit::audit_report(
+        markdown,
+        html,
+        &sources,
+        super::deep_research_report_audit::CitationRequirement::AtLeastOne,
+    );
+    if !audit.passed {
+        return Err(format!("source trace rejected: {}", audit.reason));
     }
 
-    let mut unmatched = cited
+    let observed = anchors
         .iter()
-        .chain(html_cited.iter())
+        .filter_map(|anchor| super::deep_research_report_audit::canonical_citation_target(anchor))
+        .collect::<HashSet<_>>();
+    let mut unmatched = super::deep_research_report_audit::report_citation_targets(markdown, html)
+        .into_iter()
         .filter(|citation| {
-            !reported_research_source_candidates(citation)
-                .iter()
-                .any(|candidate| observed.contains(candidate))
+            !citation.starts_with('#')
+                && !citation.starts_with("mailto:")
+                && !observed.contains(citation)
         })
-        .cloned()
         .collect::<Vec<_>>();
     unmatched.sort();
     unmatched.dedup();
@@ -224,25 +232,22 @@ fn deep_research_report_source_trace_diagnostic(
 
 fn sanitize_unobserved_markdown_http_citations(
     markdown: &str,
-    query: &str,
+    _query: &str,
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
 ) -> String {
     let observed = deep_research_workflow_source_anchors(workflow_output, workflow_metadata)
         .into_iter()
+        .filter_map(|anchor| super::deep_research_report_audit::canonical_citation_target(&anchor))
         .collect::<HashSet<_>>();
     if observed.is_empty() {
         return markdown.to_string();
     }
 
-    let (cited, _) = markdown_report_source_anchors(markdown, query);
-    let unobserved = cited
+    let unobserved = super::deep_research_report_audit::report_citation_targets(markdown, "")
         .into_iter()
-        .filter(|citation| {
-            !reported_research_source_candidates(citation)
-                .iter()
-                .any(|candidate| observed.contains(candidate))
-        })
+        .filter(|citation| citation.starts_with("http://") || citation.starts_with("https://"))
+        .filter(|citation| !observed.contains(citation))
         .collect::<HashSet<_>>();
     if unobserved.is_empty() {
         return markdown.to_string();
@@ -251,9 +256,8 @@ fn sanitize_unobserved_markdown_http_citations(
     let invalid_targets = http_source_targets(markdown)
         .into_iter()
         .filter(|target| {
-            reported_research_source_candidates(target)
-                .iter()
-                .any(|candidate| unobserved.contains(candidate))
+            super::deep_research_report_audit::canonical_citation_target(target)
+                .is_some_and(|target| unobserved.contains(&target))
         })
         .collect::<HashSet<_>>();
     if invalid_targets.is_empty() {
@@ -261,29 +265,12 @@ fn sanitize_unobserved_markdown_http_citations(
     }
 
     let mut cleaned = Vec::new();
-    let mut in_source_section = false;
     for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            let heading = trimmed.trim_start_matches('#').trim();
-            in_source_section = is_source_section_heading(heading);
+        if line.trim_start().starts_with("# ") {
             cleaned.push(line.to_string());
-            continue;
+        } else {
+            cleaned.push(strip_unobserved_http_targets(line, &invalid_targets));
         }
-
-        let line_targets = http_source_targets(line);
-        let invalid_count = line_targets
-            .iter()
-            .filter(|target| invalid_targets.contains(*target))
-            .count();
-        if in_source_section
-            && is_explicit_source_citation_line(trimmed)
-            && invalid_count > 0
-            && invalid_count == line_targets.len()
-        {
-            continue;
-        }
-        cleaned.push(strip_unobserved_http_targets(line, &invalid_targets));
     }
 
     let mut output = cleaned.join("\n");
@@ -344,212 +331,6 @@ fn markdown_link_replacement(
     Some((label_start, link_end, label))
 }
 
-fn markdown_report_source_anchors(markdown: &str, query: &str) -> (Vec<String>, bool) {
-    let mut anchors = Vec::new();
-    let mut seen = HashSet::new();
-    let mut in_source_section = false;
-
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') {
-            let heading = trimmed.trim_start_matches('#').trim();
-            in_source_section = is_source_section_heading(heading);
-            continue;
-        }
-        if in_source_section && is_explicit_source_citation_line(trimmed) {
-            collect_source_anchors_from_citation_line(trimmed, &mut anchors, &mut seen);
-        }
-    }
-    let explicit_count = anchors.len();
-    let query_heading = format!("# {}", markdown_plain_text(query));
-    let query_targets = http_source_targets(&markdown_plain_text(query))
-        .into_iter()
-        .filter_map(|target| canonical_query_http_target(&target))
-        .collect::<HashSet<_>>();
-    let mut checked_report_heading = false;
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if !checked_report_heading && trimmed.starts_with("# ") {
-            checked_report_heading = true;
-            let heading_targets = http_source_targets(trimmed);
-            let is_query_derived_heading = !heading_targets.is_empty()
-                && heading_targets.iter().all(|target| {
-                    canonical_query_http_target(target)
-                        .is_some_and(|canonical| query_targets.contains(&canonical))
-                });
-            if trimmed == query_heading || is_query_derived_heading {
-                continue;
-            }
-        }
-        collect_http_source_anchors(line, &mut anchors, &mut seen);
-        collect_markdown_link_anchors(line, &mut anchors, &mut seen);
-    }
-    (anchors, explicit_count > 0)
-}
-
-fn html_report_source_anchors(html: &str, query: &str) -> Vec<String> {
-    let mut anchors = Vec::new();
-    let mut seen = HashSet::new();
-    let decoded = html.replace("&amp;", "&");
-    let without_query_title = remove_matching_html_element(&decoded, "title", query);
-    let without_query_heading = remove_matching_html_element(&without_query_title, "h1", query);
-    collect_http_source_anchors(&without_query_heading, &mut anchors, &mut seen);
-    collect_html_link_anchors(&without_query_heading, &mut anchors, &mut seen);
-    // Inline code outside a Sources section commonly names APIs, repository
-    // slugs, or unavailable candidate URLs. It is prose, not a citation. The
-    // source-section collector below still accepts code-formatted local paths
-    // where the author explicitly presents them as sources.
-    collect_html_source_section_local_anchors(&without_query_heading, &mut anchors, &mut seen);
-    anchors
-}
-
-fn remove_matching_html_element(html: &str, tag: &str, query: &str) -> String {
-    let lower = html.to_ascii_lowercase();
-    let opening = format!("<{tag}");
-    let closing = format!("</{tag}>");
-    let expected =
-        normalize_html_display_text(&markdown_backslash_unescape(&markdown_plain_text(query)));
-    let mut cursor = 0;
-
-    while let Some(offset) = lower[cursor..].find(&opening) {
-        let start = cursor + offset;
-        let name_end = start + opening.len();
-        if !lower[name_end..]
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '>' || ch.is_whitespace())
-        {
-            cursor = name_end;
-            continue;
-        }
-        let Some(open_end_offset) = lower[name_end..].find('>') else {
-            break;
-        };
-        let content_start = name_end + open_end_offset + 1;
-        let Some(close_offset) = lower[content_start..].find(&closing) else {
-            break;
-        };
-        let content_end = content_start + close_offset;
-        let display =
-            normalize_html_display_text(&strip_html_tags(&html[content_start..content_end]));
-        let element_end = content_end + closing.len();
-        let (has_http_target, targets_match_query) =
-            html_element_targets_match_query(&html[content_start..content_end], &display, query);
-        if targets_match_query && (display == expected || has_http_target) {
-            let mut filtered = String::with_capacity(html.len());
-            filtered.push_str(&html[..start]);
-            filtered.push(' ');
-            filtered.push_str(&html[element_end..]);
-            return filtered;
-        }
-        cursor = element_end;
-    }
-    html.to_string()
-}
-
-fn html_element_targets_match_query(html: &str, display: &str, query: &str) -> (bool, bool) {
-    let query_targets = http_source_targets(&markdown_plain_text(query))
-        .into_iter()
-        .filter_map(|target| canonical_query_http_target(&target))
-        .collect::<HashSet<_>>();
-    let targets = http_source_targets(display)
-        .into_iter()
-        .chain(html_link_targets(html))
-        .collect::<Vec<_>>();
-    let has_http_target = !targets.is_empty();
-    let targets_match_query = targets.iter().all(|target| {
-        canonical_query_http_target(target)
-            .is_some_and(|canonical| query_targets.contains(&canonical))
-    });
-    (has_http_target, targets_match_query)
-}
-
-fn canonical_query_http_target(value: &str) -> Option<String> {
-    let url = reqwest::Url::parse(value).ok()?;
-    if !matches!(url.scheme(), "http" | "https") || url.host_str()?.is_empty() {
-        return None;
-    }
-    Some(url.to_string())
-}
-
-fn normalize_html_display_text(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&amp;", "&")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn is_source_section_heading(heading: &str) -> bool {
-    let lower = heading.to_ascii_lowercase();
-    lower.contains("source")
-        || lower.contains("reference")
-        || heading.contains("来源")
-        || heading.contains("参考文献")
-        || heading.contains("引用")
-}
-
-fn is_explicit_source_citation_line(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    if lower.contains("http://")
-        || lower.contains("https://")
-        || line.contains("](")
-        || line.contains('`')
-        || line.starts_with('|')
-    {
-        return true;
-    }
-    if ["- ", "* ", "+ "]
-        .iter()
-        .any(|prefix| line.starts_with(prefix))
-    {
-        return true;
-    }
-    line.split_once(". ").is_some_and(|(number, _)| {
-        !number.is_empty() && number.chars().all(|ch| ch.is_ascii_digit())
-    })
-}
-
-fn collect_source_anchors_from_citation_line(
-    line: &str,
-    anchors: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let has_explicit_target = !http_source_targets(line).is_empty() || line.contains("](");
-    collect_http_source_anchors(line, anchors, seen);
-    collect_markdown_link_anchors(line, anchors, seen);
-
-    // When a citation line already has an explicit link target, the remaining
-    // prose is its display label. Treating labels such as `docs.rs` or
-    // `crates.io` as local file citations creates false, unobserved sources.
-    // A mixed local/web citation can still express the local source as a
-    // Markdown link target; otherwise it should use a separate source item.
-    if has_explicit_target {
-        return;
-    }
-
-    let mut code = false;
-    for segment in line.split('`') {
-        if code {
-            push_canonical_source_anchor(segment, anchors, seen);
-        }
-        code = !code;
-    }
-
-    for token in line.split_whitespace() {
-        push_local_citation_anchor(token, anchors, seen);
-    }
-}
-
-fn collect_http_source_anchors(text: &str, anchors: &mut Vec<String>, seen: &mut HashSet<String>) {
-    for target in http_source_targets(text) {
-        push_canonical_source_anchor(&target, anchors, seen);
-    }
-}
-
 fn http_source_targets(text: &str) -> Vec<String> {
     let lower = text.to_ascii_lowercase();
     let mut cursor = 0;
@@ -578,247 +359,12 @@ fn http_source_targets(text: &str) -> Vec<String> {
                 None
             })
             .unwrap_or(text.len());
-        let candidate = text[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+        let candidate =
+            text[start..end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_', '~']);
         targets.push(candidate.to_string());
         cursor = end;
     }
     targets
-}
-
-fn collect_markdown_link_anchors(
-    line: &str,
-    anchors: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let mut cursor = 0;
-    while let Some(start) = line[cursor..].find("](") {
-        let target_start = cursor + start + 2;
-        let mut nested_parentheses = 0usize;
-        let mut escaped = false;
-        let end = line[target_start..]
-            .char_indices()
-            .find_map(|(offset, ch)| {
-                if escaped {
-                    escaped = false;
-                    return None;
-                }
-                if ch == '\\' {
-                    escaped = true;
-                    return None;
-                }
-                match ch {
-                    '(' => nested_parentheses += 1,
-                    ')' if nested_parentheses == 0 => return Some(offset),
-                    ')' => nested_parentheses -= 1,
-                    _ => {}
-                }
-                None
-            });
-        let Some(end) = end else {
-            break;
-        };
-        push_canonical_source_anchor(&line[target_start..target_start + end], anchors, seen);
-        cursor = target_start + end + 1;
-    }
-}
-
-fn collect_html_link_anchors(html: &str, anchors: &mut Vec<String>, seen: &mut HashSet<String>) {
-    for target in html_link_targets(html) {
-        push_canonical_source_anchor(&target, anchors, seen);
-    }
-}
-
-fn html_link_targets(html: &str) -> Vec<String> {
-    let lower = html.to_ascii_lowercase();
-    let mut targets = Vec::new();
-    for attribute in ["href", "src"] {
-        let mut cursor = 0;
-        while let Some(found) = lower[cursor..].find(attribute) {
-            let attribute_start = cursor + found;
-            let has_name_boundary = attribute_start == 0
-                || lower[..attribute_start]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|ch| ch == '<' || ch.is_whitespace());
-            if !has_name_boundary {
-                cursor = attribute_start + attribute.len();
-                continue;
-            }
-            let mut value_start = attribute_start + attribute.len();
-            while html[value_start..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace)
-            {
-                value_start += html[value_start..].chars().next().unwrap().len_utf8();
-            }
-            if !html[value_start..].starts_with('=') {
-                cursor = value_start;
-                continue;
-            }
-            value_start += 1;
-            while html[value_start..]
-                .chars()
-                .next()
-                .is_some_and(char::is_whitespace)
-            {
-                value_start += html[value_start..].chars().next().unwrap().len_utf8();
-            }
-            let Some(quote) = html[value_start..].chars().next() else {
-                break;
-            };
-            if !matches!(quote, '"' | '\'') {
-                cursor = value_start + quote.len_utf8();
-                continue;
-            }
-            let target_start = value_start + quote.len_utf8();
-            let Some(end) = html[target_start..].find(quote) else {
-                break;
-            };
-            targets.push(html[target_start..target_start + end].to_string());
-            cursor = target_start + end + quote.len_utf8();
-        }
-    }
-    targets
-}
-
-fn collect_html_source_section_local_anchors(
-    html: &str,
-    anchors: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let lower = html.to_ascii_lowercase();
-    let mut cursor = 0;
-    let mut in_source_section = false;
-
-    while cursor < html.len() {
-        let Some(open_offset) = lower[cursor..].find('<') else {
-            if in_source_section {
-                for token in html[cursor..].split_whitespace() {
-                    push_local_citation_anchor(token, anchors, seen);
-                }
-            }
-            break;
-        };
-        let open = cursor + open_offset;
-        if in_source_section {
-            for token in html[cursor..open].split_whitespace() {
-                push_local_citation_anchor(token, anchors, seen);
-            }
-        }
-        let Some(close_offset) = lower[open..].find('>') else {
-            break;
-        };
-        let close = open + close_offset;
-        let tag = lower[open + 1..close].trim();
-        let name = tag
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .trim_end_matches('/');
-        if matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6") {
-            let closing = format!("</{name}>");
-            let heading_start = close + 1;
-            let Some(heading_offset) = lower[heading_start..].find(&closing) else {
-                in_source_section = false;
-                cursor = heading_start;
-                continue;
-            };
-            let heading_end = heading_start + heading_offset;
-            let heading = strip_html_tags(&html[heading_start..heading_end]);
-            in_source_section = is_source_section_heading(heading.trim());
-            cursor = heading_end + closing.len();
-        } else if in_source_section && matches!(name, "li" | "p" | "tr") && !tag.starts_with('/') {
-            let closing = format!("</{name}>");
-            let block_start = close + 1;
-            let Some(block_offset) = lower[block_start..].find(&closing) else {
-                cursor = block_start;
-                continue;
-            };
-            let block_end = block_start + block_offset;
-            let block = &html[block_start..block_end];
-            // Links are collected by `collect_html_link_anchors`. Everything
-            // else in the same block is a display label, not another source.
-            if html_link_targets(block).is_empty() {
-                for token in strip_html_tags(block).split_whitespace() {
-                    push_local_citation_anchor(token, anchors, seen);
-                }
-            }
-            cursor = block_end + closing.len();
-        } else {
-            cursor = close + 1;
-        }
-    }
-}
-
-fn push_local_citation_anchor(
-    candidate: &str,
-    anchors: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let token = candidate.trim_matches(|ch: char| {
-        ch.is_whitespace()
-            || matches!(
-                ch,
-                '`' | '"'
-                    | '\''
-                    | '<'
-                    | '>'
-                    | '('
-                    | ')'
-                    | '['
-                    | ']'
-                    | '{'
-                    | '}'
-                    | ','
-                    | ';'
-                    | '.'
-                    | ':'
-                    | '!'
-                    | '?'
-            )
-    });
-    let has_source_extension = Path::new(token)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.chars().any(|ch| ch.is_ascii_alphabetic()));
-    if token.contains('/') || token.contains('\\') || has_source_extension {
-        push_canonical_source_anchor(token, anchors, seen);
-    }
-}
-
-fn push_canonical_source_anchor(
-    candidate: &str,
-    anchors: &mut Vec<String>,
-    seen: &mut HashSet<String>,
-) {
-    let candidate = candidate.trim();
-    let lower = candidate.to_ascii_lowercase();
-    let mut mark_untrusted = || {
-        let marker = "untrusted-report-url".to_string();
-        if seen.insert(marker.clone()) {
-            anchors.push(marker);
-        }
-    };
-    if candidate.starts_with("//") || lower.contains("&#") || lower.contains("&colon;") {
-        mark_untrusted();
-        return;
-    }
-    if let Ok(url) = reqwest::Url::parse(candidate) {
-        if !matches!(url.scheme(), "http" | "https") {
-            mark_untrusted();
-            return;
-        }
-        if !url.username().is_empty() || url.password().is_some() {
-            mark_untrusted();
-            return;
-        }
-    }
-    if let Some(anchor) = canonical_research_source_anchor(candidate) {
-        if seen.insert(anchor.clone()) {
-            anchors.push(anchor);
-        }
-    }
 }
 
 fn read_small_utf8_file(path: &Path) -> Option<String> {

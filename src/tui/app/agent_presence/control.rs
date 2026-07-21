@@ -98,10 +98,22 @@ impl App {
     }
 
     pub(in crate::tui) fn begin_stream_interrupt(&mut self, reason: &str) -> Option<Cmd<Msg>> {
-        if !self.stream_interrupt_available() {
+        self.begin_stream_interrupt_with_goal_policy(reason, true)
+    }
+
+    pub(in crate::tui) fn begin_send_now_interrupt(&mut self) -> Option<Cmd<Msg>> {
+        self.begin_stream_interrupt_with_goal_policy("superseded by Send now", false)
+    }
+
+    fn begin_stream_interrupt_with_goal_policy(
+        &mut self,
+        reason: &str,
+        cancel_goal: bool,
+    ) -> Option<Cmd<Msg>> {
+        if !self.agent_island_stop_available() {
             return None;
         }
-        let goal_cancelled = self.cancel_goal_state(reason);
+        let goal_cancelled = cancel_goal && self.cancel_goal_state(reason);
         self.interrupting = true;
         self.agent_presence
             .publisher
@@ -142,7 +154,10 @@ impl App {
     }
 
     pub(in crate::tui) fn agent_island_stop_available(&self) -> bool {
-        self.stream_interrupt_available()
+        self.state == State::Streaming
+            && !self.interrupting
+            && !self.stream_join_settling
+            && !self.deep_research_subagent_settlement_inflight
     }
 
     pub(super) fn agent_island_parent_context(&self) -> String {

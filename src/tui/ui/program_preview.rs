@@ -60,17 +60,18 @@ pub(super) fn summarize_program_args(args: Option<&Value>) -> Option<ProgramPrev
             query
                 .as_deref()
                 .map(|query| {
-                    format!(
-                        "DeepResearch “{query}”: collect, cross-check, and aggregate source-backed evidence"
-                    )
+                    format!("DeepResearch “{query}”: execute the coverage-driven evidence pipeline")
                 })
                 .unwrap_or_else(|| {
-                    "Coordinate bounded DeepResearch evidence collection".to_string()
+                    "Execute the coverage-driven DeepResearch evidence pipeline".to_string()
                 })
         } else if let Some(query) = query.as_deref() {
             format!("Process “{query}” with a sandboxed script")
         } else if let Some(path) = args.get("path").and_then(Value::as_str) {
-            format!("Run workspace script {}", clean_inline(path, MAX_INLINE_CHARS))
+            format!(
+                "Run workspace script {}",
+                clean_inline(path, MAX_INLINE_CHARS)
+            )
         } else {
             "Execute sandboxed JavaScript orchestration".to_string()
         }
@@ -85,7 +86,14 @@ pub(super) fn summarize_program_args(args: Option<&Value>) -> Option<ProgramPrev
             });
         }
     }
-    if let Some(phase) = payload.and_then(program_phase) {
+    let phase = payload.and_then(|payload| {
+        if deep_research {
+            deep_research_program_phase(payload)
+        } else {
+            program_phase(payload)
+        }
+    });
+    if let Some(phase) = phase {
         details.push(ProgramPreviewDetail {
             label: "phase",
             value: phase,
@@ -98,9 +106,9 @@ pub(super) fn summarize_program_args(args: Option<&Value>) -> Option<ProgramPrev
         details.push(ProgramPreviewDetail {
             label: "phase",
             value: if local_only {
-                "inspect workspace → parallel verification → aggregate evidence".to_string()
+                "workspace retrieval → typed semantic coverage → closed review".to_string()
             } else {
-                "search → fetch → parallel verification → aggregate evidence".to_string()
+                "initial retrieval → typed-gap supplement if needed → closed review".to_string()
             },
         });
     } else if let Some(scope) = allowed_tool_scope(args) {
@@ -174,9 +182,11 @@ fn is_deep_research_input(value: &Value) -> bool {
         return false;
     };
     object.contains_key("evidence_scope")
-        && (object.contains_key("local_research_rounds")
-            || object.contains_key("local_max_parallel_tasks")
-            || object.contains_key("complexity_layers"))
+        && (object.get("inquiry_host_managed").and_then(Value::as_bool) == Some(true)
+            || value
+                .pointer("/loop_contract/pattern")
+                .and_then(Value::as_str)
+                == Some("minimal-deep-research"))
 }
 
 fn deep_research_plan(value: &Value) -> Option<String> {
@@ -188,26 +198,32 @@ fn deep_research_plan(value: &Value) -> Option<String> {
             "local_only" => "local only".to_string(),
             other => clean_inline(other, 32),
         });
-    let rounds = value.get("local_research_rounds").and_then(Value::as_u64);
-    let agents = value
-        .get("local_max_parallel_tasks")
+    let searches = value
+        .pointer("/loop_contract/hard_caps/max_searches")
         .and_then(Value::as_u64);
-    let depth = value.get("complexity_layers").and_then(Value::as_u64);
+    let fetches = value
+        .pointer("/loop_contract/hard_caps/max_fetches")
+        .and_then(Value::as_u64);
 
     let mut parts = Vec::new();
     if let Some(scope) = scope.filter(|scope| !scope.is_empty()) {
         parts.push(scope);
     }
-    match (rounds, agents) {
-        (Some(rounds), Some(agents)) => parts.push(format!("{rounds} rounds × ≤{agents} agents")),
-        (Some(rounds), None) => parts.push(format!("{rounds} research rounds")),
-        (None, Some(agents)) => parts.push(format!("≤{agents} parallel agents")),
-        (None, None) => {}
+    let local_only = value.get("evidence_scope").and_then(Value::as_str) == Some("local_only");
+    parts.push(if local_only {
+        "one workspace retrieval".to_string()
+    } else {
+        "≤2 typed-coverage passes".to_string()
+    });
+    if !local_only {
+        if let Some(searches) = searches {
+            parts.push(format!("≤{searches} searches"));
+        }
+        if let Some(fetches) = fetches {
+            parts.push(format!("≤{fetches} fetches"));
+        }
     }
-    if let Some(depth) = depth {
-        parts.push(format!("depth {depth}"));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
+    Some(parts.join(" · "))
 }
 
 fn program_phase(payload: &Value) -> Option<String> {
@@ -250,6 +266,41 @@ fn program_phase(payload: &Value) -> Option<String> {
                 _ => "execute one workflow step".to_string(),
             })
         }
+        _ => None,
+    }
+}
+
+fn deep_research_program_phase(payload: &Value) -> Option<String> {
+    match payload.get("kind").and_then(Value::as_str) {
+        Some("workflow") => {
+            let completed = payload
+                .get("step_outputs")
+                .and_then(Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            let failed = payload
+                .get("step_failures")
+                .and_then(Value::as_object)
+                .map_or(0, serde_json::Map::len);
+            Some(if completed == 0 && failed == 0 {
+                "run initial retrieval and typed semantic coverage".to_string()
+            } else if failed > 0 {
+                "settle failures without opening an untyped retrieval route".to_string()
+            } else {
+                "close typed gaps from the existing catalog, then seal evidence".to_string()
+            })
+        }
+        Some("step") => Some(
+            match payload.get("step_name").and_then(Value::as_str) {
+                Some("retrieve_web") => "run the initial web retrieval pass",
+                Some("retrieve_supplemental_web") => {
+                    "fetch typed-gap candidates from the existing catalog"
+                }
+                Some("retrieve_local") => "collect bounded workspace evidence once",
+                Some("generate_object") => "select IDs from the closed chunk catalog",
+                _ => "execute one bounded stage of the fixed pipeline",
+            }
+            .to_string(),
+        ),
         _ => None,
     }
 }
@@ -331,9 +382,14 @@ mod tests {
                 "input": {
                     "query": "2026 世界杯\u{1b}[31m 战况",
                     "evidence_scope": "web_and_workspace",
-                    "complexity_layers": 2,
-                    "local_research_rounds": 2,
-                    "local_max_parallel_tasks": 4
+                    "inquiry_host_managed": true,
+                    "loop_contract": {
+                        "pattern": "minimal-deep-research",
+                        "hard_caps": {
+                            "max_searches": 4,
+                            "max_fetches": 8
+                        }
+                    }
                 }
             }
         })))
@@ -344,9 +400,12 @@ mod tests {
         assert_eq!(preview.details[0].label, "plan");
         assert_eq!(
             preview.details[0].value,
-            "web + workspace · 2 rounds × ≤4 agents · depth 2"
+            "web + workspace · ≤2 typed-coverage passes · ≤4 searches · ≤8 fetches"
         );
-        assert_eq!(preview.details[1].value, "plan the initial evidence routes");
+        assert_eq!(
+            preview.details[1].value,
+            "run initial retrieval and typed semantic coverage"
+        );
     }
 
     #[test]

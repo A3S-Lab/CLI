@@ -205,6 +205,7 @@ impl RuntimeProjection {
         Some(removed)
     }
 
+    #[cfg(test)]
     pub(crate) fn active_tool_count(&self) -> usize {
         self.tools
             .values()

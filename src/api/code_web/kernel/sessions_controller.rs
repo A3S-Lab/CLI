@@ -102,6 +102,14 @@ impl KernelSessionsController {
             .await
     }
 
+    #[post("/v1/kernel/sessions/{session_id}/actions/cancel")]
+    async fn cancel_kernel_session(
+        &self,
+        #[param("session_id")] session_id: String,
+    ) -> BootResult<serde_json::Value> {
+        self.service.cancel_session(&session_id).await
+    }
+
     #[post("/v1/kernel/sessions/{session_id}/confirmations/{tool_id}/confirm")]
     async fn confirm_kernel_tool_use(
         &self,

@@ -18,6 +18,7 @@ use super::web::{api_only_fallback, prepare_default_web_dir, serve_static};
 
 mod api_gateway;
 mod background;
+mod foreground_interrupt;
 mod options;
 
 pub(crate) use background::{
@@ -26,7 +27,9 @@ pub(crate) use background::{
 };
 
 const API_PREFIX: &str = "/api";
-const BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+// Work accepts Office source files up to 50 MiB. Keep enough headroom for
+// request metadata while retaining one explicit limit for every API route.
+const BODY_LIMIT_BYTES: usize = 52 * 1024 * 1024;
 
 pub(crate) enum ServeOutcome {
     Help,
@@ -57,6 +60,7 @@ pub(crate) fn usage_text() -> String {
 
 pub(crate) async fn run(
     args: &[String],
+    cancellation: &CancellationToken,
     offline: bool,
     allow_asset_download: bool,
 ) -> anyhow::Result<ServeOutcome> {
@@ -81,13 +85,18 @@ pub(crate) async fn run(
         });
     }
 
-    match run_foreground(options).await? {
+    match run_foreground(options, cancellation).await? {
         Some(instance) => Ok(ServeOutcome::Existing(instance)),
         None => Ok(ServeOutcome::ForegroundStopped),
     }
 }
 
-async fn run_foreground(options: ServeOptions) -> anyhow::Result<Option<WebEndpoint>> {
+async fn run_foreground(
+    options: ServeOptions,
+    cancellation: &CancellationToken,
+) -> anyhow::Result<Option<WebEndpoint>> {
+    let _interrupt_mode = foreground_interrupt::InterruptSignalGuard::enable()
+        .context("failed to enable Ctrl+C for foreground A3S Web")?;
     if options.replace {
         background::replace_managed(&options.workspace).await?;
     }
@@ -240,10 +249,11 @@ async fn run_foreground(options: ServeOptions) -> anyhow::Result<Option<WebEndpo
     println!("Press Ctrl+C to stop.");
 
     let shutdown_signal = Arc::clone(&shutdown);
+    let cancellation = cancellation.clone();
     let serve_result = axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {}
+                _ = cancellation.cancelled() => {}
                 _ = shutdown_signal.notified() => {}
             }
         })

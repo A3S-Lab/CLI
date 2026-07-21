@@ -8,6 +8,14 @@ enum SubmissionIntent {
     SendNow,
 }
 
+pub(super) fn parse_use_status_command(rest: &str) -> Result<bool, &'static str> {
+    match rest.trim() {
+        "" | "status" => Ok(false),
+        "repair" => Ok(true),
+        _ => Err("usage: /use [status|repair]"),
+    }
+}
+
 impl App {
     pub(super) fn on_submit(&mut self, text: String) -> Option<Cmd<Msg>> {
         self.on_submit_with_intent(text, SubmissionIntent::Queue)
@@ -92,10 +100,10 @@ impl App {
                 Msg::ShellOutput(text)
             }));
         }
-        // Deep-research mode (`?`) is host-orchestrated for stability. An LLM
-        // planner selects the stages, depth, parallelism, and phase clocks
-        // inside a query-agnostic safety envelope; Rust never re-plans by
-        // matching keywords or query length.
+        // Deep-research mode (`?`) is host-orchestrated for stability. One LLM
+        // call defines the semantic research contract and the exact provider
+        // queries for one bounded retrieval pass. Rust never routes free-form
+        // query text through lexical rules.
         if self.research_mode || trimmed.starts_with('?') {
             self.research_mode = false;
             let raw_query = trimmed.trim_start_matches('?').trim();
@@ -114,26 +122,20 @@ impl App {
                     .bold()
                     .render(&format!("✦\u{200A}deep research: {query}")),
             )));
-            let os_runtime =
-                should_use_os_runtime_for_deep_research(&query, self.os_session.is_some());
             let evidence_scope_label = evidence_scope.label();
-            let runtime_hint = if os_runtime {
+            let runtime_hint = if self.os_session.is_some() {
                 format!(
-                    "  ◎\u{200A}goal set · LLM-planned deep research · local workflow selected · {evidence_scope_label} · OS Runtime FaaS pending · adaptive stages and budget · local HTML opens in RemoteUI (Esc stops)"
-                )
-            } else if self.os_session.is_some() {
-                format!(
-                    "  ◎\u{200A}goal set · LLM-planned deep research · local workflow selected · {evidence_scope_label} · adaptive stages and budget · local HTML opens in RemoteUI (Esc stops)"
+                    "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · local HTML opens in RemoteUI (Esc stops)"
                 )
             } else {
                 format!(
-                    "  ◎\u{200A}goal set · LLM-planned local deep research · {evidence_scope_label} · adaptive stages and budget · report + HTML opens in RemoteUI (Esc stops)"
+                    "  ◎\u{200A}goal set · semantic plan · one evidence pass · {evidence_scope_label} · closed-evidence review · report + HTML opens in RemoteUI (Esc stops)"
                 )
             };
             self.push_line(&Style::new().fg(TN_GRAY).render(&runtime_hint));
             let display = format!("✦\u{200A}{query}");
-            // The planner chooses the work; the host only supplies finite hard
-            // caps and one bounded report finalization phase.
+            // The planner defines the semantic contract and provider queries;
+            // the host supplies finite caps and one report finalization path.
             let runtime_expectation = Some(RuntimeExpectation::required("deep research"));
             let execution_mode = self.mode;
             self.enqueue_turn(
@@ -143,7 +145,7 @@ impl App {
                     display,
                     images: Vec::new(),
                     runtime_expectation,
-                    deep_research: Some((query, os_runtime, evidence_scope)),
+                    deep_research: Some((query, evidence_scope)),
                 },
                 execution_mode,
             );
@@ -172,6 +174,31 @@ impl App {
                 )));
                 return None;
             }
+        }
+        if let Some(rest) = slash_tail(trimmed, "/use") {
+            self.textarea.clear();
+            let include_repair_guidance = match parse_use_status_command(rest) {
+                Ok(include_repair_guidance) => include_repair_guidance,
+                Err(usage) => {
+                    self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  {usage}")));
+                    return None;
+                }
+            };
+            let status_entry = self.push_tracked_line(
+                &Style::new()
+                    .fg(TN_GRAY)
+                    .render("  inspecting A3S Use capabilities…"),
+            );
+            let Some(registry) = self.use_registry.clone() else {
+                let status = crate::use_registry::unavailable_status_text(include_repair_guidance);
+                self.replace_tracked_line(status_entry, &gutter(TN_YELLOW, &status));
+                return None;
+            };
+            let session = Arc::clone(&self.session);
+            return Some(cmd::cmd(move || async move {
+                let text = registry.status_text(session, include_repair_guidance).await;
+                Msg::UseStatus { status_entry, text }
+            }));
         }
         if let Some(rest) = slash_tail(trimmed, "/island") {
             return self.submit_agent_island_command(rest);
@@ -707,6 +734,9 @@ impl App {
                 }
             }
         }
+        if let Some(rest) = slash_tail(trimmed, "/fork") {
+            return self.submit_fork_command(rest);
+        }
         if let Some(rest) = slash_tail(trimmed, "/copy") {
             return self.submit_copy_command(rest);
         }
@@ -716,34 +746,7 @@ impl App {
         // Slash commands run inline in any state.
         match trimmed {
             "/exit" => return self.begin_graceful_quit(),
-            "/fork" => {
-                // Branch a new session from the current one: copy the persisted
-                // SessionData under a fresh id, then swap the active session to it
-                // (Msg::Forked). The original id keeps its state, so it stays
-                // resumable — the two diverge from here. Idle-only (guarded above),
-                // so the last turn is already flushed to the store.
-                self.textarea.clear();
-                let store = self.store.clone();
-                let src = self.session_id.clone();
-                let dst = new_session_id();
-                self.session_rebuild_seq = self.session_rebuild_seq.wrapping_add(1);
-                let request_id = self.session_rebuild_seq;
-                self.session_rebuild_pending = Some(request_id);
-                return Some(cmd::cmd(move || async move {
-                    let result = match store.load_snapshot(&src).await {
-                        Ok(Some(mut snapshot)) => {
-                            snapshot.session.id = dst.clone();
-                            match store.save_snapshot(&snapshot).await {
-                                Ok(()) => Ok(dst),
-                                Err(e) => Err(format!("could not save the fork: {e}")),
-                            }
-                        }
-                        Ok(None) => Err("nothing to fork yet — start a conversation first".into()),
-                        Err(e) => Err(format!("could not read the session: {e}")),
-                    };
-                    Msg::Forked { request_id, result }
-                }));
-            }
+            "/rewind" => return self.submit_rewind_command(),
             "/clear" => {
                 self.textarea.clear();
                 self.cancel_goal_state("cleared by /clear");
@@ -827,15 +830,27 @@ impl App {
                 self.help_scroll = 0;
                 return None;
             }
-            "/checkup" => return self.submit_checkup_command(),
-            "/permissions" => {
+            "/terminal" => {
                 self.textarea.clear();
-                self.open_permission_panel();
+                let diagnostic =
+                    panels::terminal::current_terminal_diagnostic(self.viewport_content_width());
+                self.push_line(&diagnostic);
+                return None;
+            }
+            "/checkup" => return self.submit_checkup_command(),
+            "/queue" => {
+                self.textarea.clear();
+                self.open_queue_panel();
                 return None;
             }
             "/history" => {
                 self.textarea.clear();
                 self.open_history_panel("");
+                return None;
+            }
+            "/permissions" => {
+                self.textarea.clear();
+                self.open_permission_panel();
                 return None;
             }
             "/auto" => {
@@ -946,6 +961,11 @@ impl App {
                 });
                 return Some(self.load_memory_panel(dir));
             }
+            "/evolution" => {
+                self.textarea.clear();
+                self.evolution = Some(panels::evolution::EvolutionPanel::loading());
+                return Some(self.load_evolution_panel());
+            }
             _ => {}
         }
 
@@ -1023,7 +1043,7 @@ impl App {
         };
         let execution_mode = self.mode;
         let images = std::mem::take(&mut self.pending_images);
-        if execution_mode == Mode::Plan && !loop_cont {
+        let sequence = if execution_mode == Mode::Plan && !loop_cont {
             let request = PlanDraftRequest::initial(prompt, display.clone());
             self.enqueue_plan_turn(
                 priority,
@@ -1035,7 +1055,7 @@ impl App {
                     deep_research: None,
                 },
                 request,
-            );
+            )
         } else {
             self.enqueue_turn(
                 priority,
@@ -1047,9 +1067,10 @@ impl App {
                     deep_research: None,
                 },
                 execution_mode,
-            );
-        }
+            )
+        };
         if send_now {
+            self.send_now_queued_sequence = Some(sequence);
             return self.begin_send_now_interrupt();
         }
         if self.state == State::Idle {

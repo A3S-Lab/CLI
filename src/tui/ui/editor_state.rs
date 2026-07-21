@@ -306,15 +306,54 @@ pub(super) fn copy_to_clipboard(text: &str) -> ClipboardCopyOutcome {
 /// Background of an active text selection in the transcript.
 pub(super) const SELECTION_BG: Color = SURFACE_SELECTED;
 
-/// An in-progress mouse text-selection in the transcript viewport, in screen
-/// cells (visible row, column). `anchor` = drag start, `head` = current point.
-#[derive(Clone, Copy)]
+/// Mouse selection projected into the visible transcript viewport.
+///
+/// Screen cells drive the current highlight. When both endpoints belong to
+/// committed transcript entries, `semantic` retains their stable identities so
+/// content refresh and resize can project fresh cells without losing the
+/// selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Selection {
     pub(super) anchor: (u16, u16),
     pub(super) head: (u16, u16),
+    semantic: Option<TranscriptSelection>,
 }
 
 impl Selection {
+    pub(super) fn start(cell: (u16, u16), point: Option<TranscriptPoint>) -> Self {
+        Self {
+            anchor: cell,
+            head: cell,
+            semantic: point.map(TranscriptSelection::collapsed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_cells(anchor: (u16, u16), head: (u16, u16)) -> Self {
+        Self {
+            anchor,
+            head,
+            semantic: None,
+        }
+    }
+
+    pub(super) fn set_head(&mut self, cell: (u16, u16), point: Option<TranscriptPoint>) {
+        self.head = cell;
+        match (&mut self.semantic, point) {
+            (Some(selection), Some(point)) => selection.set_head(point),
+            _ => self.semantic = None,
+        }
+    }
+
+    pub(super) fn semantic(&self) -> Option<TranscriptSelection> {
+        self.semantic
+    }
+
+    pub(super) fn project(&mut self, anchor: (u16, u16), head: (u16, u16)) {
+        self.anchor = anchor;
+        self.head = head;
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
@@ -665,5 +704,5 @@ pub(super) struct Queued {
     /// Attachments captured for this exact queued turn.
     pub(super) images: Vec<PendingImage>,
     pub(super) runtime_expectation: Option<RuntimeExpectation>,
-    pub(super) deep_research: Option<(String, bool, DeepResearchEvidenceScope)>,
+    pub(super) deep_research: Option<(String, DeepResearchEvidenceScope)>,
 }

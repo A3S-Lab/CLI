@@ -593,7 +593,7 @@ mod tests {
         }
 
         let error = store
-            .resolve_package(&temp.path().join("state"), "acme/slack", None, "stable")
+            .resolve_package(&temp.path().join("state"), "a3s/science", None, "stable")
             .await
             .unwrap_err();
 
@@ -629,7 +629,7 @@ mod tests {
             &alpha
                 .trusted_registry(&temp.path().join("initial-state"))
                 .unwrap(),
-            "acme/slack",
+            "a3s/science",
             None,
             "stable",
             None,

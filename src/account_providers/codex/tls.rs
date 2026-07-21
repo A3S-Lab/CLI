@@ -62,13 +62,12 @@ impl TlsRoots {
                 )
             })?;
         }
-        Ok(
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .context("configure Codex WebSocket TLS protocol versions")?
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        )
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        Ok(ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .context("configure Codex WebSocket TLS protocol versions")?
+            .with_root_certificates(roots)
+            .with_no_client_auth())
     }
 
     pub(super) fn add_to_reqwest(
@@ -148,5 +147,17 @@ mod tests {
     fn rejects_a_configured_ca_file_without_certificates() {
         let error = parse_pem_certificates(b"not a certificate").unwrap_err();
         assert!(error.to_string().contains("no CERTIFICATE blocks"));
+    }
+
+    #[test]
+    fn builds_websocket_config_with_an_explicit_crypto_provider() {
+        let roots = TlsRoots {
+            platform: Arc::new(Vec::new()),
+            custom: Arc::new(Vec::new()),
+        };
+
+        roots
+            .rustls_client_config()
+            .expect("Codex WebSocket TLS config");
     }
 }

@@ -231,14 +231,6 @@ fn validate_integrations(config: &CodeConfig, issues: &mut Vec<String>) {
         if !(1..=1024).contains(&parser.max_file_size_mb) {
             issues.push("documentParser.maxFileSizeMb must be between 1 and 1024".to_string());
         }
-        if let Some(ocr) = parser.ocr.as_ref() {
-            if !(1..=64).contains(&ocr.max_images) {
-                issues.push("documentParser.ocr.maxImages must be between 1 and 64".to_string());
-            }
-            if !(72..=600).contains(&ocr.dpi) {
-                issues.push("documentParser.ocr.dpi must be between 72 and 600".to_string());
-            }
-        }
     }
 
     let mut names = HashSet::new();

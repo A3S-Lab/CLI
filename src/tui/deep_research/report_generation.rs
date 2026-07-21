@@ -1,9 +1,11 @@
 //! Closed-evidence structured generation for the final DeepResearch report.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use a3s::research::ResearchObligation;
 use serde::{Deserialize, Serialize};
 
 const REPORT_MIN_CHARS: usize = 120;
-const REPORT_MAX_CHARS: usize = 30_000;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -220,7 +222,7 @@ pub(crate) enum ReportTrackStatus {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReportTrackCoverage {
-    pub(crate) track: String,
+    pub(crate) obligation_id: String,
     pub(crate) status: ReportTrackStatus,
     pub(crate) finding: String,
     pub(crate) interpretation: String,
@@ -243,134 +245,262 @@ pub(crate) struct GeneratedDeepResearchReport {
     pub(crate) presentation: ReportPresentation,
 }
 
-pub(super) fn deep_research_report_generation_args(
-    prompt: &str,
-    timeout_ms: u64,
-) -> serde_json::Value {
+pub(crate) fn validate_report_obligation_coverage(
+    editorial: &ReportEditorialPlan,
+    obligations: Option<&[ResearchObligation]>,
+) -> Result<(), String> {
+    let planned_by_id = obligations.map(|obligations| {
+        obligations
+            .iter()
+            .map(|obligation| (obligation.id.as_str(), obligation.title.as_str()))
+            .collect::<BTreeMap<_, _>>()
+    });
+    if planned_by_id.as_ref().is_some_and(BTreeMap::is_empty) {
+        return Err(
+            "content rejected: Inquiry report context contains no research obligations".to_string(),
+        );
+    }
+
+    let mut covered_ids = BTreeSet::new();
+    for coverage in &editorial.track_coverage {
+        let obligation_id = coverage.obligation_id.trim();
+        if obligation_id != coverage.obligation_id
+            || !stable_report_obligation_id(obligation_id)
+            || !covered_ids.insert(obligation_id.to_string())
+        {
+            return Err(format!(
+                "content rejected: the editorial quality map contains an invalid or duplicate obligation ID {:?}",
+                coverage.obligation_id
+            ));
+        }
+        if let Some(planned_by_id) = &planned_by_id {
+            if !planned_by_id.contains_key(obligation_id) {
+                return Err(format!(
+                    "content rejected: the editorial quality map references unknown obligation ID `{obligation_id}`"
+                ));
+            }
+        }
+        if coverage.finding.trim().chars().count() < 8
+            || coverage.interpretation.trim().chars().count() < 8
+        {
+            return Err(format!(
+                "content rejected: research obligation `{obligation_id}` lacks a finding or interpretation"
+            ));
+        }
+        if matches!(coverage.status, ReportTrackStatus::Bounded)
+            && coverage.uncertainty.trim().is_empty()
+        {
+            return Err(format!(
+                "content rejected: bounded research obligation `{obligation_id}` does not state its uncertainty"
+            ));
+        }
+    }
+
+    if let Some(planned_by_id) = planned_by_id {
+        let missing = planned_by_id
+            .into_iter()
+            .filter(|(id, _)| !covered_ids.contains(*id))
+            .map(|(id, title)| format!("{title} (`{id}`)"))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(format!(
+                "content rejected: the report did not account for planner-authored research obligation(s): {}",
+                missing.join("; ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn stable_report_obligation_id(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character.is_ascii_alphanumeric())
+        && value.chars().count() <= 160
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | ':' | '-')
+        })
+}
+
+pub(super) fn deep_research_report_frame_schema() -> serde_json::Value {
     serde_json::json!({
-        "schema": {
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "markdown": {
-                    "type": "string",
-                    "minLength": REPORT_MIN_CHARS,
-                    "maxLength": REPORT_MAX_CHARS,
-                    "description": "The complete source-backed human-facing report in Markdown. Aim for 1,500-3,000 words or the equivalent in the query language, normally using 4-8 level-two sections; finish the bounded report instead of expanding toward the maximum."
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "report_title": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 120
+            },
+            "reader_labels": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "Short reader-facing report labels in the query language. These are rendered by the Host; they are not private metadata.",
+                "properties": {
+                    "qualification_heading": { "type": "string", "minLength": 2, "maxLength": 120 },
+                    "qualification_intro": { "type": "string", "minLength": 4, "maxLength": 300 },
+                    "sources_heading": { "type": "string", "minLength": 2, "maxLength": 80 },
+                    "decision_heading": { "type": "string", "minLength": 2, "maxLength": 100 },
+                    "evidence_limitation": { "type": "string", "minLength": 2, "maxLength": 100 },
+                    "primary_source_support": { "type": "string", "minLength": 2, "maxLength": 100 },
+                    "independent_corroboration": { "type": "string", "minLength": 2, "maxLength": 100 },
+                    "established_boundary": { "type": "string", "minLength": 4, "maxLength": 240 },
+                    "qualified_boundary": { "type": "string", "minLength": 4, "maxLength": 240 },
+                    "unresolved_boundary": { "type": "string", "minLength": 4, "maxLength": 240 }
                 },
-                "editorial": {
+                "required": [
+                    "qualification_heading",
+                    "qualification_intro",
+                    "sources_heading",
+                    "decision_heading",
+                    "evidence_limitation",
+                    "primary_source_support",
+                    "independent_corroboration",
+                    "established_boundary",
+                    "qualified_boundary",
+                    "unresolved_boundary"
+                ]
+            },
+            "decision_guidance": {
+                "type": "array",
+                "minItems": 0,
+                "maxItems": 6,
+                "description": "Reader-facing, evidence-bounded normative guidance. Cover each action or choice scenario explicitly requested by the query when supported premises exist; otherwise return an empty array.",
+                "items": {
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                        "thesis": {
-                            "type": "string",
-                            "minLength": 12,
-                            "maxLength": 1200,
-                            "description": "One reader-facing sentence that directly answers the query and can lead the report hero."
-                        },
-                        "track_coverage": {
+                        "scenario": { "type": "string", "minLength": 2, "maxLength": 180 },
+                        "recommendation": { "type": "string", "minLength": 8, "maxLength": 700 },
+                        "basis_obligation_ids": {
                             "type": "array",
                             "minItems": 1,
                             "maxItems": 6,
-                            "description": "One entry for every planned research track. Reuse the full track name when practical; otherwise use a concise, unambiguous semantic label. This is a private quality map, not report prose.",
+                            "uniqueItems": true,
                             "items": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                    "track": { "type": "string", "minLength": 2, "maxLength": 180 },
-                                    "status": { "type": "string", "enum": ["answered", "bounded"] },
-                                    "finding": { "type": "string", "minLength": 8, "maxLength": 600 },
-                                    "interpretation": { "type": "string", "minLength": 8, "maxLength": 600 },
-                                    "implication": { "type": "string", "maxLength": 600 },
-                                    "uncertainty": { "type": "string", "maxLength": 600 }
-                                },
-                                "required": ["track", "status", "finding", "interpretation", "implication", "uncertainty"]
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 160,
+                                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
                             }
-                        }
+                        },
+                        "boundary": { "type": "string", "maxLength": 500 }
                     },
-                    "required": ["thesis", "track_coverage"]
-                },
-                "presentation": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "description": "A content-semantic art-direction lock. Choose deliberately from the report's argument, audience, evidence shape, and reading occasion; never from topic keywords or a task-specific template.",
-                    "properties": {
-                        "narrative_mode": {
-                            "type": "string",
-                            "enum": ["pyramid", "narrative", "instructional", "briefing"],
-                            "description": "How the report argues: conclusion-first, event arc, progressive explanation, or balanced scan."
-                        },
-                        "archetype": {
-                            "type": "string",
-                            "enum": ["editorial", "analytical", "chronicle", "executive", "field-notes"],
-                            "description": "The visual composition family. Analytical emphasizes comparisons; chronicle emphasizes ordered change; executive is restrained and decision-first; field-notes suits observation and investigation; editorial suits long-form synthesis."
-                        },
-                        "palette": {
-                            "type": "string",
-                            "enum": ["ocean", "graphite", "forest", "amber", "plum"],
-                            "description": "A curated accessible color system selected for tone and audience, independent from the subject's literal colors."
-                        },
-                        "density": {
-                            "type": "string",
-                            "enum": ["compact", "balanced", "spacious"],
-                            "description": "Information density appropriate to evidence volume and reading occasion."
-                        },
-                        "hero": {
-                            "type": "string",
-                            "enum": ["statement", "split", "metrics"],
-                            "description": "Cover composition: thesis-led statement, balanced split, or evidence-profile-led metrics."
-                        },
-                        "visual_stance": {
-                            "type": "string",
-                            "enum": ["safe", "shifted", "bold"],
-                            "description": "Safe for formal/high-risk contexts, shifted for one controlled distinctive motif, bold only when audience and evidence support it."
-                        },
-                        "rationale": {
-                            "type": "string",
-                            "minLength": 12,
-                            "maxLength": 240,
-                            "description": "One concise private sentence naming the dominant information relationship, reader use, and resulting high-level structural choice. It is never rendered."
-                        },
-                        "section_plan": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 12,
-                            "description": "One compact entry for every level-two Markdown heading, in report order. Copy each heading exactly and choose rhythm and composition from that section's information relationship rather than its topic words.",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "properties": {
-                                    "heading": {
-                                        "type": "string",
-                                        "minLength": 1,
-                                        "maxLength": 180,
-                                        "description": "The exact level-two Markdown heading without the ## marker."
-                                    },
-                                    "rhythm": {
-                                        "type": "string",
-                                        "enum": ["anchor", "dense", "breathing"]
-                                    },
-                                    "composition": {
-                                        "type": "string",
-                                        "enum": ["prose", "key_points", "comparison", "timeline", "process", "evidence", "source_ledger"]
-                                    }
-                                },
-                                "required": ["heading", "rhythm", "composition"]
-                            }
-                        }
-                    },
-                    "required": ["narrative_mode", "archetype", "palette", "density", "hero", "visual_stance", "rationale", "section_plan"]
+                    "required": ["scenario", "recommendation", "basis_obligation_ids", "boundary"]
                 }
             },
-            "required": ["markdown", "editorial", "presentation"]
+            "editorial": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "thesis": {
+                        "type": "string",
+                        "minLength": 12,
+                        "maxLength": 1200,
+                        "description": "One reader-facing sentence that directly answers the query and can lead the report hero."
+                    },
+                    "track_coverage": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 6,
+                        "description": "One entry for every planner-authored research obligation. Copy each stable obligation ID exactly from the closed frame packet; this is a private quality map, not report prose.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "obligation_id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 160,
+                                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$"
+                                },
+                                "status": { "type": "string", "enum": ["answered", "bounded"] },
+                                "finding": { "type": "string", "minLength": 8, "maxLength": 600 },
+                                "interpretation": { "type": "string", "minLength": 8, "maxLength": 600 },
+                                "implication": { "type": "string", "maxLength": 600 },
+                                "uncertainty": { "type": "string", "maxLength": 600 }
+                            },
+                            "required": ["obligation_id", "status", "finding", "interpretation", "implication", "uncertainty"]
+                        }
+                    }
+                },
+                "required": ["thesis", "track_coverage"]
+            },
+            "presentation": {
+                "type": "object",
+                "additionalProperties": false,
+                "description": "A content-semantic art-direction lock. Choose deliberately from the report's argument, audience, evidence shape, and reading occasion; never from topic keywords or a task-specific template.",
+                "properties": {
+                    "narrative_mode": {
+                        "type": "string",
+                        "enum": ["pyramid", "narrative", "instructional", "briefing"],
+                        "description": "How the report argues: conclusion-first, event arc, progressive explanation, or balanced scan."
+                    },
+                    "archetype": {
+                        "type": "string",
+                        "enum": ["editorial", "analytical", "chronicle", "executive", "field-notes"],
+                        "description": "The visual composition family. Analytical emphasizes comparisons; chronicle emphasizes ordered change; executive is restrained and decision-first; field-notes suits observation and investigation; editorial suits long-form synthesis."
+                    },
+                    "palette": {
+                        "type": "string",
+                        "enum": ["ocean", "graphite", "forest", "amber", "plum"],
+                        "description": "A curated accessible color system selected for tone and audience, independent from the subject's literal colors."
+                    },
+                    "density": {
+                        "type": "string",
+                        "enum": ["compact", "balanced", "spacious"],
+                        "description": "Information density appropriate to evidence volume and reading occasion."
+                    },
+                    "hero": {
+                        "type": "string",
+                        "enum": ["statement", "split", "metrics"],
+                        "description": "Cover composition: thesis-led statement, balanced split, or evidence-profile-led metrics."
+                    },
+                    "visual_stance": {
+                        "type": "string",
+                        "enum": ["safe", "shifted", "bold"],
+                        "description": "Safe for formal/high-risk contexts, shifted for one controlled distinctive motif, bold only when audience and evidence support it."
+                    },
+                    "rationale": {
+                        "type": "string",
+                        "minLength": 12,
+                        "maxLength": 240,
+                        "description": "One concise private sentence naming the dominant information relationship, reader use, and resulting high-level structural choice. It is never rendered."
+                    },
+                    "section_plan": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 12,
+                        "description": "One compact entry for every level-two Markdown heading, in report order. Copy each heading exactly and choose rhythm and composition from that section's information relationship rather than its topic words.",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "heading": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 180,
+                                    "description": "The exact level-two Markdown heading without the ## marker."
+                                },
+                                "rhythm": {
+                                    "type": "string",
+                                    "enum": ["anchor", "dense", "breathing"],
+                                    "description": "Section pacing only: use exactly anchor, dense, or breathing. Do not reuse the global density values compact, balanced, or spacious."
+                                },
+                                "composition": {
+                                    "type": "string",
+                                    "enum": ["prose", "key_points", "comparison", "timeline", "process", "evidence", "source_ledger"]
+                                }
+                            },
+                            "required": ["heading", "rhythm", "composition"]
+                        }
+                    }
+                },
+                "required": ["narrative_mode", "archetype", "palette", "density", "hero", "visual_stance", "rationale", "section_plan"]
+            }
         },
-        "schema_name": "deep_research_report",
-        "schema_description": "A complete evidence-grounded DeepResearch report plus a semantic coverage map and content-driven report-master presentation lock",
-        "prompt": prompt,
-        "system": "You are a closed-evidence research writer. Return only the requested object and prioritize the report content. Finish a useful bounded Markdown report in this call; keep each private coverage field to one or two precise sentences. Audit every planned track through finding, interpretation, implication, and uncertainty. Only supported checker track and stop-condition assessments are checked findings; bounded or uncovered assessments remain gaps. Omit unsupported domain knowledge entirely, even when it could be labeled as common knowledge, inference, likely, or unverified. When the checked evidence cannot support the requested conclusion, say so in the thesis and provide decision criteria and evidence gaps instead of a ranking. After the Markdown outline is final, choose the small global presentation lock and one compact section-plan entry per exact H2. Select rhythm and composition from each section's information relationship and reader use; the host safely renders those choices. Do not generate HTML or CSS. Do not invoke or discuss tools, delegation, files, workflows, or the writing process.",
-        "mode": "tool",
-        "max_repair_attempts": 0,
-        "timeout_ms": timeout_ms.clamp(1_000, 600_000)
+        "required": ["report_title", "reader_labels", "decision_guidance", "editorial", "presentation"]
     })
 }
 
@@ -565,7 +695,7 @@ mod tests {
             "editorial": {
                 "thesis": "The evidence supports a bounded, source-backed conclusion.",
                 "track_coverage": [{
-                    "track": "Current status",
+                    "obligation_id": "obligation:current-status",
                     "status": "answered",
                     "finding": "The current status is documented by the cited source.",
                     "interpretation": "The documented status materially answers the request.",
@@ -603,19 +733,22 @@ mod tests {
     }
 
     #[test]
-    fn report_generation_forces_one_closed_structured_output() {
-        let args = deep_research_report_generation_args("Write the report", 160_000);
+    fn report_frame_schema_is_closed_and_has_no_monolithic_markdown_contract() {
+        let schema = deep_research_report_frame_schema();
 
-        assert_eq!(args["mode"], "tool");
-        assert_eq!(args["timeout_ms"], 160_000);
-        assert_eq!(args["max_repair_attempts"], 0);
-        assert_eq!(args["schema"]["additionalProperties"], false);
+        assert_eq!(schema["additionalProperties"], false);
+        assert!(schema["properties"].get("report_title").is_some());
+        assert!(schema["properties"].get("reader_labels").is_some());
+        assert!(schema["properties"].get("decision_guidance").is_some());
+        assert!(schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&serde_json::json!("reader_labels"))));
+        assert!(schema["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&serde_json::json!("decision_guidance"))));
+        assert!(schema["properties"].get("markdown").is_none());
         assert_eq!(
-            args["schema"]["properties"]["markdown"]["maxLength"],
-            REPORT_MAX_CHARS
-        );
-        assert_eq!(
-            args["schema"]["properties"]["presentation"]["properties"]["archetype"]["enum"],
+            schema["properties"]["presentation"]["properties"]["archetype"]["enum"],
             serde_json::json!([
                 "editorial",
                 "analytical",
@@ -625,7 +758,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            args["schema"]["properties"]["presentation"]["properties"]["section_plan"]["items"]
+            schema["properties"]["presentation"]["properties"]["section_plan"]["items"]
                 ["properties"]["composition"]["enum"],
             serde_json::json!([
                 "prose",
@@ -637,15 +770,9 @@ mod tests {
                 "source_ledger"
             ])
         );
-        assert!(args["schema"]["properties"]["presentation"]["required"]
+        assert!(schema["properties"]["presentation"]["required"]
             .as_array()
             .is_some_and(|required| required.contains(&serde_json::json!("section_plan"))));
-        assert!(args["system"].as_str().is_some_and(|system| system
-            .to_ascii_lowercase()
-            .contains("prioritize the report content")));
-        assert!(args["system"].as_str().is_some_and(|system| {
-            system.contains("one compact section-plan entry per exact H2")
-        }));
     }
 
     #[test]

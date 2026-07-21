@@ -238,6 +238,17 @@ fn jwt_with_claims(claims: Value) -> String {
 }
 
 #[test]
+fn account_backend_reports_single_flight_model_generation() {
+    assert_eq!(
+        client(false, Some("low"))
+            .model_generation_concurrency()
+            .max_concurrency()
+            .get(),
+        1
+    );
+}
+
+#[test]
 fn chatgpt_account_id_uses_the_fully_escaped_json_pointer() {
     let token = jwt_with_claims(json!({
         "https://api.openai.com/auth/chatgpt_account_id": "acct_123"

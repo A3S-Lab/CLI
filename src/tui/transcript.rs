@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use a3s_tui::style::{strip_ansi, truncate_visible};
+use a3s_tui::components::{selected_text_range, SelectionRange};
+use a3s_tui::style::{strip_ansi, truncate_visible, visible_len};
 
 use super::design_markdown::Markdown;
 use super::message_chrome::{
@@ -18,9 +19,10 @@ use super::runtime_projection::{SubagentOutcome, ToolCallState};
 use super::tool_style::highlight_explore_detail;
 #[cfg(test)]
 use super::TN_CYAN;
-use super::{
-    assistant_block, spaced_message_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY,
-};
+use super::{assistant_block, user_bubble, wrap_words, Style, TN_FG, TN_GRAY};
+
+const TRANSCRIPT_BLOCK_SEPARATOR: &str = "\n \n";
+const TRANSCRIPT_BLOCK_GAP_ROWS: usize = 1;
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum TranscriptEntry {
@@ -115,6 +117,47 @@ pub(crate) struct TranscriptAnchor {
     row_in_entry: usize,
 }
 
+/// Stable selection endpoint inside one semantic transcript entry.
+///
+/// `semantic_offset` counts content characters rather than rendered cells, so
+/// soft wrapping, continuation indentation, and gutter decoration do not move
+/// the endpoint. Row/column hints are retained only for entries that contain no
+/// semantic characters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptPoint {
+    entry_id: TranscriptEntryId,
+    semantic_offset: usize,
+    row_hint: usize,
+    col_hint: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TranscriptSelection {
+    anchor: TranscriptPoint,
+    head: TranscriptPoint,
+}
+
+impl TranscriptSelection {
+    pub(crate) fn collapsed(point: TranscriptPoint) -> Self {
+        Self {
+            anchor: point,
+            head: point,
+        }
+    }
+
+    pub(crate) fn set_head(&mut self, point: TranscriptPoint) {
+        self.head = point;
+    }
+
+    pub(crate) fn anchor(&self) -> TranscriptPoint {
+        self.anchor
+    }
+
+    pub(crate) fn head(&self) -> TranscriptPoint {
+        self.head
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct LayoutSpan {
     entry_id: TranscriptEntryId,
@@ -129,6 +172,7 @@ pub(crate) struct Transcript {
     latest_input_tool_id: Option<String>,
     next_id: u64,
     layout: Vec<LayoutSpan>,
+    selection_rows: Vec<String>,
 }
 
 impl TranscriptEntry {
@@ -258,16 +302,6 @@ impl TranscriptEntry {
             _ => self.render_with_activity(screen_width, content_width, activity_phase),
         }
     }
-
-    /// Tool and delegated-agent cells form one execution cluster until prose,
-    /// user input, or a notice establishes a new narrative boundary.
-    fn is_activity_cell(&self) -> bool {
-        match self {
-            Self::Tool(tool) => tool.visible,
-            Self::Subagent(subagent) => subagent.visible,
-            _ => false,
-        }
-    }
 }
 
 fn render_reasoning(source: &str, width: usize) -> String {
@@ -297,12 +331,10 @@ fn render_reasoning(source: &str, width: usize) -> String {
                 }),
         );
     }
-    let body = rows
-        .into_iter()
+    rows.into_iter()
         .map(|line| truncate_visible(&line, width))
         .collect::<Vec<_>>()
-        .join("\n");
-    spaced_message_block(&body, width)
+        .join("\n")
 }
 
 fn render_subagent_result(
@@ -467,6 +499,7 @@ impl Transcript {
         self.rebuild_tool_positions();
         self.latest_input_tool_id = None;
         self.layout.clear();
+        self.selection_rows.clear();
     }
 
     pub(crate) fn clear(&mut self) {
@@ -474,6 +507,7 @@ impl Transcript {
         self.tool_positions.clear();
         self.latest_input_tool_id = None;
         self.layout.clear();
+        self.selection_rows.clear();
     }
 
     pub(crate) fn push(&mut self, entry: TranscriptEntry) {
@@ -516,6 +550,7 @@ impl Transcript {
         stored.revision = stored.revision.wrapping_add(1);
         stored.render_cache = None;
         self.layout.clear();
+        self.selection_rows.clear();
         true
     }
 
@@ -819,7 +854,6 @@ impl Transcript {
         let mut blocks = Vec::new();
         let mut layout = Vec::new();
         let mut next_block_row = 0usize;
-        let mut activity_cluster = String::new();
         let mut index = 0usize;
         while index < self.entries.len() {
             if self.is_groupable_explore(index) {
@@ -835,49 +869,47 @@ impl Transcript {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let block = render_explore_group(&tools, content_width, activity_phase);
+                let block = normalize_transcript_block(render_explore_group(
+                    &tools,
+                    content_width,
+                    activity_phase,
+                ));
                 if !block.is_empty() {
-                    let row_count = block.lines().count();
-                    append_activity_cell(&mut activity_cluster, &block);
+                    let (start_row, row_count) =
+                        append_rendered_block(&mut blocks, &mut next_block_row, block);
                     for stored in &self.entries[start..index] {
                         layout.push(LayoutSpan {
                             entry_id: stored.id,
-                            start_row: next_block_row,
+                            start_row,
                             row_count,
                         });
                     }
-                    next_block_row += row_count;
                 }
                 continue;
             }
 
-            let is_activity_cell = self.entries[index].entry.is_activity_cell();
-            let block = self.render_entry(index, screen_width, content_width, activity_phase);
+            let block = normalize_transcript_block(self.render_entry(
+                index,
+                screen_width,
+                content_width,
+                activity_phase,
+            ));
             if !block.is_empty() {
-                let row_count = block.lines().count();
-                if is_activity_cell {
-                    append_activity_cell(&mut activity_cluster, &block);
-                    layout.push(LayoutSpan {
-                        entry_id: self.entries[index].id,
-                        start_row: next_block_row,
-                        row_count,
-                    });
-                    next_block_row += row_count;
-                } else {
-                    flush_activity_cluster(&mut blocks, &mut activity_cluster);
-                    layout.push(LayoutSpan {
-                        entry_id: self.entries[index].id,
-                        start_row: next_block_row,
-                        row_count,
-                    });
-                    next_block_row += row_count;
-                    blocks.push(block);
-                }
+                let (start_row, row_count) =
+                    append_rendered_block(&mut blocks, &mut next_block_row, block);
+                layout.push(LayoutSpan {
+                    entry_id: self.entries[index].id,
+                    start_row,
+                    row_count,
+                });
             }
             index += 1;
         }
-        flush_activity_cluster(&mut blocks, &mut activity_cluster);
         self.layout = layout;
+        self.selection_rows = join_transcript_blocks(&blocks)
+            .split('\n')
+            .map(strip_ansi)
+            .collect();
         blocks
     }
 
@@ -893,11 +925,11 @@ impl Transcript {
         self.entries
             .iter()
             .map(|stored| {
-                stored.entry.render_transcript_with_activity(
+                normalize_transcript_block(stored.entry.render_transcript_with_activity(
                     screen_width,
                     content_width,
                     activity_phase,
-                )
+                ))
             })
             .filter(|block| !block.is_empty())
             .collect()
@@ -923,6 +955,53 @@ impl Transcript {
             .iter()
             .find(|span| span.entry_id == anchor.entry_id)?;
         Some(span.start_row + anchor.row_in_entry.min(span.row_count.saturating_sub(1)))
+    }
+
+    /// Resolve a rendered transcript cell into a stable semantic endpoint.
+    pub(crate) fn point_for_cell(&self, row: usize, col: usize) -> Option<TranscriptPoint> {
+        let span = self
+            .layout
+            .iter()
+            .find(|span| row >= span.start_row && row < span.start_row + span.row_count)?;
+        let rows = self.rows_for_span(span)?;
+        let row_hint = row
+            .saturating_sub(span.start_row)
+            .min(rows.len().saturating_sub(1));
+        Some(TranscriptPoint {
+            entry_id: span.entry_id,
+            semantic_offset: semantic_offset_for_cell(rows, row_hint, col),
+            row_hint,
+            col_hint: col,
+        })
+    }
+
+    /// Project a stable endpoint into the current transcript render.
+    pub(crate) fn cell_for_point(&self, point: TranscriptPoint) -> Option<(usize, usize)> {
+        let span = self
+            .layout
+            .iter()
+            .find(|span| span.entry_id == point.entry_id)?;
+        let rows = self.rows_for_span(span)?;
+        let (row, col) =
+            cell_for_semantic_offset(rows, point.semantic_offset, point.row_hint, point.col_hint);
+        Some((span.start_row.saturating_add(row), col))
+    }
+
+    /// Copy the complete semantic selection, including rows outside the
+    /// currently visible viewport.
+    pub(crate) fn selected_text(&self, selection: TranscriptSelection) -> Option<String> {
+        let (anchor_row, anchor_col) = self.cell_for_point(selection.anchor())?;
+        let (head_row, head_col) = self.cell_for_point(selection.head())?;
+        let range = SelectionRange::from_cells(anchor_row, anchor_col, head_row, head_col);
+        Some(selected_text_range(&self.selection_rows.join("\n"), range))
+    }
+
+    fn rows_for_span(&self, span: &LayoutSpan) -> Option<&[String]> {
+        let end = span
+            .start_row
+            .saturating_add(span.row_count)
+            .min(self.selection_rows.len());
+        (span.start_row < end).then_some(&self.selection_rows[span.start_row..end])
     }
 
     fn ensure_tool(&mut self, call_id: String, name: String, visible: bool) -> usize {
@@ -1182,25 +1261,100 @@ fn sanitize_export_source(source: &str) -> String {
         .collect()
 }
 
-fn append_activity_cell(cluster: &mut String, cell: &str) {
-    if !cluster.is_empty() {
-        cluster.push('\n');
+fn semantic_offset_for_cell(rows: &[String], target_row: usize, target_col: usize) -> usize {
+    let mut offset = 0usize;
+    for (row_index, row) in rows.iter().enumerate() {
+        if row_index > target_row {
+            break;
+        }
+        let mut display_col = 0usize;
+        for character in row.chars() {
+            if row_index == target_row && display_col >= target_col {
+                return offset;
+            }
+            let width = visible_len(&character.to_string());
+            if semantic_selection_character(character)
+                && (row_index < target_row || display_col < target_col)
+            {
+                offset = offset.saturating_add(1);
+            }
+            display_col = display_col.saturating_add(width);
+        }
+        if row_index == target_row {
+            break;
+        }
     }
-    cluster.push_str(cell);
+    offset
 }
 
-fn flush_activity_cluster(blocks: &mut Vec<String>, cluster: &mut String) {
-    if cluster.is_empty() {
-        return;
+fn cell_for_semantic_offset(
+    rows: &[String],
+    target_offset: usize,
+    row_hint: usize,
+    col_hint: usize,
+) -> (usize, usize) {
+    let fallback_row = row_hint.min(rows.len().saturating_sub(1));
+    let fallback_col = rows
+        .get(fallback_row)
+        .map_or(0, |row| col_hint.min(visible_len(row)));
+    let mut offset = 0usize;
+    let mut last_semantic_end = None;
+
+    for (row_index, row) in rows.iter().enumerate() {
+        let mut display_col = 0usize;
+        for character in row.chars() {
+            let width = visible_len(&character.to_string());
+            if semantic_selection_character(character) {
+                if offset == target_offset {
+                    return (row_index, display_col);
+                }
+                offset = offset.saturating_add(1);
+                last_semantic_end = Some((row_index, display_col.saturating_add(width)));
+            }
+            display_col = display_col.saturating_add(width);
+        }
     }
-    blocks.push(std::mem::take(cluster));
+
+    last_semantic_end.unwrap_or((fallback_row, fallback_col))
 }
 
-/// Codex history cells own their internal spacing. Stacking them with one row
-/// boundary keeps tool runs cohesive and lets the user-authored surface provide
-/// its own top/bottom breathing room without an extra global blank row.
+fn semantic_selection_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn normalize_transcript_block(block: String) -> String {
+    block.trim_matches('\n').to_string()
+}
+
+fn append_rendered_block(
+    blocks: &mut Vec<String>,
+    next_block_row: &mut usize,
+    block: String,
+) -> (usize, usize) {
+    if !blocks.is_empty() {
+        *next_block_row = next_block_row.saturating_add(TRANSCRIPT_BLOCK_GAP_ROWS);
+    }
+    let start_row = *next_block_row;
+    let row_count = block.lines().count();
+    *next_block_row = next_block_row.saturating_add(row_count);
+    blocks.push(block);
+    (start_row, row_count)
+}
+
+/// Join top-level transcript cells with exactly one real terminal row. The
+/// visible space survives `str::lines`, viewport partitioning, and trailing-row
+/// accounting, so messages, tools, notices, and prompts all share one rule.
 pub(crate) fn join_transcript_blocks(blocks: &[String]) -> String {
-    blocks.join("\n")
+    blocks
+        .iter()
+        .map(|block| block.trim_matches('\n'))
+        .filter(|block| !block.is_empty())
+        .collect::<Vec<_>>()
+        .join(TRANSCRIPT_BLOCK_SEPARATOR)
+}
+
+pub(crate) fn transcript_block_separator() -> &'static str {
+    TRANSCRIPT_BLOCK_SEPARATOR
 }
 
 #[derive(Debug)]
@@ -1294,6 +1448,28 @@ mod tests {
     use super::super::ACCENT;
     use super::*;
 
+    fn assert_bounded(rendered: &str, width: usize) {
+        for line in rendered.lines() {
+            assert!(
+                a3s_tui::style::visible_len(line) <= width,
+                "line exceeds width {width}: {:?}",
+                a3s_tui::style::strip_ansi(line)
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_markdown_is_source_backed_across_resize() {
+        let entry = TranscriptEntry::assistant_markdown(
+            "A paragraph with **formatting** and enough words to wrap at narrow widths.",
+        );
+        let narrow = entry.render(28, 27);
+        let wide = entry.render(80, 79);
+        assert!(narrow.lines().count() > wide.lines().count());
+        assert_bounded(&narrow, 27);
+        assert_bounded(&wide, 79);
+    }
+
     #[test]
     fn semantic_markdown_is_source_backed_and_excludes_private_or_transient_rows() {
         let mut transcript = Transcript::from_entries(vec![
@@ -1370,99 +1546,128 @@ mod tests {
         );
     }
 
-    fn assert_bounded(rendered: &str, width: usize) {
-        for line in rendered.lines() {
-            assert!(
-                a3s_tui::style::visible_len(line) <= width,
-                "line exceeds width {width}: {:?}",
-                a3s_tui::style::strip_ansi(line)
-            );
-        }
-    }
-
     #[test]
-    fn assistant_markdown_is_source_backed_across_resize() {
-        let entry = TranscriptEntry::assistant_markdown(
-            "A paragraph with **formatting** and enough words to wrap at narrow widths.",
-        );
-        let narrow = entry.render(28, 27);
-        let wide = entry.render(80, 79);
-        assert!(narrow.lines().count() > wide.lines().count());
-        assert_bounded(&narrow, 27);
-        assert_bounded(&wide, 79);
-    }
-
-    #[test]
-    fn assistant_markdown_owns_top_and_bottom_rows() {
-        let entry = TranscriptEntry::assistant_markdown("The response has breathing room.");
-
-        for width in [24_usize, 80] {
-            let rendered = a3s_tui::style::strip_ansi(&entry.render(width as u16, width));
-            let rows = rendered.lines().collect::<Vec<_>>();
-
-            assert!(
-                rows.first().is_some_and(|row| row.trim().is_empty()),
-                "width {width}: {rendered:?}"
-            );
-            assert!(
-                rows.last().is_some_and(|row| row.trim().is_empty()),
-                "width {width}: {rendered:?}"
-            );
-            assert!(
-                rows.iter().any(|row| row.contains("response")),
-                "width {width}: {rendered:?}"
-            );
-            assert_bounded(&rendered, width);
-        }
-
-        assert_eq!(entry.render(0, 0), "");
-    }
-
-    #[test]
-    fn user_and_assistant_messages_each_own_vertical_spacing_at_product_widths() {
+    fn compositor_gives_user_and_assistant_cells_one_stable_gap_at_product_widths() {
         for width in [24_u16, 48, 80] {
             let mut transcript = Transcript::from_entries(vec![
                 TranscriptEntry::user("Review the message hierarchy."),
                 TranscriptEntry::assistant_markdown("The hierarchy is now calmer."),
             ]);
-            let blocks = transcript.render(width, width as usize);
-            assert_eq!(blocks.len(), 2);
-            let joined = join_transcript_blocks(&blocks);
-            let rendered = a3s_tui::style::strip_ansi(&joined);
-            let rows = rendered.lines().collect::<Vec<_>>();
-            let assistant_row = rows
-                .iter()
-                .position(|row| row.contains("The hierarchy"))
-                .expect("assistant row");
-            let assistant_last_row = rows
-                .iter()
-                .rposition(|row| !row.trim().is_empty())
-                .expect("last assistant row");
-            assert!(
-                rendered
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .contains("The hierarchy is now calmer."),
-                "width {width}: {rendered:?}"
-            );
+            let compact = transcript.render(width, width as usize);
+            let complete = transcript.render_transcript_with_activity(width, width as usize, true);
 
-            assert!(rows.first().is_some_and(|row| row.trim().is_empty()));
-            assert!(rows.iter().any(|row| row.starts_with("› Review")));
-            assert!(rows[assistant_row - 1].trim().is_empty());
-            assert!(rows[assistant_row - 2].trim().is_empty());
-            assert!(rows[assistant_last_row + 1].trim().is_empty());
-            assert_eq!(
-                rows.iter().filter(|row| row.trim().is_empty()).count(),
-                4,
-                "width {width}: {rendered:?}"
+            for (surface, blocks) in [("compact", compact), ("Ctrl+T", complete)] {
+                assert_eq!(blocks.len(), 2, "{surface} width {width}");
+                let joined = join_transcript_blocks(&blocks);
+                let rendered = a3s_tui::style::strip_ansi(&joined);
+                let rows = rendered.lines().collect::<Vec<_>>();
+                let assistant_row = rows
+                    .iter()
+                    .position(|row| row.contains("The hierarchy"))
+                    .expect("assistant row");
+                assert!(
+                    rendered
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .contains("The hierarchy is now calmer."),
+                    "{surface} width {width}: {rendered:?}"
+                );
+
+                assert!(rows.first().is_some_and(|row| row.trim().is_empty()));
+                assert!(rows.iter().any(|row| row.starts_with("› Review")));
+                assert!(rows[assistant_row - 1].trim().is_empty());
+                // The other empty row is the user surface's own bottom inset;
+                // the neutral compositor gap is always the row immediately
+                // before the next semantic cell.
+                assert!(rows[assistant_row - 2].trim().is_empty());
+                assert_eq!(
+                    rows.iter().filter(|row| row.trim().is_empty()).count(),
+                    3,
+                    "{surface} width {width}: {rendered:?}"
+                );
+                assert!(joined
+                    .lines()
+                    .take(1)
+                    .all(|row| row
+                        .contains(&format!("\x1b[{}m", super::super::SURFACE_USER.bg_ansi()))));
+                assert!(
+                    !rendered.contains("\n\n\n"),
+                    "{surface} width {width}: {rendered:?}"
+                );
+                assert_bounded(&blocks[0], width as usize);
+                assert_bounded(&blocks[1], width as usize);
+            }
+        }
+    }
+
+    #[test]
+    fn every_top_level_cell_kind_uses_the_same_single_gap_row() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::preformatted("temporary status"),
+            TranscriptEntry::notice(NoticeKind::Warning, "Check the active request."),
+            TranscriptEntry::user("Run the verification."),
+            TranscriptEntry::assistant_markdown("Starting now."),
+            TranscriptEntry::reasoning("Inspect the complete transcript."),
+        ]);
+        for (id, command) in [("tool-one", "cargo check"), ("tool-two", "cargo test")] {
+            let args = serde_json::json!({"command": command});
+            transcript.start_tool_execution(id.into(), "bash".into(), args.clone(), true);
+            transcript.finish_tool(
+                id,
+                "bash".into(),
+                Some(args),
+                "completed".into(),
+                0,
+                None,
+                true,
             );
-            assert!(joined.lines().take(1).all(
-                |row| row.contains(&format!("\x1b[{}m", super::super::SURFACE_USER.bg_ansi()))
-            ));
-            assert!(!rendered.contains("\n\n\n"), "width {width}: {rendered:?}");
-            assert_bounded(&blocks[0], width as usize);
-            assert_bounded(&blocks[1], width as usize);
+        }
+        transcript.finish_subagent(
+            "child-one".into(),
+            "reviewer".into(),
+            "Review the result.".into(),
+            true,
+            "Looks good.".into(),
+            true,
+        );
+
+        let compact = transcript.render(80, 79);
+        let compact_layout = transcript.layout.clone();
+        let complete = transcript.render_transcript_with_activity(80, 79, true);
+
+        for (surface, blocks, spans, expected_blocks) in [
+            ("compact", compact, Some(compact_layout), 7),
+            ("Ctrl+T", complete, None, 8),
+        ] {
+            assert_eq!(blocks.len(), expected_blocks, "{surface}");
+            let joined = a3s_tui::style::strip_ansi(&join_transcript_blocks(&blocks));
+            let rows = joined.split('\n').collect::<Vec<_>>();
+            let mut next_row = 0usize;
+            for (index, block) in blocks.iter().enumerate() {
+                let row_count = block.lines().count();
+                next_row += row_count;
+                if index + 1 < blocks.len() {
+                    assert_eq!(
+                        rows[next_row], " ",
+                        "{surface} gap after block {index}: {joined:?}"
+                    );
+                    next_row += TRANSCRIPT_BLOCK_GAP_ROWS;
+                }
+            }
+            assert_eq!(next_row, rows.len(), "{surface}");
+
+            if let Some(mut spans) = spans {
+                spans.sort_by_key(|span| span.start_row);
+                assert_eq!(spans.len(), blocks.len(), "{surface}");
+                for pair in spans.windows(2) {
+                    assert_eq!(
+                        pair[1].start_row,
+                        pair[0].start_row + pair[0].row_count + TRANSCRIPT_BLOCK_GAP_ROWS,
+                        "{surface} layout must account for the visible separator"
+                    );
+                }
+            }
         }
     }
 
@@ -1499,8 +1704,7 @@ mod tests {
         assert_eq!(complete.len(), 1);
         let plain = a3s_tui::style::strip_ansi(&complete[0]);
         let rows = plain.lines().collect::<Vec<_>>();
-        assert_eq!(rows.first(), Some(&" "));
-        assert_eq!(rows.last(), Some(&" "));
+        assert!(rows.iter().all(|row| !row.trim().is_empty()), "{plain}");
         assert!(plain.contains("• Reasoning"), "{plain}");
         assert!(plain.contains("  └ Inspect the event ordering"), "{plain}");
         assert!(plain.contains("Inspect the event ordering"), "{plain}");
@@ -1815,7 +2019,7 @@ mod tests {
     }
 
     #[test]
-    fn consecutive_tool_cells_share_one_dense_activity_cluster() {
+    fn consecutive_tool_cells_each_receive_one_compositor_gap() {
         let mut transcript = Transcript::from_entries(vec![TranscriptEntry::assistant_markdown(
             "I will verify both layers.",
         )]);
@@ -1833,11 +2037,14 @@ mod tests {
 
         let blocks = transcript.render(80, 79);
 
-        assert_eq!(blocks.len(), 3, "activity cells should share one block");
-        let activity = a3s_tui::style::strip_ansi(&blocks[1]);
-        assert!(activity.contains("cargo check"), "{activity}");
-        assert!(activity.contains("cargo test focused"), "{activity}");
-        assert!(!activity.contains("\n\n"), "{activity}");
+        assert_eq!(blocks.len(), 4, "each tool call is one semantic block");
+        let first_activity = a3s_tui::style::strip_ansi(&blocks[1]);
+        let second_activity = a3s_tui::style::strip_ansi(&blocks[2]);
+        assert!(first_activity.contains("cargo check"), "{first_activity}");
+        assert!(
+            second_activity.contains("cargo test focused"),
+            "{second_activity}"
+        );
 
         let tool_spans = transcript
             .entries
@@ -1854,8 +2061,8 @@ mod tests {
         assert_eq!(tool_spans.len(), 2);
         assert_eq!(
             tool_spans[1].start_row,
-            tool_spans[0].start_row + tool_spans[0].row_count,
-            "adjacent activity cells must not reserve a blank layout row"
+            tool_spans[0].start_row + tool_spans[0].row_count + TRANSCRIPT_BLOCK_GAP_ROWS,
+            "adjacent activity cells must reserve the compositor gap row"
         );
 
         let flow = a3s_tui::style::strip_ansi(&join_transcript_blocks(&blocks));
@@ -1872,17 +2079,25 @@ mod tests {
             .iter()
             .rposition(|row| row.contains("test passed"))
             .expect("last tool row");
+        let second_tool = rows
+            .iter()
+            .position(|row| row.contains("• Ran cargo test focused"))
+            .expect("second tool row");
         let after = rows
             .iter()
             .position(|row| row.contains("Both verification"))
             .expect("assistant after row");
         assert!(
             rows[before + 1].trim().is_empty() && first_tool == before + 2,
-            "assistant-to-tool spacing should be owned by the assistant block: {flow}"
+            "assistant-to-tool spacing should be owned by the compositor: {flow}"
+        );
+        assert!(
+            rows[second_tool - 1].trim().is_empty(),
+            "tool-to-tool spacing should be owned by the compositor: {flow}"
         );
         assert!(
             rows[last_tool + 1].trim().is_empty() && after == last_tool + 2,
-            "tool-to-assistant spacing should be owned by the assistant block: {flow}"
+            "tool-to-assistant spacing should be owned by the compositor: {flow}"
         );
     }
 
@@ -2297,6 +2512,111 @@ mod tests {
         assert!(restored >= new_span.start_row);
         assert!(restored < new_span.start_row + new_span.row_count);
         assert_ne!(old_span.start_row, new_span.start_row);
+    }
+
+    #[test]
+    fn semantic_selection_survives_entry_reflow_and_keeps_complete_copy_range() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::assistant_markdown(
+                "prefix words alpha selection crosses several wrapped rows before omega suffix",
+            ),
+            TranscriptEntry::assistant_markdown(
+                "A later streamed entry must not invalidate a completed-history selection.",
+            ),
+        ]);
+        transcript.render(24, 23);
+        let (alpha_row, alpha_col) = cell_containing(&transcript, "alpha");
+        let (omega_row, omega_col) = cell_containing(&transcript, "omega");
+        let anchor = transcript
+            .point_for_cell(alpha_row, alpha_col)
+            .expect("alpha semantic point");
+        let head = transcript
+            .point_for_cell(omega_row, omega_col + "omega".len())
+            .expect("omega semantic point");
+        let mut selection = TranscriptSelection::collapsed(anchor);
+        selection.set_head(head);
+
+        transcript.render(72, 71);
+
+        let copied = transcript
+            .selected_text(selection)
+            .expect("selection should project after resize");
+        let normalized = copied.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.starts_with("alpha"), "{normalized:?}");
+        assert!(normalized.ends_with("omega"), "{normalized:?}");
+        assert!(
+            normalized.contains("several wrapped rows"),
+            "{normalized:?}"
+        );
+    }
+
+    #[test]
+    fn semantic_selection_ignores_repeated_gutter_and_user_surface_decoration() {
+        let mut transcript = Transcript::from_entries(vec![TranscriptEntry::user(
+            "start abcdefghijklmnopqrstuvwxyz target finish",
+        )]);
+        transcript.render(14, 13);
+        let (row, col) = cell_containing(&transcript, "target");
+        let point = transcript
+            .point_for_cell(row, col)
+            .expect("target semantic point");
+
+        transcript.render(48, 47);
+
+        let (restored_row, restored_col) = transcript
+            .cell_for_point(point)
+            .expect("point should survive user-bubble reflow");
+        let restored = &transcript.selection_rows[restored_row];
+        assert_eq!(
+            a3s_tui::style::slice_visible_cols(
+                restored,
+                restored_col,
+                restored_col + visible_len("target")
+            ),
+            "target"
+        );
+    }
+
+    #[test]
+    fn semantic_selection_copy_is_not_limited_to_a_visible_viewport_window() {
+        let mut transcript = Transcript::from_entries(vec![
+            TranscriptEntry::assistant_markdown("first anchor"),
+            TranscriptEntry::assistant_markdown(
+                "middle one\nmiddle two\nmiddle three\nmiddle four\nmiddle five",
+            ),
+            TranscriptEntry::assistant_markdown("last anchor"),
+        ]);
+        transcript.render(32, 31);
+        let (first_row, first_col) = cell_containing(&transcript, "first");
+        let (last_row, last_col) = cell_containing(&transcript, "last");
+        let anchor = transcript
+            .point_for_cell(first_row, first_col)
+            .expect("first point");
+        let head = transcript
+            .point_for_cell(last_row, last_col + "last".len())
+            .expect("last point");
+        let mut selection = TranscriptSelection::collapsed(anchor);
+        selection.set_head(head);
+
+        let copied = transcript
+            .selected_text(selection)
+            .expect("full transcript copy");
+
+        assert!(copied.contains("first anchor"), "{copied:?}");
+        assert!(copied.contains("middle five"), "{copied:?}");
+        assert!(copied.contains("last"), "{copied:?}");
+    }
+
+    fn cell_containing(transcript: &Transcript, needle: &str) -> (usize, usize) {
+        transcript
+            .selection_rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                line.find(needle)
+                    .map(|byte| (row, visible_len(&line[..byte])))
+            })
+            .unwrap_or_else(|| panic!("missing {needle:?} in {:?}", transcript.selection_rows))
     }
 
     #[test]

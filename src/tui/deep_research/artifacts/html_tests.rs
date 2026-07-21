@@ -96,7 +96,7 @@ fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
         "# 简洁研究标题\n\n## 核心发现\n\n结论正文。\n\n## Sources\n\n- [来源](https://example.com)",
     );
 
-    assert!(html.contains("<html lang=\"zh-CN\">"), "{html}");
+    assert!(html.contains("<html lang=\"und\">"), "{html}");
     assert!(html.contains("class=\"hero\""), "{html}");
     assert!(html.contains("class=\"report-shell\""), "{html}");
     assert!(html.contains("@media(max-width:820px)"), "{html}");
@@ -105,35 +105,53 @@ fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
     assert!(html.contains("prefers-reduced-motion"), "{html}");
     assert!(html.contains(":focus-visible"), "{html}");
     assert!(
-        html.contains("<strong>01</strong><span>引用来源</span>"),
+        html.contains("<strong>01</strong><span>Cited sources</span>"),
         "{html}"
     );
     assert!(html.contains("class=\"toc\""), "{html}");
-    assert!(html.contains("section--findings"), "{html}");
-    assert!(html.contains("section--sources"), "{html}");
-    assert!(html.contains("aria-label=\"报告元数据\""), "{html}");
+    assert_eq!(
+        html.matches("class=\"report-section section--narrative")
+            .count(),
+        2,
+        "{html}"
+    );
+    assert!(
+        !html.contains("class=\"report-section section--findings"),
+        "{html}"
+    );
+    assert!(
+        !html.contains("class=\"report-section section--sources"),
+        "{html}"
+    );
+    assert!(html.contains("aria-label=\"Report metadata\""), "{html}");
     assert_eq!(html.matches("<h1>").count(), 1, "{html}");
     assert!(!html.contains("<script"), "{html}");
 }
 
 #[test]
-fn editorial_report_uses_distinct_information_shapes_instead_of_one_markdown_shell() {
+fn headings_do_not_select_information_shapes_without_a_typed_section_plan() {
     let html = deep_research_completed_report_html(
         "Compare Tokio and async-std",
         "# Tokio and async-std\n\n## Executive Summary\n\n- Tokio is active.\n- async-std is deprecated.\n\n## Key Findings\n\n### Maintenance\n\nLifecycle evidence.\n\n### Adoption\n\nAdoption evidence.\n\n## Evidence Matrix\n\n| Finding | Source |\n| --- | --- |\n| Maintenance | [Docs](https://example.com/docs) |\n\n## Gaps And Caveats\n\n- No workload benchmark.\n\n## Source Quality And Confidence\n\nConfidence is medium-high.\n\n## Sources\n\n- [Docs](https://example.com/docs)",
     );
 
-    for class in [
-        "section--summary",
-        "section--findings",
+    assert_eq!(
+        html.matches("class=\"report-section section--narrative")
+            .count(),
+        6,
+        "{html}"
+    );
+    assert!(html.contains("class=\"table-wrap\""), "{html}");
+    for forbidden in [
+        "class=\"report-section section--summary",
+        "class=\"report-section section--findings",
         "class=\"key-point\"",
-        "section--matrix",
-        "class=\"table-wrap\"",
-        "section--caveats",
-        "section--confidence",
-        "section--sources",
+        "class=\"report-section section--matrix",
+        "class=\"report-section section--caveats",
+        "class=\"report-section section--confidence",
+        "class=\"report-section section--sources",
     ] {
-        assert!(html.contains(class), "missing {class}: {html}");
+        assert!(!html.contains(forbidden), "unexpected {forbidden}: {html}");
     }
     assert!(html.contains("<strong>02</strong><span>Key findings</span>"));
     assert!(html.contains("href=\"#section-6\""));
@@ -245,10 +263,7 @@ fn recovery_report_is_visually_and_semantically_degraded() {
         "# DeepResearch Recovery Report\n\n## Findings\n\nEvidence collection did not complete.\n\n## Sources And Evidence\n\n- https://example.com/partial\n\n## Confidence And Limits\n\nConfidence is low.",
     );
 
-    assert!(
-        html.contains("class=\"theme-editorial report-degraded\""),
-        "{html}"
-    );
+    assert!(html.contains("report-degraded"), "{html}");
     assert!(html.contains("Insufficient evidence · Degraded"), "{html}");
     assert!(html.contains("Not a final domain conclusion"), "{html}");
     assert!(html.contains("<title>DeepResearch Recovery Report</title>"));
@@ -277,13 +292,12 @@ fn editorial_report_wraps_unparsed_relative_markdown_without_page_overflow() {
 }
 
 #[test]
-fn editorial_report_derives_a_semantic_title_without_double_ellipsis() {
-    let title = concise_report_title(
-        "请研究2020年第8号台风“巴威”（Bavi）的生命史、路径、强度、登陆时间、灾害影响和预警…研究报告",
-    );
+fn editorial_report_truncates_long_titles_without_language_rules() {
+    let title = concise_report_title(&"Evidence boundary ".repeat(12));
 
-    assert_eq!(title, "2020年第8号台风“巴威”（Bavi）研究");
-    assert!(!title.contains('…'));
+    assert!(title.ends_with('…'), "{title}");
+    assert_eq!(title.matches('…').count(), 1, "{title}");
+    assert!(title.chars().count() <= 97, "{title}");
 }
 
 #[test]
@@ -321,7 +335,7 @@ fn editorial_report_counts_unique_external_source_urls() {
     );
 
     assert!(
-        html.contains("<strong>02</strong><span>Cited sources</span>"),
+        html.contains("<strong>04</strong><span>Cited sources</span>"),
         "{html}"
     );
     assert!(!html.contains("Cited sources: 2"), "{html}");
@@ -352,19 +366,16 @@ fn editorial_hero_background_tracks_intrinsic_content_height() {
 }
 
 #[test]
-fn editorial_lead_style_targets_paragraph_after_first_section_heading() {
+fn ordinary_headings_keep_the_neutral_section_treatment() {
     let html = deep_research_completed_report_html(
         "Lead paragraph",
         "# Lead paragraph\n\n## Executive summary\n\nThis paragraph is the report lead.\n\nMore detail.",
     );
 
     assert!(
-        html.contains(".section--summary .section-body > p:first-child"),
-        "{html}"
-    );
-    assert!(
-        html.contains("class=\"report-section section--summary rhythm-anchor composition-prose\"")
-            && html.contains("<h2>Executive summary</h2>")
+        html.contains(
+            "class=\"report-section section--narrative rhythm-breathing composition-prose\""
+        ) && html.contains("<h2>Executive summary</h2>")
             && html.contains("<p>This paragraph is the report lead.</p>"),
         "{html}"
     );

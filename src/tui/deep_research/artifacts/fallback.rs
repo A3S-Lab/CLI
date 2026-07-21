@@ -131,6 +131,9 @@ fn deep_research_fallback_answer(answer_text: &str, workflow_output: &str) -> St
 
 fn is_deep_research_model_failure_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
+    // Keep historical pre-sectioned diagnostic spellings from being promoted
+    // when an older interrupted run is recovered. Active report content uses
+    // targeted revision and durable-resume terminology.
     lower.contains("deepresearch synthesis model call timed out")
         || lower.contains("deepresearch synthesis model call failed")
         || lower.contains("deepresearch repair model call timed out")
@@ -223,20 +226,8 @@ fn direct_web_coverage_summary(metadata: &serde_json::Value) -> Option<String> {
         .get("fetched_host_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let query_term_count = metadata
-        .get("query_term_count")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let matched_query_term_count = metadata
-        .get("matched_query_term_count")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
-    let fetched_query_term_count = metadata
-        .get("fetched_query_term_count")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0);
     let mut summary = format!(
-        "Web coverage: {source_count} source(s) across {host_count} host(s), {fetched_count} fetched across {fetched_host_count} host(s); topic {matched_query_term_count}/{query_term_count}, fetched text {fetched_query_term_count}/{query_term_count}."
+        "Web coverage: {source_count} semantically selected source(s) across {host_count} host(s), {fetched_count} fetched across {fetched_host_count} host(s)."
     );
     if metadata
         .get("freshness_required")
@@ -250,13 +241,6 @@ fn direct_web_coverage_summary(metadata: &serde_json::Value) -> Option<String> {
         summary.push_str(&format!(
             " Freshness requires dates; {dated_source_count}/{source_count} source(s) are dated."
         ));
-    }
-    if metadata
-        .get("query_terms_truncated")
-        .and_then(serde_json::Value::as_bool)
-        == Some(true)
-    {
-        summary.push_str(" Query-term analysis was bounded, so direct completion was disabled.");
     }
     Some(summary)
 }

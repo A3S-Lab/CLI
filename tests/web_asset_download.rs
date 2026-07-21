@@ -58,6 +58,42 @@ fn cargo_style_install_downloads_verified_web_assets_once_and_reuses_them_offlin
 }
 
 #[test]
+fn github_api_rate_limit_does_not_block_deterministic_web_asset_downloads() {
+    let fixture = CargoWebFixture::new("cargo-web-api-rate-limit");
+    let archive_name = web_archive_name();
+    let archive =
+        web_release_archive("<!doctype html><title>A3S Web without release API discovery</title>");
+    let server = FakeReleaseServer::start_with_forbidden_api(
+        "CLI",
+        env!("CARGO_PKG_VERSION"),
+        &archive_name,
+        archive,
+    );
+
+    let output = fixture.start(Some(server.api_base()), false, false, 0);
+
+    assert_success(&output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let pid = output_value(&stdout, "Background PID:")
+        .parse::<u32>()
+        .expect("downloaded Web background PID");
+    let address = web_address(&stdout);
+    let mut guard = DaemonGuard::new(pid);
+    assert!(
+        http_get(&address, "/").contains("without release API discovery"),
+        "downloaded Web workspace was not served"
+    );
+    guard.stop();
+    wait_until_stopped(&address);
+
+    assert_eq!(
+        server.requests(),
+        expected_release_requests(&archive_name),
+        "Web setup must not query the rate-limited GitHub Releases API"
+    );
+}
+
+#[test]
 fn downloaded_web_assets_reject_a_mismatched_release_digest() {
     let fixture = CargoWebFixture::new("cargo-web-bad-digest");
     let archive_name = web_archive_name();
@@ -292,6 +328,7 @@ impl CargoWebFixture {
         }
         if let Some(api_base) = api_base {
             command.env("A3S_UPDATER_GITHUB_API_BASE", api_base);
+            command.env("A3S_UPDATER_GITHUB_RELEASE_BASE", api_base);
         }
         command
     }
@@ -313,7 +350,9 @@ impl CargoWebFixture {
             )
             .env_remove("A3S_CODE_WEB_DIR")
             .env_remove("A3S_NO_AUTO_INSTALL")
-            .env_remove("A3S_OFFLINE");
+            .env_remove("A3S_OFFLINE")
+            .env_remove("A3S_UPDATER_GITHUB_API_BASE")
+            .env_remove("A3S_UPDATER_GITHUB_RELEASE_BASE");
     }
 
     fn cached_index(&self) -> PathBuf {
@@ -329,12 +368,13 @@ fn web_archive_name() -> String {
 }
 
 fn expected_release_requests(archive_name: &str) -> [String; 2] {
+    let release_path = format!(
+        "/A3S-Lab/CLI/releases/download/v{}",
+        env!("CARGO_PKG_VERSION")
+    );
     [
-        format!(
-            "/repos/A3S-Lab/CLI/releases/tags/v{}",
-            env!("CARGO_PKG_VERSION")
-        ),
-        format!("/assets/{archive_name}"),
+        format!("{release_path}/{archive_name}.sha256"),
+        format!("{release_path}/{archive_name}"),
     ]
 }
 

@@ -203,216 +203,100 @@ pub(crate) enum LoopRuntimeMode {
     LocalAgentDev,
 }
 
-/// Build the transient maker/checker contract used by DeepResearch. Persistent
-/// `/loop` specs and transient research runs intentionally share the same loop
-/// engineering vocabulary; DeepResearch stores its live state in the research
-/// event journal instead of creating another user-managed loop directory.
+/// Build the transient coverage-driven Loop Engineering contract for
+/// DeepResearch.
+///
+/// This contract is durable workflow input, not a user-managed `.a3s/loops`
+/// directory. It describes one fixed semantic pipeline; the Rust Inquiry
+/// reducer remains the execution and terminal authority.
 pub(crate) fn deep_research_loop_contract(
     query: &str,
     current_date: &str,
     evidence_scope: &str,
-    max_parallel_tasks: usize,
-    max_child_steps: usize,
+    max_tracks: usize,
 ) -> serde_json::Value {
-    let track_schema = serde_json::json!({
+    let planner_track_schema = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "title": { "type": "string", "maxLength": 160 },
-            "focus": { "type": "string", "maxLength": 1200 }
-        },
-        "required": ["title", "focus"]
-    });
-    let plan_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "answer_shape": {
+            "id": {
                 "type": "string",
-                "enum": ["lookup", "briefing", "investigation"]
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
             },
-            "report_title": { "type": "string", "maxLength": 100 },
+            "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+            "material": { "type": "boolean" }
+        },
+        "required": ["id", "title", "material"]
+    });
+    let outline_schema = serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "report_title": { "type": "string", "minLength": 1, "maxLength": 160 },
             "freshness_required": { "type": "boolean" },
             "workspace_evidence_required": { "type": "boolean" },
-            "execution_route": {
-                "type": "string",
-                "enum": ["direct_only", "direct_then_review", "direct_then_maker", "maker_first"]
-            },
-            "phases": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 100 }
-            },
             "tracks": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": { "type": "string", "maxLength": 140 }
-            },
-            "search_queries": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 180 }
-            },
-            "seed_urls": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 500 }
-            },
-            "budget": {
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "retrieval_timeout_secs": { "type": "integer", "minimum": 30, "maximum": 150 },
-                    "synthesis_timeout_secs": { "type": "integer", "minimum": 120, "maximum": 180 },
-                    "max_iterations": { "type": "integer", "minimum": 1, "maximum": 4 },
-                    "max_parallel_tasks": { "type": "integer", "minimum": 1, "maximum": max_parallel_tasks.max(1) },
-                    "max_steps_per_task": { "type": "integer", "minimum": 1, "maximum": max_child_steps.clamp(1, 2) },
-                    "direct_searches": { "type": "integer", "minimum": 0, "maximum": 4 },
-                    "direct_fetches": { "type": "integer", "minimum": 0, "maximum": 8 }
-                },
-                "required": [
-                    "retrieval_timeout_secs", "synthesis_timeout_secs", "max_iterations",
-                    "max_parallel_tasks", "max_steps_per_task", "direct_searches",
-                    "direct_fetches"
-                ]
-            },
-            "stop_conditions": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 100 }
+                "maxItems": max_tracks.clamp(1, 4),
+                "items": planner_track_schema
             }
         },
         "required": [
-            "answer_shape", "report_title", "freshness_required",
-            "workspace_evidence_required", "execution_route", "phases", "tracks",
-            "search_queries", "seed_urls", "budget", "stop_conditions"
-        ]
-    });
-    let checker_assessment_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "plan_index": { "type": "integer", "minimum": 0, "maximum": 5 },
-            "status": {
-                "type": "string",
-                "enum": ["supported", "bounded", "uncovered"]
-            },
-            "finding": { "type": "string", "minLength": 1, "maxLength": 1600 },
-            "source_urls": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 2000 }
-            }
-        },
-        "required": ["plan_index", "status", "finding", "source_urls"]
-    });
-    let checker_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "decision": { "type": "string", "enum": ["finalize", "continue", "degrade"] },
-            "coverage_summary": { "type": "string", "maxLength": 2400 },
-            "report_summary": { "type": "string", "maxLength": 4800 },
-            "verified_findings": {
-                "type": "array",
-                "maxItems": 5,
-                "items": { "type": "string", "maxLength": 1600 }
-            },
-            "track_assessments": {
-                "type": "array",
-                "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": checker_assessment_schema.clone()
-            },
-            "stop_condition_assessments": {
-                "type": "array",
-                "maxItems": 3,
-                "items": checker_assessment_schema
-            },
-            "unresolved_gaps": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "limitations": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "contradictions": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "next_action": {
-                "type": "string",
-                "enum": ["none", "direct_retrieval", "maker"]
-            },
-            "search_queries": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 600 }
-            },
-            "seed_urls": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 2000 }
-            },
-            "next_tracks": {
-                "type": "array",
-                "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": track_schema
-            },
-            "reason": { "type": "string", "maxLength": 1600 }
-        },
-        "required": [
-            "decision", "coverage_summary", "report_summary", "verified_findings",
-            "track_assessments", "stop_condition_assessments", "unresolved_gaps",
-            "limitations", "next_action"
+            "report_title", "freshness_required", "workspace_evidence_required",
+            "tracks"
         ]
     });
     let planner_prompt = format!(
-        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Use the same language as the query for report_title, phases, tracks, and stop_conditions. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather all material evidence and one structured review can synthesize it across the planned tracks and check coverage; direct_then_maker when direct retrieval should seed sources but the planned tracks still require adaptive source reading or multi-step evidence collection before the independent checker; maker_first only when useful initial evidence requires workspace inspection, evidence production, or other work that direct retrieval cannot establish. A substantial public-source investigation with several independent evidence tracks normally needs direct_then_maker, while a narrow lookup normally needs direct_only, but make the decision from the requested work rather than labels or surface features. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question and give every consequential track a real chance to retrieve primary or authoritative evidence plus independent corroboration when available; generic comparison pages cannot substitute for official status, governance, or quantitative claims. For a comparison, cover both axes of the request: every consequential criterion and every explicitly requested alternative must have at least one targeted query or confident seed opportunity. Do not collapse all named alternatives into one broad comparison query when the available query budget can give them distinct discovery paths. Include seed URLs only when you confidently know a canonical, directly fetchable URL; otherwise use a targeted discovery query instead of guessing a page. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. `max_iterations` is the total number of evidence passes including initial collection, so reserve enough checked recovery passes for the source failures that are realistically likely in this plan. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; a timeout is a hard cancellation boundary, so budget enough time for a reasoning model to return the complete report rather than merely begin it. The execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
+        "Create only the semantic outline for one bounded DeepResearch inquiry. Do not research, solve, compare, or answer the query. The Host deterministically supplies questions, completion semantics, retrieval budgets, the original provider query, and universal stop conditions; no target-detail or retrieval-planner call follows.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nUse the query language for report_title and track titles. Set freshness_required only for current or time-bounded evidence. Set workspace_evidence_required=true for local-only scope or when the request explicitly depends on workspace artifacts and the scope permits them. Do not route by keywords, query length, named entities, fixed roles, task templates, or language.\n\nCreate one material track for each coherent evidence family whose absence would make the report misleading. Keep secondary requested dimensions as material=false when their absence can be disclosed, and keep at least one material track. Treat independently published projects, products, institutions, or artifacts as distinct targets. Return only a stable ASCII id, concise title, and material flag for each track.\n\nDo not return focus, questions, criteria, evidence requirements, stop conditions, queries, URLs, budget fields, facts, conclusions, or reasoning."
     );
 
     serde_json::json!({
-        "pattern": "adaptive-deep-research",
+        "version": 1,
+        "pattern": "minimal-deep-research",
         "goal": query,
-        "maker_role": "evidence-researcher",
-        "checker_role": "evidence-coverage-checker",
-        "planner": {
-            "agent": "loop-planner",
-            "description": "Plan research",
-            "max_steps": 1,
-            // v5.2.2 streams and repairs structured output inside this single
-            // call. Keep planning independent from retrieval while allowing
-            // reasoning models to finish the schema-valid plan they already
-            // started instead of cancelling them at the old workflow deadline.
-            "timeout_ms": 120000,
-            "prompt": planner_prompt,
-            "output_schema": plan_schema
+        "controller": "host_inquiry_reducer",
+        "quota": {
+            "mode": "unlimited"
         },
-        "checker": {
-            "agent": "loop-checker",
-            "description": "Check evidence",
-            "max_steps": 2,
-            // The schema uses a bounded provider-facing acceptance envelope;
-            // the host compacts accepted checker context again at the synthesis
-            // boundary. One repair remains available for structural defects
-            // rather than harmless prose-length drift.
-            // Checker calls are independent from planning, retrieval, maker,
-            // and report clocks. Slow reasoning providers can exceed 120s on
-            // evidence review even when the 300s workflow fuse has ample room.
-            "timeout_ms": 180000,
-            "output_schema": checker_schema
+        "execution": {
+            "mode": "coverage_driven",
+            "stages": [
+                "semantic_plan",
+                "initial_retrieval",
+                "semantic_chunk_selection",
+                "typed_coverage_evaluation",
+                "optional_supplemental_retrieval",
+                "final_closed_question_review",
+                "host_contract_reduction",
+                "sectioned_report_transaction"
+            ]
+        },
+        "cardinality": {
+            "semantic_iterations": 2,
+            "retrieval_passes": 2,
+            "semantic_selections": 2,
+            "question_reviews": 1,
+            "contract_assessments": 1,
+            "report_transactions": 1,
+            "section_revision_rounds": 2
+        },
+        "planner": {
+            "agent": "research-planner",
+            "description": "Optionally identify evidence-family targets while bootstrap acquisition runs",
+            "max_steps": 1,
+            "timeout_ms": 90000,
+            "prompt": planner_prompt,
+            "output_schema": outline_schema
         },
         "hard_caps": {
-            "max_iterations": 4,
-            "max_parallel_tasks": max_parallel_tasks.max(1),
-            "max_steps_per_task": max_child_steps.clamp(1, 2),
-            "retrieval_timeout_ms": 150000,
-            "synthesis_timeout_ms": 180000
+            "max_tracks": max_tracks.clamp(1, 4),
+            "max_searches": 4,
+            "max_fetches": 8,
+            "max_supplemental_fetches": 2,
+            "retrieval_timeout_ms": 150000
         }
     })
 }
@@ -873,144 +757,4 @@ pub(crate) fn find_loop(cwd: &str, name: &str) -> Result<LoopSpec, String> {
         .ok_or_else(|| format!("loop `{name}` not found"))
 }
 
-fn exists_nonempty(path: &Path) -> bool {
-    path.is_file()
-        && std::fs::metadata(path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-}
-
-pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
-    let mut score = 0u8;
-    let mut passed = Vec::new();
-    let mut missing = Vec::new();
-    let mut warnings = Vec::new();
-    let mut add = |points: u8, ok: bool, pass: &str, miss: &str| {
-        if ok {
-            score = score.saturating_add(points);
-            passed.push(pass.to_string());
-        } else {
-            missing.push(miss.to_string());
-        }
-    };
-    add(
-        10,
-        !spec.goal.trim().is_empty(),
-        "single clear goal",
-        "add a single-sentence goal",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(STATE_FILE)),
-        "durable STATE.md",
-        "create STATE.md",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(RUN_LOG_FILE)),
-        "append-only RUN_LOG.md",
-        "create RUN_LOG.md",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(BUDGET_FILE)) && spec.budget_tokens_per_day > 0,
-        "budget and kill-switch file",
-        "create budget.toml with daily caps",
-    );
-    add(
-        10,
-        !spec.denylist.is_empty(),
-        "denylist paths configured",
-        "add denylist paths for secrets/infra",
-    );
-    add(
-        15,
-        !spec.maker_agent.is_empty()
-            && !spec.checker_agent.is_empty()
-            && spec.maker_agent != spec.checker_agent,
-        "maker/checker split",
-        "configure separate maker_agent and checker_agent",
-    );
-    let agent_loop = spec.level == "A2";
-    let goal_loop = spec.level == "G1";
-    add(
-        10,
-        spec.worktree || agent_loop || goal_loop,
-        if agent_loop {
-            "agent asset scope requested"
-        } else if goal_loop {
-            "goal scope is guarded by the active session"
-        } else {
-            "worktree isolation requested"
-        },
-        if agent_loop {
-            "scope the loop to one agent definition"
-        } else {
-            "enable worktree isolation before L2"
-        },
-    );
-    add(
-        10,
-        if agent_loop || goal_loop {
-            !spec.os_runtime && !spec.connectors.iter().any(|c| c == "os-runtime")
-        } else {
-            spec.os_runtime && spec.connectors.iter().any(|c| c == "os-runtime")
-        },
-        if agent_loop {
-            "local agent loop runtime"
-        } else if goal_loop {
-            "local goal loop runtime"
-        } else {
-            "OS Runtime connector enabled"
-        },
-        if agent_loop {
-            "disable OS Runtime for local /agent loops"
-        } else {
-            "enable os_runtime/connectors=[\"os-runtime\"]"
-        },
-    );
-    let skill_pair = if goal_loop {
-        exists_nonempty(&spec.dir.join("skills").join("maker.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
-    } else {
-        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
-    };
-    add(
-        15,
-        skill_pair,
-        if goal_loop {
-            "maker and verifier skills"
-        } else {
-            "triage and verifier skills"
-        },
-        if goal_loop {
-            "add skills/maker.md and skills/verifier.md"
-        } else {
-            "add skills/triage.md and skills/verifier.md"
-        },
-    );
-    if spec.level == "L3" && score < 90 {
-        warnings.push("L3 requested but readiness is below unattended threshold".to_string());
-    }
-    if spec.level != "L1" && spec.level != "A2" && spec.level != "G1" && !spec.worktree {
-        warnings.push("acting loops should use worktree isolation".to_string());
-    }
-    let level = if score >= 90 {
-        "L3-ready"
-    } else if score >= 75 {
-        "L2-ready"
-    } else if score >= 50 {
-        "L1-ready"
-    } else {
-        "L0-draft"
-    }
-    .to_string();
-    LoopAudit {
-        score,
-        level,
-        passed,
-        missing,
-        warnings,
-    }
-}
+include!("audit.rs");

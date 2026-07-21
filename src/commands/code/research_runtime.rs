@@ -13,8 +13,8 @@ use crate::budget::{
 
 const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
-pub(crate) const DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS: u64 = 30_000;
-pub(crate) const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 3 * 60 * 1000;
+pub(crate) const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 =
+    crate::tui::DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
 const DEEP_RESEARCH_ABORT_SETTLE_MS: u64 = 250;
 
@@ -22,43 +22,45 @@ pub(crate) fn deep_research_default_budget() -> BudgetPlan {
     budget_plan_for_effort_index(DEFAULT_TUI_EFFORT_INDEX, None, BudgetWorkload::DeepResearch)
 }
 
-pub(crate) fn deep_research_workflow_args(query: &str, _os_runtime: bool) -> serde_json::Value {
-    crate::tui::deep_research_cli_workflow_args_for_budget(query, deep_research_default_budget())
-}
-
-pub(crate) fn deep_research_workflow_timeout_ms(args: &serde_json::Value) -> u64 {
-    args.pointer("/limits/timeoutMs")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|timeout_ms| *timeout_ms >= 1_000)
-        .unwrap_or(300_000)
-}
-
-pub(crate) fn deep_research_workflow_host_timeout_ms(args: &serde_json::Value) -> u64 {
-    deep_research_workflow_timeout_ms(args).saturating_add(DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DeepResearchRuntimeMode {
-    Auto,
-    Local,
-    Os,
+#[cfg(test)]
+pub(crate) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
+    crate::tui::deep_research_cli_workflow_args_for_budget(
+        query,
+        deep_research_default_budget(),
+        None,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeepResearchCliOptions {
     query: String,
-    runtime_mode: DeepResearchRuntimeMode,
+    evidence_scope: Option<crate::tui::DeepResearchEvidenceScope>,
 }
 
 fn parse_deepresearch_args(args: &[String]) -> anyhow::Result<DeepResearchCliOptions> {
-    let mut runtime_mode = DeepResearchRuntimeMode::Auto;
+    let mut evidence_scope = None;
     let mut query_parts = Vec::new();
     for arg in args {
         match arg.as_str() {
-            "--local" => runtime_mode = DeepResearchRuntimeMode::Local,
-            "--os" => runtime_mode = DeepResearchRuntimeMode::Os,
+            "--local" | "--os" => {
+                anyhow::bail!(
+                    "DeepResearch runtime selection has been removed; use --web or --local-only to choose the evidence scope"
+                )
+            }
+            "--local-only" | "--offline" => {
+                if evidence_scope == Some(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace) {
+                    anyhow::bail!("--local-only conflicts with --web");
+                }
+                evidence_scope = Some(crate::tui::DeepResearchEvidenceScope::LocalOnly);
+            }
+            "--web" => {
+                if evidence_scope == Some(crate::tui::DeepResearchEvidenceScope::LocalOnly) {
+                    anyhow::bail!("--web conflicts with --local-only");
+                }
+                evidence_scope = Some(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace);
+            }
             "-h" | "--help" | "help" => {
-                anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+                anyhow::bail!("usage: a3s code deepresearch [--local-only|--web] <query>");
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown a3s code deepresearch option `{value}`")
@@ -68,11 +70,11 @@ fn parse_deepresearch_args(args: &[String]) -> anyhow::Result<DeepResearchCliOpt
     }
     let query = query_parts.join(" ").trim().to_string();
     if query.is_empty() {
-        anyhow::bail!("usage: a3s code deepresearch [--local|--os] <query>");
+        anyhow::bail!("usage: a3s code deepresearch [--local-only|--web] <query>");
     }
     Ok(DeepResearchCliOptions {
         query,
-        runtime_mode,
+        evidence_scope,
     })
 }
 
@@ -83,42 +85,68 @@ pub(crate) async fn execute_deepresearch_in(
     memory_dir: PathBuf,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     let opts = parse_deepresearch_args(args)?;
-    if opts.runtime_mode == DeepResearchRuntimeMode::Os {
-        anyhow::bail!(
-            "--os is temporarily disabled for DeepResearch; OS Runtime support should use Function-as-a-Service instead of remote tool-call fan-out"
-        );
-    }
     let workspace_text = workspace.to_string_lossy().to_string();
     let (session, report_tool_gate) =
         build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
-    let os_runtime = match opts.runtime_mode {
-        DeepResearchRuntimeMode::Local => false,
-        DeepResearchRuntimeMode::Os => false,
-        DeepResearchRuntimeMode::Auto => false,
-    };
-
-    eprintln!(
-        "deepresearch: gathering evidence via {} workflow…",
-        if os_runtime { "OS Runtime" } else { "local" }
+    eprintln!("deepresearch: gathering evidence via the host-managed workflow…");
+    let mut workflow_args = crate::tui::deep_research_cli_workflow_args_for_budget(
+        &opts.query,
+        deep_research_default_budget(),
+        opts.evidence_scope,
     );
-    let workflow_args = deep_research_workflow_args(&opts.query, os_runtime);
-    let workflow = run_deepresearch_workflow(&session, workflow_args.clone()).await;
+    let run_id = crate::tui::ensure_deep_research_workflow_run_id(&mut workflow_args)
+        .ok_or_else(|| anyhow::anyhow!("failed to assign a DeepResearch workflow run ID"))?;
+    let workflow = run_deepresearch_inquiry(Arc::clone(&session), workflow_args.clone()).await;
+    let workflow_succeeded = workflow.as_ref().is_ok_and(|result| result.exit_code == 0);
     let (workflow_output, exit_code, metadata) = match workflow {
         Ok(result) => (result.output, result.exit_code, result.metadata),
         Err(error) => (error, 1, None),
     };
 
-    synthesize_deepresearch_report(
+    let mut synthesis = synthesize_deepresearch_report(
         &session,
         workspace,
         &opts.query,
-        os_runtime,
         &workflow_output,
         exit_code,
         metadata.as_ref(),
+        &run_id,
         &report_tool_gate,
     )
+    .await?;
+    let requested_outcome = match synthesis.status {
+        DeepResearchReportStatus::Completed => crate::tui::ResearchOutcome::Completed,
+        DeepResearchReportStatus::Qualified => crate::tui::ResearchOutcome::Qualified,
+        DeepResearchReportStatus::Degraded => crate::tui::ResearchOutcome::Degraded,
+    };
+    let journal_artifacts = crate::tui::ResearchReportArtifacts {
+        markdown: synthesis.artifacts.markdown.clone(),
+        html: synthesis.artifacts.html.clone(),
+    };
+    let settled_outcome = crate::tui::settle_deep_research_cli_run(
+        workspace,
+        &run_id,
+        workflow_succeeded,
+        &workflow_output,
+        metadata.as_ref(),
+        requested_outcome,
+        &journal_artifacts,
+    )
     .await
+    .map_err(anyhow::Error::msg)?;
+    synthesis.status = match settled_outcome {
+        crate::tui::ResearchOutcome::Completed => DeepResearchReportStatus::Completed,
+        crate::tui::ResearchOutcome::Qualified => DeepResearchReportStatus::Qualified,
+        crate::tui::ResearchOutcome::Degraded | crate::tui::ResearchOutcome::Failed => {
+            DeepResearchReportStatus::Degraded
+        }
+        crate::tui::ResearchOutcome::Active => {
+            return Err(anyhow::anyhow!(
+                "DeepResearch CLI journal remained active after terminal settlement"
+            ));
+        }
+    };
+    Ok(synthesis)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,38 +189,56 @@ async fn synthesize_deepresearch_report(
     session: &AgentSession,
     workspace: &Path,
     query: &str,
-    _os_runtime: bool,
     workflow_output: &str,
     exit_code: i32,
     metadata: Option<&serde_json::Value>,
+    run_id: &str,
     report_tool_gate: &DeepResearchReportToolGate,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     eprintln!("deepresearch: synthesizing report artifacts…");
-    let report_plan = crate::tui::deep_research_cli_report_plan(query, workflow_output, metadata);
-    let (prompt, qualified) = match report_plan {
-        Ok(plan) => plan,
-        Err(reason) => {
-            report_tool_gate.set_report_only(false);
-            let reason = format!("report plan rejected: {reason}");
-            eprintln!("deepresearch: {reason}");
-            return materialize_deepresearch_cli_recovery(
-                workspace,
-                query,
-                &reason,
-                workflow_output,
-                metadata,
-            );
-        }
-    };
+    let qualified =
+        match crate::tui::deep_research_cli_report_is_qualified(query, workflow_output, metadata) {
+            Ok(qualified) => qualified,
+            Err(reason) => {
+                report_tool_gate.set_report_only(false);
+                let reason = format!("report plan rejected: {reason}");
+                eprintln!("deepresearch: {reason}");
+                return materialize_deepresearch_cli_recovery(
+                    workspace,
+                    query,
+                    &reason,
+                    workflow_output,
+                    metadata,
+                );
+            }
+        };
+    if !crate::tui::deep_research_cli_sectioned_report_available(workflow_output, metadata) {
+        report_tool_gate.set_report_only(false);
+        let reason =
+            "report plan rejected: current DeepResearch output has no reportable Outlining Inquiry";
+        eprintln!("deepresearch: {reason}");
+        return materialize_deepresearch_cli_recovery(
+            workspace,
+            query,
+            reason,
+            workflow_output,
+            metadata,
+        );
+    }
 
     report_tool_gate.set_report_only(true);
-    let args = crate::tui::deep_research_cli_report_generation_args(
-        &prompt,
-        DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
-    );
+    let mut completed_workflow_output = workflow_output.to_string();
+    let mut completed_metadata = metadata.cloned();
     let generated = match tokio::time::timeout(
         std::time::Duration::from_millis(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS),
-        session.tool("generate_object", args),
+        crate::tui::complete_deep_research_cli_sectioned_report(
+            session,
+            query,
+            &mut completed_workflow_output,
+            &mut completed_metadata,
+            run_id,
+            DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
+        ),
     )
     .await
     {
@@ -201,10 +247,10 @@ async fn synthesize_deepresearch_report(
             query,
             &result.output,
             result.exit_code,
-            workflow_output,
-            metadata,
+            &completed_workflow_output,
+            completed_metadata.as_ref(),
         ),
-        Ok(Err(error)) => Err(format!("structured report generation failed: {error}")),
+        Ok(Err(error)) => Err(format!("sectioned report generation failed: {error}")),
         Err(_) => {
             let _ = session
                 .cancel_and_settle(
@@ -213,7 +259,7 @@ async fn synthesize_deepresearch_report(
                 )
                 .await;
             Err(format!(
-                "structured report generation timed out after {DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS} ms"
+                "sectioned report generation timed out after {DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS} ms"
             ))
         }
     };
@@ -235,8 +281,8 @@ async fn synthesize_deepresearch_report(
                 workspace,
                 query,
                 &reason,
-                workflow_output,
-                metadata,
+                &completed_workflow_output,
+                completed_metadata.as_ref(),
             )
         }
     }
@@ -283,10 +329,6 @@ fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::Permissio
             "ls(*)",
             "web_search(*)",
             "web_fetch(*)",
-            "Write(.a3s/research/**)",
-            "Edit(.a3s/research/**)",
-            "write(.a3s/research/**)",
-            "edit(.a3s/research/**)",
         ]);
     policy.default_decision = a3s_code_core::permissions::PermissionDecision::Deny;
     policy
@@ -314,60 +356,46 @@ impl a3s_code_core::permissions::PermissionChecker for DeepResearchPermissionChe
 
 pub(crate) fn deep_research_report_phase_tool_permission(
     tool_name: &str,
-    args: &serde_json::Value,
+    _args: &serde_json::Value,
 ) -> a3s_code_core::permissions::PermissionDecision {
     match tool_name.to_ascii_lowercase().as_str() {
         "generate_object" => a3s_code_core::permissions::PermissionDecision::Allow,
-        "write" | "edit" if report_artifact_write_args(args) => {
-            a3s_code_core::permissions::PermissionDecision::Allow
-        }
-        "read" | "ls" | "glob" | "grep" if report_artifact_read_args(args) => {
-            a3s_code_core::permissions::PermissionDecision::Allow
-        }
         _ => a3s_code_core::permissions::PermissionDecision::Deny,
     }
-}
-
-fn report_artifact_write_args(args: &serde_json::Value) -> bool {
-    ["file_path", "path"]
-        .iter()
-        .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
-        .any(is_report_artifact_path)
-}
-
-fn report_artifact_read_args(args: &serde_json::Value) -> bool {
-    [
-        "file_path",
-        "path",
-        "dir",
-        "directory",
-        "root",
-        "pattern",
-        "glob",
-        "include",
-    ]
-    .iter()
-    .filter_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
-    .any(is_report_artifact_path)
-}
-
-fn is_report_artifact_path(path: &str) -> bool {
-    let normalized = path.replace('\\', "/");
-    normalized.starts_with(".a3s/research/") || normalized.contains("/.a3s/research/")
 }
 
 async fn build_deepresearch_session(
     workspace: &str,
     code_config: CodeConfig,
     memory_dir: PathBuf,
-) -> anyhow::Result<(AgentSession, DeepResearchReportToolGate)> {
-    let agent = Agent::from_config(code_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to load DeepResearch agent: {e}"))?;
-    let budget = deep_research_default_budget();
+) -> anyhow::Result<(Arc<AgentSession>, DeepResearchReportToolGate)> {
+    build_deepresearch_session_with_resolver(
+        workspace,
+        code_config,
+        memory_dir,
+        crate::session_llm::resolve_session_llm_client,
+    )
+    .await
+}
+
+async fn build_deepresearch_session_with_resolver<F>(
+    workspace: &str,
+    code_config: CodeConfig,
+    memory_dir: PathBuf,
+    resolve_llm_client: F,
+) -> anyhow::Result<(Arc<AgentSession>, DeepResearchReportToolGate)>
+where
+    F: FnOnce(
+        &CodeConfig,
+        &SessionOptions,
+        &str,
+    ) -> Result<Arc<dyn a3s_code_core::llm::LlmClient>, String>,
+{
     let permission_policy = deepresearch_cli_permission_policy();
     let report_tool_gate = DeepResearchReportToolGate::default();
+    let session_id = deep_research_execution_id();
     let opts = SessionOptions::new()
+        .with_session_id(&session_id)
         .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
         .with_permission_policy(permission_policy.clone())
         .with_permission_checker(Arc::new(DeepResearchPermissionChecker {
@@ -377,25 +405,41 @@ async fn build_deepresearch_session(
         .with_tool_timeout(RESEARCH_TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD)
         .with_file_memory(memory_dir)
-        .with_max_parallel_tasks(budget.max_parallel_tasks)
-        .with_max_tool_rounds(budget.max_tool_rounds)
-        .with_max_continuation_turns(budget.max_continuation_turns)
-        .with_auto_delegation_enabled(true)
-        .with_auto_parallel_delegation(true)
+        // DeepResearch invokes only host-owned tools. Keep one manual `task`
+        // slot for the optional local-workspace retrieval step; never expose
+        // automatic delegation, parallel fan-out, or parent continuations.
+        .with_continuation(false)
+        .with_max_parallel_tasks(1)
+        .with_auto_delegation_enabled(false)
+        .with_auto_parallel_delegation(false)
         .with_manual_delegation_enabled(true);
+    let llm_client = resolve_llm_client(&code_config, &opts, &session_id)
+        .map_err(|error| anyhow::anyhow!("failed to resolve DeepResearch model: {error}"))?;
+    let opts = opts.with_llm_client(llm_client);
+    let agent = Agent::from_config(code_config)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to load DeepResearch agent: {e}"))?;
     let session = agent
         .session_async(workspace.to_string(), Some(opts))
         .await?;
     session.register_dynamic_workflow_runtime()?;
-    Ok((session, report_tool_gate))
+    Ok((Arc::new(session), report_tool_gate))
 }
 
-async fn run_deepresearch_workflow(
-    session: &AgentSession,
+fn deep_research_execution_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!("research-{nanos:016x}-{:x}", std::process::id())
+}
+
+async fn run_deepresearch_inquiry(
+    session: Arc<AgentSession>,
     args: serde_json::Value,
 ) -> Result<ToolCallResult, String> {
-    let timeout_ms = deep_research_workflow_host_timeout_ms(&args);
-    let (mut progress_rx, workflow_join) = session.tool_with_events("dynamic_workflow", args);
+    let timeout_ms = crate::tui::DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
+    let (mut progress_rx, workflow_join) = crate::tui::spawn_deep_research_inquiry(session, args);
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
     let result = match tokio::time::timeout(
@@ -409,7 +453,7 @@ async fn run_deepresearch_workflow(
         Err(_) => {
             workflow_abort.abort();
             Err(format!(
-                "dynamic_workflow timed out after {timeout_ms} ms while gathering DeepResearch evidence"
+                "DeepResearch inquiry timed out after {timeout_ms} ms while gathering and reviewing evidence"
             ))
         }
     };
@@ -445,6 +489,12 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for ScriptedLlmClient {
+        fn model_generation_concurrency(&self) -> a3s_code_core::llm::ModelGenerationConcurrency {
+            a3s_code_core::llm::ModelGenerationConcurrency::bounded(
+                std::num::NonZeroUsize::new(1).expect("scripted test concurrency is non-zero"),
+            )
+        }
+
         async fn complete(
             &self,
             messages: &[Message],
@@ -485,53 +535,10 @@ mod tests {
 
         fn response_for_messages(
             &self,
-            messages: &[Message],
-            system: Option<&str>,
-            tools: &[ToolDefinition],
+            _messages: &[Message],
+            _system: Option<&str>,
+            _tools: &[ToolDefinition],
         ) -> LlmResponse {
-            if tools.iter().any(|tool| tool.name == "emit_step_output") {
-                return tool_call_response(
-                    "toolu_emit_step_output",
-                    "emit_step_output",
-                    serde_json::json!({
-                        "summary": "Structured DeepResearch track evidence confirms local fan-out completed before synthesis.",
-                        "sources": [{
-                            "title": "Example research source",
-                            "url_or_path": "https://example.com/research",
-                            "date": "2026-07-08",
-                            "quote_or_fact": "Local DeepResearch fan-out completed before synthesis.",
-                            "reliability": "deterministic test evidence"
-                        }],
-                        "key_evidence": [
-                            "Local parallel_task fan-out produced deterministic evidence."
-                        ],
-                        "contradictions": [],
-                        "confidence": "high for deterministic test evidence",
-                        "gaps": []
-                    }),
-                );
-            }
-            let last = message_text(messages.last());
-            if system.is_some_and(|system| system.contains("pre-analysis assistant"))
-                || last.contains("ONLY the JSON object")
-            {
-                return text_response(
-                    r#"{"intent":"GeneralPurpose","requires_planning":false,"goal":{"description":"DeepResearch child task","success_criteria":["evidence returned"]},"execution_plan":{"complexity":"Simple","steps":[],"required_tools":[]},"optimized_input":"DeepResearch child task"}"#,
-                );
-            }
-            let trimmed = last.trim_start();
-            let lower = trimmed.to_ascii_lowercase();
-            if lower.contains("deep-research evidence track for:")
-                && !lower.contains("dynamicworkflowruntime output:")
-                && !lower.contains("dynamicworkflowruntime metadata:")
-                && !lower.contains("complete only the missing report work")
-                && !last.contains("DeepResearch verification layer")
-            {
-                return text_response(
-                    "Track evidence: https://example.com/research confirms the local \
-                     DeepResearch fan-out completed before synthesis.",
-                );
-            }
             self.next_response()
         }
 
@@ -542,22 +549,6 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| text_response("DONE"))
         }
-    }
-
-    fn message_text(message: Option<&Message>) -> String {
-        message
-            .map(|message| {
-                message
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
     }
 
     fn text_response(text: impl Into<String>) -> LlmResponse {

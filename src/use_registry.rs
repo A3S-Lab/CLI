@@ -4,7 +4,7 @@
 //! JSON CLI contract. A3S Code core remains unaware of Use package management,
 //! while long-running TUI sessions still observe MCP and Skill hot-plug events.
 
-use a3s_code_core::mcp::{McpServerConfig, McpTransportConfig};
+use a3s_code_core::mcp::{McpServerConfig, McpServerStatus, McpTransportConfig};
 #[cfg(test)]
 use a3s_code_core::permissions::PermissionChecker;
 use a3s_code_core::permissions::{PermissionDecision, PermissionPolicy};
@@ -37,16 +37,17 @@ const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_JSON_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_ACTIVITY_HTML_BYTES: u64 = 2 * 1024 * 1024;
 // Browser installation has a bounded 15-minute HTTP timeout, while Office
 // and OCR installations are bounded at five minutes. Keep the host request
 // alive slightly longer than the longest supported Use operation so the
 // provider can return its typed outcome instead of a misleading MCP timeout.
 const MCP_REQUEST_TIMEOUT_SECS: u64 = 15 * 60 + 30;
+const COMMAND_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
 
 // Built-in application operations run inside the dedicated Use boundary.
-// Provider installation is intentionally absent: the three install tools and
-// any newly hot-plugged extension tool remain Ask decisions and inherit the
-// parent TUI confirmation path.
+// Provider installation is intentionally absent: install tools and newly
+// hot-plugged extension tools remain Ask decisions inherited from the parent.
 const UNCONFIRMED_USE_MCP_TOOLS: &[&str] = &[
     "mcp__use_browser__agent_browser_tools_profiles",
     "mcp__use_browser__agent_browser_open",
@@ -93,6 +94,47 @@ const UNCONFIRMED_USE_MCP_TOOLS: &[&str] = &[
     "mcp__use_ocr__ocr_doctor",
     "mcp__use_ocr__ocr_extract",
 ];
+
+fn configure_registry_process_group(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+struct RegistryProcessGroup {
+    #[cfg(unix)]
+    process_group: Option<libc::pid_t>,
+}
+
+impl RegistryProcessGroup {
+    fn attach(child: &tokio::process::Child) -> Self {
+        Self {
+            #[cfg(unix)]
+            process_group: child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
+        }
+    }
+
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        if let Some(process_group) = self.process_group.take() {
+            // SAFETY: the registry CLI was spawned as the leader of this
+            // process group. A negative pid targets it and all descendants.
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for RegistryProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
 
 fn ready_capability_ids(desired: &DesiredCapabilities) -> Vec<String> {
     desired
@@ -179,12 +221,16 @@ struct CapabilityBinding {
     origin: CapabilityOrigin,
     enabled: bool,
     #[serde(default)]
+    readiness: CapabilityReadiness,
+    #[serde(default)]
     package_root: PathBuf,
     surfaces: Vec<String>,
     #[serde(default)]
     mcp: Option<ProjectedMcpSurface>,
     #[serde(default)]
     skills: Vec<ProjectedSkillSurface>,
+    #[serde(default)]
+    activity_bar: Vec<ProjectedActivityBarContribution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +238,27 @@ struct CapabilityBinding {
 enum CapabilityOrigin {
     BuiltIn,
     Extension,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CapabilityReadiness {
+    Ready,
+    Missing,
+    Broken,
+    #[default]
+    Unknown,
+}
+
+impl CapabilityReadiness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Missing => "missing",
+            Self::Broken => "broken",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +280,27 @@ struct ProjectedSkillSurface {
     path: PathBuf,
     #[serde(default)]
     sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedManagedAsset {
+    path: PathBuf,
+    sha256: String,
+    media_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectedActivityBarContribution {
+    id: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    icon: String,
+    entry: ProjectedManagedAsset,
+    skill: String,
+    order: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -243,12 +331,59 @@ struct DesiredSkill {
     skill: Arc<Skill>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityCatalogItem {
+    pub(crate) key: String,
+    pub(crate) package_id: String,
+    pub(crate) route: String,
+    pub(crate) version: String,
+    pub(crate) enabled: bool,
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) description: String,
+    pub(crate) icon: String,
+    pub(crate) skill: String,
+    pub(crate) order: i32,
+    pub(crate) sha256: String,
+    pub(crate) media_type: String,
+}
+
+#[derive(Clone)]
+struct DesiredActivity {
+    catalog: UseActivityCatalogItem,
+    html: Arc<str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityCatalog {
+    pub(crate) schema_version: u32,
+    pub(crate) generation: u64,
+    pub(crate) revision: String,
+    pub(crate) items: Vec<UseActivityCatalogItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UseActivityContent {
+    pub(crate) key: String,
+    pub(crate) package_id: String,
+    pub(crate) skill: String,
+    pub(crate) registry_revision: String,
+    pub(crate) sha256: String,
+    pub(crate) media_type: String,
+    pub(crate) html: String,
+}
+
 #[derive(Clone, Default)]
 struct DesiredCapabilities {
     generation: u64,
     revision: String,
+    packages: BTreeMap<String, bool>,
     mcp: BTreeMap<String, DesiredMcp>,
     skills: BTreeMap<String, DesiredSkill>,
+    activities: BTreeMap<String, DesiredActivity>,
     warnings: Vec<String>,
 }
 
@@ -351,11 +486,7 @@ impl UseRegistryClient {
             revision: snapshot.revision.clone(),
             ..DesiredCapabilities::default()
         };
-        for binding in snapshot
-            .capabilities
-            .iter()
-            .filter(|binding| binding.enabled)
-        {
+        for binding in &snapshot.capabilities {
             self.add_projected_capabilities(&mut desired, binding)
                 .await?;
         }
@@ -378,33 +509,43 @@ impl UseRegistryClient {
         desired: &mut DesiredCapabilities,
         binding: &CapabilityBinding,
     ) -> anyhow::Result<()> {
-        if let Some(mcp) = &binding.mcp {
-            match mcp.transport {
-                ProjectedMcpTransport::Stdio => {
-                    let server_name = format!("use_{}", binding.route);
-                    let fingerprint = mcp_fingerprint(binding, mcp)?;
-                    let replaced = desired.mcp.insert(
-                        server_name.clone(),
-                        DesiredMcp {
-                            server_name: server_name.clone(),
-                            capability_id: binding.id.clone(),
-                            target: mcp.target.clone(),
-                            fingerprint,
-                        },
-                    );
-                    if replaced.is_some() {
-                        bail!("duplicate A3S Use MCP server name '{server_name}'");
+        if desired
+            .packages
+            .insert(binding.id.clone(), binding.enabled)
+            .is_some()
+        {
+            bail!("duplicate A3S Use package identity '{}'", binding.id);
+        }
+        if binding.enabled {
+            if let Some(mcp) = &binding.mcp {
+                match mcp.transport {
+                    ProjectedMcpTransport::Stdio => {
+                        let server_name = format!("use_{}", binding.route);
+                        let fingerprint = mcp_fingerprint(binding, mcp)?;
+                        let replaced = desired.mcp.insert(
+                            server_name.clone(),
+                            DesiredMcp {
+                                server_name: server_name.clone(),
+                                capability_id: binding.id.clone(),
+                                target: mcp.target.clone(),
+                                fingerprint,
+                            },
+                        );
+                        if replaced.is_some() {
+                            bail!("duplicate A3S Use MCP server name '{server_name}'");
+                        }
                     }
-                }
-                ProjectedMcpTransport::StreamableHttp => {
-                    desired.warnings.push(format!(
+                    ProjectedMcpTransport::StreamableHttp => {
+                        desired.warnings.push(format!(
                         "A3S Use capability '{}' declares streamable-http MCP without an attachable endpoint; its MCP surface was skipped",
                         binding.id
                     ));
+                    }
                 }
             }
         }
 
+        let mut binding_skill_names = BTreeSet::new();
         for skill_surface in &binding.skills {
             let expected_sha256 =
                 (!skill_surface.sha256.is_empty()).then_some(skill_surface.sha256.as_str());
@@ -412,6 +553,10 @@ impl UseRegistryClient {
                 load_managed_skill(&binding.package_root, &skill_surface.path, expected_sha256)
                     .await?;
             let name = skill.name.clone();
+            binding_skill_names.insert(name.clone());
+            if !binding.enabled {
+                continue;
+            }
             let fingerprint = skill_fingerprint(binding, skill_surface)?;
             let candidate = DesiredSkill {
                 package_id: binding.id.clone(),
@@ -425,6 +570,51 @@ impl UseRegistryClient {
                     binding.id,
                     name
                 );
+            }
+        }
+
+        for activity in &binding.activity_bar {
+            if !binding_skill_names.contains(&activity.skill) {
+                bail!(
+                    "A3S Use Activity Bar contribution '{}:{}' references missing same-package Skill '{}'",
+                    binding.route,
+                    activity.id,
+                    activity.skill
+                );
+            }
+            let html = validation::load_managed_activity(
+                &binding.package_root,
+                &activity.entry.path,
+                &activity.entry.sha256,
+                &activity.entry.media_type,
+                MAX_ACTIVITY_HTML_BYTES,
+            )
+            .await?;
+            let key = format!("{}:{}", binding.route, activity.id);
+            let desired_activity = DesiredActivity {
+                catalog: UseActivityCatalogItem {
+                    key: key.clone(),
+                    package_id: binding.id.clone(),
+                    route: binding.route.clone(),
+                    version: binding.version.clone(),
+                    enabled: binding.enabled,
+                    id: activity.id.clone(),
+                    title: activity.title.clone(),
+                    description: activity.description.clone(),
+                    icon: activity.icon.clone(),
+                    skill: activity.skill.clone(),
+                    order: activity.order,
+                    sha256: activity.entry.sha256.clone(),
+                    media_type: activity.entry.media_type.clone(),
+                },
+                html,
+            };
+            if desired
+                .activities
+                .insert(key.clone(), desired_activity)
+                .is_some()
+            {
+                bail!("duplicate A3S Use Activity Bar key '{key}'");
             }
         }
         Ok(())
@@ -441,9 +631,11 @@ impl UseRegistryClient {
             .stderr(Stdio::piped())
             .current_dir(&self.directory)
             .kill_on_drop(true);
+        configure_registry_process_group(&mut command);
         let mut child = command
             .spawn()
             .with_context(|| format!("failed to run {}", self.executable.display()))?;
+        let mut process_group = RegistryProcessGroup::attach(&child);
         let stdout = child
             .stdout
             .take()
@@ -452,27 +644,58 @@ impl UseRegistryClient {
             .stderr
             .take()
             .context("A3S Use registry command did not expose stderr")?;
-        let collect = async move {
+        let mut collect = Box::pin(async {
+            let wait = async {
+                let status = child.wait().await;
+                // Registry commands own no background services. Closing the
+                // group here also releases pipes inherited by helpers.
+                process_group.terminate();
+                status
+            };
             let (status, stdout, stderr) = tokio::try_join!(
-                child.wait(),
+                wait,
                 read_limited(stdout, MAX_JSON_OUTPUT_BYTES),
                 read_limited(stderr, MAX_STDERR_OUTPUT_BYTES),
             )?;
             Ok::<_, std::io::Error>((status, stdout, stderr))
-        };
-        let wait = tokio::time::timeout(timeout, collect);
-        let (status, stdout, stderr) = tokio::select! {
-            _ = self.cancellation.cancelled() => {
-                bail!("A3S Use registry command cancelled")
-            }
-            result = wait => result,
+        });
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        enum Outcome<T> {
+            Complete(std::io::Result<T>),
+            Cancelled,
+            TimedOut,
         }
-        .with_context(|| {
-            format!(
-                "A3S Use registry command timed out after {} ms",
-                timeout.as_millis()
-            )
-        })??;
+        let outcome = tokio::select! {
+            _ = self.cancellation.cancelled() => Outcome::Cancelled,
+            _ = &mut deadline => Outcome::TimedOut,
+            result = &mut collect => Outcome::Complete(result),
+        };
+        drop(collect);
+        let (status, stdout, stderr) = match outcome {
+            Outcome::Complete(Ok(output)) => output,
+            Outcome::Complete(Err(error)) => {
+                process_group.terminate();
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(COMMAND_SETTLEMENT_TIMEOUT, child.wait()).await;
+                return Err(error).context("failed to collect A3S Use registry output");
+            }
+            Outcome::Cancelled => {
+                process_group.terminate();
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(COMMAND_SETTLEMENT_TIMEOUT, child.wait()).await;
+                bail!("A3S Use registry command cancelled");
+            }
+            Outcome::TimedOut => {
+                process_group.terminate();
+                let _ = child.start_kill();
+                let _ = tokio::time::timeout(COMMAND_SETTLEMENT_TIMEOUT, child.wait()).await;
+                bail!(
+                    "A3S Use registry command timed out after {} ms",
+                    timeout.as_millis()
+                );
+            }
+        };
 
         if stdout.exceeded {
             bail!("A3S Use registry response exceeded the JSON size limit");
@@ -578,10 +801,419 @@ struct SessionProjection {
 
 struct UseRegistryInner {
     executable: PathBuf,
+    directory: PathBuf,
     desired_tx: watch::Sender<Arc<DesiredCapabilities>>,
     cancellation: CancellationToken,
     projections: Mutex<BTreeMap<String, SessionProjection>>,
     registry_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UseVersionData {
+    version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UseDoctorData {
+    diagnostics: Vec<UseDomainDiagnostic>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UseDomainDiagnostic {
+    domain: String,
+    readiness: CapabilityReadiness,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
+    #[serde(default)]
+    path: Option<PathBuf>,
+    message: String,
+}
+
+struct UseStatusInput<'a> {
+    executable: &'a Path,
+    version: anyhow::Result<UseVersionData>,
+    snapshot: anyhow::Result<RegistrySnapshot>,
+    doctor: anyhow::Result<UseDoctorData>,
+    ocr_diagnostic: Option<anyhow::Result<serde_json::Value>>,
+    desired: &'a DesiredCapabilities,
+    mcp_status: &'a HashMap<String, McpServerStatus>,
+    loaded_skills: &'a [String],
+    include_repair_guidance: bool,
+}
+
+fn render_status(input: UseStatusInput<'_>) -> String {
+    let UseStatusInput {
+        executable,
+        version,
+        snapshot,
+        doctor,
+        ocr_diagnostic,
+        desired,
+        mcp_status,
+        loaded_skills,
+        include_repair_guidance,
+    } = input;
+    let mut lines = vec!["A3S Use status".to_string()];
+    match version {
+        Ok(version) => lines.push(format!(
+            "  binary  {} ({})",
+            version.version,
+            executable.display()
+        )),
+        Err(error) => lines.push(format!(
+            "  binary  found at {}, but version probing failed: {}",
+            executable.display(),
+            status_excerpt(&error.to_string())
+        )),
+    }
+
+    let doctor = match doctor {
+        Ok(doctor) => {
+            lines.push(format!(
+                "  doctor  {} built-in diagnostic(s) returned",
+                doctor.diagnostics.len()
+            ));
+            Some(doctor)
+        }
+        Err(error) => {
+            lines.push(format!(
+                "  doctor  failed: {}",
+                status_excerpt(&error.to_string())
+            ));
+            None
+        }
+    };
+
+    let snapshot = match snapshot {
+        Ok(snapshot) => {
+            let watcher = if desired.revision == snapshot.revision
+                && desired.generation == snapshot.generation
+            {
+                "converged"
+            } else {
+                "converging"
+            };
+            lines.push(format!(
+                "  registry generation {} · {} · revision {}",
+                snapshot.generation,
+                watcher,
+                short_revision(&snapshot.revision)
+            ));
+            Some(snapshot)
+        }
+        Err(error) => {
+            lines.push(format!(
+                "  registry failed: {}",
+                status_excerpt(&error.to_string())
+            ));
+            lines.push(format!(
+                "  projection currently retains {} MCP route(s) and {} verified Skill(s)",
+                desired.mcp.len(),
+                desired.skills.len()
+            ));
+            None
+        }
+    };
+
+    let loaded_skills = loaded_skills
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let ocr_value = ocr_diagnostic
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    if let Some(snapshot) = snapshot.as_ref() {
+        lines.push("  capabilities".to_string());
+        for capability in &snapshot.capabilities {
+            lines.extend(render_capability(
+                capability,
+                doctor.as_ref(),
+                ocr_value,
+                desired,
+                mcp_status,
+                &loaded_skills,
+            ));
+        }
+        if !snapshot.capabilities.iter().any(is_ocr_capability) {
+            lines.push(
+                "    - use/ocr  unavailable · installed Use release has no built-in OCR surface"
+                    .to_string(),
+            );
+            lines.push(
+                "      MCP unavailable · Skill unavailable · run /use repair for update guidance"
+                    .to_string(),
+            );
+        }
+    }
+
+    if !desired.warnings.is_empty() {
+        lines.push("  projection warnings".to_string());
+        for warning in desired.warnings.iter().take(4) {
+            lines.push(format!("    - {}", status_excerpt(warning)));
+        }
+    }
+    if let Some(Err(error)) = ocr_diagnostic.as_ref() {
+        lines.push(format!(
+            "  OCR doctor failed: {}",
+            status_excerpt(&error.to_string())
+        ));
+    }
+
+    if include_repair_guidance {
+        append_repair_guidance(&mut lines, snapshot.as_ref(), ocr_value);
+    } else {
+        lines.push("  Run /use repair for non-destructive repair guidance.".to_string());
+    }
+    lines.join("\n")
+}
+
+fn render_capability(
+    capability: &CapabilityBinding,
+    doctor: Option<&UseDoctorData>,
+    ocr_diagnostic: Option<&serde_json::Value>,
+    desired: &DesiredCapabilities,
+    mcp_status: &HashMap<String, McpServerStatus>,
+    loaded_skills: &BTreeSet<&str>,
+) -> Vec<String> {
+    let diagnostic = if capability.id == "use/office" {
+        None
+    } else {
+        doctor.and_then(|doctor| {
+            let domain = match capability.route.as_str() {
+                "office-compat" => "office",
+                other => other,
+            };
+            doctor
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.domain == domain)
+        })
+    };
+    let readiness = if !capability.enabled {
+        "disabled"
+    } else if is_ocr_capability(capability) {
+        ocr_diagnostic
+            .and_then(|value| value.get("readiness"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_else(|| capability.readiness.as_str())
+    } else {
+        diagnostic
+            .map(|diagnostic| diagnostic.readiness.as_str())
+            .unwrap_or_else(|| capability.readiness.as_str())
+    };
+    let origin = match capability.origin {
+        CapabilityOrigin::BuiltIn => "built-in",
+        CapabilityOrigin::Extension => "extension",
+    };
+    let provider = capability_provider(capability, diagnostic, ocr_diagnostic);
+    let mut lines = vec![format!(
+        "    {}  {} · {} · v{} · provider {}",
+        if readiness == "ready" { "✓" } else { "-" },
+        capability.id,
+        readiness,
+        capability.version,
+        provider
+    )];
+
+    let mcp = match (&capability.mcp, capability.enabled) {
+        (_, false) => "disabled".to_string(),
+        (None, true) => "not projected".to_string(),
+        (Some(_), true) => {
+            let server_name = format!("use_{}", capability.route);
+            match mcp_status.get(&server_name) {
+                Some(status) if status.connected => {
+                    format!("connected ({} tools)", status.tool_count)
+                }
+                Some(status) => status
+                    .error
+                    .as_deref()
+                    .map(|error| format!("error: {}", status_excerpt(error)))
+                    .unwrap_or_else(|| "disconnected".to_string()),
+                None if desired.mcp.contains_key(&server_name) => "connecting".to_string(),
+                None => "not loaded".to_string(),
+            }
+        }
+    };
+
+    let declared_skills = capability.skills.len();
+    let projected_skills = desired
+        .skills
+        .values()
+        .filter(|skill| skill.package_id == capability.id)
+        .collect::<Vec<_>>();
+    let loaded = projected_skills
+        .iter()
+        .filter(|skill| loaded_skills.contains(skill.skill.name.as_str()))
+        .count();
+    let skill = match (
+        capability.enabled,
+        declared_skills,
+        projected_skills.len(),
+        loaded,
+    ) {
+        (false, _, _, _) => "disabled".to_string(),
+        (_, 0, _, _) => "not declared".to_string(),
+        (_, declared, verified, loaded) if declared == verified && verified == loaded => {
+            format!("verified + loaded ({loaded}/{declared})")
+        }
+        (_, declared, verified, loaded) if declared == verified => {
+            format!("verified; loading ({loaded}/{declared})")
+        }
+        (_, declared, verified, loaded) => {
+            format!("verification pending/failed ({verified} verified, {loaded} loaded, {declared} declared)")
+        }
+    };
+    lines.push(format!(
+        "      {origin} · MCP {mcp} · Skill {skill} · surfaces {}",
+        if capability.surfaces.is_empty() {
+            "none".to_string()
+        } else {
+            capability.surfaces.join(",")
+        }
+    ));
+
+    if let Some(diagnostic) = diagnostic {
+        if readiness != "ready" {
+            lines.push(format!("      {}", status_excerpt(&diagnostic.message)));
+        }
+    } else if is_ocr_capability(capability) {
+        if let Some(message) = ocr_diagnostic
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+        {
+            lines.push(format!("      {}", status_excerpt(message)));
+        }
+    }
+    lines
+}
+
+fn capability_provider(
+    capability: &CapabilityBinding,
+    diagnostic: Option<&UseDomainDiagnostic>,
+    ocr_diagnostic: Option<&serde_json::Value>,
+) -> String {
+    if capability.id == "use/office" {
+        return "native".to_string();
+    }
+    if is_ocr_capability(capability) {
+        let provider = ocr_diagnostic
+            .and_then(|value| value.get("provider"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("pp-ocr-v6");
+        let model = ocr_diagnostic
+            .and_then(|value| value.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("PP-OCRv6_small");
+        let engine = ocr_diagnostic
+            .and_then(|value| value.get("engine"))
+            .and_then(serde_json::Value::as_str)
+            .map(|engine| {
+                if engine == "onnx-runtime" {
+                    "local ONNX".to_string()
+                } else {
+                    format!("local {engine}")
+                }
+            })
+            .unwrap_or_else(|| "local ONNX".to_string());
+        return format!("{provider} · {model} · {engine}");
+    }
+    if let Some(diagnostic) = diagnostic {
+        let mut provider = diagnostic
+            .provider
+            .clone()
+            .unwrap_or_else(|| "unconfigured".to_string());
+        if let Some(version) = &diagnostic.version {
+            provider.push('@');
+            provider.push_str(version);
+        }
+        if let Some(path) = &diagnostic.path {
+            provider.push_str(" at ");
+            provider.push_str(&path.display().to_string());
+        }
+        return provider;
+    }
+    match capability.origin {
+        CapabilityOrigin::BuiltIn => "built-in".to_string(),
+        CapabilityOrigin::Extension => "extension process".to_string(),
+    }
+}
+
+fn append_repair_guidance(
+    lines: &mut Vec<String>,
+    snapshot: Option<&RegistrySnapshot>,
+    ocr_diagnostic: Option<&serde_json::Value>,
+) {
+    lines.push("  repair guidance (never run automatically)".to_string());
+    lines.push("    - Inspect the parent binary: a3s doctor use".to_string());
+    lines.push("    - Repair/install Use explicitly: a3s install use --source release".to_string());
+    lines.push("    - Browser provider: a3s install use/browser".to_string());
+    lines
+        .push("    - Office compatibility provider (optional): a3s install use/office".to_string());
+
+    let ocr = snapshot.and_then(|snapshot| {
+        snapshot
+            .capabilities
+            .iter()
+            .find(|capability| is_ocr_capability(capability))
+    });
+    match ocr {
+        None => lines.push(
+            "    - Built-in OCR: update or repair Use with a3s install use --source release --force"
+                .to_string(),
+        ),
+        Some(ocr) if !ocr.enabled => {
+            lines.push("    - Built-in OCR is disabled in this custom Use build.".to_string())
+        }
+        Some(_) => {
+            let readiness = ocr_diagnostic
+                .and_then(|value| value.get("readiness"))
+                .and_then(serde_json::Value::as_str);
+            if readiness != Some("ready") {
+                lines.push(
+                    "    - OCR model: a3s install use/ocr; inspect with a3s use ocr doctor --json"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    lines.push(
+        "    - The live watcher retries MCP/Skill projection; restart Code only after installing the missing parent Use binary."
+            .to_string(),
+    );
+}
+
+fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
+}
+
+fn status_excerpt(value: &str) -> String {
+    let value = value.trim().replace(['\n', '\r'], " ");
+    let mut excerpt = value.chars().take(240).collect::<String>();
+    if value.chars().count() > 240 {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+pub(crate) fn unavailable_status_text(include_repair_guidance: bool) -> String {
+    let mut lines = vec![
+        "A3S Use status".to_string(),
+        "  binary  not discovered; no Use MCP or Skill projection is attached".to_string(),
+        "  Browser/Office/OCR application tools are unavailable to the Use worker".to_string(),
+    ];
+    if include_repair_guidance {
+        append_repair_guidance(&mut lines, None, None);
+    } else {
+        lines.push("  Run /use repair for explicit install guidance.".to_string());
+    }
+    lines.join("\n")
+}
+
+fn is_ocr_capability(capability: &CapabilityBinding) -> bool {
+    capability.route == "ocr"
 }
 
 impl Drop for UseRegistryInner {
@@ -609,6 +1241,99 @@ pub(crate) struct UseRegistryHandle {
 }
 
 impl UseRegistryHandle {
+    /// Return every package in the verified registry snapshot, including
+    /// packages that do not contribute an Activity Bar view.
+    pub(crate) fn package_statuses(&self) -> BTreeMap<String, bool> {
+        self.inner.desired_tx.borrow().packages.clone()
+    }
+
+    /// Return the immutable Activity Bar catalog already verified against the
+    /// current A3S Use registry revision. Disabled contributions remain listed
+    /// for management UI but cannot be opened through `activity_content`.
+    pub(crate) fn activity_catalog(&self) -> UseActivityCatalog {
+        let desired = self.inner.desired_tx.borrow().clone();
+        UseActivityCatalog {
+            schema_version: SCHEMA_VERSION,
+            generation: desired.generation,
+            revision: desired.revision.clone(),
+            items: desired
+                .activities
+                .values()
+                .map(|activity| activity.catalog.clone())
+                .collect(),
+        }
+    }
+
+    /// Resolve one enabled, digest-verified Activity document by its stable
+    /// route-qualified key.
+    pub(crate) fn activity_content(&self, key: &str) -> Option<UseActivityContent> {
+        let desired = self.inner.desired_tx.borrow().clone();
+        let activity = desired.activities.get(key)?;
+        if !activity.catalog.enabled {
+            return None;
+        }
+        Some(UseActivityContent {
+            key: activity.catalog.key.clone(),
+            package_id: activity.catalog.package_id.clone(),
+            skill: activity.catalog.skill.clone(),
+            registry_revision: desired.revision.clone(),
+            sha256: activity.catalog.sha256.clone(),
+            media_type: activity.catalog.media_type.clone(),
+            html: activity.html.to_string(),
+        })
+    }
+
+    /// Build a live, read-only diagnostic for the `/use` TUI command.
+    pub(crate) async fn status_text(
+        &self,
+        session: Arc<AgentSession>,
+        include_repair_guidance: bool,
+    ) -> String {
+        let client = UseRegistryClient::new(
+            self.inner.executable.clone(),
+            self.inner.directory.clone(),
+            self.inner.cancellation.child_token(),
+        );
+        let desired = self.inner.desired_tx.borrow().clone();
+        let (version, snapshot, doctor, mcp_status) = tokio::join!(
+            client.run_json::<UseVersionData>(vec!["--version", "--json"], COMMAND_TIMEOUT),
+            client.snapshot(),
+            client.run_json::<UseDoctorData>(vec!["doctor", "--json"], COMMAND_TIMEOUT),
+            session.mcp_status(),
+        );
+
+        let ocr_diagnostic = match snapshot.as_ref() {
+            Ok(snapshot)
+                if snapshot
+                    .capabilities
+                    .iter()
+                    .any(|capability| is_ocr_capability(capability) && capability.enabled) =>
+            {
+                Some(
+                    client
+                        .run_json::<serde_json::Value>(
+                            vec!["ocr", "doctor", "--json"],
+                            COMMAND_TIMEOUT,
+                        )
+                        .await,
+                )
+            }
+            _ => None,
+        };
+
+        render_status(UseStatusInput {
+            executable: &self.inner.executable,
+            version,
+            snapshot,
+            doctor,
+            ocr_diagnostic,
+            desired: &desired,
+            mcp_status: &mcp_status,
+            loaded_skills: &session.skill_names(),
+            include_repair_guidance,
+        })
+    }
+
     /// Attach a Web session under its stable session identifier.
     pub(crate) fn attach_session(&self, session: Arc<AgentSession>) {
         let key = format!("web:{}", session.session_id());
@@ -758,11 +1483,10 @@ async fn start_with_budgets(
 ) -> (UseRegistryHandle, Option<String>) {
     let (handle, mut warnings) =
         start_detached_with_budget(executable, directory, cancellation, discovery_budget).await;
-    let desired = handle.inner.desired_tx.borrow().clone();
     handle.replace_session(Arc::clone(&session));
-    if !wait_for_initial_projection(session.as_ref(), desired.as_ref(), projection_budget).await {
+    if !wait_for_initial_projection(&handle, session.as_ref(), projection_budget).await {
         warnings.push(format!(
-            "A3S Use initial MCP projection is still converging after {} ms; capabilities will continue loading in the background",
+            "A3S Use initial capability projection is still converging after {} ms; capabilities will continue loading in the background",
             projection_budget.as_millis()
         ));
     }
@@ -770,32 +1494,61 @@ async fn start_with_budgets(
 }
 
 async fn wait_for_initial_projection(
+    handle: &UseRegistryHandle,
     session: &AgentSession,
-    desired: &DesiredCapabilities,
     budget: Duration,
 ) -> bool {
-    if desired.mcp.is_empty() {
-        return true;
-    }
-    let prefixes = desired
-        .mcp
-        .keys()
-        .map(|name| format!("mcp__{name}__"))
-        .collect::<Vec<_>>();
-    tokio::time::timeout(budget, async {
+    let mut desired_rx = handle.inner.desired_tx.subscribe();
+    tokio::time::timeout(budget, async move {
         loop {
-            let tools = session.tool_names();
-            if prefixes
-                .iter()
-                .all(|prefix| tools.iter().any(|tool| tool.starts_with(prefix)))
-            {
-                break;
+            let desired = desired_rx.borrow_and_update().clone();
+            if initial_projection_is_visible(session, desired.as_ref()) {
+                return true;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::select! {
+                changed = desired_rx.changed() => {
+                    if changed.is_err() {
+                        return false;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+            }
         }
     })
     .await
-    .is_ok()
+    .unwrap_or(false)
+}
+
+fn initial_projection_is_visible(session: &AgentSession, desired: &DesiredCapabilities) -> bool {
+    if desired.revision.is_empty() {
+        return false;
+    }
+
+    let loaded_skills = session.skill_names().into_iter().collect::<BTreeSet<_>>();
+    if !desired
+        .skills
+        .keys()
+        .all(|name| loaded_skills.contains(name))
+    {
+        return false;
+    }
+
+    let tools = session.tool_names();
+    if !desired.mcp.keys().all(|name| {
+        let prefix = format!("mcp__{name}__");
+        tools.iter().any(|tool| tool.starts_with(&prefix))
+    }) {
+        return false;
+    }
+
+    let ready = ready_capability_ids(desired);
+    ready.is_empty()
+        || session.tool_definitions().into_iter().any(|tool| {
+            tool.name == "task"
+                && ready
+                    .iter()
+                    .all(|capability| tool.description.contains(capability))
+        })
 }
 
 /// Start a shared registry watcher without installing A3S Use as a side
@@ -823,7 +1576,8 @@ async fn start_detached_with_budget(
     cancellation: CancellationToken,
     startup_budget: Duration,
 ) -> (UseRegistryHandle, Vec<String>) {
-    let client = UseRegistryClient::new(executable.clone(), directory, cancellation.clone());
+    let client =
+        UseRegistryClient::new(executable.clone(), directory.clone(), cancellation.clone());
     let mut startup_warnings = Vec::new();
     let discovery = tokio::time::timeout(startup_budget, async {
         let snapshot = client.snapshot().await?;
@@ -862,6 +1616,7 @@ async fn start_detached_with_budget(
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable,
+            directory,
             desired_tx,
             cancellation,
             projections: Mutex::new(BTreeMap::new()),
@@ -1041,6 +1796,7 @@ fn worker_capabilities_for_applied(
     DesiredCapabilities {
         generation: applied.generation,
         revision: applied.revision.clone(),
+        packages: desired.packages.clone(),
         mcp: desired
             .mcp
             .iter()
@@ -1053,6 +1809,7 @@ fn worker_capabilities_for_applied(
             .filter(|(name, skill)| applied.skills.get(*name) == Some(&skill.fingerprint))
             .map(|(name, skill)| (name.clone(), skill.clone()))
             .collect(),
+        activities: BTreeMap::new(),
         warnings: desired.warnings.clone(),
     }
 }

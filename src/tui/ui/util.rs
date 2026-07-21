@@ -140,27 +140,19 @@ pub(crate) fn gutter(color: Color, content: &str) -> String {
         .view()
 }
 
-/// Render one assistant-authored Markdown cell with a blank row owned above
-/// and below its gutter. A visible space keeps the trailing padding row in
-/// `str::lines()` so transcript layout and scroll anchors count it correctly.
+/// Render one assistant-authored Markdown cell.
+///
+/// Vertical separation belongs to the transcript compositor, not the cell.
+/// Keeping cells spacing-free gives messages, notices, and tool calls the same
+/// boundary rule and avoids doubled rows when two padded cells meet.
 pub(crate) fn assistant_block(content: &str, width: usize) -> String {
-    let body = assistant_body(content, width);
-    spaced_message_block(&body, width)
+    assistant_body(content, width)
 }
 
-/// Give a rendered semantic message one stable blank row above and below.
-pub(crate) fn spaced_message_block(body: &str, width: usize) -> String {
-    if body.is_empty() || width == 0 {
-        return String::new();
-    }
-    let padding = assistant_padding_row(width);
-    format!("{padding}\n{body}\n{padding}")
-}
-
-/// Split a streaming assistant cell at its stable/tail boundary while keeping
-/// exactly one owned padding row on each outside edge. The stable fragment is
-/// newline-terminated so `Viewport::set_content_parts` can retain its wrapped
-/// rows while replacing only the mutable tail.
+/// Split a streaming assistant cell at its stable/tail boundary. The stable
+/// fragment is newline-terminated so `Viewport::set_content_parts` can retain
+/// its wrapped rows while replacing only the mutable tail. The caller inserts
+/// the same transcript gap used by committed entries before this cell.
 pub(crate) fn assistant_stream_block_parts(
     stable: &str,
     tail: &str,
@@ -172,19 +164,12 @@ pub(crate) fn assistant_stream_block_parts(
         return None;
     }
 
-    let padding = assistant_padding_row(width);
-    let mut prefix = format!("{padding}\n");
+    let mut prefix = String::new();
     if !stable.is_empty() {
         prefix.push_str(&stable);
         prefix.push('\n');
     }
-    let mut suffix = String::new();
-    if !tail.is_empty() {
-        suffix.push_str(&tail);
-        suffix.push('\n');
-    }
-    suffix.push_str(padding);
-    Some((prefix, suffix))
+    Some((prefix, tail))
 }
 
 fn assistant_body(content: &str, width: usize) -> String {
@@ -192,14 +177,6 @@ fn assistant_body(content: &str, width: usize) -> String {
         String::new()
     } else {
         gutter(TN_GRAY, content)
-    }
-}
-
-fn assistant_padding_row(width: usize) -> &'static str {
-    if width == 0 {
-        ""
-    } else {
-        " "
     }
 }
 
@@ -279,13 +256,12 @@ pub(crate) fn thinking_block(text: &str, width: usize) -> String {
         return String::new();
     }
 
-    let body = a3s_tui::components::WrappedPrefixBlock::new(text)
+    a3s_tui::components::WrappedPrefixBlock::new(text)
         .margin(PAD)
         .width(width)
         .prefixes("• ", "  ")
         .style(Style::new().fg(TN_GRAY).italic())
-        .view();
-    spaced_message_block(&body, width)
+        .view()
 }
 
 pub(crate) fn compact_progress_line(elapsed: Duration, width: usize) -> String {
@@ -481,33 +457,33 @@ mod tests {
     }
 
     #[test]
-    fn assistant_block_owns_real_padding_rows() {
+    fn assistant_block_leaves_vertical_spacing_to_the_transcript() {
         let rendered = assistant_block("hello\nworld", 20);
         let plain = strip_ansi(&rendered);
 
-        assert_eq!(
-            plain.lines().collect::<Vec<_>>(),
-            [" ", "• hello", "  world", " "]
-        );
+        assert_eq!(plain.lines().collect::<Vec<_>>(), ["• hello", "  world"]);
+        assert!(plain.lines().all(|row| !row.trim().is_empty()));
         assert!(rendered.lines().all(|row| visible_len(row) <= 20));
         assert_eq!(assistant_block("", 20), "");
         assert_eq!(assistant_block("hello", 0), "");
     }
 
     #[test]
-    fn streaming_assistant_parts_keep_padding_on_the_outside_edges() {
+    fn streaming_assistant_parts_do_not_create_private_gap_rows() {
         for (stable, tail) in [("stable", ""), ("", "tail"), ("stable", "tail")] {
             let (prefix, suffix) =
                 assistant_stream_block_parts(stable, tail, 20).expect("stream parts");
-            assert!(prefix.ends_with('\n'));
+            if stable.is_empty() {
+                assert!(prefix.is_empty());
+            } else {
+                assert!(prefix.ends_with('\n'));
+            }
             let rendered = strip_ansi(&format!("{prefix}{suffix}"));
             let rows = rendered.lines().collect::<Vec<_>>();
 
-            assert!(rows.first().is_some_and(|row| row == &" "), "{rendered:?}");
-            assert!(rows.last().is_some_and(|row| row == &" "), "{rendered:?}");
             assert_eq!(
                 rows.iter().filter(|row| row.trim().is_empty()).count(),
-                2,
+                0,
                 "{rendered:?}"
             );
         }
@@ -515,7 +491,7 @@ mod tests {
         let (stable_prefix, stable_suffix) =
             assistant_stream_block_parts("stable", "", 20).expect("stable parts");
         assert_eq!(
-            format!("{stable_prefix}{stable_suffix}"),
+            format!("{stable_prefix}{stable_suffix}").trim_end_matches('\n'),
             assistant_block("stable", 20)
         );
         let (tail_prefix, tail_suffix) =
@@ -677,18 +653,9 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert_eq!(rows.first(), Some(&" "));
-        assert_eq!(rows.last(), Some(&" "));
-        assert!(rows[1].starts_with("• alpha"));
-        assert!(rows[2..rows.len() - 1]
-            .iter()
-            .skip(1)
-            .all(|row| row.starts_with("  ")));
-        assert!(rendered
-            .lines()
-            .skip(1)
-            .take(rows.len() - 2)
-            .all(|line| visible_len(line) == 16));
+        assert!(rows[0].starts_with("• alpha"));
+        assert!(rows.iter().skip(1).all(|row| row.starts_with("  ")));
+        assert!(rendered.lines().all(|line| visible_len(line) == 16));
         assert!(rendered.contains(&format!("\x1b[3;{}m• alpha", TN_GRAY.fg_ansi())));
     }
 
@@ -704,15 +671,9 @@ mod tests {
         let plain = strip_ansi(&rendered);
         let rows = plain.lines().collect::<Vec<_>>();
 
-        assert_eq!(rows[0], " ");
-        assert!(rows[1].starts_with("• 中文测试内"));
-        assert!(rows[2].starts_with("  容"));
-        assert_eq!(rows[3], " ");
-        assert!(rendered
-            .lines()
-            .skip(1)
-            .take(2)
-            .all(|line| visible_len(line) == 13));
+        assert!(rows[0].starts_with("• 中文测试内"));
+        assert!(rows[1].starts_with("  容"));
+        assert!(rendered.lines().all(|line| visible_len(line) == 13));
     }
 
     #[test]

@@ -112,20 +112,17 @@ pub(crate) struct CodeResearchArgs {
     #[arg(value_name = "QUERY", required = true)]
     pub query: Vec<String>,
 
-    #[arg(long, value_enum, default_value_t = ResearchRuntime::Auto)]
-    pub runtime: ResearchRuntime,
+    /// Restrict evidence collection to the workspace and other local sources.
+    #[arg(long, conflicts_with = "web")]
+    pub local_only: bool,
+
+    /// Explicitly allow web and workspace evidence, overriding query wording.
+    #[arg(long, conflicts_with = "local_only")]
+    pub web: bool,
 
     /// Directory that should receive generated report artifacts.
     #[arg(long, value_name = "PATH")]
     pub report_dir: Option<PathBuf>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub(crate) enum ResearchRuntime {
-    #[default]
-    Auto,
-    Local,
-    Os,
 }
 
 #[derive(Clone, Debug, Args)]

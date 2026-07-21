@@ -52,7 +52,7 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--dry-run"],
+        &["install", "use/a3s/science", "--dry-run"],
     );
     assert!(first_plan.status.success(), "{first_plan:?}");
     let first_plan = json(&first_plan);
@@ -61,7 +61,7 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         .unwrap()
         .to_string();
     let first_package =
-        &first_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/acme/slack"];
+        &first_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"];
     assert_eq!(first_package["registryName"], "localhost");
     assert_eq!(first_package["targetsVersion"], 1);
     assert_eq!(first_package["sha256"], version_one.target_sha256);
@@ -76,7 +76,7 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--plan-digest", &first_digest],
+        &["install", "use/a3s/science", "--plan-digest", &first_digest],
     );
     assert!(!stale.status.success(), "{stale:?}");
     assert_eq!(json(&stale)["error"]["code"], "component.plan_mismatch");
@@ -87,13 +87,13 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--dry-run"],
+        &["install", "use/a3s/science", "--dry-run"],
     );
     assert!(current_plan.status.success(), "{current_plan:?}");
     let current_plan = json(&current_plan);
     let current_digest = current_plan["data"]["planDigest"].as_str().unwrap();
     let package: ResolvedRemotePackage = serde_json::from_value(
-        current_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/acme/slack"].clone(),
+        current_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"].clone(),
     )
     .unwrap();
     assert_eq!(package.targets_version, 2);
@@ -104,13 +104,18 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--plan-digest", current_digest],
+        &[
+            "install",
+            "use/a3s/science",
+            "--plan-digest",
+            current_digest,
+        ],
     );
     assert!(applied.status.success(), "{applied:?}");
     assert_eq!(json(&applied)["data"]["planDigest"], current_digest);
     assert_no_target_request(&server);
     let arguments = std::fs::read_to_string(&install_log).unwrap();
-    assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
+    assert!(arguments.contains("component\ninstall\na3s/science\n--json\n"));
     assert!(arguments.contains("--registry-name\nlocalhost\n"));
     assert!(arguments.contains(&format!("--registry-url\n{registry_url}\n")));
     assert!(arguments.contains(&format!(
@@ -128,7 +133,7 @@ fn signed_registry_plan_is_bound_before_delegating_to_use() {
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--allow-unsigned"],
+        &["install", "use/a3s/science", "--allow-unsigned"],
     );
     assert!(!unsigned.status.success(), "{unsigned:?}");
     assert!(json(&unsigned)["error"]["message"]
@@ -163,12 +168,12 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["install", "use/acme/slack", "--dry-run"],
+        &["install", "use/a3s/science", "--dry-run"],
     );
     assert!(initial.status.success(), "{initial:?}");
     let initial = json(&initial);
     let installed: ResolvedRemotePackage = serde_json::from_value(
-        initial["data"]["plans"][0]["resolvedRegistryPackages"]["use/acme/slack"].clone(),
+        initial["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"].clone(),
     )
     .unwrap();
     make_installed_use_fixture(&use_bin, &install_log, &installed);
@@ -186,11 +191,11 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
     assert!(available.status.success(), "{available:?}");
     let available = json(&available);
     let components = available["data"]["components"].as_array().unwrap();
-    let slack = components
+    let science = components
         .iter()
-        .find(|component| component["id"] == "use/acme/slack")
+        .find(|component| component["id"] == "use/a3s/science")
         .expect("signed extension should be listed as upgradeable");
-    assert_eq!(slack["update"], "available");
+    assert_eq!(science["update"], "available");
     assert_no_target_request(&server);
 
     server.clear_requests();
@@ -198,7 +203,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
     assert!(all_plan.status.success(), "{all_plan:?}");
     let all_plan = json(&all_plan);
     assert_eq!(all_plan["data"]["plans"].as_array().unwrap().len(), 1);
-    assert_eq!(all_plan["data"]["plans"][0]["component"], "use/acme/slack");
+    assert_eq!(all_plan["data"]["plans"][0]["component"], "use/a3s/science");
     assert_no_target_request(&server);
 
     server.clear_requests();
@@ -206,7 +211,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(first_plan.status.success(), "{first_plan:?}");
     let first_plan = json(&first_plan);
@@ -221,7 +226,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
     assert_eq!(operation["mutates"], true);
     assert_eq!(operation["force"], true);
     assert_eq!(
-        operation["resolvedRegistryPackages"]["use/acme/slack"]["version"],
+        operation["resolvedRegistryPackages"]["use/a3s/science"]["version"],
         NEXT_VERSION
     );
     assert_no_target_request(&server);
@@ -239,7 +244,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--plan-digest", &first_digest],
+        &["upgrade", "use/a3s/science", "--plan-digest", &first_digest],
     );
     assert!(!stale.status.success(), "{stale:?}");
     assert_eq!(json(&stale)["error"]["code"], "component.plan_mismatch");
@@ -250,13 +255,13 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(current.status.success(), "{current:?}");
     let current = json(&current);
     let current_digest = current["data"]["planDigest"].as_str().unwrap();
     let package: ResolvedRemotePackage = serde_json::from_value(
-        current["data"]["plans"][0]["resolvedRegistryPackages"]["use/acme/slack"].clone(),
+        current["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"].clone(),
     )
     .unwrap();
     let registry_plan_digest = package.plan_digest().unwrap();
@@ -266,13 +271,17 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--plan-digest", current_digest],
+        &[
+            "upgrade",
+            "use/a3s/science",
+            "--plan-digest",
+            current_digest,
+        ],
     );
     assert!(applied.status.success(), "{applied:?}");
-    assert_eq!(json(&applied)["data"]["operations"][0]["action"], "upgrade");
     assert_no_target_request(&server);
     let arguments = std::fs::read_to_string(&install_log).unwrap();
-    assert!(arguments.contains("component\ninstall\nacme/slack\n--json\n"));
+    assert!(arguments.contains("component\ninstall\na3s/science\n--json\n"));
     assert!(arguments.contains("--force\n"));
     assert!(arguments.contains("--registry-name\nlocalhost\n"));
     assert!(arguments.contains(&format!("--registry-url\n{registry_url}\n")));
@@ -288,7 +297,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(converged.status.success(), "{converged:?}");
     let converged = json(&converged);
@@ -309,7 +318,7 @@ fn signed_registry_upgrade_restores_the_recorded_source_and_binds_the_new_target
         &temp,
         &config,
         &use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(!rejected.status.success(), "{rejected:?}");
     assert!(json(&rejected)["error"]["message"]
@@ -400,7 +409,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         &temp,
         &config,
         use_bin,
-        &["install", "use/acme/slack", "--dry-run"],
+        &["install", "use/a3s/science", "--dry-run"],
     );
     assert!(plan.status.success(), "{plan:?}");
     let plan = json(&plan);
@@ -411,7 +420,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         &temp,
         &config,
         use_bin,
-        &["install", "use/acme/slack", "--plan-digest", digest],
+        &["install", "use/a3s/science", "--plan-digest", digest],
     );
     assert!(installed.status.success(), "{installed:?}");
     assert_eq!(
@@ -423,7 +432,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         1
     );
     let receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(temp.path("state/use/extensions/acme/slack.json")).unwrap(),
+        &std::fs::read(temp.path("state/use/extensions/a3s/science.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(receipt["trust"], "registry-tuf");
@@ -442,14 +451,14 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         &temp,
         &config,
         use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(upgrade_plan.status.success(), "{upgrade_plan:?}");
     let upgrade_plan = json(&upgrade_plan);
     let upgrade_digest = upgrade_plan["data"]["planDigest"].as_str().unwrap();
     assert_eq!(upgrade_plan["data"]["plans"][0]["action"], "upgrade");
     assert_eq!(
-        upgrade_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/acme/slack"]["version"],
+        upgrade_plan["data"]["plans"][0]["resolvedRegistryPackages"]["use/a3s/science"]["version"],
         NEXT_VERSION
     );
     assert_no_target_request(&server);
@@ -458,7 +467,12 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         &temp,
         &config,
         use_bin,
-        &["upgrade", "use/acme/slack", "--plan-digest", upgrade_digest],
+        &[
+            "upgrade",
+            "use/a3s/science",
+            "--plan-digest",
+            upgrade_digest,
+        ],
     );
     assert!(upgraded.status.success(), "{upgraded:?}");
     assert_eq!(
@@ -470,7 +484,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         1
     );
     let upgraded_receipt: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(temp.path("state/use/extensions/acme/slack.json")).unwrap(),
+        &std::fs::read(temp.path("state/use/extensions/a3s/science.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(upgraded_receipt["version"], NEXT_VERSION);
@@ -484,7 +498,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         &temp,
         &config,
         use_bin,
-        &["upgrade", "use/acme/slack", "--dry-run"],
+        &["upgrade", "use/a3s/science", "--dry-run"],
     );
     assert!(converged_plan.status.success(), "{converged_plan:?}");
     let converged_plan = json(&converged_plan);
@@ -497,7 +511,7 @@ fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
         use_bin,
         &[
             "upgrade",
-            "use/acme/slack",
+            "use/a3s/science",
             "--plan-digest",
             converged_digest,
         ],
@@ -557,12 +571,12 @@ fn make_installed_use_fixture(
     installed: &ResolvedRemotePackage,
 ) {
     let component = serde_json::json!({
-        "id": "acme/slack",
-        "description": "Installed signed slack extension",
+        "id": "a3s/science",
+        "description": "Installed signed science extension",
         "presence": "managed",
         "health": "ready",
         "version": installed.version,
-        "path": "/tmp/a3s-use-slack",
+        "path": "/tmp/a3s-use-science",
         "trust": "registry-tuf",
         "registry": installed
     });

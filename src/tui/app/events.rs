@@ -24,7 +24,6 @@ impl App {
             turn_had_agent_activity: self.turn_had_agent_activity,
             turn_text_after_activity: self.turn_text_after_activity,
             runtime_tools: self.runtime.checkpoint_tools(),
-            report_tools: self.deep_research_report_tools.clone(),
         });
     }
 
@@ -37,7 +36,6 @@ impl App {
         self.turn_had_agent_activity = checkpoint.turn_had_agent_activity;
         self.turn_text_after_activity = checkpoint.turn_text_after_activity;
         self.runtime.restore_tools(checkpoint.runtime_tools);
-        self.deep_research_report_tools = checkpoint.report_tools;
         self.last_paint = None;
         self.relayout();
         self.rebuild_viewport();
@@ -77,33 +75,19 @@ impl App {
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolStart { id, name } => {
-                let delay_report_tool = self.should_delay_deep_research_report_tool();
                 let transcript_visible = presentation_policy(&name).transcript_visible();
                 self.mark_agent_activity();
                 // A tool event is an authoritative transcript boundary. Seal
                 // the assistant segment even when its last Markdown construct
                 // is incomplete; later text belongs to a new assistant entry.
                 self.finalize_streaming();
-                self.messages.start_tool(
-                    id.clone(),
-                    name.clone(),
-                    !delay_report_tool && transcript_visible,
-                );
-                if delay_report_tool {
-                    self.deep_research_report_tools.start(id, name);
-                    return self.rx.clone().map(pump);
-                }
+                self.messages
+                    .start_tool(id.clone(), name.clone(), transcript_visible);
                 self.runtime.prepare_tool(id, name);
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolInputDelta { id, delta } => {
                 self.messages.push_tool_input(id.as_deref(), &delta);
-                if self
-                    .deep_research_report_tools
-                    .push_input(id.as_deref(), &delta)
-                {
-                    return self.rx.clone().map(pump);
-                }
                 self.runtime.push_tool_input(id.as_deref(), &delta);
                 let update_plan_args = id.as_deref().and_then(|id| {
                     let tool = self.runtime.tool(id)?;
@@ -117,16 +101,6 @@ impl App {
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolExecutionStart { id, name, args } => {
-                let delay_report_tool = self.should_delay_deep_research_report_tool();
-                if self.deep_research_report_tools.set_args(
-                    &id,
-                    name.clone(),
-                    args.clone(),
-                    delay_report_tool,
-                ) {
-                    self.messages.start_tool_execution(id, name, args, false);
-                    return self.rx.clone().map(pump);
-                }
                 self.mark_agent_activity();
                 let policy = presentation_policy(&name);
                 if policy == ToolPresentationPolicy::PinnedOnly {
@@ -142,16 +116,6 @@ impl App {
                 self.update_viewport_with_stream();
             }
             AgentEvent::ToolOutputDelta { id, name, delta } => {
-                let delay_report_tool = self.should_delay_deep_research_report_tool();
-                if self.deep_research_report_tools.push_output_or_start(
-                    id.clone(),
-                    name.clone(),
-                    &delta,
-                    delay_report_tool,
-                ) {
-                    self.messages.push_tool_output(&id, name, &delta, false);
-                    return self.rx.clone().map(pump);
-                }
                 self.messages.push_tool_output(
                     &id,
                     name.clone(),
@@ -175,68 +139,6 @@ impl App {
                 metadata,
                 ..
             } => {
-                let delay_report_tool = self.should_delay_deep_research_report_tool();
-                if let Some(delayed) = self.deep_research_report_tools.take_or_synthetic(
-                    &id,
-                    name.clone(),
-                    args.clone(),
-                    delay_report_tool,
-                ) {
-                    let args = delayed.args();
-                    let display_output = if output.is_empty() {
-                        delayed.output
-                    } else {
-                        output
-                    };
-                    if suppress_deep_research_report_phase_tool_output(
-                        &delayed.name,
-                        &display_output,
-                        args.as_ref(),
-                    ) {
-                        self.messages.discard_tool(&id);
-                        return self.rx.clone().map(pump);
-                    }
-                    self.mark_agent_activity();
-                    let policy = presentation_policy(&delayed.name);
-                    if policy == ToolPresentationPolicy::PinnedOnly {
-                        if let Some(args) = args.as_ref() {
-                            self.apply_update_plan_args(args);
-                        }
-                    }
-                    let completed = self.runtime.end_tool(
-                        &id,
-                        delayed.name.clone(),
-                        args.clone(),
-                        display_output.clone(),
-                        exit_code,
-                    );
-                    if policy == ToolPresentationPolicy::PinnedOnly {
-                        self.messages.discard_tool(&id);
-                    } else {
-                        self.messages.finish_tool_with_state(
-                            &id,
-                            delayed.name.clone(),
-                            completed.args.clone(),
-                            completed.output.clone(),
-                            completed.exit_code,
-                            metadata,
-                            completed.state,
-                            true,
-                        );
-                    }
-                    self.rebuild_viewport();
-                    self.record_runtime_tool_evidence(&delayed.name);
-                    if completed.first_terminal {
-                        self.capture_workflow(&delayed.name, completed.args.as_ref());
-                    }
-                    if let Some(spec) = self.find_remote_view_spec(&display_output) {
-                        self.remember_remote_view(spec);
-                    }
-                    if let Some(cmd) = self.stop_deep_research_synthesis_if_report_ready() {
-                        return Some(cmd);
-                    }
-                    return self.rx.clone().map(pump);
-                }
                 self.mark_agent_activity();
                 if presentation_policy(&name) == ToolPresentationPolicy::PinnedOnly {
                     if let Some(args) = args.as_ref() {
@@ -271,9 +173,6 @@ impl App {
                 }
                 if let Some(spec) = self.find_remote_view_spec(&output) {
                     self.remember_remote_view(spec);
-                }
-                if let Some(cmd) = self.stop_deep_research_synthesis_if_report_ready() {
-                    return Some(cmd);
                 }
             }
             // Parallel/child task lifecycle (parallel_task, task) — show each
@@ -524,7 +423,6 @@ impl App {
                 args,
                 reason,
             } => {
-                self.deep_research_report_tools.remove(&tool_id);
                 let completed = self.runtime.deny_tool(
                     &tool_id,
                     tool_name,
@@ -549,85 +447,16 @@ impl App {
                 self.record_local_agent_terminal(
                     crate::system_agents::AgentActivityState::Completed,
                 );
-                let mut review_text = if text.is_empty() {
+                let review_text = if text.is_empty() {
                     self.turn_text.clone()
                 } else {
                     text.clone()
                 };
-                let deep_research_query = self
-                    .deep_research_loop
-                    .as_ref()
-                    .map(|state| state.query.clone());
-                let deep_research_buffered_output = self.deep_research_loop.is_some()
-                    && self.deep_research_report_tool_gate.finalization_only();
-                let deep_research_repair_phase = self.deep_research_report_repair_used;
-                let workflow_output_for_validation = self
-                    .deep_research_workflow
-                    .output
-                    .clone()
-                    .unwrap_or_default();
-                let workflow_metadata_for_validation = self.deep_research_workflow.metadata.clone();
-                let deep_research_artifacts = deep_research_query.as_deref().and_then(|query| {
-                    let baseline = self.deep_research_workflow.report_baseline.as_ref()?;
-                    deep_research_report_artifacts_from_output_for_current_run(
-                        &review_text,
-                        Path::new(&self.cwd),
-                        query,
-                        &workflow_output_for_validation,
-                        workflow_metadata_for_validation.as_ref(),
-                        baseline,
-                    )
-                });
-                if self.deep_research_loop.is_some()
-                    && deep_research_output_has_internal_leak(&review_text)
-                {
-                    if let Some(clean_text) =
-                        deep_research_artifacts.as_ref().and_then(|artifacts| {
-                            clean_deep_research_final_text_from_artifacts(
-                                artifacts,
-                                Path::new(&self.cwd),
-                            )
-                        })
-                    {
-                        review_text = clean_text;
-                        self.streaming.clear();
-                        self.turn_text.clear();
-                        self.streaming.push(&review_text);
-                        self.turn_text.push_str(&review_text);
-                        self.mark_assistant_text(&review_text);
-                    }
-                }
-                let deep_research_dirty_output = self.deep_research_loop.is_some()
-                    && deep_research_output_has_internal_leak(&review_text);
-                if deep_research_buffered_output
-                    && !deep_research_dirty_output
-                    && !review_text.trim().is_empty()
-                {
-                    self.streaming.clear();
-                    self.turn_text.clear();
-                    self.streaming.push(&review_text);
-                    self.turn_text.push_str(&review_text);
-                    self.mark_assistant_text(&review_text);
-                }
-                let deep_research_missing_report = deep_research_report_is_missing_since(
-                    self.deep_research_loop.is_some(),
-                    self.deep_research_outcome.report_ready(),
-                    deep_research_query.as_deref(),
-                    &review_text,
-                    Path::new(&self.cwd),
-                    &workflow_output_for_validation,
-                    workflow_metadata_for_validation.as_ref(),
-                    self.deep_research_workflow.report_baseline.as_ref(),
-                ) || deep_research_dirty_output;
-                if deep_research_missing_report {
-                    self.deep_research_outcome = DeepResearchRunOutcome::Active;
-                    self.pending_deep_research_report_view = None;
-                }
                 // /loop: stop once the agent signals completion (the word DONE).
                 // Not during /sleep: its completion signal is the a3s-sleep
                 // report itself, and consolidation narration ("what was done
                 // today") would false-trigger this and end the run early.
-                if self.loop_remaining > 0 && !self.sleep_pending && !deep_research_missing_report {
+                if self.loop_remaining > 0 && !self.sleep_pending {
                     let r = review_text.clone();
                     if r.split(|c: char| !c.is_alphabetic())
                         .any(|w| w.eq_ignore_ascii_case("done"))
@@ -646,18 +475,6 @@ impl App {
                     self.mark_assistant_text(&text);
                     self.streaming.push(&text);
                 }
-                if deep_research_dirty_output {
-                    self.streaming.clear();
-                    self.turn_text.clear();
-                    self.push_line(&Style::new().fg(TN_YELLOW).render(
-                        "  ⚠ DeepResearch synthesis contained internal workflow/tool logs; discarding that draft and running a clean repair pass…",
-                    ));
-                } else if self.deep_research_loop.is_some()
-                    && !deep_research_repair_phase
-                    && !review_text.trim().is_empty()
-                {
-                    self.deep_research_workflow.last_synthesis_text = Some(review_text.clone());
-                }
                 self.finalize_streaming();
                 // Asset code review: a ```a3s-review report in the final message
                 // ends the review loop and opens the issue checklist.
@@ -665,81 +482,7 @@ impl App {
                 // `/sleep`: an ```a3s-sleep report ends the consolidation loop
                 // and persists the distilled memories (async, batched below).
                 let sleep_save = self.capture_sleep(&review_text);
-                if !deep_research_dirty_output {
-                    self.capture_research_report_view(&review_text);
-                }
-                if deep_research_missing_report {
-                    let fallback_query = self
-                        .deep_research_loop
-                        .as_ref()
-                        .map(|state| state.query.clone());
-                    let workflow_output = self
-                        .deep_research_workflow
-                        .output
-                        .as_deref()
-                        .unwrap_or_default()
-                        .to_string();
-                    let workflow_metadata = self.deep_research_workflow.metadata.clone();
-                    let completed_outcome = fallback_query.as_deref().map(|query| {
-                        let evidence_scope = self
-                            .deep_research_workflow
-                            .args
-                            .as_ref()
-                            .map(|args| deep_research_evidence_scope_from_args(args, query))
-                            .unwrap_or_default();
-                        deep_research_report_outcome_for_workflow(
-                            query,
-                            evidence_scope,
-                            &workflow_output,
-                            workflow_metadata.as_ref(),
-                        )
-                    });
-                    match recover_missing_deep_research_report(
-                        Path::new(&self.cwd),
-                        fallback_query.as_deref(),
-                        &review_text,
-                        &workflow_output,
-                        workflow_metadata.as_ref(),
-                        &mut self.loop_remaining,
-                        &mut self.deep_research_report_repair_used,
-                    ) {
-                        DeepResearchReportRecovery::CompletedMaterialized { artifacts } => {
-                            self.stage_deep_research_report(
-                                &artifacts,
-                                completed_outcome.unwrap_or(DeepResearchRunOutcome::Completed),
-                            );
-                            self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
-                                "  ✓ DeepResearch report validated and rendered at {}",
-                                artifacts.html.display()
-                            )));
-                        }
-                        DeepResearchReportRecovery::RecoveryMaterialized { artifacts } => {
-                            self.stage_deep_research_report(
-                                &artifacts,
-                                DeepResearchRunOutcome::Degraded,
-                            );
-                            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
-                                "  ⚠ DeepResearch evidence was insufficient; wrote an explicit low-confidence recovery report at {}",
-                                artifacts.html.display()
-                            )));
-                        }
-                        DeepResearchReportRecovery::RepairPassArmed => {
-                            self.pending_deep_research_report_repair_prompt =
-                                deep_research_report_repair_prompt_from_state(
-                                    self.deep_research_loop.as_ref(),
-                                    &workflow_output,
-                                    workflow_metadata.as_ref(),
-                                    &review_text,
-                                );
-                            self.push_line(&Style::new().fg(TN_YELLOW).render(
-                            "  ⚠ DeepResearch report is missing; running one focused repair pass…",
-                        ));
-                        }
-                        DeepResearchReportRecovery::Missing(message) => self.push_line(
-                            &Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {message}")),
-                        ),
-                    }
-                }
+                self.capture_research_report_view(&review_text);
                 self.disarm_sleep_if_over(sleep_save.is_some());
                 // `↓` counts OUTPUT (generated) tokens. Summing total_tokens per
                 // turn re-counts the whole context every turn (the prompt is
@@ -768,13 +511,10 @@ impl App {
                 };
             }
             AgentEvent::Error { message } => {
+                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
                 self.push_notice(NoticeKind::Error, &message);
-                if self.recover_deep_research_report_after_model_error(&message) {
-                    return self.complete_turn();
-                }
-                self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // and abandons an asset review
                 self.sleep_pending = false; // and a `/sleep` consolidation

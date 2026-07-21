@@ -9,6 +9,14 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "sign in with a copied OS access token instead of browser auth",
     ),
     (
+        "/use [status]",
+        "inspect the live Use registry, MCP connections, Skills, and providers",
+    ),
+    (
+        "/use repair",
+        "show explicit repair commands without installing or changing anything",
+    ),
+    (
         "/copy [transcript]",
         "copy the latest response or the complete semantic session Markdown",
     ),
@@ -274,7 +282,7 @@ fn help_panel() -> HelpPanel {
                 .row("! <cmd>", "run a shell command directly")
                 .row(
                     "? <query>",
-                    "web seed + local DynamicWorkflowRuntime workflow fan-out; say `no web` for offline evidence",
+                    "one planned retrieval pass; use `--local-only` for offline evidence",
                 )
                 .row("@<path>", "attach a workspace file from the file picker")
                 .row(
@@ -312,6 +320,11 @@ fn help_panel() -> HelpPanel {
                     "Ctrl+B",
                     "inspect delegated tasks, recent output, and safe cancellation",
                 )
+                .row(
+                    "Ctrl+B",
+                    "inspect delegated tasks, recent output, and safe cancellation",
+                )
+                .row("Ctrl+R", "fuzzy-search prompts from the current session")
                 .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",
@@ -700,8 +713,8 @@ mod tests {
         assert!(body.contains("/agent clone"));
         assert!(body.contains("/skill clone"));
         assert!(body.contains("typed OS services"));
-        assert!(body.contains("DynamicWorkflowRuntime"));
-        assert!(body.contains("local DynamicWorkflowRuntime workflow"));
+        assert!(body.contains("one planned retrieval pass"));
+        assert!(body.contains("--local-only"));
         assert!(body.contains("Ctrl+T"));
         assert!(body.contains("complete live semantic transcript"));
         assert!(!body.contains("uses runtime when signed in"));

@@ -35,6 +35,11 @@ impl App {
                     Mode::Auto => format!("⏵⏵ {}", item.value().display),
                     Mode::Default => item.value().display.clone(),
                 };
+                let display = if self.send_now_queued_sequence == Some(item.sequence()) {
+                    format!("↑ {display}")
+                } else {
+                    display
+                };
                 chrome
                     .queued_task(display)
                     .priority(i32::from(item.priority()))

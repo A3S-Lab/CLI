@@ -32,6 +32,7 @@ async fn start_web(args: WebStartArgs, context: &InvocationContext) -> anyhow::R
     let argv = start_argv(args, context)?;
     match crate::api::run_web(
         &argv,
+        &context.cancellation,
         context.network.offline,
         context.network.allow_first_use_install,
     )

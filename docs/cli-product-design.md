@@ -184,7 +184,10 @@ a3s code session delete <session-id> [--yes]
 a prompt file, or piped stdin. Arbitrary trailing text after `a3s code` is never
 guessed to be a prompt. It emits a final result in JSON or an event stream in
 JSONL. Any approval that cannot be resolved in non-interactive mode fails
-instead of blocking on hidden input.
+instead of blocking on hidden input. `auto` uses the shared risk classifier to
+approve bounded workspace operations; high-risk or unknown operations still
+fail with `approval.required`. A successful result requires a terminal Code
+completion event rather than merely a closed event stream.
 
 `code resume` remains canonical because it is a frequent user action. The
 `session` group owns less frequent inspection and data lifecycle operations.
@@ -210,14 +213,55 @@ source reads, text search, and all mutations.
 
 ```text
 a3s code research <query>
-    [--runtime auto|local|os]
+    [--local-only|--web]
     [--report-dir <path>]
 ```
 
 The command replaces `deepresearch` and `deep-research`. It always reports the
-Markdown and HTML artifacts it created. A requested runtime that is not
-available fails explicitly; it is not silently replaced when reproducibility
-matters.
+Markdown and HTML artifacts it created. DeepResearch has one host-managed
+runtime; callers choose only the evidence scope.
+
+Every run receives an automatic `quota.mode = unlimited`,
+`execution.mode = coverage_driven` Loop Engineering contract. Search-provider
+queries are immutable plan inputs and are sent byte-for-byte exactly once.
+After the fixed eight-slot initial web retrieval and closed semantic selection,
+the Host validates typed source-to-obligation coverage and counts operational
+loss from fetch or source-selection failure. Either kind of gap can authorize
+one supplemental pass over at most two previously unselected candidates from
+the already returned provider catalog. The supplemental allowance is separate
+from the eight initial slots and cannot generate or rewrite a query. It records
+the initial outcome for every candidate and avoids a fetch-failed transport
+surface when a distinct remaining candidate is available. The initial closed
+evidence portfolio is durably checkpointed first, so a shared-stage timeout in
+optional supplemental work recovers that same-run result instead of erasing
+completed material evidence.
+
+Research quality is not inferred from prompt compliance, wording overlap, URL
+shape, title terms, language detection, or language-specific routing. Closed
+IDs, typed graph edges, durable replay, deterministic Host assessment, citation
+audit, and atomic report publication are the product boundary. Primary-source
+requirements need one typed primary edge; independent corroboration needs two
+distinct answer-path source identities with typed independent edges.
+Source-local relevance edges route partial and complete evidence into one
+closed review per obligation without wording-based filtering. Models cite
+short Host-owned evidence references; the Host maps them to exact evidence IDs
+per question so one malformed entry or invalid reference does not discard a
+valid sibling resolution. An `answered` entry with an explicit limitation is
+deterministically downgraded to `partial`. Report sections receive bounded
+accepted-claim excerpts, and
+full-date literals must normalize back to those committed claims before
+publication.
+Question review, section writing/revision, and editorial framing share explicit
+semantic guardrails: source metadata keeps its original meaning, raw dates do
+not become invented intervals, and narrow dependency or lifecycle evidence
+cannot become incompatibility, future-fix, replacement-performance, governance,
+or ecosystem-wide claims. Internal fetch/review diagnostics do not appear in
+the reader-facing source ledger. Reader-facing review, section/revision, and
+frame text uses the query language, and a local evidence gap cannot be widened
+into a report-wide absence.
+Complete replacement packets repeat exact source alternatives for every
+binding, while the Host reduces only strict same-origin child paths to the
+longest committed parent. Similar or wider URLs remain invalid.
 
 ### 6.3 Asset Families
 
@@ -286,12 +330,11 @@ or promotion operations remain interactive-only.
 
 ```text
 a3s web start [--detach] [--replace] [--host <host>] [--port <port>]
-    [--web-dir <path>] [--api-only]
-a3s web stop
-a3s web status
-a3s web logs [--follow]
-a3s web open
-a3s -C <path> web <start|stop|status|logs|open>
+    [--directory <path>] [--web-dir <path>] [--api-only]
+a3s web stop [--directory <path>]
+a3s web status [--directory <path>]
+a3s web logs [--directory <path>] [--follow]
+a3s web open [--directory <path>]
 ```
 
 `a3s web` remains a documented human shortcut for `a3s web start`. Scripts
@@ -311,6 +354,14 @@ extracts the archive, and atomically activates a versioned user-data cache
 behind a cross-process lock. Offline mode and `A3S_NO_AUTO_INSTALL=1` never
 contact the release service. A fixed detached port is validated before the
 first-use download begins.
+
+Start is idempotent: it reuses a healthy workspace instance instead of treating
+repeat invocation as a failure. It may discover a healthy foreground or legacy
+A3S instance through the versioned health contract, but that observation does
+not grant lifecycle ownership. `--replace` performs authenticated graceful
+shutdown only for a managed instance; it refuses unmanaged A3S and foreign port
+owners. Port ownership is checked before assets, configuration, or persisted
+sessions are loaded.
 
 Web sessions for the same canonical workspace share one Code Intelligence
 runtime. Monaco consumes typed status, outline, navigation, and diagnostics

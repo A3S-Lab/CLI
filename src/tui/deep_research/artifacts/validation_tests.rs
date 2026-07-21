@@ -1,4 +1,5 @@
 use super::*;
+use a3s::research::{EvidenceRef, InquiryEvent, InquiryLimits, Question, ResearchMethod};
 
 fn observed_workflow_output(sources: &[&str]) -> String {
     let sources = sources
@@ -32,6 +33,49 @@ fn observed_workflow_output(sources: &[&str]) -> String {
         }
     })
     .to_string()
+}
+
+#[test]
+fn completed_artifact_validation_rejects_an_outlining_inquiry() {
+    let events = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![Question::queued(
+                "question:one",
+                None,
+                "What does the evidence establish?",
+            )],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:one",
+                vec!["claim:one".to_string()],
+                vec!["source:one".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:one".to_string(),
+            answer: "The evidence establishes the finding.".to_string(),
+            evidence_ids: vec!["evidence:one".to_string()],
+        },
+    ];
+    let state = a3s::research::replay(&events, &InquiryLimits::default()).unwrap();
+    let workflow = serde_json::json!({
+        "inquiry": {"events": events, "state": state}
+    })
+    .to_string();
+
+    let error = validate_deep_research_completed_report_content(
+        "# Report\n\nA sufficiently long report body that would otherwise continue through the remaining validation gates.",
+        "<!doctype html><html><body>report</body></html>",
+        "query",
+        &workflow,
+        None,
+    )
+    .expect_err("Outlining evidence readiness must not publish a completed artifact");
+    assert!(error.contains("current phase is Outlining"), "{error}");
 }
 
 #[test]
@@ -122,7 +166,7 @@ fn generated_report_sanitizes_one_unobserved_url_without_discarding_the_report()
     assert!(cleaned.contains(observed), "{cleaned}");
     assert!(!cleaned.contains(mistyped), "{cleaned}");
     assert!(cleaned.contains("a mistyped duplicate"), "{cleaned}");
-    assert!(!cleaned.contains("- Mistyped duplicate"), "{cleaned}");
+    assert!(cleaned.contains("- Mistyped duplicate"), "{cleaned}");
 
     let html = deep_research_completed_report_html("Runtime report", &cleaned);
     deep_research_report_source_trace_diagnostic(
@@ -136,9 +180,49 @@ fn generated_report_sanitizes_one_unobserved_url_without_discarding_the_report()
 }
 
 #[test]
+fn generated_report_sanitizes_an_unobserved_autolink_inside_bold_disclosure() {
+    let observed = "https://example.com/observed";
+    let unavailable = "https://github.com/launchbadge/sqlx/issues/1669";
+    let workflow_output = observed_workflow_output(&[observed]);
+    let markdown = format!(
+        "# Runtime report\n\n\
+         > [!CAUTION]\n\
+         > **Evidence boundaries**\n\
+         >\n\
+         > - **Fetch retained no substantive text for {unavailable}.** — The unavailable page remains an explicit evidence gap.\n\n\
+         ## Findings\n\nA substantive comparison remains supported by [the observed source]({observed}).\n\n\
+         ## Sources\n\n- [Observed source]({observed})\n\n\
+         ## Limitations\n\nConfidence is bounded by the unavailable corroboration.\n"
+    );
+
+    let cleaned = sanitize_unobserved_markdown_http_citations(
+        &markdown,
+        "Runtime report",
+        &workflow_output,
+        None,
+    );
+
+    assert!(cleaned.contains(observed), "{cleaned}");
+    assert!(!cleaned.contains(unavailable), "{cleaned}");
+    assert!(
+        cleaned.contains("Fetch retained no substantive text"),
+        "{cleaned}"
+    );
+    let html = deep_research_completed_report_html("Runtime report", &cleaned);
+    deep_research_report_source_trace_diagnostic(
+        &cleaned,
+        &html,
+        "Runtime report",
+        &workflow_output,
+        None,
+    )
+    .expect("bold evidence-boundary prose must not create an unobserved citation");
+}
+
+#[test]
 fn internal_status_text_has_a_specific_rejection_diagnostic() {
     let workflow_output = observed_workflow_output(&["https://example.com/observed"]);
-    let answer = "# Runtime report\n\n## Findings\n\nCreated the report directory and wrote the HTML report. This deliberately contains enough additional text to pass the length boundary.\n\n## Sources\n\n- https://example.com/observed\n\n## Limitations\n\nConfidence is bounded.\n";
+    let answer = "# Runtime report\n\n## Findings\n\nDynamicWorkflowRuntime output: an internal transport record that must never be published. This deliberately contains enough additional text to pass the length boundary.\n\n## Sources\n\n- https://example.com/observed\n\n## Limitations\n\nConfidence is bounded.\n";
 
     let diagnostic = deep_research_report_rejection_diagnostic_from_answer_text(
         "Runtime report",

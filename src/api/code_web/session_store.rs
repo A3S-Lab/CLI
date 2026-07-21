@@ -12,6 +12,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+use super::kernel::turn_queue::CodeWebStoredTurnQueue;
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings};
 
 const SESSION_SCHEMA_VERSION: u32 = 1;
@@ -48,6 +49,8 @@ pub(in crate::api::code_web) struct CodeWebStoredSession {
     #[serde(default)]
     pub(in crate::api::code_web) context: CodeWebStoredContext,
     #[serde(default)]
+    pub(in crate::api::code_web) turn_queue: CodeWebStoredTurnQueue,
+    #[serde(default)]
     pub(in crate::api::code_web) settings: CodeWebSessionSettings,
 }
 
@@ -58,6 +61,7 @@ impl CodeWebStoredSession {
         messages: Vec<Value>,
         controls: CodeWebSessionControls,
         context: CodeWebStoredContext,
+        turn_queue: CodeWebStoredTurnQueue,
         settings: CodeWebSessionSettings,
     ) -> Self {
         Self {
@@ -67,6 +71,7 @@ impl CodeWebStoredSession {
             messages,
             controls,
             context,
+            turn_queue,
             settings,
         }
     }
@@ -379,6 +384,7 @@ mod tests {
             vec![json!({ "role": "user", "content": "hello" })],
             CodeWebSessionControls::default(),
             CodeWebStoredContext::default(),
+            CodeWebStoredTurnQueue::default(),
             CodeWebSessionSettings::default(),
         );
 

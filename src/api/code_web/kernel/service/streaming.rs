@@ -1,3 +1,4 @@
+use super::goal_runtime::goal_continuation_prompt;
 use super::*;
 
 impl KernelService {
@@ -6,25 +7,83 @@ impl KernelService {
         session_id: &str,
         request: serde_json::Value,
     ) -> BootResult<BootResponse> {
-        let content = request
+        let session = self.kernel_session(session_id).await?;
+        let queue_id = request
+            .get("queueId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let queued_turn = match queue_id {
+            Some(queue_id) => Some(self.begin_queued_turn(session_id, queue_id).await?),
+            None => None,
+        };
+        let direct_content = request
             .get("content")
             .or_else(|| request.get("message"))
             .and_then(Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| BootError::BadRequest("content is required".to_string()))?;
-        let session = self.kernel_session(session_id).await?;
-        let prompt = self.compose_session_prompt(session_id, content).await;
-        let history = self.model_history_for_session(session.as_ref()).await?;
-        self.append_message(session_id, "user", content, None)
-            .await?;
-        let (mut agent_events, join) = session
-            .stream(&prompt, Some(&history))
+            .filter(|value| !value.is_empty());
+        if queued_turn.is_none() && direct_content.is_none() {
+            return Err(BootError::BadRequest(
+                "content or queueId is required".to_string(),
+            ));
+        }
+        let visible_content = queued_turn
+            .as_ref()
+            .map(queued_turn_visible_content)
+            .unwrap_or_else(|| direct_content.unwrap_or_default().to_string());
+        let prompt = match queued_turn.as_ref().map(|turn| turn.kind) {
+            Some(CodeWebQueuedTurnKind::GoalContinuation) => {
+                let controls = self.session_controls_snapshot(session_id).await;
+                let goal = controls
+                    .goal
+                    .as_deref()
+                    .unwrap_or("the active session goal");
+                let attempt = controls
+                    .goal_run
+                    .as_ref()
+                    .map(|run| run.attempts)
+                    .unwrap_or_default();
+                goal_continuation_prompt(goal, attempt)
+            }
+            _ => {
+                self.compose_session_prompt(session_id, &visible_content)
+                    .await
+            }
+        };
+        let history = match self.model_history_for_session(session.as_ref()).await {
+            Ok(history) => history,
+            Err(error) => {
+                if let Some(turn) = queued_turn.as_ref() {
+                    let _ = self.restore_queued_turn(session_id, &turn.id).await;
+                }
+                return Err(error);
+            }
+        };
+        let (mut agent_events, join) = match session.stream(&prompt, Some(&history)).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                if let Some(turn) = queued_turn.as_ref() {
+                    let _ = self.restore_queued_turn(session_id, &turn.id).await;
+                }
+                return Err(BootError::Internal(error.to_string()));
+            }
+        };
+        self.begin_goal_attempt(session_id).await;
+        if let Err(error) = self
+            .append_message(session_id, "user", &visible_content, None)
             .await
-            .map_err(|error| BootError::Internal(error.to_string()))?;
+        {
+            session.cancel().await;
+            if let Some(turn) = queued_turn.as_ref() {
+                let _ = self.finish_queued_turn(session_id, &turn.id, true).await;
+            }
+            return Err(error);
+        }
 
         let service = Self::new(Arc::clone(&self.state));
         let session_id = session_id.to_string();
+        let queued_turn_id = queued_turn.as_ref().map(|turn| turn.id.clone());
         let (sender, receiver) = tokio::sync::mpsc::channel::<BootResult<SseEvent>>(64);
         tokio::spawn(async move {
             let mut accumulator = CodeWebStreamAccumulator::default();
@@ -36,6 +95,7 @@ impl KernelService {
                 if let AgentEvent::Error { message } = &event {
                     terminal_error = Some(message.clone());
                 }
+                service.observe_goal_event(&session_id, &event).await;
                 observed_events.push(event.clone());
                 send_code_web_event(&sender, &event).await;
                 accumulator.observe(event);
@@ -51,6 +111,7 @@ impl KernelService {
                 accumulator.finish()
             };
 
+            let succeeded = result.is_ok();
             match result {
                 Ok(mut result) => {
                     result.events = observed_events;
@@ -88,6 +149,19 @@ impl KernelService {
                         )
                         .await;
                 }
+            }
+
+            let goal_continuation = service.pending_goal_continuation(&session_id).await;
+            if let Some(turn_id) = queued_turn_id.as_deref() {
+                let pause_queue = !succeeded && goal_continuation.is_none();
+                let _ = service
+                    .finish_queued_turn(&session_id, turn_id, pause_queue)
+                    .await;
+            }
+            if let Some((goal, attempt)) = goal_continuation {
+                let _ = service
+                    .enqueue_goal_continuation(&session_id, &goal, attempt)
+                    .await;
             }
         });
 
@@ -129,8 +203,42 @@ impl KernelService {
             self.maybe_auto_compact(session_id, session, result.last_prompt_tokens, None)
                 .await;
         }
+        if let Err(error) =
+            refresh_evolution_runtime_after_turn(self.state.as_ref(), session.workspace()).await
+        {
+            tracing::warn!(%error, session_id, "could not refresh learned Web session assets after streamed turn");
+        }
         Ok(())
     }
+}
+
+fn queued_turn_visible_content(turn: &CodeWebQueuedTurn) -> String {
+    if turn.kind == CodeWebQueuedTurnKind::GoalContinuation {
+        return format!("[goal continuation]\n{}", turn.content);
+    }
+    let mut sections = Vec::new();
+    if !turn.skill_names.is_empty() {
+        sections.push(format!(
+            "[Selected skills]\n{}\n[/Selected skills]",
+            turn.skill_names
+                .iter()
+                .map(|name| format!("- Use your `{name}` skill."))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    if !turn.context_files.is_empty() {
+        sections.push(format!(
+            "[Workspace context files]\n{}\n[/Workspace context files]",
+            turn.context_files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ));
+    }
+    sections.push(turn.content.clone());
+    sections.join("\n\n")
 }
 
 pub(super) struct CodeWebStreamResult {

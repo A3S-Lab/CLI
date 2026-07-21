@@ -12,6 +12,7 @@ use super::service::KernelService;
 use super::sessions_controller::KernelSessionsController;
 use super::shell_controller::KernelShellController;
 use super::sleep_controller::KernelSleepController;
+use super::turn_queue_controller::KernelTurnQueueController;
 use crate::api::code_web::state::CodeWebState;
 
 pub(in crate::api::code_web) struct KernelModule;
@@ -38,6 +39,7 @@ impl Module for KernelModule {
             Arc::new(KernelControlsController::new(Arc::clone(&service))).controller()?,
             Arc::new(KernelCompactionController::new(Arc::clone(&service))).controller()?,
             Arc::new(KernelSleepController::new(Arc::clone(&service))).controller()?,
+            Arc::new(KernelTurnQueueController::new(Arc::clone(&service))).controller()?,
             Arc::new(KernelForkController::new(Arc::clone(&service))).controller()?,
             Arc::new(KernelOutputController::new(Arc::clone(&service))).controller()?,
             Arc::new(KernelShellController::new(Arc::clone(&service))).controller()?,

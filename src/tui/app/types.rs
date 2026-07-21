@@ -23,7 +23,6 @@ pub(super) struct LlmTurnUiCheckpoint {
     pub(super) turn_had_agent_activity: bool,
     pub(super) turn_text_after_activity: bool,
     pub(super) runtime_tools: RuntimeToolCheckpoint,
-    pub(super) report_tools: ReportPhaseToolBuffer,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -185,6 +184,11 @@ pub(super) enum SessionRebuildAction {
     Fork {
         session_id: String,
     },
+    Rewind {
+        session_id: String,
+        files_rewound: bool,
+        warning: Option<String>,
+    },
     Relay {
         restore: RelayRestoreState,
     },
@@ -194,9 +198,52 @@ pub(super) enum SessionRebuildAction {
     Reload {
         skill_count: usize,
     },
+    EvolutionRuntime {
+        pending_assets: usize,
+        stream_token: u64,
+        synthesis: Option<(String, String)>,
+    },
     Refresh {
         failure_context: Option<&'static str>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorktreeForkResult {
+    pub(super) session_id: String,
+    pub(super) workspace: PathBuf,
+    pub(super) worktree_root: PathBuf,
+    pub(super) branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RewindCheckpointSeed {
+    pub(super) source_session_id: String,
+    pub(super) task: String,
+    pub(super) history_before: Vec<Message>,
+    pub(super) session_before: Option<a3s_code_core::store::SessionData>,
+    pub(super) git_before: Option<GitTreeSnapshot>,
+    pub(super) warning: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RewindCheckpoint {
+    pub(super) id: u64,
+    pub(super) source_session_id: String,
+    pub(super) task: String,
+    pub(super) history_before: Vec<Message>,
+    pub(super) session_before: Option<a3s_code_core::store::SessionData>,
+    pub(super) file_patch: Option<GitBinaryPatch>,
+    pub(super) repository_root: Option<PathBuf>,
+    pub(super) warning: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RewindResult {
+    pub(super) checkpoint_id: u64,
+    pub(super) session_id: String,
+    pub(super) files_rewound: bool,
+    pub(super) warning: Option<String>,
 }
 
 pub(super) struct SessionRebuildProfile {
@@ -264,6 +311,8 @@ pub(super) enum Msg {
         join: StreamJoin,
         /// Temporary previews retained until stream admission succeeds.
         submitted_images: Vec<PendingImage>,
+        /// Pre-turn conversation and Git state captured before admission.
+        rewind_checkpoint: Option<RewindCheckpointSeed>,
     },
     StreamEnded(SharedRx),
     StreamJoinSettled {
@@ -411,6 +460,11 @@ pub(super) enum Msg {
         status_entry: TranscriptEntryId,
         result: Result<(PathBuf, u64), String>,
     },
+    /// Live A3S Use capability projection and provider readiness.
+    UseStatus {
+        status_entry: TranscriptEntryId,
+        text: String,
+    },
     /// Typed, secret-free host inspection completed before `/checkup` starts
     /// its strict read-only workspace audit.
     CheckupPreflightCompleted {
@@ -421,7 +475,6 @@ pub(super) enum Msg {
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
     DeepResearchWorkflowCompleted {
         query: String,
-        os_runtime: bool,
         args: serde_json::Value,
         result: Result<ToolCallResult, String>,
         convergence: ConvergenceDecision,
@@ -434,17 +487,6 @@ pub(super) enum Msg {
         query: String,
         phase: DeepResearchReportGenerationPhase,
         result: Result<ToolCallResult, String>,
-    },
-    /// A DeepResearch synthesis/repair stream exceeded its host-side model budget.
-    DeepResearchSynthesisTimedOut {
-        token: u64,
-    },
-    /// A timed-out DeepResearch synthesis/repair stream was cancelled at the session layer.
-    DeepResearchSynthesisTimedOutAfterCancel {
-        token: u64,
-        status: String,
-        streamed_text: String,
-        report_completed: bool,
     },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
@@ -490,6 +532,25 @@ pub(super) enum Msg {
         request_id: u64,
         result: Result<String, String>,
     },
+    /// `/fork worktree` created an isolated Git worktree and copied the complete
+    /// session into its workspace-local store. The current TUI stays attached
+    /// to its original workspace.
+    WorktreeForked {
+        request_id: u64,
+        result: Result<WorktreeForkResult, String>,
+    },
+    /// Post-turn Git capture finished and queued continuation may proceed.
+    RewindCheckpointFinalized {
+        token: u64,
+        checkpoint: RewindCheckpoint,
+        synthesis: Option<(String, String)>,
+    },
+    /// `/rewind` created a pre-turn session fork and safely reversed its file
+    /// patch, or refused without changing files.
+    Rewound {
+        request_id: u64,
+        result: Result<RewindResult, String>,
+    },
     /// A background scan of native and external coding-agent transcripts.
     RelayData {
         request_id: u64,
@@ -503,6 +564,19 @@ pub(super) enum Msg {
     MemoryLoaded(MemPanelData),
     /// A `/memory` forget-candidate deletion finished, with fresh graph data.
     MemoryForgotten(Result<(String, MemPanelData), String>),
+    /// `/evolution` loaded the current memory-derived candidate catalog.
+    EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
+    /// A candidate review/materialize/rollback action completed.
+    EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
+    /// Post-turn check for automatically materialized session assets. This
+    /// remains a queue barrier until a required session rebuild has settled.
+    EvolutionRuntimeChecked {
+        stream_token: u64,
+        synthesis: Option<(String, String)>,
+        result: Result<usize, String>,
+    },
+    /// A rebuilt session loaded materialized local skills.
+    EvolutionSkillsActivated(Result<usize, String>),
     /// Asset-scoped OS asset list loaded.
     AssetListLoaded(Result<panels::asset_resources::AssetListFetch, String>),
     /// Runtime activity rows loaded for an asset-scoped activity panel.
@@ -583,12 +657,12 @@ pub(super) struct DeepResearchSubagentSettlement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeepResearchReportGenerationPhase {
     Synthesis,
-    Repair,
+    Resume,
 }
 
 impl DeepResearchReportGenerationPhase {
-    pub(super) fn is_repair(self) -> bool {
-        matches!(self, Self::Repair)
+    pub(super) fn is_resume(self) -> bool {
+        matches!(self, Self::Resume)
     }
 }
 

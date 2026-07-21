@@ -146,7 +146,6 @@ impl App {
         self.host_tool_abort = None;
         self.host_progress_inflight = false;
         self.host_tool_call_id = None;
-        self.deep_research_report_tools.clear();
         self.restore_current_approval_feedback();
         self.pending_tools.clear();
         self.permission_rule_write_inflight = None;
@@ -251,66 +250,18 @@ impl App {
     }
 
     pub(super) fn capture_research_report_view(&mut self, output: &str) -> bool {
+        // DeepResearch artifacts are staged only by the host-owned structured
+        // report pipeline. Text markers remain available for ordinary report
+        // workflows, but can never promote a second DeepResearch report path.
+        if self.deep_research_loop.is_some() {
+            return false;
+        }
         let workspace = Path::new(&self.cwd);
-        let spec = self
-            .deep_research_loop
-            .as_ref()
-            .and_then(|state| {
-                let baseline = self.deep_research_workflow.report_baseline.as_ref()?;
-                deep_research_report_view_spec_for_current_run(
-                    output,
-                    workspace,
-                    &state.query,
-                    self.deep_research_workflow
-                        .output
-                        .as_deref()
-                        .unwrap_or_default(),
-                    self.deep_research_workflow.metadata.as_ref(),
-                    baseline,
-                )
-            })
-            .or_else(|| {
-                self.deep_research_loop
-                    .is_none()
-                    .then(|| research_report_view_spec(output, workspace))
-                    .flatten()
-            });
+        let spec = research_report_view_spec(output, workspace);
         if let Some(spec) = spec {
-            match research_report_view_action(self.deep_research_loop.is_some()) {
-                ResearchReportViewAction::DeferUntilDeepResearchComplete => {
-                    self.deep_research_outcome = self
-                        .deep_research_loop
-                        .as_ref()
-                        .map(|state| {
-                            let workflow_output = self
-                                .deep_research_workflow
-                                .output
-                                .as_deref()
-                                .unwrap_or_default();
-                            let evidence_scope = self
-                                .deep_research_workflow
-                                .args
-                                .as_ref()
-                                .map(|args| {
-                                    deep_research_evidence_scope_from_args(args, &state.query)
-                                })
-                                .unwrap_or_default();
-                            deep_research_report_outcome_for_workflow(
-                                &state.query,
-                                evidence_scope,
-                                workflow_output,
-                                self.deep_research_workflow.metadata.as_ref(),
-                            )
-                        })
-                        .unwrap_or(DeepResearchRunOutcome::Completed);
-                    self.pending_deep_research_report_view = Some(spec);
-                }
-                ResearchReportViewAction::OpenNow => {
-                    let is_new = self.remember_remote_view(spec.clone());
-                    if is_new {
-                        self.open_remote_view(&spec);
-                    }
-                }
+            let is_new = self.remember_remote_view(spec.clone());
+            if is_new {
+                self.open_remote_view(&spec);
             }
             return true;
         }
@@ -431,14 +382,12 @@ impl App {
     /// after login. Called after every auth change (login/logout), once the
     /// session has been (re)built.
     pub(super) fn replace_session(&mut self, session: AgentSession) {
-        // Permission rows are scoped to the active session and its shared
-        // grants. Never leave a stale inspector open across replacement.
-        self.permission_panel = None;
         // A task panel is scoped to the exact Core session and its live
         // cancellation handles. Closing it prevents a late refresh or click
         // from targeting a rebuilt session with a coincidentally equal task id.
         self.task_panel = None;
         self.history_panel = None;
+        self.permission_panel = None;
         self.session = Arc::new(session);
         let _ = self.session.register_dynamic_workflow_runtime();
         self.sync_runtime_tool();
@@ -619,7 +568,7 @@ impl App {
             assistant_stream_block_parts(&stable, &tail, content_width)
         {
             if !blocks.is_empty() {
-                prefix.push('\n');
+                prefix.push_str(transcript_block_separator());
             }
             prefix.push_str(&stream_prefix);
             format!("{stream_suffix}\n")
@@ -633,6 +582,7 @@ impl App {
         // entry, matching Codex's committed-history + active-tail model.
         self.viewport.set_content_parts(&prefix, &suffix);
         self.restore_viewport_anchor(anchor);
+        self.refresh_transcript_selection_projection();
         self.refresh_transcript_view();
     }
 
@@ -642,7 +592,6 @@ impl App {
     }
 
     pub(super) fn rebuild_viewport_from(&mut self, anchor: ViewportAnchor) {
-        self.selection = None; // content changed → screen-coord selection is stale
         let content_width = self.viewport_content_width();
         let blocks =
             self.messages
@@ -650,6 +599,7 @@ impl App {
         let full = join_transcript_blocks(&blocks);
         self.viewport.set_content(&format!("\n{full}\n")); // top padding
         self.restore_viewport_anchor(anchor);
+        self.refresh_transcript_selection_projection();
         self.refresh_transcript_view();
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.9.8"
+version = "0.9.9"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -14,7 +14,7 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=6.1.0"
+a3s-code-core = "=6.3.0"
 a3s-boot = "=0.1.2"
 a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
@@ -24,9 +24,10 @@ a3s-tui = "=0.1.13"
 a3s-search = { version = "=2.0.0", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use-extension = { version = "=0.1.2", git = "https://github.com/A3S-Lab/Use", rev = "fe4be794c4dd2bdb7e049c6039204fed1fb1d392" }
+a3s-use-extension = "=0.1.3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
+libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
@@ -53,11 +54,11 @@ tokio-socks = "0.5"
 thiserror = "2"
 webpki-roots = "1"
 sha2 = "0.10"
+sysinfo = "0.36.1"
 axum = "0.8"
 comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
-sysinfo = "0.36.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -95,3 +96,4 @@ a3s-memory = { path = "../memory" }
 a3s-search = { path = "../search" }
 a3s-tui = { path = "../tui" }
 a3s-updater = { path = "../updater" }
+a3s-use-extension = { path = "../use/crates/extension" }

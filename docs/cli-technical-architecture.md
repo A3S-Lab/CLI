@@ -370,10 +370,66 @@ Files split by concern before reaching repository size limits.
 
 Typed asset execution and DeepResearch orchestration live under
 `commands/code`. The Research application module owns workflow source, budgets,
-prompts, evidence normalization, report artifacts, and report-only permission
-policy. The TUI imports that module as a presentation adapter; the application
+prompts, evidence normalization, and report artifacts. Report models receive
+only schema-constrained generation calls and no file, shell, retrieval,
+delegation, Runtime, or MCP tools. The host validates the typed report result
+and is the only authority that may atomically materialize the Markdown/HTML
+pair. The TUI imports that module as a presentation adapter; the application
 runtime never imports TUI internals and must not regain a string-based CLI
 router.
+
+DeepResearch automatically materializes a transient Loop Engineering contract
+for each TUI or headless run. The contract has `quota.mode = unlimited` and an
+immutable `coverage_driven` stage graph. Its maximum logical cardinality is two
+semantic iterations, retrieval passes, and semantic selections, followed by one
+obligation-review stage, Host contract assessment, report transaction, and
+targeted section revision allowance. It travels with durable workflow input but
+never creates a user-facing `.a3s/loops/` asset. Rust Inquiry validates the
+contract, owns legal state transitions and terminal authority, and delegates
+only durable effects to Flow.
+
+The first pass creates the complete provider candidate catalog and has eight
+initial web-fetch slots. Source-local selectors emit obligation-relevance edges
+for partial routing and separate criterion/role edges for full coverage. A
+second pass is legal only when Host-validated coverage edges expose a typed gap
+or the Host counts evidence lost to an initial fetch/source-selection failure;
+it may fetch at most two additional previously unselected candidates and avoids
+a fetch-failed transport surface when a distinct candidate remains. It cannot
+call search again or create, rewrite, normalize, or translate a provider query. Per-call
+deadlines, output bounds, concurrency ceilings, and catalog limits are safety
+fuses rather than quota accounting; none can authorize a third pass or reopen a
+terminal stage.
+
+The initial materialized evidence result is an explicit durable Flow checkpoint
+before the optional second pass. When the shared retrieval deadline interrupts
+that optional work, Rust validates and restores the checkpoint by exact run ID,
+query, evidence ledger, and Host terminal-authority marker, then continues into
+closed review. An unfinished supplement cannot replace the initial result with
+an empty collection.
+
+Obligation review generation uses short Host-owned evidence references rather
+than model-copied evidence hashes. Rust maps those references through the exact
+per-question catalog before committing any answer event. The shared envelope is
+validated once, then each question entry is decoded independently: a malformed
+sibling fails closed on its own, while `answered` plus a non-empty limitation is
+monotonically demoted to `partial`. Section generation
+receives bounded claim excerpts for each committed evidence binding; the Host
+normalizes ISO, English, and Chinese full dates and rejects a section whose date
+does not resolve to one of its committed claims. Citation and date failures
+share the single durable targeted-revision allowance.
+Closed question review, section generation/revision, and frame generation also
+carry one semantic-granularity contract. It forbids unstated interval math,
+metadata reclassification, dependency-to-incompatibility inference,
+discontinuation-to-no-future-fix inference, unsupported replacement properties,
+and ecosystem-wide conclusions from a few examples. Source discovery/review
+metadata remains internal when the final source ledger is assembled.
+Reader-facing structured output uses the query language, and scoped evidence
+absence cannot become a report-global assertion. Editorial-frame generation
+uses two 270-second active attempts inside the one durable report budget.
+Revision packets carry exact citation alternatives for the complete binding
+set. Citation normalization accepts only a strict same-origin path descendant
+of a non-root committed source and selects the longest matching parent; lexical
+prefixes, broader roots, and code spans are not normalized.
 
 ## 11. Component Application Layer
 
@@ -408,6 +464,37 @@ The component manager supports registered A3S identities, not arbitrary native
 package names. Backends construct typed argv for trusted source kinds. They do
 not execute registry-provided command strings, remote shell scripts, or
 installer command definitions embedded in ACL.
+
+### 11.1 Code local sandbox supply
+
+The local command sandbox is an internal Code support component rather than a
+new public product proxy. Core owns the `BashSandbox` contract and permission
+boundary. CLI owns user-wide preparation, receipt validation, compatible Node
+selection, and the capability handshake. Runtime owns durable Task and Service
+placement, while Box owns OCI and stronger-isolation workloads.
+
+The production supply path is release-owned:
+
+1. reuse only a managed installation whose receipt, exact package identity and
+   version, registry integrity, lock file, and complete tree digest match;
+2. otherwise locate the support tree carried by the CLI archive or Homebrew
+   formula, reject links and workspace-local copies, and compare its complete
+   normalized tree against the digest compiled into the CLI;
+3. require Node.js 20.11 or newer, pin that executable for the Code process, and
+   run the Core handshake before attaching the sandbox;
+4. permit the verified release payload in offline mode and with
+   `A3S_NO_AUTO_INSTALL=1` because discovery performs no mutation;
+5. only when no release payload exists and first-use mutation is allowed, use
+   the fixed npm lock as a source/Cargo development bootstrap with lifecycle
+   scripts disabled and official registry URLs pinned;
+6. if every source fails, continue without a sandbox so Default can request one
+   exact host command and Auto can deny Bash.
+
+The TUI does not select an arbitrary `srt` from `PATH`. Release packaging,
+Homebrew installation, and standalone self-update all preserve the same
+verified support tree. Runtime and Box remain the owners of durable placement
+and stronger isolation; this payload does not become a public component
+catalog or stack-wide execution contract.
 
 Executable discovery and version probes use bounded output files and an
 explicit portable timeout. They must not install process-global signal
@@ -462,20 +549,30 @@ canonical workspace. State records include:
 
 - schema version and instance ID;
 - canonical workspace and bound address;
-- PID plus platform process identity or start time;
-- executable identity and version;
+- PID plus the recorded launch time;
+- executable path and version;
 - a random launch nonce known to the worker;
 - log path, start time, and readiness state.
 
 `web start --detach` launches a hidden internal worker mode and waits on a
 bounded readiness handshake. It writes state atomically only after the server
-binds. Failure returns the child diagnostic and cleans incomplete state.
+binds. A workspace-keyed lifecycle lock makes concurrent starts converge on the
+same worker. Failure returns the child diagnostic and cleans incomplete state.
 
-`stop`, `status`, `logs`, and `open` resolve the same instance. Before sending a
-signal, stop validates PID, process identity, executable, and nonce. A stale or
-ambiguous record is reported and quarantined; it never causes a blind kill.
-Graceful shutdown has a bounded timeout and requires explicit escalation before
-force termination.
+`stop`, `status`, `logs`, and `open` resolve the same instance. Before requesting
+shutdown, stop verifies the recorded PID and random launch nonce against the
+private control route. A stale or ambiguous record is reported and quarantined;
+it never causes a blind kill.
+Graceful shutdown has a bounded timeout and does not fall back to force
+termination.
+
+Before configuration or session restoration, foreground startup reserves the
+requested listener and detached startup probes any occupied address. A
+versioned A3S health response identifies healthy foreground and legacy
+instances for reuse and diagnostics, but it does not expose the control nonce
+or confer stop authority. `--replace` is accepted only for an authenticated
+managed record. A foreign listener and an unmanaged A3S listener are never
+signaled.
 
 Foreground and detached modes use the same server configuration and startup
 path. Logs rotate under the shared state/log path policy and never contain

@@ -933,6 +933,27 @@ mod tests {
     }
 
     #[test]
+    fn path_webview_candidates_preserve_every_match_in_order() {
+        let temp = tempfile::tempdir().unwrap();
+        let first_directory = temp.path().join("first");
+        let missing_directory = temp.path().join("missing");
+        let second_directory = temp.path().join("second");
+        std::fs::create_dir_all(&first_directory).unwrap();
+        std::fs::create_dir_all(&second_directory).unwrap();
+        let first = first_directory.join("a3s-webview");
+        let second = second_directory.join("a3s-webview");
+        std::fs::write(&first, b"stale helper").unwrap();
+        std::fs::write(&second, b"compatible helper").unwrap();
+
+        let candidates = find_on_paths(
+            "a3s-webview",
+            [first_directory, missing_directory, second_directory],
+        );
+
+        assert_eq!(candidates, vec![first, second]);
+    }
+
+    #[test]
     fn webview_binary_name_tracks_platform() {
         if cfg!(windows) {
             assert_eq!(webview_binary_name(), "a3s-webview.exe");

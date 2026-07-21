@@ -6,6 +6,7 @@ use super::capabilities::CapabilitiesModule;
 use super::code_intelligence::CodeIntelligenceModule;
 use super::config::ConfigModule;
 use super::context::ContextModule;
+use super::evolution::EvolutionModule;
 use super::health::HealthModule;
 use super::kernel::KernelModule;
 use super::knowledge::KnowledgeModule;
@@ -14,6 +15,7 @@ use super::os::OsModule;
 use super::plugins::PluginsModule;
 use super::processes::ProcessesModule;
 use super::state::CodeWebState;
+use super::work::WorkModule;
 use super::workspace::WorkspaceModule;
 
 pub(in crate::api) struct CodeWebModule {
@@ -36,11 +38,13 @@ impl Module for CodeWebModule {
             Arc::new(CodeWebStateModule::new(Arc::clone(&self.state))),
             Arc::new(HealthModule),
             Arc::new(ConfigModule),
+            Arc::new(WorkModule),
             Arc::new(WorkspaceModule),
             Arc::new(CodeIntelligenceModule),
             Arc::new(CapabilitiesModule),
             Arc::new(KnowledgeModule),
             Arc::new(ContextModule),
+            Arc::new(EvolutionModule),
             Arc::new(KernelModule),
             Arc::new(ProcessesModule),
             Arc::new(LoopsModule),

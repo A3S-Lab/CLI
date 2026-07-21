@@ -67,13 +67,30 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     workspace: &Path,
     session_id: Option<&str>,
     model: Option<String>,
-    effort: &str,
+    controls: &CodeWebSessionControls,
     settings: &CodeWebSessionSettings,
 ) -> BootResult<(SessionOptions, CodeWebSessionRuntime, Arc<dyn LlmClient>)> {
+    let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+    if let Err(error) = evolution
+        .synchronize_memory_store(config::memory_dir())
+        .await
+    {
+        tracing::warn!(%error, "could not synchronize memory evolution before Web session startup");
+    }
+    let learned_preferences = match evolution.session_preference_prompt() {
+        Ok(preferences) => preferences,
+        Err(error) => {
+            tracing::warn!(%error, "could not load learned preferences before Web session startup");
+            None
+        }
+    };
     let runtime = code_web_session_runtime_for_workspace(state, workspace).await;
     let context_limit = code_web_context_limit_for_model(state, model.as_deref());
-    let budget =
-        budget::budget_plan_for_effort_id(effort, Some(context_limit), BudgetWorkload::Interactive);
+    let budget = budget::budget_plan_for_effort_id(
+        &controls.effort,
+        Some(context_limit),
+        BudgetWorkload::Interactive,
+    );
     let permission_policy = permission_policy_for_mode(&settings.permission_mode);
     let permission_checker = permission_checker_for_mode(&settings.permission_mode, workspace);
     let mut options = SessionOptions::new()
@@ -89,6 +106,7 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_max_context_tokens(context_limit as usize)
         .with_auto_compact_threshold(state.auto_compact_threshold as f32)
         .with_file_memory(config::memory_dir())
+        .with_memory_observer(crate::evolution::EvolutionMemoryObserver::new(evolution))
         .with_skill_dirs(runtime.skill_dirs.clone())
         .with_max_tool_rounds(budget.max_tool_rounds)
         .with_max_parallel_tasks(budget.max_parallel_tasks)
@@ -96,8 +114,8 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_confirmation_policy(confirmation_policy_for_mode(&settings.permission_mode))
         .with_permission_policy(permission_policy)
         .with_permission_checker(Arc::new(permission_checker))
-        .with_planning_mode(planning_mode(settings.planning_mode.as_deref()))
-        .with_goal_tracking(settings.goal_tracking.unwrap_or(false));
+        .with_planning_mode(effective_planning_mode(controls, settings))
+        .with_goal_tracking(effective_goal_tracking(controls, settings));
 
     let session_id = session_id
         .map(ToOwned::to_owned)
@@ -106,10 +124,16 @@ pub(in crate::api::code_web) async fn code_web_session_options(
     if let Some(model) = model {
         options = options.with_model(model);
     }
+    let mut extra_prompt = Vec::new();
     if let Some(session) = runtime.os_session.as_ref() {
-        options = options.with_prompt_slots(
-            SystemPromptSlots::default().with_extra(os_platform_guide(&session.address)),
-        );
+        extra_prompt.push(os_platform_guide(&session.address));
+    }
+    if let Some(preferences) = learned_preferences {
+        extra_prompt.push(preferences);
+    }
+    if !extra_prompt.is_empty() {
+        options = options
+            .with_prompt_slots(SystemPromptSlots::default().with_extra(extra_prompt.join("\n\n")));
     }
 
     let llm_client = crate::session_llm::resolve_session_llm_client(
@@ -165,7 +189,20 @@ pub(in crate::api::code_web) fn activate_session_runtime(
 pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
     state: &CodeWebState,
 ) -> BootResult<Vec<Value>> {
-    let sessions = current_sessions(state).await;
+    rebuild_code_web_sessions_for_workspace(state, None).await
+}
+
+pub(in crate::api::code_web) async fn rebuild_code_web_sessions_for_workspace(
+    state: &CodeWebState,
+    workspace_filter: Option<&Path>,
+) -> BootResult<Vec<Value>> {
+    let sessions = current_sessions(state)
+        .await
+        .into_iter()
+        .filter(|(_, _, workspace)| {
+            workspace_filter.is_none_or(|filter| same_workspace(workspace, filter))
+        })
+        .collect::<Vec<_>>();
     let mut rebuilt = Vec::new();
 
     for (session_id, old_session, workspace) in sessions {
@@ -177,7 +214,7 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
             &workspace,
             Some(&session_id),
             model,
-            &controls.effort,
+            &controls,
             &settings,
         )
         .await?;
@@ -212,6 +249,47 @@ pub(in crate::api::code_web) async fn rebuild_code_web_sessions(
     }
 
     Ok(rebuilt)
+}
+
+pub(in crate::api::code_web) async fn refresh_evolution_runtime_after_turn(
+    state: &CodeWebState,
+    workspace: &Path,
+) -> BootResult<usize> {
+    let _refresh = state.evolution_refresh_lock.lock().await;
+    let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+    let pending = evolution
+        .pending_session_reload_count()
+        .await
+        .map_err(|error| BootError::Internal(error.to_string()))?;
+    if pending == 0 {
+        return Ok(0);
+    }
+
+    let rebuilt = rebuild_code_web_sessions_for_workspace(state, Some(workspace)).await?;
+    if rebuilt.is_empty() {
+        return Ok(0);
+    }
+    evolution
+        .mark_session_assets_activated()
+        .await
+        .map_err(|error| BootError::Internal(error.to_string()))
+}
+
+fn effective_planning_mode(
+    controls: &CodeWebSessionControls,
+    settings: &CodeWebSessionSettings,
+) -> PlanningMode {
+    if controls.goal.is_some() {
+        return PlanningMode::Enabled;
+    }
+    planning_mode(settings.planning_mode.as_deref())
+}
+
+fn effective_goal_tracking(
+    controls: &CodeWebSessionControls,
+    settings: &CodeWebSessionSettings,
+) -> bool {
+    controls.goal.is_some() || settings.goal_tracking.unwrap_or(false)
 }
 
 fn planning_mode(value: Option<&str>) -> PlanningMode {
@@ -320,6 +398,15 @@ async fn current_sessions(state: &CodeWebState) -> Vec<(String, Arc<AgentSession
         .collect()
 }
 
+fn same_workspace(left: &Path, right: &Path) -> bool {
+    left == right
+        || left
+            .canonicalize()
+            .ok()
+            .zip(right.canonicalize().ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 async fn session_settings(state: &CodeWebState, session_id: &str) -> CodeWebSessionSettings {
     state
         .session_settings
@@ -355,7 +442,190 @@ show the user an authenticated Open view action."
 mod tests {
     use super::*;
     use a3s_code_core::config::{ModelConfig, ModelLimit, ProviderConfig};
+    use a3s_code_core::memory::MemoryObservation;
+    use a3s_memory::{MemoryItem, MemoryType};
     use std::collections::HashMap;
+
+    struct MemoryDirEnv {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl MemoryDirEnv {
+        fn install(path: &Path) -> Self {
+            let previous = std::env::var_os("A3S_MEMORY_DIR");
+            std::env::set_var("A3S_MEMORY_DIR", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for MemoryDirEnv {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var("A3S_MEMORY_DIR", value),
+                None => std::env::remove_var("A3S_MEMORY_DIR"),
+            }
+        }
+    }
+
+    async fn test_state(root: &Path, workspace: &Path) -> Arc<CodeWebState> {
+        let config = CodeConfig::from_acl(
+            r#"
+                default_model = "openai/test-model"
+                providers "openai" {
+                  apiKey = "test-key"
+                  baseUrl = "http://127.0.0.1:1/v1"
+                  models "test-model" {}
+                }
+            "#,
+        )
+        .unwrap();
+        let agent = Arc::new(
+            a3s_code_core::Agent::from_config(config.clone())
+                .await
+                .unwrap(),
+        );
+        let repository = Arc::new(
+            crate::api::code_web::session_store::CodeWebSessionRepository::open(
+                root.join("sessions"),
+            )
+            .await
+            .unwrap(),
+        );
+        Arc::new(CodeWebState::new(
+            agent,
+            root.join("config.acl"),
+            workspace.to_path_buf(),
+            config,
+            repository,
+        ))
+    }
+
+    async fn install_session(state: &CodeWebState, id: &str) -> Arc<AgentSession> {
+        let settings = CodeWebSessionSettings::default();
+        let controls = CodeWebSessionControls::default();
+        let (options, runtime, llm_client) = code_web_session_options(
+            state,
+            &state.default_workspace,
+            Some(id),
+            state.current_default_model(),
+            &controls,
+            &settings,
+        )
+        .await
+        .unwrap();
+        let session = Arc::new(
+            state
+                .agent
+                .session_async(state.default_workspace.display().to_string(), Some(options))
+                .await
+                .unwrap(),
+        );
+        activate_session_runtime(session.as_ref(), &runtime);
+        state
+            .sessions
+            .lock()
+            .await
+            .insert(id.to_string(), Arc::clone(&session));
+        state
+            .session_settings
+            .lock()
+            .await
+            .insert(id.to_string(), settings);
+        state
+            .session_controls
+            .lock()
+            .await
+            .insert(id.to_string(), controls);
+        state
+            .session_contexts
+            .lock()
+            .await
+            .entry(id.to_string())
+            .or_default()
+            .set_llm_client(llm_client);
+        session
+    }
+
+    fn evolution_observation(
+        id: &str,
+        session: &str,
+        workspace: &Path,
+        kind: &str,
+        pattern: &str,
+        title: &str,
+    ) -> MemoryObservation {
+        let source = if kind == "preference" {
+            "preference"
+        } else {
+            "workflow"
+        };
+        let item = MemoryItem::new(format!("Stable local evidence for {title}."))
+            .with_type(if kind == "preference" {
+                MemoryType::Semantic
+            } else {
+                MemoryType::Procedural
+            })
+            .with_importance(0.92)
+            .with_metadata("source", source)
+            .with_metadata("scope", "workspace")
+            .with_metadata("workspace", workspace.display().to_string())
+            .with_metadata("session_id", session)
+            .with_metadata("confidence", "0.96")
+            .with_metadata("evolution_schema", "a3s.evolution.signal.v1")
+            .with_metadata("evolution_kind", kind)
+            .with_metadata("evolution_pattern", pattern)
+            .with_metadata("evolution_title", title)
+            .with_metadata(
+                "evolution_summary",
+                format!("Apply the reusable local guidance for {title}."),
+            )
+            .with_metadata(
+                "evolution_instructions",
+                r#"["Apply this guidance when the task matches.","Verify the current workspace evidence first."]"#,
+            );
+        let mut incoming = item.clone();
+        incoming.id = id.to_string();
+        MemoryObservation {
+            incoming: incoming.clone(),
+            stored: incoming,
+            merged: false,
+        }
+    }
+
+    #[test]
+    fn active_goal_forces_planning_and_goal_tracking() {
+        let controls = CodeWebSessionControls {
+            goal: Some("Ship verified queue semantics".to_string()),
+            ..CodeWebSessionControls::default()
+        };
+        let settings = CodeWebSessionSettings {
+            planning_mode: Some("disabled".to_string()),
+            goal_tracking: Some(false),
+            ..CodeWebSessionSettings::default()
+        };
+
+        assert_eq!(
+            effective_planning_mode(&controls, &settings),
+            PlanningMode::Enabled
+        );
+        assert!(effective_goal_tracking(&controls, &settings));
+    }
+
+    #[test]
+    fn sessions_without_a_goal_keep_their_selected_execution_modes() {
+        let controls = CodeWebSessionControls::default();
+        let settings = CodeWebSessionSettings {
+            planning_mode: Some("disabled".to_string()),
+            goal_tracking: Some(false),
+            ..CodeWebSessionSettings::default()
+        };
+
+        assert_eq!(
+            effective_planning_mode(&controls, &settings),
+            PlanningMode::Disabled
+        );
+        assert!(!effective_goal_tracking(&controls, &settings));
+    }
 
     #[test]
     fn os_status_does_not_expose_tokens() {
@@ -432,5 +702,180 @@ mod tests {
             ),
             32_768
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn post_turn_refresh_activates_an_automatically_learned_skill_for_all_sessions() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let _memory = MemoryDirEnv::install(&temp.path().join("memory"));
+        let state = test_state(temp.path(), &workspace).await;
+        let first = install_session(state.as_ref(), "session-one").await;
+        let second = install_session(state.as_ref(), "session-two").await;
+        assert!(same_workspace(first.workspace(), &workspace));
+        assert!(same_workspace(second.workspace(), &workspace));
+        assert!(!first
+            .skill_names()
+            .contains(&"learned-release-checks".to_string()));
+
+        let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+        for (id, session) in [
+            ("evidence-one", "session-one"),
+            ("evidence-two", "session-two"),
+            ("evidence-three", "session-two"),
+        ] {
+            evolution
+                .observe(evolution_observation(
+                    id,
+                    session,
+                    &workspace,
+                    "skill",
+                    "workflow.release.learned-checks",
+                    "Learned release checks",
+                ))
+                .await
+                .unwrap();
+        }
+        assert_eq!(evolution.pending_session_reload_count().await.unwrap(), 1);
+
+        let activated = refresh_evolution_runtime_after_turn(state.as_ref(), &workspace)
+            .await
+            .unwrap();
+
+        assert_eq!(activated, 1);
+        assert_eq!(evolution.pending_session_reload_count().await.unwrap(), 0);
+        let sessions = state.sessions.lock().await;
+        let rebuilt_first = sessions.get("session-one").unwrap();
+        let rebuilt_second = sessions.get("session-two").unwrap();
+        assert!(!Arc::ptr_eq(&first, rebuilt_first));
+        assert!(!Arc::ptr_eq(&second, rebuilt_second));
+        for session in [rebuilt_first, rebuilt_second] {
+            let names = session.skill_names();
+            assert!(
+                names.contains(&"learned-release-checks".to_string()),
+                "rebuilt Skill registry did not include the learned Skill: {names:?}"
+            );
+        }
+        drop(sessions);
+        state.close().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn failed_multi_session_rebuild_keeps_the_activation_barrier_pending() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let _memory = MemoryDirEnv::install(&temp.path().join("memory"));
+        let state = test_state(temp.path(), &workspace).await;
+        install_session(state.as_ref(), "session-one").await;
+        install_session(state.as_ref(), "session-two").await;
+        state.session_settings.lock().await.insert(
+            "session-two".to_string(),
+            CodeWebSessionSettings {
+                model: Some("missing-provider/missing-model".to_string()),
+                follow_default_model: false,
+                ..CodeWebSessionSettings::default()
+            },
+        );
+
+        let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+        for (id, session) in [
+            ("barrier-one", "session-one"),
+            ("barrier-two", "session-two"),
+            ("barrier-three", "session-two"),
+        ] {
+            evolution
+                .observe(evolution_observation(
+                    id,
+                    session,
+                    &workspace,
+                    "skill",
+                    "workflow.release.barrier-checks",
+                    "Barrier release checks",
+                ))
+                .await
+                .unwrap();
+        }
+
+        assert!(
+            refresh_evolution_runtime_after_turn(state.as_ref(), &workspace)
+                .await
+                .is_err()
+        );
+        assert_eq!(evolution.pending_session_reload_count().await.unwrap(), 1);
+        state.close().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn web_session_options_inject_and_remove_the_active_preference_prompt() {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&workspace).await.unwrap();
+        let _memory = MemoryDirEnv::install(&temp.path().join("memory"));
+        let state = test_state(temp.path(), &workspace).await;
+        let evolution = crate::evolution::WorkspaceEvolution::new(&workspace);
+        evolution
+            .observe(evolution_observation(
+                "preference-one",
+                "session-one",
+                &workspace,
+                "preference",
+                "preference.response.local-evidence",
+                "Local evidence responses",
+            ))
+            .await
+            .unwrap();
+        let candidate_id = evolution.overview().await.unwrap().candidates[0].id.clone();
+        evolution.materialize(&candidate_id, false).await.unwrap();
+
+        let (options, _, _) = code_web_session_options(
+            state.as_ref(),
+            &workspace,
+            Some("preference-session"),
+            state.current_default_model(),
+            &CodeWebSessionControls::default(),
+            &CodeWebSessionSettings::default(),
+        )
+        .await
+        .unwrap();
+        let extra = options
+            .prompt_slots
+            .as_ref()
+            .and_then(|slots| slots.extra.as_deref())
+            .unwrap();
+        assert!(extra.contains("# Learned Local Preferences"));
+        assert!(extra.contains("Apply this guidance when the task matches."));
+        assert!(!extra.contains("Stable local evidence"));
+
+        evolution.rollback(&candidate_id, Some(0)).await.unwrap();
+        let (options, _, _) = code_web_session_options(
+            state.as_ref(),
+            &workspace,
+            Some("baseline-session"),
+            state.current_default_model(),
+            &CodeWebSessionControls::default(),
+            &CodeWebSessionSettings::default(),
+        )
+        .await
+        .unwrap();
+        assert!(options
+            .prompt_slots
+            .as_ref()
+            .and_then(|slots| slots.extra.as_deref())
+            .is_none());
+        state.close().await;
     }
 }

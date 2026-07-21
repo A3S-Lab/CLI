@@ -4057,9 +4057,14 @@ mod tests {
                     "input": {
                         "query": "2026 世界杯战况",
                         "evidence_scope": "web_and_workspace",
-                        "complexity_layers": 2,
-                        "local_research_rounds": 2,
-                        "local_max_parallel_tasks": 4
+                        "inquiry_host_managed": true,
+                        "loop_contract": {
+                            "pattern": "minimal-deep-research",
+                            "hard_caps": {
+                                "max_searches": 4,
+                                "max_fetches": 8
+                            }
+                        }
                     }
                 }
             })),
@@ -4074,11 +4079,11 @@ mod tests {
         assert!(plain.contains("intent"), "{plain}");
         assert!(plain.contains("DeepResearch “2026 世界杯战况”"), "{plain}");
         assert!(
-            plain.contains("web + workspace · 2 rounds × ≤4 agents"),
+            plain.contains("web + workspace · ≤2 typed-coverage passes · ≤4 searches · ≤8 fetches"),
             "{plain}"
         );
         assert!(
-            plain.contains("plan the initial evidence routes"),
+            plain.contains("run initial retrieval and typed semantic coverage"),
             "{plain}"
         );
         assert!(!plain.contains("async function run"), "{plain}");

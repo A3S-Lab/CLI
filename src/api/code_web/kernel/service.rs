@@ -12,8 +12,13 @@ use tokio::time::{timeout, Duration};
 
 use super::controls::{
     compose_controlled_prompt, controls_json, effort_levels_json, normalize_effort, normalize_goal,
+    CodeWebContextUsage,
 };
 use super::sleep::{parse_sleep_report, sleep_directive, sleep_today, store_sleep_memories};
+use super::turn_queue::{
+    CodeWebQueuedTurn, CodeWebQueuedTurnKind, CodeWebSessionTurnQueue, CodeWebStoredTurnQueue,
+    GOAL_CONTINUATION_PRIORITY, USER_TURN_PRIORITY,
+};
 use crate::api::code_web::dto::{
     ChatRequest, ChatResponse, ConfirmToolUseRequest, CreateSessionRequest, ForkSessionRequest,
     KernelSessionResponse, SessionListResponse, SessionResponse, ShellSessionRequest,
@@ -21,16 +26,18 @@ use crate::api::code_web::dto::{
 };
 use crate::api::code_web::session_runtime::{
     activate_session_runtime, code_web_context_limit_for_model, code_web_os_status,
-    code_web_session_options, effective_session_model,
+    code_web_session_options, effective_session_model, refresh_evolution_runtime_after_turn,
 };
 use crate::api::code_web::session_store::{
     CodeWebSessionMetadata, CodeWebStoredContext, CodeWebStoredSession,
 };
 use crate::api::code_web::state::{
-    CodeWebSessionContext, CodeWebSessionControls, CodeWebSessionSettings, CodeWebState,
+    CodeWebGoalRun, CodeWebGoalStatus, CodeWebSessionContext, CodeWebSessionControls,
+    CodeWebSessionSettings, CodeWebState,
 };
 
 mod control_operations;
+mod goal_runtime;
 mod maintenance;
 mod messages;
 mod persistence;
@@ -38,6 +45,7 @@ mod sessions;
 mod shell_output;
 mod streaming;
 mod text;
+mod turn_queue;
 
 pub(in crate::api) struct KernelService {
     state: Arc<CodeWebState>,

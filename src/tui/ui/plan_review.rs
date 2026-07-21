@@ -432,7 +432,7 @@ impl App {
     }
 
     pub(super) fn overlay_decision_modals(&self, composed: String) -> String {
-        self.overlay_approval(self.overlay_plan_review(composed))
+        self.overlay_approval(self.overlay_plan_review(self.overlay_queue_menu(composed)))
     }
 
     fn apply_plan_review_choice(&mut self, choice: usize) -> Option<Cmd<Msg>> {
@@ -462,8 +462,7 @@ impl App {
         }
         let prompt = review.implementation_prompt();
         let display = format!("Implement approved plan: {}", review.request.display);
-        self.mode = Mode::Default;
-        self.execution_policy.set_mode(Mode::Default);
+        self.set_composer_mode(Mode::Default);
         self.plan.clear();
         self.push_notice(NoticeKind::Info, "Plan approved · implementation started");
         self.enqueue_turn(
@@ -491,8 +490,7 @@ impl App {
         self.history.push(feedback);
         self.history_pos = None;
         self.history_draft = None;
-        self.mode = Mode::Plan;
-        self.execution_policy.set_mode(Mode::Plan);
+        self.set_composer_mode(Mode::Plan);
         self.plan.clear();
         let display = format!("Revise plan: {}", request.display);
         self.enqueue_plan_turn(
@@ -515,8 +513,7 @@ impl App {
         if let Some(stashed) = review.take_stashed_composer() {
             self.textarea.set_value(&stashed);
         }
-        self.mode = Mode::Default;
-        self.execution_policy.set_mode(Mode::Default);
+        self.set_composer_mode(Mode::Default);
         self.plan.clear();
         self.push_notice(
             NoticeKind::Info,
