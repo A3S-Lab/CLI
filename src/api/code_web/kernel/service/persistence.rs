@@ -490,27 +490,6 @@ fn is_unavailable_session_error(error: &BootError) -> bool {
         || message.contains("was not found, or has no API key")
 }
 
-#[cfg(test)]
-mod restore_report_tests {
-    use super::*;
-
-    #[test]
-    fn missing_model_errors_are_grouped_as_unavailable_sessions() {
-        let error = BootError::Internal(
-            "provider 'fixture' or model 'removed' not found in config".to_string(),
-        );
-
-        assert!(is_unavailable_session_error(&error));
-    }
-
-    #[test]
-    fn storage_failures_are_not_misreported_as_model_availability() {
-        let error = BootError::Internal("persisted session JSON is truncated".to_string());
-
-        assert!(!is_unavailable_session_error(&error));
-    }
-}
-
 pub(super) fn code_web_store_dir(workspace: &Path) -> PathBuf {
     workspace.join(".a3s").join("tui-sessions")
 }
@@ -738,4 +717,25 @@ fn file_timestamp_millis(path: &Path) -> Option<i64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(duration.as_millis().min(i64::MAX as u128) as i64)
+}
+
+#[cfg(test)]
+mod restore_report_tests {
+    use super::*;
+
+    #[test]
+    fn missing_model_errors_are_grouped_as_unavailable_sessions() {
+        let error = BootError::Internal(
+            "provider 'fixture' or model 'removed' not found in config".to_string(),
+        );
+
+        assert!(is_unavailable_session_error(&error));
+    }
+
+    #[test]
+    fn storage_failures_are_not_misreported_as_model_availability() {
+        let error = BootError::Internal("persisted session JSON is truncated".to_string());
+
+        assert!(!is_unavailable_session_error(&error));
+    }
 }

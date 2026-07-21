@@ -24,7 +24,24 @@ mod use_registry;
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
-    cli::run(std::env::args_os()).await
+const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn main() -> std::process::ExitCode {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start the A3S async runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let exit_code = runtime.block_on(cli::run(std::env::args_os()));
+    // Tokio waits indefinitely for blocking-pool work during Runtime::drop.
+    // Product hosts perform explicit cleanup; this final bound prevents an
+    // unresponsive filesystem or child adapter from keeping a finished CLI
+    // process alive forever.
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_GRACE);
+    exit_code
 }

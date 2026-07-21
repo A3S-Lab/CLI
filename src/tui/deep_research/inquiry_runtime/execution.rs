@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use super::super::{
     accepted_evidence_ledger, deep_research_canonical_workflow_output,
+    recover_deep_research_bootstrap_acquisition_from_store,
     recover_deep_research_initial_retrieval_from_store, AcceptedEvidence,
 };
 use super::plan::{bound_question_batch, bound_questions};

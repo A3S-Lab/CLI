@@ -6,15 +6,14 @@ use crate::cli::context::InvocationContext;
 
 const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
-
-fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
-    ManifestWorkspaceBackend::new_with_access_policy(
-        workspace,
-        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
-    )
-}
+const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
 struct CodeUseResolution {
+    executable: Option<PathBuf>,
+    warning: Option<String>,
+}
+
+struct CodeWebviewResolution {
     executable: Option<PathBuf>,
     warning: Option<String>,
 }
@@ -43,24 +42,24 @@ where
             Err(error) => CodeUseResolution {
                 executable: None,
                 warning: Some(format!(
-                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run /use repair for recovery guidance"
+                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` and `a3s install use` for recovery"
                 )),
             },
         },
         Ok(None) => CodeUseResolution {
             executable: None,
             warning: Some(if offline {
-                "A3S Use is not ready and first-use setup is disabled in offline mode; run /use repair after going online"
+                "A3S Use is not ready and first-use setup is disabled in offline mode; run /use repair after going online, or use `a3s install use`"
                     .to_string()
             } else {
-                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run /use repair for explicit setup"
+                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run /use repair, or use `a3s install use` for explicit setup"
                     .to_string()
             }),
         },
         Err(error) => CodeUseResolution {
             executable: None,
             warning: Some(format!(
-                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run /use repair for recovery guidance"
+                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run /use repair, or use `a3s doctor use` for recovery"
             )),
         },
     }
@@ -81,6 +80,77 @@ async fn resolve_code_use(context: &InvocationContext) -> CodeUseResolution {
         },
     )
     .await
+}
+
+async fn resolve_code_webview_with<D, F, Fut>(
+    allow_first_use_install: bool,
+    offline: bool,
+    discover: D,
+    install: F,
+) -> CodeWebviewResolution
+where
+    D: FnOnce() -> anyhow::Result<Option<PathBuf>>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
+{
+    match discover() {
+        Ok(Some(executable)) => CodeWebviewResolution {
+            executable: Some(executable),
+            warning: None,
+        },
+        Ok(None) if allow_first_use_install => match install().await {
+            Ok(executable) => CodeWebviewResolution {
+                executable: Some(executable),
+                warning: None,
+            },
+            Err(error) => CodeWebviewResolution {
+                executable: None,
+                warning: Some(format!(
+                    "A3S WebView first-use setup failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` and `a3s install webview` for recovery"
+                )),
+            },
+        },
+        Ok(None) => CodeWebviewResolution {
+            executable: None,
+            warning: Some(if offline {
+                "A3S WebView is not ready and first-use setup is disabled in offline mode; run `a3s install webview` after going online"
+                    .to_string()
+            } else {
+                "A3S WebView is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run `a3s install webview` for explicit setup"
+                    .to_string()
+            }),
+        },
+        Err(error) => CodeWebviewResolution {
+            executable: None,
+            warning: Some(format!(
+                "A3S WebView discovery failed; Code will continue without native RemoteUI and Agent Island windows: {error}. Run `a3s doctor webview` for recovery"
+            )),
+        },
+    }
+}
+
+async fn resolve_code_webview(context: &InvocationContext) -> CodeWebviewResolution {
+    resolve_code_webview_with(
+        context.network.allow_first_use_install,
+        context.network.offline,
+        || a3s::components::find_ready_executable_with("webview", &context.component_paths),
+        || {
+            a3s::components::resolve_or_install_with(
+                "webview",
+                &context.component_paths,
+                context.network.allow_first_use_install,
+                context.output.progress,
+            )
+        },
+    )
+    .await
+}
+
+fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
+    ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    )
 }
 
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
@@ -228,7 +298,15 @@ async fn shutdown_code_intelligence(provider: Arc<LocalCodeIntelligence>) -> boo
         "Code Intelligence cleanup did not settle before host exit; aborting the shutdown task"
     );
     shutdown.abort();
-    let _ = shutdown.await;
+    if tokio::time::timeout(CODE_INTELLIGENCE_ABORT_SETTLE, &mut shutdown)
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout = ?CODE_INTELLIGENCE_ABORT_SETTLE,
+            "Code Intelligence shutdown task did not acknowledge abort before host exit"
+        );
+    }
     false
 }
 
@@ -790,8 +868,19 @@ pub(crate) async fn run_in(
         ));
     }
 
-    // Headless smoke mode exercises the same Use-projected session that the
-    // interactive TUI receives, without taking over the terminal.
+    // WebView is optional to the terminal UI but required for native RemoteUI
+    // popups and Agent Island. Resolve or install its verified release before
+    // terminal takeover, then pass the exact managed path to both consumers.
+    let webview_resolution = resolve_code_webview(context).await;
+    if let Some(warning) = webview_resolution.warning {
+        initial_messages.push(TranscriptEntry::preformatted(
+            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+        ));
+    }
+
+    // Headless smoke mode exercises the same Use and WebView first-use
+    // preparation that the interactive TUI receives, without taking over the
+    // terminal.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         return run_smoke(
             session,
@@ -839,8 +928,6 @@ pub(crate) async fn run_in(
             Action::ScrollBottom,
             "Scroll to bottom",
         );
-
-    remote_ui::prime_webview_lookup();
 
     let initial_paused_goal = tui_session_state
         .as_ref()
@@ -950,7 +1037,7 @@ pub(crate) async fn run_in(
         deep_research_goal_restore: None,
         loop_remaining: 0,
         runtime: RuntimeProjection::default(),
-        agent_presence: agent_presence::AgentPresenceRuntime::new(),
+        agent_presence: agent_presence::AgentPresenceRuntime::new(webview_resolution.executable),
         background_subagent_watches: HashSet::new(),
         subagent_snapshot_request_id: 0,
         deep_research_subagent_settlement_inflight: false,
@@ -1140,14 +1227,25 @@ pub(crate) async fn run_in(
     // async owner. Stop discovery while this host still has an explicit
     // manifest handle, before the rest of the workspace services are dropped.
     workspace_manifest.shutdown();
+    let final_session = active_session
+        .lock()
+        .map(|session| Arc::clone(&session))
+        .map_err(|_| anyhow::anyhow!("active session lock was poisoned"));
+    if let Ok(session) = &final_session {
+        let session = Arc::clone(session);
+        let _ = settle_session_close_for_quit(
+            async move {
+                session.close().await;
+            },
+            Duration::from_millis(GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS),
+        )
+        .await;
+    }
     let code_intelligence_shutdown_complete =
         shutdown_code_intelligence(Arc::clone(&code_intelligence)).await;
     program_result?;
 
-    let final_session = active_session
-        .lock()
-        .map(|session| Arc::clone(&session))
-        .map_err(|_| anyhow::anyhow!("active session lock was poisoned"))?;
+    let final_session = final_session?;
     let session_id = final_session.session_id().to_string();
     if let Err(error) = final_session.save().await {
         eprintln!("⚠  could not save session {session_id}: {error}");

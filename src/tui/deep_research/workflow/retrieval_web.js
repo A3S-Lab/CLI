@@ -295,6 +295,81 @@
     };
   };
 
+  // Bootstrap acquisition deliberately avoids model admission. Provider rank
+  // remains acquisition metadata rather than evidence, while round-robin
+  // admission prevents one query from consuming the complete fetch cohort.
+  const deterministicWebCandidates = (plan, discovery) => {
+    const candidates = Array.isArray(discovery && discovery.candidates)
+      ? discovery.candidates
+      : [];
+    const fetchLimit = clamp(
+      object(plan.budget).direct_fetches,
+      0,
+      MAX_SOURCES,
+      4
+    );
+    if (candidates.length === 0 || fetchLimit === 0) {
+      return {
+        candidates: [],
+        mode: "provider_round_robin",
+        error: "Web discovery produced no candidate within the bootstrap fetch budget.",
+      };
+    }
+    const selected = [];
+    const selectedIds = new Set();
+    const admit = (candidate) => {
+      if (
+        !candidate ||
+        selected.length >= fetchLimit ||
+        selectedIds.has(candidate.candidate_id)
+      ) {
+        return false;
+      }
+      selectedIds.add(candidate.candidate_id);
+      selected.push(candidate);
+      return true;
+    };
+    for (const candidate of candidates) {
+      const queryIndexes = Array.isArray(candidate.query_indexes)
+        ? candidate.query_indexes
+        : [];
+      if (queryIndexes.length === 0) {
+        admit(candidate);
+      }
+    }
+    const queryCount = Array.isArray(plan.search_queries)
+      ? plan.search_queries.length
+      : 0;
+    let madeProgress = true;
+    while (selected.length < fetchLimit && madeProgress) {
+      madeProgress = false;
+      for (let queryIndex = 0; queryIndex < queryCount; queryIndex += 1) {
+        const candidate = candidates.find((item) =>
+          !selectedIds.has(item.candidate_id) &&
+          Array.isArray(item.query_indexes) &&
+          item.query_indexes.includes(queryIndex)
+        );
+        madeProgress = admit(candidate) || madeProgress;
+        if (selected.length >= fetchLimit) {
+          break;
+        }
+      }
+    }
+    for (const candidate of candidates) {
+      if (selected.length >= fetchLimit) {
+        break;
+      }
+      admit(candidate);
+    }
+    return {
+      candidates: selected,
+      mode: "provider_round_robin",
+      error: selected.length > 0
+        ? ""
+        : "Bootstrap candidate admission retained no fetchable URL.",
+    };
+  };
+
   const collectWeb = async (stepInput) => {
     const plan = object(stepInput.plan);
     const fetchTimeout = clamp(stepInput.fetch_timeout_secs, 1, 120, 20);

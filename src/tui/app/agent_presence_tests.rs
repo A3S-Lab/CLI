@@ -61,6 +61,7 @@ fn failed_parent_terminal_state_is_retained_for_export() {
     let mut runtime = AgentPresenceRuntime {
         publisher: AgentPresencePublisher::for_directory(temp.path().to_path_buf()),
         refreshing: false,
+        webview_binary: None,
         terminal: None,
         island: AgentIslandSupervisor::default(),
         cancel_requested: std::collections::HashSet::new(),
@@ -217,6 +218,7 @@ async fn disabling_supervisor_stops_a_running_helper_and_blocks_launches() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     let (_exit_tx, exit) = oneshot::channel();
     let (shutdown, shutdown_rx) = oneshot::channel();
@@ -256,6 +258,7 @@ async fn helper_spawned_after_disable_is_stopped_as_a_stale_launch() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     let mut supervisor = AgentIslandSupervisor::default();
     assert!(supervisor.observe_snapshot(request, true).is_some());
@@ -287,6 +290,7 @@ fn island_helper_arguments_match_the_native_mode_contract() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
 
     assert_eq!(
@@ -309,7 +313,7 @@ fn island_binary_override_is_honored_without_silent_fallback() {
         ..AgentIslandEnvironment::default()
     };
 
-    let (explicit, candidates) = resolve_agent_island_binaries(&environment).unwrap();
+    let (explicit, candidates) = resolve_agent_island_binaries(&environment, None).unwrap();
     assert!(explicit);
     assert_eq!(candidates, vec![override_path]);
 }
@@ -317,9 +321,11 @@ fn island_binary_override_is_honored_without_silent_fallback() {
 #[test]
 fn successful_export_starts_one_launch_while_the_first_is_in_flight() {
     let temp = tempfile::tempdir().unwrap();
+    let webview_binary = temp.path().join("a3s-webview");
     let mut runtime = AgentPresenceRuntime {
         publisher: AgentPresencePublisher::for_directory(temp.path().to_path_buf()),
         refreshing: true,
+        webview_binary: Some(webview_binary.clone()),
         terminal: None,
         island: AgentIslandSupervisor::default(),
         cancel_requested: std::collections::HashSet::new(),
@@ -333,7 +339,8 @@ fn successful_export_starts_one_launch_while_the_first_is_in_flight() {
         warnings: Vec::new(),
     };
 
-    assert!(runtime.apply_refresh(result.clone()).is_some());
+    let request = runtime.apply_refresh(result.clone()).unwrap();
+    assert_eq!(request.binary.as_deref(), Some(webview_binary.as_path()));
     assert!(!runtime.refreshing);
     assert!(runtime.apply_refresh(result).is_none());
     assert!(matches!(
@@ -348,6 +355,7 @@ fn idle_export_does_not_start_the_native_island() {
     let mut runtime = AgentPresenceRuntime {
         publisher: AgentPresencePublisher::for_directory(temp.path().to_path_buf()),
         refreshing: true,
+        webview_binary: None,
         terminal: None,
         island: AgentIslandSupervisor::default(),
         cancel_requested: std::collections::HashSet::new(),
@@ -377,6 +385,7 @@ fn failed_export_leaves_the_island_waiting_for_a_snapshot() {
     let mut runtime = AgentPresenceRuntime {
         publisher: AgentPresencePublisher::for_directory(temp.path().to_path_buf()),
         refreshing: true,
+        webview_binary: None,
         terminal: None,
         island: AgentIslandSupervisor::default(),
         cancel_requested: std::collections::HashSet::new(),
@@ -400,6 +409,7 @@ fn retry_backoff_is_tick_driven_and_cools_down_after_four_consecutive_failures()
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     let mut supervisor = AgentIslandSupervisor::default();
     assert_eq!(
@@ -438,6 +448,7 @@ fn obsolete_helper_rechecks_after_a_bounded_recovery_cooldown() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     let mut supervisor = AgentIslandSupervisor::default();
     assert!(supervisor.observe_snapshot(request, true).is_some());
@@ -468,6 +479,7 @@ fn idle_snapshot_cancels_a_pending_helper_retry() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     let mut supervisor = AgentIslandSupervisor::default();
     assert!(supervisor.observe_snapshot(request.clone(), true).is_some());
@@ -495,6 +507,7 @@ fn singleton_contention_rechecks_infrequently_for_eventual_takeover() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
     supervisor.request = Some(request.clone());
     let now = Instant::now();
@@ -528,9 +541,12 @@ fn watchdog_length_success_is_relaunched_with_bounded_backoff() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
         lock_path: PathBuf::from("/private/state/island.lock"),
+        binary: None,
     };
-    let mut supervisor = AgentIslandSupervisor::default();
-    supervisor.request = Some(request.clone());
+    let mut supervisor = AgentIslandSupervisor {
+        request: Some(request.clone()),
+        ..AgentIslandSupervisor::default()
+    };
     let now = Instant::now();
 
     supervisor.apply_exit(
@@ -694,6 +710,7 @@ pwd > observed-cwd
     let request = AgentIslandLaunchRequest {
         snapshot_path: state.join("system-snapshot.json"),
         lock_path: state.join("island.lock"),
+        binary: None,
     };
     let environment = AgentIslandEnvironment {
         binary_override: Some(helper),

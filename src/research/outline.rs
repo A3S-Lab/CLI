@@ -372,10 +372,10 @@ fn validate_evidence_graph(
         }
     }
     for question_id in &context.material_question_ids {
-        if !context
+        if context
             .question_evidence_ids
             .get(question_id)
-            .is_some_and(|evidence_ids| !evidence_ids.is_empty())
+            .is_none_or(|evidence_ids| evidence_ids.is_empty())
         {
             return Err(OutlineValidationError::new(format!(
                 "material question id `{question_id}` has no accepted answer evidence binding"

@@ -55,8 +55,14 @@ brew install A3S-Lab/tap/a3s
 ```
 
 The initial installation always contains the umbrella CLI and A3S Code. It does
-not download Box, Bench, Search, or Use. This keeps a Code-only installation
-small, while every product still has one public entry point under `a3s`.
+not download Box, Bench, Search, Use, or WebView. This keeps a Code-only
+installation small, while every product still has one public entry point under
+`a3s`.
+Homebrew and GitHub archives bundle the Web workspace. A Cargo installation
+downloads the CLI's exact-version Web asset on the first `a3s web` start,
+verifies its SHA-256, and caches it in the A3S data directory. `--offline` and
+`A3S_NO_AUTO_INSTALL=1` never perform that download; use `--web-dir` for a
+local build or `--api-only` when no frontend is required.
 
 Release packages install the native `a3s-webview` companion on supported
 desktop platforms. It owns both RemoteUI windows and the system-agent island.
@@ -158,6 +164,7 @@ a3s install box
 a3s install bench
 a3s install search
 a3s install use
+a3s install webview
 a3s install use/browser
 a3s install use/office
 ```
@@ -353,6 +360,8 @@ a3s list --json
 a3s install use
 a3s install use/browser
 a3s install use/office
+a3s info use/ocr --sources
+a3s doctor use/ocr
 a3s uninstall use/office
 
 a3s use capabilities --json
@@ -408,11 +417,14 @@ identity, and raw MCP tool names do not replace the user-facing worker label.
 
 ### Platform support
 
-macOS and Linux are the supported runtime and managed-artifact targets for the
-current component platform. Windows remains a roadmap target: the CLI and
-protocol types should continue to compile there, but managed component
-archives, Browser persistent-session lifecycle, and full file-lock conformance
-are not part of the current runtime support claim.
+macOS and Linux remain the broad runtime and managed-artifact targets for the
+component platform. Windows x86_64 now supports the native WebView managed
+release and Code first-use installation. A real-process Windows E2E additionally
+covers the verified Use ZIP layout, all 31 Browser core-profile tools against
+Microsoft Edge, every native Office MCP operation and view, confirmed OfficeCLI
+installation, and confirmed PP-OCRv6 model installation plus extraction.
+Advanced Browser profiles, persistent-session promotion, and full file-lock
+conformance remain roadmap work.
 
 `a3s install` manages registered A3S components; it is not a universal frontend
 for Homebrew, APT, DNF, Pacman, Winget, npm, pip, Cargo, or arbitrary package
@@ -988,14 +1000,17 @@ While a turn is actively running, Enter on an empty composer sends the current
 queue head now.
 The transcript uses Codex-style `•` headers with `└` detail and `│` command
 continuations, groups adjacent reads/lists/searches into one Explore cell, and
-reflows semantic arguments, output, diffs, and Markdown after a resize. Streamed
-Markdown commits only complete lines, paces stable rows with adaptive catch-up,
-keeps active tables in a replaceable tail, and provisionally completes a
-candidate table before painting it so raw pipe rows never flash or move the
-scrollbar. Tables use compact rounded cards with a soft header surface and a
-stacked narrow-screen fallback while preserving code, URLs, Unicode graphemes,
-headings, and every cell value. Tail-only updates reuse the already-wrapped
-transcript prefix instead of rebuilding the full viewport.
+reflows semantic arguments, output, diffs, and Markdown after a resize. User,
+reasoning, and assistant message surfaces each own a blank row above and below
+their content; streaming and finalized cells keep the same vertical rhythm
+while adjacent tool activity remains compact. Streamed Markdown commits only
+complete lines, paces stable rows with adaptive catch-up, keeps active tables in
+a replaceable tail, and provisionally completes a candidate table before
+painting it so raw pipe rows never flash or move the scrollbar. Tables use
+compact rounded cards with a soft header surface and a stacked narrow-screen
+fallback while preserving code, URLs, Unicode graphemes, headings, and every
+cell value. Tail-only updates reuse the already-wrapped transcript prefix
+instead of rebuilding the full viewport.
 
 The transcript compositor owns vertical separation: every top-level semantic
 cell boundary receives exactly one neutral blank row in both the main history
@@ -1033,6 +1048,7 @@ Key interactions:
 | `Up` / `Down` | Recall input history or move through menus/panels. |
 | `PgUp` / `PgDn` | Scroll the transcript or the active full-screen panel. |
 | `Shift+End` | Jump to the latest transcript output. |
+| `Ctrl+R` | Fuzzy-search prompts from the current session without replacing the current draft until a result is accepted. Press it again to cycle matches. |
 | `Ctrl+T` | Open the complete live semantic session transcript, including full tool output and the current streaming tail. |
 | `Ctrl+R` | Fuzzy-search current-session prompts; repeated Ctrl+R cycles matches. |
 | `Ctrl+B` | Open or close delegated-task control without interrupting the parent turn. |

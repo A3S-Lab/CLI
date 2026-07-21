@@ -106,7 +106,18 @@ where
                 "Session close did not settle before the TUI shutdown deadline"
             );
             close.abort();
-            let _ = close.await;
+            if tokio::time::timeout(
+                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                &mut close,
+            )
+            .await
+            .is_err()
+            {
+                tracing::warn!(
+                    timeout_ms = GRACEFUL_QUIT_ABORT_SETTLE_MS,
+                    "Session close task did not acknowledge abort before host exit"
+                );
+            }
             false
         }
     }

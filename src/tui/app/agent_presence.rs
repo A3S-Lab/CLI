@@ -60,6 +60,7 @@ impl RecentTerminalState {
 pub(super) struct AgentPresenceRuntime {
     pub(super) publisher: AgentPresencePublisher,
     pub(super) refreshing: bool,
+    webview_binary: Option<PathBuf>,
     terminal: Option<RecentTerminalState>,
     island: AgentIslandSupervisor,
     cancel_requested: HashSet<String>,
@@ -67,18 +68,23 @@ pub(super) struct AgentPresenceRuntime {
 }
 
 impl AgentPresenceRuntime {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(webview_binary: Option<PathBuf>) -> Self {
         let publisher = AgentPresencePublisher::from_environment();
         let mut island = AgentIslandSupervisor::default();
         island.set_enabled(publisher.island_preference_enabled());
         Self {
             publisher,
             refreshing: false,
+            webview_binary,
             terminal: None,
             island,
             cancel_requested: HashSet::new(),
             last_warnings: Vec::new(),
         }
+    }
+
+    pub(super) fn webview_binary(&self) -> Option<&Path> {
+        self.webview_binary.as_deref()
     }
 
     fn recent_terminal(&self, session_id: &str) -> Option<&RecentTerminalState> {
@@ -124,6 +130,7 @@ impl AgentPresenceRuntime {
             AgentIslandLaunchRequest {
                 snapshot_path,
                 lock_path,
+                binary: self.webview_binary.clone(),
             },
             result.launch_requested,
         )
@@ -327,6 +334,7 @@ pub(super) fn agent_presence_tick() -> Cmd<Msg> {
 pub(super) struct AgentIslandLaunchRequest {
     snapshot_path: PathBuf,
     lock_path: PathBuf,
+    binary: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -671,18 +679,27 @@ fn agent_island_args(request: &AgentIslandLaunchRequest) -> Vec<OsString> {
 
 fn resolve_agent_island_binaries(
     environment: &AgentIslandEnvironment,
+    preferred: Option<&Path>,
 ) -> std::io::Result<(bool, Vec<PathBuf>)> {
     if let Some(binary) = &environment.binary_override {
         return Ok((true, vec![binary.clone()]));
     }
-    let candidates = remote_ui::webview_helper_candidates();
-    if candidates.1.is_empty() {
+    let (explicit, mut candidates) = remote_ui::webview_helper_candidates();
+    if explicit {
+        return Ok((true, candidates));
+    }
+    if let Some(preferred) = preferred {
+        let preferred = preferred.to_path_buf();
+        candidates.retain(|candidate| candidate != &preferred);
+        candidates.insert(0, preferred);
+    }
+    if candidates.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "a3s-webview is missing; install it or set A3S_AGENT_ISLAND_BIN",
         ));
     }
-    Ok(candidates)
+    Ok((false, candidates))
 }
 
 async fn find_compatible_agent_island_binary(
@@ -724,7 +741,8 @@ async fn launch_agent_island_with_environment(
             "agent island snapshot has no private parent directory",
         )
     })?;
-    let (explicit, candidates) = resolve_agent_island_binaries(&environment)?;
+    let (explicit, candidates) =
+        resolve_agent_island_binaries(&environment, request.binary.as_deref())?;
     let (binary, rejected) =
         find_compatible_agent_island_binary(candidates, working_directory).await;
     let Some(binary) = binary else {
@@ -910,7 +928,7 @@ async fn probe_agent_island_capability(
             ));
         }
     };
-    Ok(crate::update::webview_supports_agent_island_output(
+    Ok(a3s::components::webview_supports_agent_island_output(
         &stdout, &stderr,
     ))
 }
@@ -923,7 +941,7 @@ async fn probe_agent_island_capability(
     // Windows capability checks use the same bounded PE/target/marker
     // validation as self-update. Avoiding execution removes the process-tree
     // escape entirely instead of relying on a racy post-spawn Job assignment.
-    crate::update::webview_binary_supports_agent_island(binary)
+    a3s::components::webview_binary_supports_agent_island(binary)
 }
 
 #[cfg(not(any(unix, windows)))]

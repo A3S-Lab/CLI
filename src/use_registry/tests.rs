@@ -1,5 +1,10 @@
 use super::*;
 
+#[cfg(unix)]
+// Keep process-backed fixtures from competing for spawn and stdio scheduling;
+// startup budget tests must measure the product path, not test-harness load.
+static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn test_config() -> a3s_code_core::CodeConfig {
     a3s_code_core::CodeConfig::from_acl(
         r#"
@@ -162,7 +167,33 @@ fn dedicated_use_worker_allows_only_use_mcp_tools() {
         worker
             .permissions
             .check("mcp__use_browser__browser_open", &serde_json::json!({})),
+        PermissionDecision::Ask
+    );
+    assert_eq!(
+        worker.permissions.check(
+            "mcp__use_browser__agent_browser_open",
+            &serde_json::json!({})
+        ),
         PermissionDecision::Allow
+    );
+    for installer in [
+        "mcp__use_browser__agent_browser_install",
+        "mcp__use_office__office_install_compat",
+        "mcp__use_ocr__ocr_install",
+        "mcp__use_acme_report__install_provider",
+    ] {
+        assert_eq!(
+            worker.permissions.check(installer, &serde_json::json!({})),
+            PermissionDecision::Ask,
+            "{installer} must inherit the parent confirmation path"
+        );
+        assert!(worker.permissions.expose_to_model(installer));
+    }
+    assert_eq!(
+        worker
+            .permissions
+            .check("mcp__use_acme_report__render", &serde_json::json!({})),
+        PermissionDecision::Ask
     );
     assert_eq!(
         worker
@@ -316,6 +347,7 @@ async fn use_worker_advertises_a_route_only_after_its_mcp_projection_applies() {
 async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -395,6 +427,7 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
 async fn registry_command_timeout_kills_descendants() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("slow-a3s-use");
     let started = temp.path().join("started");
@@ -416,13 +449,21 @@ async fn registry_command_timeout_kills_descendants() {
             .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(1))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    let startup = tokio::time::timeout(Duration::from_secs(1), async {
         while !started.exists() || !descendant_started.exists() {
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .expect("fixture registry command did not start its descendant");
+    .await;
+    if startup.is_err() {
+        if request.is_finished() {
+            panic!(
+                "fixture registry command exited before starting its descendant: {:?}",
+                request.await
+            );
+        }
+        panic!("fixture registry command did not start its descendant");
+    }
 
     let error = request.await.unwrap().unwrap_err();
 
@@ -439,6 +480,7 @@ async fn registry_command_timeout_kills_descendants() {
 async fn registry_command_cancellation_kills_descendants() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("cancelled-a3s-use");
     let started = temp.path().join("started");
@@ -462,13 +504,21 @@ async fn registry_command_cancellation_kills_descendants() {
             .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(5))
             .await
     });
-    tokio::time::timeout(Duration::from_secs(1), async {
+    let startup = tokio::time::timeout(Duration::from_secs(1), async {
         while !started.exists() || !descendant_started.exists() {
             tokio::task::yield_now().await;
         }
     })
-    .await
-    .expect("fixture registry command did not start");
+    .await;
+    if startup.is_err() {
+        if request.is_finished() {
+            panic!(
+                "fixture registry command exited before starting its descendant: {:?}",
+                request.await
+            );
+        }
+        panic!("fixture registry command did not start");
+    }
 
     cancellation.cancel();
     let error = request.await.unwrap().unwrap_err();
@@ -615,19 +665,19 @@ fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
         },
     )]);
 
-    let status = render_status(
-        Path::new("/opt/a3s-use"),
-        Ok(UseVersionData {
+    let status = render_status(UseStatusInput {
+        executable: Path::new("/opt/a3s-use"),
+        version: Ok(UseVersionData {
             version: "0.4.0".to_string(),
         }),
-        Ok(snapshot),
-        Ok(doctor),
-        None,
-        &desired,
-        &mcp_status,
-        &[],
-        false,
-    );
+        snapshot: Ok(snapshot),
+        doctor: Ok(doctor),
+        ocr_diagnostic: None,
+        desired: &desired,
+        mcp_status: &mcp_status,
+        loaded_skills: &[],
+        include_repair_guidance: false,
+    });
 
     assert!(
         status.contains("use/office · ready · v0.4.0 · provider native"),
@@ -680,16 +730,16 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         )]),
         ..DesiredCapabilities::default()
     };
-    let status = render_status(
-        Path::new("/opt/a3s-use"),
-        Ok(UseVersionData {
+    let status = render_status(UseStatusInput {
+        executable: Path::new("/opt/a3s-use"),
+        version: Ok(UseVersionData {
             version: "0.4.0".to_string(),
         }),
-        Ok(snapshot.clone()),
-        Ok(UseDoctorData {
+        snapshot: Ok(snapshot.clone()),
+        doctor: Ok(UseDoctorData {
             diagnostics: Vec::new(),
         }),
-        Some(Ok(serde_json::json!({
+        ocr_diagnostic: Some(Ok(serde_json::json!({
             "readiness": "ready",
             "provider": "pp-ocr-v6",
             "engine": "onnx-runtime",
@@ -697,11 +747,11 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
             "sendsSourceOffDevice": false,
             "message": "Local PP-OCRv6 detection and recognition models are ready."
         }))),
-        &desired,
-        &HashMap::new(),
-        &[],
-        true,
-    );
+        desired: &desired,
+        mcp_status: &HashMap::new(),
+        loaded_skills: &[],
+        include_repair_guidance: true,
+    });
 
     assert!(
         status.contains("pp-ocr-v6 · PP-OCRv6_small · local ONNX"),
@@ -720,16 +770,16 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
         "ready PP-OCRv6 models must not receive model repair guidance: {status}"
     );
 
-    let missing_status = render_status(
-        Path::new("/opt/a3s-use"),
-        Ok(UseVersionData {
+    let missing_status = render_status(UseStatusInput {
+        executable: Path::new("/opt/a3s-use"),
+        version: Ok(UseVersionData {
             version: "0.4.0".to_string(),
         }),
-        Ok(snapshot),
-        Ok(UseDoctorData {
+        snapshot: Ok(snapshot),
+        doctor: Ok(UseDoctorData {
             diagnostics: Vec::new(),
         }),
-        Some(Ok(serde_json::json!({
+        ocr_diagnostic: Some(Ok(serde_json::json!({
             "readiness": "missing",
             "provider": "pp-ocr-v6",
             "engine": "onnx-runtime",
@@ -737,11 +787,11 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
             "sendsSourceOffDevice": false,
             "message": "The local PP-OCRv6 model bundle is not installed."
         }))),
-        &desired,
-        &HashMap::new(),
-        &[],
-        true,
-    );
+        desired: &desired,
+        mcp_status: &HashMap::new(),
+        loaded_skills: &[],
+        include_repair_guidance: true,
+    });
     assert!(
         missing_status.contains("pp-ocr-v6 · PP-OCRv6_small · local ONNX"),
         "{missing_status}"
@@ -764,6 +814,7 @@ fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
 async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -1035,6 +1086,7 @@ esac
 async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let binary = std::env::var_os("A3S_USE_E2E_BIN")
         .map(PathBuf::from)
         .expect("A3S_USE_E2E_BIN must point to the real a3s-use binary");
@@ -1347,6 +1399,7 @@ async fn assert_fixture_tool(session: &AgentSession, expected: &str) {
 async fn startup_discovery_respects_its_budget() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("slow-a3s-use");
     std::fs::write(&executable, "#!/bin/sh\nsleep 5\n").unwrap();
@@ -1394,6 +1447,7 @@ async fn startup_discovery_respects_its_budget() {
 async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let executable = temp.path().join("slow-initial-mcp");
     let snapshot = serde_json::json!({
@@ -1493,6 +1547,7 @@ esac
 async fn timed_out_startup_discovery_converges_from_the_watch_generation() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let package = temp.path().join("package");
     std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
@@ -1634,12 +1689,34 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     let desired = DesiredCapabilities {
         generation: 2,
         revision: "2222222222222222222222222222222222222222222222222222222222222222".to_string(),
+        packages: BTreeMap::from([("use/acme/report".to_string(), true)]),
         skills: BTreeMap::from([(
             "fixture-report".to_string(),
             DesiredSkill {
                 package_id: "use/acme/report".to_string(),
                 fingerprint: "v2".to_string(),
                 skill,
+            },
+        )]),
+        activities: BTreeMap::from([(
+            "report:reports".to_string(),
+            DesiredActivity {
+                catalog: UseActivityCatalogItem {
+                    key: "report:reports".to_string(),
+                    package_id: "use/acme/report".to_string(),
+                    route: "reports".to_string(),
+                    version: "1.0.0".to_string(),
+                    enabled: true,
+                    id: "report".to_string(),
+                    title: "Reports".to_string(),
+                    description: "Fixture reports".to_string(),
+                    icon: "report".to_string(),
+                    skill: "fixture-report".to_string(),
+                    order: 10,
+                    sha256: fixture_activity_digest(),
+                    media_type: "text/html".to_string(),
+                },
+                html: Arc::from(fixture_activity()),
             },
         )]),
         ..DesiredCapabilities::default()
@@ -1675,6 +1752,19 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
             .collect::<Vec<_>>(),
         vec![PRIMARY_ATTACHMENT.to_string()]
     );
+    assert_eq!(
+        handle.package_statuses(),
+        BTreeMap::from([("use/acme/report".to_string(), true)])
+    );
+    let catalog = handle.activity_catalog();
+    assert_eq!(catalog.generation, 2);
+    assert_eq!(catalog.items.len(), 1);
+    assert_eq!(catalog.items[0].key, "report:reports");
+    let content = handle
+        .activity_content("report:reports")
+        .expect("enabled fixture Activity must be readable");
+    assert_eq!(content.html, fixture_activity());
+    assert_eq!(content.sha256, fixture_activity_digest());
 
     handle.shutdown().await;
     first.close().await;
@@ -1684,6 +1774,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
 #[cfg(unix)]
 #[tokio::test]
 async fn partial_reconciliation_never_advances_the_generation() {
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
     let skill_path = temp.path().join("SKILL.md");
     std::fs::write(&skill_path, fixture_skill()).unwrap();

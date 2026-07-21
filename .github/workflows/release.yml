@@ -10,6 +10,9 @@ on:
     tags: ["v*"]
 permissions:
   contents: write
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
   A3S_WEB_SOURCE_REF: d7a3ee72e660c88802cff5e653e93ecfe512220a
@@ -353,6 +356,7 @@ jobs:
           fi
 
   web-assets:
+    needs: [release-gate, create-release]
     runs-on: ubuntu-latest
     steps:
       - name: Validate Web source revision
@@ -396,6 +400,35 @@ jobs:
         run: bun run build
       - name: Validate Web build
         run: test -f web-source/apps/web/dist/workspace/index.html
+      - name: Package versioned Web release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          archive_name="a3s-web-v${version}.tar.gz"
+          package_root="$RUNNER_TEMP/a3s-web-package"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          cp -a web-source/apps/web/dist/workspace "$package_root/web"
+          (
+            cd "$package_root"
+            tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - web \
+              | gzip -n >"$RUNNER_TEMP/$archive_name"
+          )
+          (
+            cd "$RUNNER_TEMP"
+            sha256sum "$archive_name" >"$archive_name.sha256"
+          )
+          tar -tzf "$RUNNER_TEMP/$archive_name" | grep -Fx 'web/index.html'
+          echo "WEB_RELEASE_ARCHIVE=$RUNNER_TEMP/$archive_name" >>"$GITHUB_ENV"
+          echo "WEB_RELEASE_CHECKSUM=$RUNNER_TEMP/$archive_name.sha256" >>"$GITHUB_ENV"
+      - name: Upload versioned Web release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "$WEB_RELEASE_ARCHIVE" "$WEB_RELEASE_CHECKSUM" \
+            --repo "$GITHUB_REPOSITORY" --clobber
       - name: Upload Web workspace
         uses: actions/upload-artifact@v4
         with:
@@ -550,7 +583,11 @@ jobs:
           node-version: 22.17.1
       - name: Use published A3S crates
         shell: bash
-        run: bash .github/scripts/use-published-a3s-crates.sh
+        run: |
+          set -euo pipefail
+          cp .release-manifest/Cargo.toml Cargo.toml
+          cp .release-manifest/Cargo.lock Cargo.lock
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Download Web workspace
         uses: actions/download-artifact@v4
         with:
@@ -907,6 +944,7 @@ jobs:
 
             test do
               assert_match "a3s", shell_output("#{bin}/a3s --version")
+              assert_predicate pkgshare/"web/index.html", :exist?
             end
           end
           RB

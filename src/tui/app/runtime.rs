@@ -564,25 +564,23 @@ impl App {
         if self.deep_research_loop.is_none() && self.has_queued_turn() {
             return self.drain_queue();
         }
-        if self.loop_remaining > 0 {
-            if self.pending_deep_research_report_resume {
-                self.pending_deep_research_report_resume = false;
-                self.loop_remaining -= 1;
-                let n = self.loop_remaining;
-                self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                    "  ↻ deep research report resume ({n} left · Esc to stop)"
-                )));
-                self.loop_continuation = true;
-                let query = self
-                    .deep_research_loop
-                    .as_ref()
-                    .map(|state| state.query.clone())
-                    .unwrap_or_else(|| "report".to_string());
-                return self.start_deep_research_report_generation(
-                    format!("✦\u{200A}resume report {query}"),
-                    DeepResearchReportGenerationPhase::Resume,
-                );
-            }
+        if self.loop_remaining > 0 && self.pending_deep_research_report_resume {
+            self.pending_deep_research_report_resume = false;
+            self.loop_remaining -= 1;
+            let n = self.loop_remaining;
+            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
+                "  ↻ deep research report resume ({n} left · Esc to stop)"
+            )));
+            self.loop_continuation = true;
+            let query = self
+                .deep_research_loop
+                .as_ref()
+                .map(|state| state.query.clone())
+                .unwrap_or_else(|| "report".to_string());
+            return self.start_deep_research_report_generation(
+                format!("✦\u{200A}resume report {query}"),
+                DeepResearchReportGenerationPhase::Resume,
+            );
         }
         // Required runtime evidence is a deliverable, not just a warning. In
         // autonomous runs, spend the next loop turn on a targeted correction

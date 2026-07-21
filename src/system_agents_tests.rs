@@ -911,11 +911,11 @@ async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
             && activity
                 .workspace
                 .as_deref()
-                .map_or(true, |value| value.chars().count() <= MAX_WORKSPACE_CHARS)
+                .is_none_or(|value| value.chars().count() <= MAX_WORKSPACE_CHARS)
             && activity
                 .task
                 .as_deref()
-                .map_or(true, |value| value.chars().count() <= MAX_TASK_CHARS)
+                .is_none_or(|value| value.chars().count() <= MAX_TASK_CHARS)
     }));
 
     let replacement = SystemAgentSnapshot {

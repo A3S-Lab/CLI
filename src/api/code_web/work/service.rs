@@ -61,7 +61,7 @@ impl WorkService {
                 .cmp(&left.last_opened_at)
                 .then_with(|| right.updated_at.cmp(&left.updated_at))
         });
-        folders.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        folders.sort_by_key(|folder| folder.name.to_lowercase());
         Ok(json!({
             "artifacts": artifacts,
             "folders": folders,
@@ -208,7 +208,7 @@ impl WorkService {
         let current = self.artifact(id).await?;
         let mut artifacts = storage::list_json::<WorkArtifact>(&self.history_dir(id)).await?;
         artifacts.push(current.clone());
-        artifacts.sort_by(|left, right| right.revision.cmp(&left.revision));
+        artifacts.sort_by_key(|artifact| std::cmp::Reverse(artifact.revision));
         Ok(artifacts
             .into_iter()
             .map(|artifact| WorkArtifactVersion {

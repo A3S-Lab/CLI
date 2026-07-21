@@ -116,7 +116,7 @@ fn report_budget_covers_the_unrevised_pipeline_and_bounds_revision_time() {
             + REPORT_FINALIZATION_RESERVE_MS
     );
     assert_eq!(FINAL_TARGETED_REPAIR_RESERVE_MS, 30 * 60 * 1000);
-    assert!(SECTIONED_REPORT_BUDGET_MS < 97 * 60 * 1000);
+    const { assert!(SECTIONED_REPORT_BUDGET_MS < 97 * 60 * 1000) };
 }
 
 #[test]

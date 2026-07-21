@@ -14,7 +14,7 @@ use crate::config;
 use self::api_gateway::ApiGateway;
 use self::options::ServeOptions;
 use super::code_web::{CodeWebModule, CodeWebSessionRepository, CodeWebState, KernelService};
-use super::web::{api_only_fallback, find_default_web_dir, serve_static};
+use super::web::{api_only_fallback, prepare_default_web_dir, serve_static};
 
 mod api_gateway;
 mod background;
@@ -61,8 +61,12 @@ pub(crate) fn usage_text() -> String {
 pub(crate) async fn run(
     args: &[String],
     cancellation: &CancellationToken,
+    offline: bool,
+    allow_asset_download: bool,
 ) -> anyhow::Result<ServeOutcome> {
-    let options = ServeOptions::parse(args)?;
+    let mut options = ServeOptions::parse(args)?;
+    options.offline = offline;
+    options.allow_asset_download = allow_asset_download;
     if options.help {
         print!("{}", usage_text());
         return Ok(ServeOutcome::Help);
@@ -124,7 +128,7 @@ async fn run_foreground(
         }
     };
     let actual_addr = listener.local_addr()?;
-    let web_root = resolve_web_root(&options)?;
+    let web_root = resolve_web_root(&options).await?;
     let config_path = ensure_config_path(&options)?;
     let code_config = CodeConfig::from_file(Path::new(&config_path))
         .map_err(|e| anyhow::anyhow!("failed to parse {config_path}: {e}"))?;
@@ -270,24 +274,25 @@ async fn run_foreground(
     }
 }
 
-fn resolve_web_root(options: &ServeOptions) -> anyhow::Result<Option<Arc<PathBuf>>> {
+async fn resolve_web_root(options: &ServeOptions) -> anyhow::Result<Option<Arc<PathBuf>>> {
     if options.api_only {
         return Ok(None);
     }
-    let web_dir = options
-        .web_dir
-        .clone()
-        .or_else(find_default_web_dir)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "web assets were not found; reinstall A3S, run `npm --prefix apps/web run build`, \
-                 or pass --web-dir"
+    let web_dir = match options.web_dir.clone() {
+        Some(web_dir) => web_dir,
+        None => {
+            prepare_default_web_dir(
+                &options.workspace,
+                options.offline,
+                options.allow_asset_download,
             )
-        })?;
+            .await?
+        }
+    };
     if !web_dir.join("index.html").is_file() {
         anyhow::bail!(
-            "web assets at {} do not contain index.html; reinstall A3S, run `npm --prefix apps/web \
-             run build`, or pass --web-dir",
+            "web assets at {} do not contain index.html; pass a built workspace with --web-dir or \
+             use --api-only",
             web_dir.display()
         );
     }

@@ -139,13 +139,53 @@ pub struct FakeReleaseServer {
 
 impl FakeReleaseServer {
     pub fn start(repository: &str, version: &str, asset_name: &str, archive: Vec<u8>) -> Self {
+        Self::start_internal(repository, version, asset_name, archive, None, false)
+    }
+
+    pub fn start_with_digest(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        advertised_digest: &str,
+    ) -> Self {
+        Self::start_internal(
+            repository,
+            version,
+            asset_name,
+            archive,
+            Some(advertised_digest),
+            false,
+        )
+    }
+
+    pub fn start_with_forbidden_api(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+    ) -> Self {
+        Self::start_internal(repository, version, asset_name, archive, None, true)
+    }
+
+    fn start_internal(
+        repository: &str,
+        version: &str,
+        asset_name: &str,
+        archive: Vec<u8>,
+        advertised_digest: Option<&str>,
+        api_forbidden: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind release server");
         listener
             .set_nonblocking(true)
             .expect("failed to configure release server");
         let address = listener.local_addr().unwrap();
         let api_base = format!("http://{address}");
-        let digest = format!("{:x}", Sha256::digest(&archive));
+        let digest = advertised_digest
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{:x}", Sha256::digest(&archive)));
+        let checksum = format!("{digest}  {asset_name}\n").into_bytes();
         let release = serde_json::to_vec(&serde_json::json!({
             "tag_name": format!("v{version}"),
             "body": "fixture",
@@ -163,6 +203,21 @@ impl FakeReleaseServer {
         let asset_path = format!("/assets/{asset_name}");
         let latest_path = format!("/repos/A3S-Lab/{repository}/releases/latest");
         let tag_path = format!("/repos/A3S-Lab/{repository}/releases/tags/v{version}");
+        let direct_asset_path =
+            format!("/A3S-Lab/{repository}/releases/download/v{version}/{asset_name}");
+        let direct_checksum_path = format!("{direct_asset_path}.sha256");
+        let response = Arc::new(FakeReleaseResponse {
+            release,
+            asset_path,
+            latest_path,
+            tag_path,
+            direct_asset_path,
+            direct_checksum_path,
+            archive,
+            checksum,
+            api_forbidden,
+            requests: Arc::clone(&thread_requests),
+        });
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 match listener.accept() {
@@ -175,22 +230,9 @@ impl FakeReleaseServer {
                         stream
                             .set_nonblocking(false)
                             .expect("failed to configure release connection");
-                        let release = release.clone();
-                        let asset_path = asset_path.clone();
-                        let latest_path = latest_path.clone();
-                        let tag_path = tag_path.clone();
-                        let archive = archive.clone();
-                        let requests = Arc::clone(&thread_requests);
+                        let response = Arc::clone(&response);
                         std::thread::spawn(move || {
-                            serve_request(
-                                stream,
-                                &release,
-                                &asset_path,
-                                &latest_path,
-                                &tag_path,
-                                &archive,
-                                &requests,
-                            );
+                            serve_request(stream, &response);
                         });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -226,15 +268,20 @@ impl Drop for FakeReleaseServer {
     }
 }
 
-fn serve_request(
-    mut stream: TcpStream,
-    release: &[u8],
-    asset_path: &str,
-    latest_path: &str,
-    tag_path: &str,
-    archive: &[u8],
-    requests: &Arc<Mutex<Vec<String>>>,
-) {
+struct FakeReleaseResponse {
+    release: Vec<u8>,
+    asset_path: String,
+    latest_path: String,
+    tag_path: String,
+    direct_asset_path: String,
+    direct_checksum_path: String,
+    archive: Vec<u8>,
+    checksum: Vec<u8>,
+    api_forbidden: bool,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+fn serve_request(mut stream: TcpStream, response: &FakeReleaseResponse) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let mut buffer = [0_u8; 8192];
     let Ok(size) = stream.read(&mut buffer) else {
@@ -247,14 +294,25 @@ fn serve_request(
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("/")
         .to_string();
-    requests.lock().unwrap().push(path.clone());
-    let (status, content_type, body) = if path == asset_path {
-        ("200 OK", "application/gzip", archive)
-    } else if path == latest_path || path == tag_path {
-        ("200 OK", "application/json", release)
-    } else {
-        ("404 Not Found", "text/plain", b"not found".as_slice())
-    };
+    response.requests.lock().unwrap().push(path.clone());
+    let (status, content_type, body) =
+        if path == response.asset_path || path == response.direct_asset_path {
+            ("200 OK", "application/gzip", response.archive.as_slice())
+        } else if path == response.direct_checksum_path {
+            ("200 OK", "text/plain", response.checksum.as_slice())
+        } else if path == response.latest_path || path == response.tag_path {
+            if response.api_forbidden {
+                (
+                    "403 Forbidden",
+                    "application/json",
+                    br#"{"message":"API rate limit exceeded"}"#.as_slice(),
+                )
+            } else {
+                ("200 OK", "application/json", response.release.as_slice())
+            }
+        } else {
+            ("404 Not Found", "text/plain", b"not found".as_slice())
+        };
     let header = format!(
         "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()

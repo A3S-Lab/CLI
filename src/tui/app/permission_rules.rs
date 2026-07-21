@@ -473,7 +473,7 @@ fn canonicalize_json(value: &serde_json::Value) -> serde_json::Value {
         }
         serde_json::Value::Object(values) => {
             let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             serde_json::Value::Object(
                 entries
                     .into_iter()
@@ -785,7 +785,7 @@ mod tests {
         );
         std::fs::write(
             &target,
-            generate_project_permission_grants(&[grant.clone()]).unwrap(),
+            generate_project_permission_grants(std::slice::from_ref(&grant)).unwrap(),
         )
         .unwrap();
         let path = project_permission_rules_path(temp.path());

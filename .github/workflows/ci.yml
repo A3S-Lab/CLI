@@ -30,6 +30,9 @@ jobs:
       - name: Use published A3S crates
         shell: bash
         run: bash .github/scripts/use-published-a3s-crates.sh
+      - name: Test TUI exit regression
+        if: runner.os == 'macOS'
+        run: cargo test --locked --test tui_exit -- --nocapture
       - run: cargo build --release
         env:
           # Cross-platform PR validation does not need LTO, and rustc 1.97 can

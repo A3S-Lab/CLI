@@ -289,6 +289,7 @@ impl KimiAuth {
             let result = tokio::task::spawn_blocking(move || -> std::io::Result<Option<File>> {
                 let file = std::fs::OpenOptions::new()
                     .create(true)
+                    .truncate(false)
                     .read(true)
                     .write(true)
                     .open(path)?;

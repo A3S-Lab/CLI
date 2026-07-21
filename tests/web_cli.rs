@@ -174,7 +174,21 @@ fn detached_web_process_serves_health_until_stopped() {
 
     let response = http_get(address, "/api/v1/health");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert!(response.contains("\"ok\":true"), "{response}");
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .expect("health response body");
+    let health: serde_json::Value = serde_json::from_str(body).expect("health JSON");
+    assert_eq!(health["ok"], true);
+    assert_eq!(health["service"], "a3s-code-web");
+    assert_eq!(health["pid"], pid);
+    assert_eq!(health["version"], env!("CARGO_PKG_VERSION"));
+    let health_workspace = PathBuf::from(health["workspace"].as_str().expect("health workspace"))
+        .canonicalize()
+        .expect("canonical health workspace");
+    assert_eq!(
+        health_workspace,
+        root.canonicalize().expect("canonical test workspace")
+    );
 
     daemon.stop();
     wait_until_stopped(address);

@@ -37,6 +37,7 @@ async function run(ctx, inputs) {
   const STEP_SELECT = "select_evidence_chunks";
   const STEP_SELECT_SHARD_PREFIX = "select_evidence_chunks_shard_";
   const STEP_SELECT_SOURCE_PREFIX = "select_evidence_chunks_source_";
+  const STEP_CHECKPOINT_BOOTSTRAP = "checkpoint_bootstrap_acquisition";
   const STEP_CHECKPOINT_INITIAL = "checkpoint_initial_retrieval";
   const STEP_SELECT_SUPPLEMENTAL_WEB = "select_supplemental_web_sources";
   const STEP_SUPPLEMENTAL_WEB = "retrieve_supplemental_web";

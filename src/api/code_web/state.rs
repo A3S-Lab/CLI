@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-use a3s_code_core::{Agent, AgentSession, CodeConfig, LlmClient, WorkspaceServices};
+use a3s_code_core::{
+    Agent, AgentSession, CodeConfig, LlmClient, LocalWorkspaceManifestSnapshot, WorkspaceServices,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
@@ -121,6 +123,7 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) messages: Mutex<HashMap<String, Vec<serde_json::Value>>>,
     pub(in crate::api::code_web) session_metadata: Mutex<HashMap<String, CodeWebSessionMetadata>>,
     pub(in crate::api::code_web) session_persist_lock: Mutex<()>,
+    pub(in crate::api::code_web) workspace_file_write_lock: Mutex<()>,
     pub(in crate::api::code_web) session_controls: Mutex<HashMap<String, CodeWebSessionControls>>,
     pub(in crate::api::code_web) session_contexts: Mutex<HashMap<String, CodeWebSessionContext>>,
     pub(in crate::api::code_web) session_settings: Mutex<HashMap<String, CodeWebSessionSettings>>,
@@ -150,6 +153,7 @@ impl CodeWebState {
             messages: Mutex::new(HashMap::new()),
             session_metadata: Mutex::new(HashMap::new()),
             session_persist_lock: Mutex::new(()),
+            workspace_file_write_lock: Mutex::new(()),
             session_controls: Mutex::new(HashMap::new()),
             session_contexts: Mutex::new(HashMap::new()),
             session_settings: Mutex::new(HashMap::new()),
@@ -205,6 +209,15 @@ impl CodeWebState {
         workspace: &std::path::Path,
     ) -> anyhow::Result<Arc<WorkspaceServices>> {
         self.workspace_backends.services_for(workspace).await
+    }
+
+    pub(in crate::api::code_web) async fn workspace_manifest_snapshot_for(
+        &self,
+        workspace: &std::path::Path,
+    ) -> anyhow::Result<LocalWorkspaceManifestSnapshot> {
+        self.workspace_backends
+            .manifest_snapshot_for(workspace)
+            .await
     }
 
     pub(in crate::api::code_web) fn code_config_snapshot(&self) -> CodeConfig {

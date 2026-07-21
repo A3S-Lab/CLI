@@ -1172,12 +1172,12 @@ mod tests {
         let mut purged = first.clone();
         purged.purge = Some(true);
         assert_ne!(
-            plan_digest("component.install", &[first.clone()]).unwrap(),
+            plan_digest("component.install", std::slice::from_ref(&first)).unwrap(),
             plan_digest("component.install", &[forced.clone()]).unwrap()
         );
         for changed in [different_version, different_source, purged] {
             assert_ne!(
-                plan_digest("component.install", &[first.clone()]).unwrap(),
+                plan_digest("component.install", std::slice::from_ref(&first)).unwrap(),
                 plan_digest("component.install", &[changed]).unwrap()
             );
         }

@@ -60,7 +60,7 @@ fn deepresearch_cli_uses_the_shared_hard_safety_envelope() {
     assert_eq!(args["limits"]["timeoutMs"], 300_000);
     assert_eq!(
         crate::tui::DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS,
-        45 * 60 * 1_000
+        114 * 60 * 1_000 + 30 * 1_000
     );
     assert_eq!(
         crate::tui::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS,
@@ -68,7 +68,7 @@ fn deepresearch_cli_uses_the_shared_hard_safety_envelope() {
     );
     assert_eq!(
         crate::tui::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS,
-        15 * 60 * 1_000
+        30 * 60 * 1_000
     );
     assert_eq!(
         crate::tui::DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS,

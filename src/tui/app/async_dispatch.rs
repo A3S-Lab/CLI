@@ -393,24 +393,6 @@ impl App {
                                 .fg(TN_GREEN)
                                 .render(&format!("  ✓ already up to date (a3s {current})")),
                         );
-                        let status_entry = self.push_tracked_line(
-                            &Style::new()
-                                .fg(TN_GRAY)
-                                .render("  checking companion tools…"),
-                        );
-                        self.updating = Some(Instant::now());
-                        self.relayout();
-                        return Some(cmd::cmd(move || async move {
-                            let result =
-                                tokio::task::spawn_blocking(crate::update::repair_installation)
-                                    .await
-                                    .map_err(|e| format!("repair task failed: {e}"))
-                                    .and_then(|r| r);
-                            Msg::UpdateRepair {
-                                status_entry,
-                                result,
-                            }
-                        }));
                     }
                     Some(l) => {
                         // macOS/Linux self-update in place (Homebrew or a direct
@@ -429,38 +411,6 @@ impl App {
                             "  → a3s {l} available — download: https://github.com/A3S-Lab/Cli/releases/latest"
                         )));
                     }
-                }
-            }
-
-            Msg::UpdateRepair {
-                status_entry,
-                result,
-            } => {
-                self.updating = None;
-                self.relayout();
-                match result {
-                    Ok(items) if items.is_empty() => self.replace_tracked_line(
-                        status_entry,
-                        &Style::new()
-                            .fg(TN_GREEN)
-                            .render("  ✓ installation looks healthy"),
-                    ),
-                    Ok(items) => {
-                        for (index, item) in items.into_iter().enumerate() {
-                            let line = Style::new().fg(TN_GREEN).render(&format!("  ✓ {item}"));
-                            if index == 0 {
-                                self.replace_tracked_line(status_entry, &line);
-                            } else {
-                                self.push_line(&line);
-                            }
-                        }
-                    }
-                    Err(error) => self.replace_tracked_line(
-                        status_entry,
-                        &Style::new()
-                            .fg(TN_RED)
-                            .render(&format!("  install repair failed: {error}")),
-                    ),
                 }
             }
 

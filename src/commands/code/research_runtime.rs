@@ -489,6 +489,12 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for ScriptedLlmClient {
+        fn model_generation_concurrency(&self) -> a3s_code_core::llm::ModelGenerationConcurrency {
+            a3s_code_core::llm::ModelGenerationConcurrency::bounded(
+                std::num::NonZeroUsize::new(1).expect("scripted test concurrency is non-zero"),
+            )
+        }
+
         async fn complete(
             &self,
             messages: &[Message],

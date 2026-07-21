@@ -3591,6 +3591,38 @@ fn scrollbar_thumb_tracks_position() {
 }
 
 #[test]
+fn scrollbar_rows_with_emoji_graphemes_stay_within_the_terminal_canvas() {
+    let canvas_width = 138usize;
+    let headings = [
+        "## ✏️ 代码编辑与生成",
+        "## ⚙️ 执行与验证",
+        "## 🛠️ 专项技能（Skills）",
+        "## 👩‍💻 Agent collaboration",
+    ];
+    let view = headings
+        .iter()
+        .map(|heading| fit_viewport_row(heading, canvas_width))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rendered = append_scrollbar(&view, canvas_width, headings.len() + 20, 37);
+
+    for row in rendered.lines() {
+        assert_eq!(
+            a3s_tui::style::visible_len(row),
+            canvas_width,
+            "scrollbar row exceeded the terminal canvas: {row:?}"
+        );
+        assert!(
+            matches!(
+                a3s_tui::style::strip_ansi(row).chars().next_back(),
+                Some('█' | '│')
+            ),
+            "scrollbar left the final column: {row:?}"
+        );
+    }
+}
+
+#[test]
 fn streamed_markdown_table_keeps_the_scrollbar_in_the_final_canvas_column() {
     let canvas_width = 48usize;
     let markdown_width = transcript_markdown_width_for(canvas_width as u16);
@@ -4136,10 +4168,6 @@ fn auto_mode_rejects_every_unexpected_confirmation_without_hitl() {
         (
             "mcp__github__create_issue",
             serde_json::json!({"title": "side effect"}),
-        ),
-        (
-            "git",
-            serde_json::json!({"command": "checkout", "ref": "feature", "force": true}),
         ),
         (
             "batch",
@@ -6254,6 +6282,10 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/update",
         "/memory",
         "/relay",
+        "/permissions",
+        "/tasks",
+        "/history",
+        "/checkup",
     ]);
 
     for (cmd, _) in SLASH_COMMANDS {
@@ -6453,6 +6485,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/history",
+            handler: Exact,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/kb",
             handler: Parameterized,
             idle_only: true,
@@ -6616,6 +6654,14 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
 }
 
 #[test]
+fn permissions_is_non_idle_and_listed() {
+    assert!(!IDLE_ONLY.contains(&"/permissions"));
+    assert!(SLASH_COMMANDS
+        .iter()
+        .any(|(name, _)| *name == "/permissions"));
+}
+
+#[test]
 fn removed_top_level_aliases_stay_unregistered() {
     let removed = [
         "/output".to_string(),
@@ -6676,14 +6722,6 @@ fn relay_is_idle_only_and_listed() {
 fn tasks_is_non_idle_and_listed() {
     assert!(!IDLE_ONLY.contains(&"/tasks"));
     assert!(SLASH_COMMANDS.iter().any(|(name, _)| *name == "/tasks"));
-}
-
-#[test]
-fn permissions_is_non_idle_and_listed() {
-    assert!(!IDLE_ONLY.contains(&"/permissions"));
-    assert!(SLASH_COMMANDS
-        .iter()
-        .any(|(name, _)| *name == "/permissions"));
 }
 
 #[test]

@@ -14,7 +14,7 @@ use super::discovery::find_state;
 use super::id::ComponentId;
 use super::lock::ComponentOperationLock;
 use super::paths::ComponentPaths;
-use super::probe::probe_version;
+use super::probe::probe_release;
 use super::release_install::{install_release, ResolvedRelease};
 use super::state::{ComponentState, Health, Presence};
 use crate::registry::ResolvedRegistryPackage;
@@ -446,7 +446,10 @@ fn install_homebrew(
     }
     let prefix = PathBuf::from(String::from_utf8(prefix_output.stdout)?.trim());
     let executable = prefix.join("bin").join(release.binary);
-    let version = probe_version(&executable)?;
+    let version = match probe_release(release, &executable)? {
+        Some(version) => version,
+        None => homebrew_formula_version(formula)?,
+    };
     let receipt = ComponentReceipt {
         schema_version: RECEIPT_SCHEMA_VERSION,
         component_id: id.to_string(),
@@ -470,6 +473,23 @@ fn install_homebrew(
         path: Some(executable),
         message: format!("Homebrew completed {verb} for component '{}'.", id),
     })
+}
+
+fn homebrew_formula_version(formula: &str) -> anyhow::Result<String> {
+    let output = Command::new("brew")
+        .args(["list", "--versions", formula])
+        .output()
+        .context("failed to query the installed Homebrew formula version")?;
+    if !output.status.success() {
+        bail!("Homebrew installed '{formula}', but its version is unavailable");
+    }
+    let output = String::from_utf8(output.stdout)?;
+    output
+        .split_whitespace()
+        .rev()
+        .find(|field| parse_version(field).is_ok())
+        .map(str::to_string)
+        .with_context(|| format!("Homebrew returned no installed version for formula '{formula}'"))
 }
 
 fn delegate_install(

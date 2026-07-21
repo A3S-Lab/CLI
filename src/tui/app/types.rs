@@ -485,11 +485,6 @@ pub(super) enum Msg {
     },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
-    /// `/update` found no binary upgrade was needed and repaired companion tools.
-    UpdateRepair {
-        status_entry: TranscriptEntryId,
-        result: Result<Vec<String>, String>,
-    },
     /// OS login completed.
     OsLogin {
         status_entry: TranscriptEntryId,

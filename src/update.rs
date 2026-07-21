@@ -869,11 +869,10 @@ fn perform_upgrade_with(
             "\n⚠  Homebrew did not produce a complete a3s {latest} installation — falling back to a direct download…"
         );
     }
-    let result = standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
+    standalone_upgrade_with(latest, runner, current_exe).map_err(|e| {
         failures.push(e);
         failures.join("; ")
-    });
-    result
+    })
 }
 
 fn standalone_upgrade_with(
@@ -2200,14 +2199,12 @@ mod tests {
                     // its mode-specific usage for this capability probe.
                     success: false,
                     stdout: Vec::new(),
-                    stderr: available
-                        .then(|| {
-                            b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
+                    stderr: if available {
+                        b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>\n"
                                 .to_vec()
-                        })
-                        .unwrap_or_else(|| {
-                            b"usage: a3s-webview --url <http(s)://...>\n".to_vec()
-                        }),
+                    } else {
+                        b"usage: a3s-webview --url <http(s)://...>\n".to_vec()
+                    },
                 });
             }
             None

@@ -524,6 +524,12 @@ impl TuiHitlPermissionChecker {
 
         let evidence_collection = self.deep_research_report_tool_gate.evidence_collection();
         let tool = tool_name.to_ascii_lowercase();
+        if tool.starts_with("mcp__use_") {
+            // The primary model cannot see this route. Returning the neutral
+            // parent Allow lets an explicitly scoped Use worker preserve its
+            // stricter per-tool Allow/Ask/Deny decision during delegation.
+            return a3s_code_core::permissions::PermissionDecision::Allow;
+        }
         if self.deep_research_report_tool_gate.synthesis_only() {
             return a3s_code_core::permissions::PermissionDecision::Deny;
         }
@@ -700,6 +706,12 @@ impl a3s_code_core::permissions::PermissionChecker for TuiHitlPermissionChecker 
     }
 
     fn expose_to_model(&self, tool_name: &str) -> bool {
+        if tool_name.to_ascii_lowercase().starts_with("mcp__use_") {
+            return false;
+        }
+        if !a3s_code_core::permissions::PermissionChecker::expose_to_model(&self.base, tool_name) {
+            return false;
+        }
         let tool = tool_name.to_ascii_lowercase();
         if self.deep_research_report_tool_gate.synthesis_only() {
             return false;

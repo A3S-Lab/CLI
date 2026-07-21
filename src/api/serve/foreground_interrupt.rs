@@ -23,7 +23,7 @@ impl InterruptSignalGuard {
     pub(super) fn enable() -> io::Result<Self> {
         #[cfg(unix)]
         {
-            return Self::enable_for_fd(libc::STDIN_FILENO);
+            Self::enable_for_fd(libc::STDIN_FILENO)
         }
 
         #[cfg(not(unix))]

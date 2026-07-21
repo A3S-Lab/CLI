@@ -292,6 +292,102 @@ pub(super) async fn run_retrieval_stage(
     }
 }
 
+pub(super) async fn run_bootstrap_acquisition_stage(
+    session: &AgentSession,
+    args: Value,
+    progress_tx: &mpsc::Sender<AgentEvent>,
+    timeout_ms: u64,
+) -> Result<ToolCallResult, String> {
+    let recovery_args = args.clone();
+    let result = within_inquiry_stage_timeout(
+        run_dynamic_workflow(session, args, progress_tx),
+        timeout_ms,
+        "bootstrap acquisition",
+    )
+    .await;
+    match result {
+        Ok(result) => Ok(result),
+        Err(error)
+            if error.starts_with("DeepResearch bootstrap acquisition stage timed out after ") =>
+        {
+            recover_bootstrap_acquisition_after_timeout(session, &recovery_args).ok_or(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn recover_bootstrap_acquisition_after_timeout(
+    session: &AgentSession,
+    args: &Value,
+) -> Option<ToolCallResult> {
+    let recovered =
+        recover_deep_research_bootstrap_acquisition_from_store(session.workspace(), args)?;
+    let output = recovered.output?;
+    let expected_query = args.pointer("/input/query").and_then(Value::as_str)?;
+    bootstrap_acquisition_value(&output, expected_query)?;
+    Some(ToolCallResult {
+        name: "dynamic_workflow".to_string(),
+        output,
+        exit_code: 0,
+        metadata: Some(recovered.metadata),
+        error_kind: None,
+    })
+}
+
+pub(super) fn bootstrap_acquisition_from_result(
+    result: &ToolCallResult,
+    expected_query: &str,
+) -> Option<Value> {
+    let canonical =
+        deep_research_canonical_workflow_output(&result.output, result.metadata.as_ref());
+    bootstrap_acquisition_value(&canonical, expected_query)
+}
+
+fn bootstrap_acquisition_value(output: &str, expected_query: &str) -> Option<Value> {
+    let value = serde_json::from_str::<Value>(output).ok()?;
+    if value.get("query").and_then(Value::as_str) != Some(expected_query)
+        || value.get("mode").and_then(Value::as_str) != Some("bootstrap_acquisition")
+        || value
+            .pointer("/execution/terminal_authority")
+            .and_then(Value::as_str)
+            != Some("host_inquiry_reducer")
+    {
+        return None;
+    }
+    let acquisition = value.get("acquisition")?.clone();
+    let sources = acquisition.pointer("/packet/sources")?.as_array()?;
+    if sources.is_empty() || sources.len() > 16 {
+        return None;
+    }
+    let valid = sources.iter().all(|source| {
+        source
+            .get("source_id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+            && source
+                .get("url_or_path")
+                .and_then(Value::as_str)
+                .is_some_and(|anchor| !anchor.trim().is_empty())
+            && source
+                .get("chunks")
+                .and_then(Value::as_array)
+                .is_some_and(|chunks| {
+                    !chunks.is_empty()
+                        && chunks.iter().all(|chunk| {
+                            chunk
+                                .get("chunk_id")
+                                .and_then(Value::as_str)
+                                .is_some_and(|id| !id.trim().is_empty())
+                                && chunk
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|text| !text.trim().is_empty())
+                        })
+                })
+    });
+    valid.then_some(acquisition)
+}
+
 fn recover_initial_retrieval_after_timeout(
     session: &AgentSession,
     args: &Value,

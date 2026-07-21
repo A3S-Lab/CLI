@@ -250,7 +250,7 @@ impl PluginsService {
             request.channel.as_deref(),
             None,
         )?;
-        self.run_a3s_json(args).await
+        self.run_a3s_json(args, JsonOutputOwner::Root).await
     }
 
     pub(in crate::api::code_web) async fn apply_operation(
@@ -266,7 +266,7 @@ impl PluginsService {
             request.channel.as_deref(),
             Some(&request.plan_digest),
         )?;
-        self.run_a3s_json(args).await
+        self.run_a3s_json(args, JsonOutputOwner::Root).await
     }
 
     pub(in crate::api::code_web) async fn set_package_enabled(
@@ -277,19 +277,19 @@ impl PluginsService {
         let package_id = package_id
             .strip_prefix("use/")
             .ok_or_else(|| BootError::BadRequest("invalid Use package ID".to_string()))?;
-        let action = if request.enabled { "enable" } else { "disable" };
         let _guard = self.operation_lock.lock().await;
-        self.run_a3s_json(vec![
-            "use".to_string(),
-            "extension".to_string(),
-            action.to_string(),
-            package_id.to_string(),
-            "--json".to_string(),
-        ])
+        self.run_a3s_json(
+            use_extension_toggle_args(package_id, request.enabled),
+            JsonOutputOwner::UseProxy,
+        )
         .await
     }
 
-    async fn run_a3s_json(&self, args: Vec<String>) -> BootResult<Value> {
+    async fn run_a3s_json(
+        &self,
+        args: Vec<String>,
+        output_owner: JsonOutputOwner,
+    ) -> BootResult<Value> {
         let executable = std::env::current_exe().map_err(|error| {
             BootError::Internal(format!("could not locate current a3s executable: {error}"))
         })?;
@@ -299,8 +299,7 @@ impl PluginsService {
             .arg(&self.state.config_path)
             .arg("--directory")
             .arg(&self.state.default_workspace)
-            .args(["--output", "json", "--non-interactive", "--no-progress"])
-            .args(&args)
+            .args(json_invocation_args(output_owner, args))
             .current_dir(&self.state.default_workspace)
             .kill_on_drop(true);
         let output = timeout(PLUGIN_OPERATION_TIMEOUT, command.output())
@@ -421,6 +420,32 @@ impl PluginsService {
     fn default_skill_dirs(&self) -> Vec<PathBuf> {
         agent_skill_dirs(&self.state.default_workspace.display().to_string())
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JsonOutputOwner {
+    Root,
+    UseProxy,
+}
+
+fn json_invocation_args(output_owner: JsonOutputOwner, args: Vec<String>) -> Vec<String> {
+    let mut invocation = Vec::with_capacity(args.len() + 4);
+    if output_owner == JsonOutputOwner::Root {
+        invocation.extend(["--output".to_string(), "json".to_string()]);
+    }
+    invocation.extend(["--non-interactive".to_string(), "--no-progress".to_string()]);
+    invocation.extend(args);
+    invocation
+}
+
+fn use_extension_toggle_args(package_id: &str, enabled: bool) -> Vec<String> {
+    vec![
+        "use".to_string(),
+        "extension".to_string(),
+        if enabled { "enable" } else { "disable" }.to_string(),
+        package_id.to_string(),
+        "--json".to_string(),
+    ]
 }
 
 fn latest_signed_packages(
@@ -592,9 +617,11 @@ fn concise_error(value: &str) -> String {
 
 fn stderr_suffix(stderr: &[u8]) -> String {
     let stderr = concise_error(&String::from_utf8_lossy(stderr));
-    (!stderr.is_empty())
-        .then(|| format!(": {stderr}"))
-        .unwrap_or_default()
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(": {stderr}")
+    }
 }
 
 fn normalize_skill_name(raw_name: &str) -> BootResult<String> {
@@ -670,5 +697,29 @@ mod tests {
             plugin_operation_args("install", "use/a3s/science", None, None, Some("unsigned"))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn use_extension_toggle_keeps_json_output_owned_by_the_child_cli() {
+        let invocation = json_invocation_args(
+            JsonOutputOwner::UseProxy,
+            use_extension_toggle_args("a3s/science", false),
+        );
+
+        assert_eq!(
+            invocation,
+            [
+                "--non-interactive",
+                "--no-progress",
+                "use",
+                "extension",
+                "disable",
+                "a3s/science",
+                "--json",
+            ]
+        );
+        assert!(!invocation
+            .windows(2)
+            .any(|arguments| arguments == ["--output", "json"]));
     }
 }

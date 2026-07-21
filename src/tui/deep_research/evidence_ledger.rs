@@ -148,7 +148,17 @@ fn synthesis_report_context(workflow_output: &str) -> Option<serde_json::Value> 
         Ok(super::ValidatedInquiryProjection::Inquiry { state, .. }) => Some(state),
         Ok(super::ValidatedInquiryProjection::LegacyCheckedLoop) | Err(_) => None,
     };
-    if plan.is_none() && inquiry.is_none() {
+    // An event-sourced inquiry is the authoritative report contract. Preserve
+    // only the bounded verification facts for legacy/degraded workflows so a
+    // stale legacy checker packet cannot widen an inquiry projection.
+    let verification = if inquiry.is_none() {
+        workflow
+            .get("verification")
+            .and_then(serde_json::Value::as_object)
+    } else {
+        None
+    };
+    if plan.is_none() && inquiry.is_none() && verification.is_none() {
         return None;
     }
 
@@ -206,6 +216,20 @@ fn synthesis_report_context(workflow_output: &str) -> Option<serde_json::Value> 
                 "questions": questions,
             }),
         );
+    }
+    if let Some(verification) = verification {
+        let mut verification_context = serde_json::Map::new();
+        for key in ["status", "checker_completed", "prior_checker_retained"] {
+            if let Some(value) = verification.get(key) {
+                verification_context.insert(key.to_string(), value.clone());
+            }
+        }
+        if !verification_context.is_empty() {
+            context.insert(
+                "verification".to_string(),
+                serde_json::Value::Object(verification_context),
+            );
+        }
     }
     (!context.is_empty()).then_some(serde_json::Value::Object(context))
 }
@@ -1095,5 +1119,51 @@ mod tests {
         assert!(!context
             .to_string()
             .contains("legacy verification detail must not survive"));
+    }
+
+    #[test]
+    fn synthesis_payload_exposes_verification_facts_without_internal_publication_status() {
+        let evidence = AcceptedEvidence {
+            id: "evidence:1".to_string(),
+            summary: "A traceable result survived the checker failure.".to_string(),
+            confidence: Some("medium".to_string()),
+            sources: vec![AcceptedSource {
+                id: "source:1".to_string(),
+                anchor: "https://example.com/source".to_string(),
+                title: Some("Source".to_string()),
+                date: None,
+                reliability: Some("Official".to_string()),
+                quote_or_fact: Some("A traceable result survived the checker failure.".to_string()),
+                evidence_excerpts: Vec::new(),
+            }],
+            claims: vec![],
+            source_coverage: Vec::new(),
+            relevant_obligation_ids: Vec::new(),
+            contradictions: vec![],
+            gaps: vec![],
+        };
+        let workflow = serde_json::json!({
+            "plan": { "report_title": "Qualified result" },
+            "verification": {
+                "status": "degraded",
+                "checker_completed": false,
+                "prior_checker_retained": true,
+                "error": "internal provider failure must not leak"
+            }
+        })
+        .to_string();
+
+        let payload = synthesis_payload_with_context(&[evidence], &workflow);
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert!(payload["report_context"]
+            .get("publication_status")
+            .is_none());
+        assert_eq!(
+            payload["report_context"]["verification"]["checker_completed"],
+            false
+        );
+        assert!(!payload
+            .to_string()
+            .contains("internal provider failure must not leak"));
     }
 }

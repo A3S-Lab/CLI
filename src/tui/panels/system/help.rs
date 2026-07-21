@@ -315,6 +315,11 @@ fn help_panel() -> HelpPanel {
                     "Ctrl+T",
                     "open the complete live semantic transcript with full tool output",
                 )
+                .row("Ctrl+R", "fuzzy-search prompts from the current session")
+                .row(
+                    "Ctrl+B",
+                    "inspect delegated tasks, recent output, and safe cancellation",
+                )
                 .row(
                     "Ctrl+B",
                     "inspect delegated tasks, recent output, and safe cancellation",

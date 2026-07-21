@@ -433,10 +433,7 @@ fn normalize_bracketed_citations_in_line(
                 let matched = anchors.iter().find(|anchor| {
                     let suffix = &line[cursor + 1..];
                     if !suffix.starts_with(anchor.as_str())
-                        || !suffix
-                            .as_bytes()
-                            .get(anchor.len())
-                            .is_some_and(|byte| *byte == b']')
+                        || suffix.as_bytes().get(anchor.len()) != Some(&b']')
                     {
                         return false;
                     }

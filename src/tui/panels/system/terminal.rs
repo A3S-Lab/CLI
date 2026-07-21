@@ -106,9 +106,7 @@ mod tests {
         assert!(plain.contains("OSC 8 links"), "{plain}");
         assert!(plain.contains("OSC 52 copy"), "{plain}");
         assert!(
-            rendered
-                .lines()
-                .all(|line| visible_len(line) <= width as usize),
+            rendered.lines().all(|line| visible_len(line) <= width),
             "{rendered:?}"
         );
     }

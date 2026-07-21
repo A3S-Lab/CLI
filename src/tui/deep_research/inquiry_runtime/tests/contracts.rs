@@ -14,9 +14,9 @@ use super::execution::{
     prepare_question_evidence_packet, question_group_evidence, question_review_groups,
 };
 use super::plan::{
-    bound_questions, commit_plan_research_contract, merge_plan_fragments,
-    planner_fragment_schema, queue_plan_questions, validate_plan, validated_loop_planner,
-    workflow_args_with_plan,
+    attach_bootstrap_acquisition, bootstrap_workflow_args, bound_questions,
+    commit_plan_research_contract, host_fallback_plan, host_plan_from_outline,
+    queue_plan_questions, validate_plan, validated_loop_planner, workflow_args_with_plan,
 };
 
 fn minimal_plan() -> Value {
@@ -64,6 +64,79 @@ fn automatic_loop_workflow_args(query: &str) -> Value {
     })
 }
 
+#[test]
+fn host_fallback_contract_preserves_the_original_provider_query() {
+    let query = "截至 2026 年核实一个 planner 失败后仍必须检索的公开结论";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"], serde_json::json!([query]));
+    assert_eq!(fallback.value["budget"]["direct_searches"], 1);
+    assert_eq!(fallback.value["budget"]["direct_fetches"], 8);
+    assert_eq!(fallback.value["tracks"][0]["id"], "request.primary");
+    assert_eq!(fallback.value["tracks"][0]["material"], true);
+    assert_eq!(
+        fallback.value["stop_conditions"],
+        serde_json::json!(["Material evidence is retained or the request is explicitly bounded."])
+    );
+}
+
+#[test]
+fn bootstrap_args_are_transport_only_and_reusable_by_final_retrieval() {
+    let query = "Acquire raw evidence before planning";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+    args["limits"] = serde_json::json!({
+        "timeoutMs": 90_000,
+        "maxToolCalls": 32,
+        "maxOutputBytes": 2 * 1024 * 1024
+    });
+    let bootstrap =
+        bootstrap_workflow_args(args.clone(), "run-bootstrap").expect("bootstrap workflow args");
+    assert_eq!(bootstrap["run_id"], "run-bootstrap");
+    assert_eq!(
+        bootstrap["input"]["execution_mode"],
+        "bootstrap_acquisition"
+    );
+    assert_eq!(
+        bootstrap["input"]["research_plan"]["search_queries"][0],
+        query
+    );
+
+    let plan = host_fallback_plan(&args).expect("fallback plan");
+    let mut final_args =
+        workflow_args_with_plan(args, plan.value, Some("run-final")).expect("final workflow args");
+    attach_bootstrap_acquisition(
+        &mut final_args,
+        serde_json::json!({
+            "status": "success",
+            "packet": {
+                "version": 1,
+                "focuses": [],
+                "sources": [{
+                    "source_id": "bootstrap-web-source-1",
+                    "title": "Source",
+                    "url_or_path": "https://example.test/source",
+                    "reliability": "fetched",
+                    "chunks": [{
+                        "chunk_id": "bootstrap-web-source-1:chunk:1",
+                        "text": "traceable source text"
+                    }]
+                }]
+            },
+            "errors": [],
+            "metadata": {}
+        }),
+    )
+    .expect("attach reusable bootstrap packet");
+    assert_eq!(
+        final_args["input"]["bootstrap_acquisition"]["packet"]["sources"][0]["source_id"],
+        "bootstrap-web-source-1"
+    );
+}
+
 fn planned_state(plan: &Value) -> (InquiryState, Vec<InquiryEvent>, InquiryLimits) {
     let limits = InquiryLimits::default();
     let mut state = InquiryState::default();
@@ -91,8 +164,7 @@ fn automatic_loop_contract_is_unlimited_and_coverage_driven() {
 
     assert!(planner["output_schema"].is_object());
     assert_eq!(
-        planner["output_schema"]["properties"]["budget"]["properties"]
-            ["direct_fetches"]["enum"],
+        planner["output_schema"]["properties"]["budget"]["properties"]["direct_fetches"]["enum"],
         serde_json::json!([8])
     );
     assert_eq!(contract["quota"]["mode"], "unlimited");
@@ -118,63 +190,55 @@ fn automatic_loop_contract_is_unlimited_and_coverage_driven() {
 }
 
 #[test]
-fn split_planner_schemas_merge_into_one_host_validated_plan() {
-    let args = automatic_loop_workflow_args("跨语言核实公开结论");
-    let planner = validated_loop_planner(&args).expect("valid split planner contract");
-    let full_schema = &planner["output_schema"];
-    let semantic_fields = [
-        "report_title",
-        "freshness_required",
-        "workspace_evidence_required",
-        "tracks",
-        "stop_conditions",
-    ];
-    let retrieval_fields = ["search_queries", "seed_urls", "budget"];
-    let semantic_schema =
-        planner_fragment_schema(full_schema, &semantic_fields).expect("semantic plan schema");
-    let retrieval_schema =
-        planner_fragment_schema(full_schema, &retrieval_fields).expect("retrieval plan schema");
+fn one_optional_outline_becomes_a_complete_host_owned_plan() {
+    let query = "跨语言核实公开结论";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+    let outline = serde_json::json!({
+        "report_title": "公开结论核实",
+        "freshness_required": true,
+        "workspace_evidence_required": true,
+        "tracks": [{
+            "id": "publisher.primary",
+            "title": "发布方原始记录",
+            "material": true
+        }, {
+            "id": "independent.context",
+            "title": "独立背景材料",
+            "material": false
+        }]
+    });
+
+    let plan = host_plan_from_outline(&args, outline).expect("Host-completed outline plan");
+
+    assert_eq!(plan.value["search_queries"], serde_json::json!([query]));
+    assert_eq!(plan.value["seed_urls"], serde_json::json!([]));
+    assert_eq!(plan.value["budget"]["direct_searches"], 1);
+    assert_eq!(plan.value["budget"]["direct_fetches"], 8);
+    assert_eq!(plan.value["workspace_evidence_required"], true);
+    assert_eq!(plan.value["tracks"][0]["focus"], "发布方原始记录");
     assert_eq!(
-        semantic_schema["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        semantic_fields.into_iter().collect()
+        plan.value["tracks"][0]["questions"],
+        serde_json::json!(["发布方原始记录"])
     );
     assert_eq!(
-        retrieval_schema["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<std::collections::BTreeSet<_>>(),
-        retrieval_fields.into_iter().collect()
+        plan.value["tracks"][0]["completion_criteria"],
+        serde_json::json!(["发布方原始记录"])
     );
-
-    let plan = minimal_plan();
-    let semantic = serde_json::json!({
-        "report_title": plan["report_title"],
-        "freshness_required": plan["freshness_required"],
-        "workspace_evidence_required": plan["workspace_evidence_required"],
-        "tracks": plan["tracks"],
-        "stop_conditions": plan["stop_conditions"],
-    });
-    let retrieval = serde_json::json!({
-        "search_queries": plan["search_queries"],
-        "seed_urls": plan["seed_urls"],
-        "budget": plan["budget"],
-    });
-    let merged = merge_plan_fragments(semantic, retrieval).expect("merge disjoint plan fragments");
-    validate_plan(merged).expect("Host validates the merged full plan");
-
-    let overlap = merge_plan_fragments(
-        serde_json::json!({"tracks": []}),
-        serde_json::json!({"tracks": []}),
-    )
-    .expect_err("overlapping fragments fail closed");
-    assert!(overlap.contains("overlap"), "{overlap}");
+    assert_eq!(
+        plan.value["tracks"][0]["evidence_requirements"],
+        serde_json::json!({
+            "primary_source_required": false,
+            "independent_corroboration_required": false
+        })
+    );
+    assert_eq!(
+        plan.value["stop_conditions"],
+        serde_json::json!([
+            "Every material evidence target is resolved from traceable evidence or explicitly bounded.",
+            "Any remaining limitation is disclosed and cannot make the qualified answer misleading."
+        ])
+    );
 }
 
 #[test]
@@ -303,7 +367,8 @@ fn planner_allows_more_seed_candidates_than_direct_fetch_slots() {
     ]);
     plan["budget"]["direct_fetches"] = serde_json::json!(1);
 
-    let planned = validate_plan(plan).expect("seed URLs are semantic candidates, not reserved slots");
+    let planned =
+        validate_plan(plan).expect("seed URLs are semantic candidates, not reserved slots");
 
     assert_eq!(planned.value["seed_urls"].as_array().unwrap().len(), 2);
     assert_eq!(planned.value["budget"]["direct_fetches"], 1);
@@ -495,10 +560,12 @@ fn one_semantic_review_leaves_contract_reduction_to_the_host() {
     assert_eq!(super::QUESTION_RESOLUTION_ATTEMPT_TIMEOUT_MS, 360_000);
     assert_eq!(super::QUESTION_RESOLUTION_MAX_ATTEMPTS, 2);
     assert_eq!(super::QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS, 735_000);
-    assert!(
-        super::QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS
-            < super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
-    );
+    const {
+        assert!(
+            super::QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS
+                < super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
+        );
+    }
     assert!(GENERATION.contains("inputs.input.max_attempts"));
     assert!(GENERATION.contains("retry: { max_attempts: maxAttempts"));
     assert!(GENERATION.contains("exitCode ?? result.exit_code"));
@@ -517,10 +584,7 @@ fn one_obligation_review_groups_its_linked_questions() {
 
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0].len(), 2);
-    assert_eq!(
-        groups[0][0].obligation_ids,
-        groups[0][1].obligation_ids
-    );
+    assert_eq!(groups[0][0].obligation_ids, groups[0][1].obligation_ids);
 }
 
 #[test]
@@ -634,8 +698,7 @@ fn invalid_wire_entry_preserves_its_valid_shared_review_sibling() {
 #[test]
 fn shared_inquiry_deadline_reserves_review_then_releases_it_for_review() {
     let now = Instant::now();
-    let deadline =
-        super::InquiryDeadline::from_elapsed(now, 720_000, 180_000, 60_000, 400_000);
+    let deadline = super::InquiryDeadline::from_elapsed(now, 720_000, 180_000, 60_000, 400_000);
 
     assert_eq!(
         deadline.pre_review_stage_timeout_ms_at(now, 180_000),
@@ -646,10 +709,7 @@ fn shared_inquiry_deadline_reserves_review_then_releases_it_for_review() {
         Some(180_000)
     );
     assert_eq!(
-        deadline.pre_review_stage_timeout_ms_at(
-            now + Duration::from_millis(79_001),
-            90_000
-        ),
+        deadline.pre_review_stage_timeout_ms_at(now + Duration::from_millis(79_001), 90_000),
         None
     );
 }
@@ -661,10 +721,7 @@ fn regressed_wall_clock_cannot_grant_a_fresh_inquiry_budget() {
         super::InquiryDeadline::from_wall_clock(50_000, 49_999, 720_000, 180_000, 60_000, now);
 
     assert_eq!(deadline.deadline, now);
-    assert_eq!(
-        deadline.pre_review_stage_timeout_ms_at(now, 180_000),
-        None
-    );
+    assert_eq!(deadline.pre_review_stage_timeout_ms_at(now, 180_000), None);
     assert_eq!(
         deadline.question_review_stage_timeout_ms_at(now, 180_000),
         None
@@ -673,12 +730,11 @@ fn regressed_wall_clock_cannot_grant_a_fresh_inquiry_budget() {
 
 #[test]
 fn inquiry_budget_keeps_the_full_closed_review_reserve_after_retrieval() {
-    assert_eq!(super::PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS, 480_000);
-    assert_eq!(super::PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS, 240_000);
-    assert_eq!(super::PLANNER_GENERATION_MAX_ATTEMPTS, 2);
-    assert_eq!(super::PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS, 975_000);
-    assert_eq!(super::PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS, 495_000);
-    assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 1_470_000);
+    assert_eq!(super::PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS, 90_000);
+    assert_eq!(super::PLANNER_GENERATION_MAX_ATTEMPTS, 1);
+    assert_eq!(super::PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS, 105_000);
+    assert_eq!(super::MAX_PLANNER_TRACK_EFFECTS, 4);
+    assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 105_000);
     let accounted = super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
@@ -735,8 +791,7 @@ async fn review_stage_timeout_keeps_completed_siblings_and_drops_pending_work() 
         }),
     ];
     let stream = futures::stream::iter(futures).buffer_unordered(2);
-    let (results, timed_out) =
-        super::execution::collect_inquiry_stage_results(stream, 20).await;
+    let (results, timed_out) = super::execution::collect_inquiry_stage_results(stream, 20).await;
 
     assert_eq!(results, [1]);
     assert!(timed_out);

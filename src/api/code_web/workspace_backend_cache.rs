@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use a3s_code_core::{
-    LocalCodeIntelligence, LocalWorkspaceManifest, ManifestWorkspaceBackend,
-    WorkspaceCodeIntelligence, WorkspaceFileSystem, WorkspaceServices,
+    LocalCodeIntelligence, LocalWorkspaceManifest, LocalWorkspaceManifestSnapshot,
+    ManifestWorkspaceBackend, WorkspaceCodeIntelligence, WorkspaceFileSystem, WorkspaceServices,
 };
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
+
+const INITIAL_MANIFEST_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 struct CachedWorkspaceBackend {
     services: Arc<WorkspaceServices>,
@@ -65,6 +67,55 @@ impl WorkspaceBackendCache {
             },
         );
         Ok(services)
+    }
+
+    /// Return the shared file manifest, waiting briefly for its first scan.
+    ///
+    /// A very large workspace may outlive this bound. In that case callers get
+    /// the newest snapshot immediately and can retry without starting a second
+    /// traversal or blocking the Web request indefinitely.
+    pub(in crate::api::code_web) async fn manifest_snapshot_for(
+        &self,
+        workspace: &Path,
+    ) -> Result<LocalWorkspaceManifestSnapshot> {
+        let services = self.services_for(workspace).await?;
+        let canonical_root = services
+            .local_root()
+            .context("local workspace services did not expose a root")?;
+        let manifest = {
+            let state = self.state.lock().await;
+            Arc::clone(
+                &state
+                    .entries
+                    .get(canonical_root)
+                    .context("workspace manifest was not cached")?
+                    .manifest,
+            )
+        };
+        let mut snapshots = manifest.subscribe();
+        let current = manifest.snapshot();
+        if current.version > 0 {
+            return Ok(current);
+        }
+
+        let scanned = tokio::time::timeout(INITIAL_MANIFEST_WAIT, async {
+            loop {
+                match snapshots.recv().await {
+                    Ok(snapshot) if snapshot.version > 0 => return snapshot,
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let current = manifest.snapshot();
+                        if current.version > 0 {
+                            return current;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return manifest.snapshot();
+                    }
+                }
+            }
+        })
+        .await;
+        Ok(scanned.unwrap_or_else(|_| manifest.snapshot()))
     }
 
     pub(in crate::api::code_web) async fn close(&self) {

@@ -23,12 +23,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use self::execution::{
-    assess_completed_research_contract, attach_inquiry_projection, resolve_questions_once,
+    assess_completed_research_contract, attach_inquiry_projection,
+    bootstrap_acquisition_from_result, resolve_questions_once, run_bootstrap_acquisition_stage,
     run_retrieval_stage, InquiryExecution,
 };
 use self::plan::{
-    bound_questions, bound_workflow_timeout, commit_plan_research_contract, generate_plan,
-    queue_plan_questions, workflow_args_with_plan,
+    attach_bootstrap_acquisition, bootstrap_workflow_args, bound_questions, bound_workflow_timeout,
+    commit_plan_research_contract, generate_plan, host_fallback_plan, queue_plan_questions,
+    workflow_args_with_plan,
 };
 use super::deep_research_state_journal::{
     load_inquiry_state, load_research_run_started_at_ms, record_inquiry_state,
@@ -40,21 +42,19 @@ use super::{
 };
 
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
-// Planning is one logical Host-validated plan built from two durable effects.
-// Each effect reuses its exact hashed Flow input across retry and process
-// recovery; neither can independently publish or widen the final contract.
-const PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS: u64 = 480_000;
-const PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS: u64 = 240_000;
-const PLANNER_GENERATION_MAX_ATTEMPTS: u8 = 2;
+const BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS: u64 = 90_000;
+// Semantic planning is optional enrichment, not an acquisition prerequisite.
+// One small outline generation may identify evidence families while the exact
+// user query is already being searched. Invalid or slow output selects the
+// Host fallback contract; no target-detail or retrieval-planner fan-out runs.
+const PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS: u64 = 90_000;
+const PLANNER_GENERATION_MAX_ATTEMPTS: u8 = 1;
 const DURABLE_GENERATION_WORKFLOW_GRACE_MS: u64 = 15_000;
-const PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_SEMANTIC_ATTEMPT_TIMEOUT_MS
+const MAX_PLANNER_TRACK_EFFECTS: u64 = 4;
+const PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS
     * PLANNER_GENERATION_MAX_ATTEMPTS as u64
     + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
-const PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_RETRIEVAL_ATTEMPT_TIMEOUT_MS
-    * PLANNER_GENERATION_MAX_ATTEMPTS as u64
-    + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
-pub(crate) const DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS: u64 =
-    PLANNER_SEMANTIC_WORKFLOW_TIMEOUT_MS + PLANNER_RETRIEVAL_WORKFLOW_TIMEOUT_MS;
+pub(crate) const DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS: u64 = PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS;
 // Active model time only; admission queue time remains outside each attempt.
 // Closed review packets now carry explicit reasoning and language guardrails;
 // Real material reviews have repeatedly reached the five-minute active fuse
@@ -180,7 +180,31 @@ async fn execute_inquiry_pipeline(
     state: &mut InquiryState,
     inquiry_events: &mut Vec<InquiryEvent>,
 ) -> Result<ToolCallResult, String> {
-    let plan = generate_plan(session, args, progress_tx, checkpoint).await?;
+    let bootstrap_run_id = format!("{}-bootstrap", checkpoint.run_id());
+    let bootstrap_args = bootstrap_workflow_args(args.clone(), &bootstrap_run_id)?;
+    let query = args
+        .pointer("/input/query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "DeepResearch inquiry input omitted its query".to_string())?;
+    let (planned, bootstrap) = tokio::join!(
+        generate_plan(session, args, progress_tx, checkpoint),
+        run_bootstrap_acquisition_stage(
+            session,
+            bootstrap_args,
+            progress_tx,
+            BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS,
+        ),
+    );
+    let plan = match planned {
+        Ok(plan) => plan,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "DeepResearch semantic planning failed; continuing with the Host fallback contract"
+            );
+            host_fallback_plan(args)?
+        }
+    };
     apply_event(
         state,
         inquiry_events,
@@ -193,6 +217,25 @@ async fn execute_inquiry_pipeline(
     queue_plan_questions(&plan.value, state, inquiry_events, limits)?;
     checkpoint.checkpoint(inquiry_events, state).await?;
     let mut workflow_args = workflow_args_with_plan(args.clone(), plan.value, None)?;
+    match bootstrap {
+        Ok(result) => match bootstrap_acquisition_from_result(&result, query) {
+            Some(acquisition) => {
+                if let Err(error) = attach_bootstrap_acquisition(&mut workflow_args, acquisition) {
+                    tracing::warn!(
+                        %error,
+                        "DeepResearch ignored an invalid bootstrap acquisition packet"
+                    );
+                }
+            }
+            None => tracing::warn!(
+                "DeepResearch bootstrap acquisition returned no reusable raw source packet"
+            ),
+        },
+        Err(error) => tracing::warn!(
+            %error,
+            "DeepResearch bootstrap acquisition failed; final retrieval will use the settled plan"
+        ),
+    }
     let requested_step_timeout =
         configured_workflow_timeout_ms(&workflow_args, RETRIEVAL_STEP_ACTIVE_TIMEOUT_MS);
     let Some(retrieval_stage_timeout_ms) =
@@ -200,7 +243,7 @@ async fn execute_inquiry_pipeline(
     else {
         let reason =
             "the shared inquiry deadline left no retrieval budget after reserving closed-evidence review and finalization";
-        terminalize_budget_exhaustion(Some(&checkpoint), state, inquiry_events, limits, reason)
+        terminalize_budget_exhaustion(Some(checkpoint), state, inquiry_events, limits, reason)
             .await?;
         return attach_inquiry_projection(
             budget_terminal_result(args, reason),

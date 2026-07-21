@@ -618,6 +618,7 @@
     if (inputs.step_name === STEP_LOCAL) {
       return await collectLocal(object(inputs.input));
     }
+    if (inputs.step_name === STEP_CHECKPOINT_BOOTSTRAP) return object(inputs.input);
     if (inputs.step_name === STEP_CHECKPOINT_INITIAL) return object(inputs.input);
     if (inputs.step_name === "generate_object") {
       const result = await ctx.tool("generate_object", object(inputs.input));
@@ -643,6 +644,7 @@
   const input = object(inputs.input);
   const plan = object(input.research_plan);
   const query = String(input.query || "");
+  const executionMode = String(input.execution_mode || "collect_only");
   const scope = input.evidence_scope === "local_only"
     ? "local_only"
     : "web_and_workspace";
@@ -673,8 +675,169 @@
       error: "host-managed DeepResearch retrieval requires a query and validated research plan",
     };
   }
+  if (executionMode === "bootstrap_acquisition") {
+    if (
+      needsWeb &&
+      !outputs[STEP_DISCOVER_WEB] &&
+      !failures[STEP_DISCOVER_WEB]
+    ) {
+      return {
+        type: "schedule_step",
+        step_id: STEP_DISCOVER_WEB,
+        step_name: STEP_DISCOVER_WEB,
+        input: {
+          query,
+          plan,
+          search_timeout_secs: 12,
+        },
+        retry: retrievalRetry,
+      };
+    }
+    const bootstrapDiscovery = needsWeb
+      ? (outputs[STEP_DISCOVER_WEB] || {
+          status: "failed",
+          candidates: [],
+          errors: [
+            failures[STEP_DISCOVER_WEB] && failures[STEP_DISCOVER_WEB].error ||
+              "bootstrap web discovery failed",
+          ],
+          metadata: {},
+        })
+      : null;
+    const bootstrapSelection = needsWeb
+      ? deterministicWebCandidates(plan, bootstrapDiscovery)
+      : { candidates: [], mode: "none", error: "" };
+    if (
+      needsWeb &&
+      bootstrapSelection.candidates.length > 0 &&
+      !outputs[STEP_WEB] &&
+      !failures[STEP_WEB]
+    ) {
+      return {
+        type: "schedule_step",
+        step_id: STEP_WEB,
+        step_name: STEP_WEB,
+        input: {
+          plan,
+          candidates: bootstrapSelection.candidates,
+          discovery_errors: uniqueStrings([
+            ...(Array.isArray(bootstrapDiscovery.errors)
+              ? bootstrapDiscovery.errors
+              : []),
+            bootstrapSelection.error || "",
+          ]),
+          discovery_metadata: object(bootstrapDiscovery.metadata),
+          source_selection_mode: bootstrapSelection.mode,
+          source_id_prefix: "bootstrap-web-source",
+          fetch_timeout_secs: 20,
+        },
+        retry: retrievalRetry,
+      };
+    }
+    if (needsLocal && !outputs[STEP_LOCAL] && !failures[STEP_LOCAL]) {
+      return {
+        type: "schedule_step",
+        step_id: STEP_LOCAL,
+        step_name: STEP_LOCAL,
+        input: {
+          query,
+          plan,
+          max_steps: input.local_max_steps,
+        },
+        retry: retrievalRetry,
+      };
+    }
+    const bootstrapWeb = needsWeb
+      ? (outputs[STEP_WEB] || {
+          status: "failed",
+          packet: null,
+          errors: uniqueStrings([
+            ...(Array.isArray(bootstrapDiscovery.errors)
+              ? bootstrapDiscovery.errors
+              : []),
+            bootstrapSelection.error || "",
+            failures[STEP_WEB] && failures[STEP_WEB].error ||
+              "bootstrap web retrieval did not complete",
+          ]),
+          metadata: Object.assign({}, object(bootstrapDiscovery.metadata), {
+            source_selection_mode: bootstrapSelection.mode,
+            selected_candidate_count: 0,
+            fetched_count: 0,
+          }),
+        })
+      : null;
+    const bootstrapLocal = needsLocal
+      ? (outputs[STEP_LOCAL] || {
+          status: "failed",
+          packet: null,
+          errors: [
+            failures[STEP_LOCAL] && failures[STEP_LOCAL].error ||
+              "bootstrap local retrieval did not complete",
+          ],
+          metadata: {},
+        })
+      : null;
+    const bootstrapAdmission = combinedEvidencePacket(
+      plan,
+      [bootstrapWeb, bootstrapLocal]
+    );
+    const bootstrapErrors = uniqueStrings([
+      ...(Array.isArray(bootstrapWeb && bootstrapWeb.errors)
+        ? bootstrapWeb.errors
+        : []),
+      ...(Array.isArray(bootstrapLocal && bootstrapLocal.errors)
+        ? bootstrapLocal.errors
+        : []),
+      bootstrapAdmission.error || "",
+    ]);
+    const bootstrapOutput = {
+      query,
+      mode: "bootstrap_acquisition",
+      acquisition: {
+        status: bootstrapAdmission.packet
+          ? (bootstrapErrors.length > 0 ? "partial" : "success")
+          : "failed",
+        packet: bootstrapAdmission.packet,
+        errors: bootstrapErrors,
+        metadata: {
+          source_selection_mode: bootstrapSelection.mode,
+          source_count: bootstrapAdmission.source_count,
+          chunk_count: bootstrapAdmission.chunk_count,
+          web: bootstrapWeb ? object(bootstrapWeb.metadata) : undefined,
+          local: bootstrapLocal ? object(bootstrapLocal.metadata) : undefined,
+        },
+      },
+      execution: {
+        mode: "acquire_only",
+        terminal_authority: "host_inquiry_reducer",
+        note: "Raw sources were durably acquired before semantic planning settled.",
+      },
+    };
+    if (
+      !outputs[STEP_CHECKPOINT_BOOTSTRAP] &&
+      !failures[STEP_CHECKPOINT_BOOTSTRAP]
+    ) {
+      return {
+        type: "schedule_step",
+        step_id: STEP_CHECKPOINT_BOOTSTRAP,
+        step_name: STEP_CHECKPOINT_BOOTSTRAP,
+        input: bootstrapOutput,
+        retry: retrievalRetry,
+      };
+    }
+    return {
+      type: "complete",
+      output: outputs[STEP_CHECKPOINT_BOOTSTRAP] || bootstrapOutput,
+    };
+  }
+  const bootstrapAcquisition = object(input.bootstrap_acquisition);
+  const bootstrapPacket = object(bootstrapAcquisition.packet);
+  const hasBootstrapWeb = needsWeb &&
+    Array.isArray(bootstrapPacket.sources) &&
+    bootstrapPacket.sources.length > 0;
   if (
     needsWeb &&
+    !hasBootstrapWeb &&
     !outputs[STEP_DISCOVER_WEB] &&
     !failures[STEP_DISCOVER_WEB]
   ) {
@@ -690,7 +853,7 @@
       retry: retrievalRetry,
     };
   }
-  const webDiscovery = needsWeb
+  const webDiscovery = needsWeb && !hasBootstrapWeb
     ? (outputs[STEP_DISCOVER_WEB] || {
         status: "failed",
         candidates: [],
@@ -713,7 +876,8 @@
     4
   );
   const needsWebSourceSelection =
-    needsWeb && fetchLimit > 0 && discoveryCandidatesList.length > fetchLimit;
+    needsWeb && !hasBootstrapWeb && fetchLimit > 0 &&
+    discoveryCandidatesList.length > fetchLimit;
   if (
     needsWebSourceSelection &&
     !outputs[STEP_SELECT_WEB] &&
@@ -727,18 +891,19 @@
       retry: semanticSelectionRetry,
     };
   }
-  const webSourceSelection = needsWeb
+  const webSourceSelection = needsWeb && !hasBootstrapWeb
     ? selectedWebCandidates(
         plan,
         webDiscovery,
         structuredOutput(outputs[STEP_SELECT_WEB])
       )
-    : { candidates: [], mode: "none", error: "" };
+    : { candidates: [], mode: hasBootstrapWeb ? "bootstrap_packet" : "none", error: "" };
   const webSourceSelectorFailure = failures[STEP_SELECT_WEB] &&
     (failures[STEP_SELECT_WEB].error ||
       "semantic web source selection failed");
   if (
     needsWeb &&
+    !hasBootstrapWeb &&
     webSourceSelection.candidates.length > 0 &&
     !outputs[STEP_WEB] &&
     !failures[STEP_WEB]
@@ -776,7 +941,19 @@
   }
 
   const webRetrieval = needsWeb
-    ? (outputs[STEP_WEB] || {
+    ? (hasBootstrapWeb
+      ? {
+          status: String(bootstrapAcquisition.status || "partial"),
+          packet: bootstrapPacket,
+          errors: Array.isArray(bootstrapAcquisition.errors)
+            ? bootstrapAcquisition.errors
+            : [],
+          metadata: Object.assign({}, object(bootstrapAcquisition.metadata), {
+            source_selection_mode: "bootstrap_packet",
+            bootstrap_source_count: bootstrapPacket.sources.length,
+          }),
+        }
+      : (outputs[STEP_WEB] || {
         status: "failed",
         packet: null,
         errors: uniqueStrings([
@@ -791,7 +968,7 @@
           selected_candidate_count: 0,
           fetched_count: 0,
         }),
-      })
+      }))
     : null;
   const localRetrieval = needsLocal
     ? (outputs[STEP_LOCAL] || {
@@ -938,6 +1115,9 @@
       semantic_selection_failed_source_reduction_count:
         sourceReduction.failed_source_reduction_count || 0,
       semantic_selection_materialized_count: sourceReduction.candidate_count,
+      bootstrap_source_count: hasBootstrapWeb
+        ? bootstrapPacket.sources.length
+        : 0,
       web: webRetrieval ? object(webRetrieval.metadata) : undefined,
       local: localRetrieval ? object(localRetrieval.metadata) : undefined,
     }

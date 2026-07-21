@@ -162,7 +162,9 @@ pub(crate) use deep_research_state_journal::{
     ResearchSpec as DeepResearchTestResearchSpec,
 };
 pub(crate) use deep_research_workflow_store::{
-    ensure_deep_research_workflow_run_id, recover_deep_research_initial_retrieval_from_store,
+    ensure_deep_research_workflow_run_id,
+    recover_deep_research_bootstrap_acquisition_from_store,
+    recover_deep_research_initial_retrieval_from_store,
     recover_deep_research_workflow_run_from_store,
 };
 

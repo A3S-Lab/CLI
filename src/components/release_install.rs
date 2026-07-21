@@ -13,7 +13,7 @@ use super::catalog::ReleaseSpec;
 use super::id::ComponentId;
 use super::lifecycle::{InstallRequest, OperationRecord};
 use super::paths::ComponentPaths;
-use super::probe::probe_version;
+use super::probe::probe_release;
 
 /// One exact release artifact resolved before a component plan is approved.
 ///
@@ -117,14 +117,15 @@ pub async fn install_release(
         .asset_family
         .executable_name(release_spec.binary, &resolved.target);
     let staged_executable = find_unique_file(&unpacked, &executable_name)?;
-    let actual_version = probe_version(&staged_executable)?;
-    if parse_version(&actual_version)? != parse_version(&resolved.version)? {
-        bail!(
-            "downloaded '{}' reported version {}, expected {}",
-            id,
-            actual_version,
-            resolved.version
-        );
+    if let Some(actual_version) = probe_release(release_spec, &staged_executable)? {
+        if parse_version(&actual_version)? != parse_version(&resolved.version)? {
+            bail!(
+                "downloaded '{}' reported version {}, expected {}",
+                id,
+                actual_version,
+                resolved.version
+            );
+        }
     }
     let relative_executable = staged_executable.strip_prefix(&unpacked)?.to_path_buf();
     let active = paths.version_root(id, &resolved.version);
@@ -247,10 +248,7 @@ async fn release_checksum(
             return Ok(digest.to_ascii_lowercase());
         }
     }
-    for name in [
-        format!("{}.sha256", asset.name),
-        "checksums.txt".to_string(),
-    ] {
+    for name in checksum_asset_names(&asset.name) {
         let Some(checksum_asset) = release
             .assets
             .iter()
@@ -267,6 +265,21 @@ async fn release_checksum(
         "release asset '{}' has no trusted SHA-256 digest or checksum file",
         asset.name
     )
+}
+
+fn checksum_asset_names(asset_name: &str) -> Vec<String> {
+    let mut names = vec![format!("{asset_name}.sha256")];
+    let base_name = asset_name
+        .strip_suffix(".tar.gz")
+        .or_else(|| asset_name.strip_suffix(".zip"));
+    if let Some(base_name) = base_name {
+        let companion = format!("{base_name}.sha256");
+        if !names.contains(&companion) {
+            names.push(companion);
+        }
+    }
+    names.push("checksums.txt".to_string());
+    names
 }
 
 fn parse_checksum_file(bytes: &[u8], asset_name: &str) -> Option<String> {
@@ -336,6 +349,18 @@ mod tests {
                 "asset.tar.gz"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn checks_the_webview_release_companion_checksum_name() {
+        assert_eq!(
+            checksum_asset_names("a3s-webview-v0.1.3-x86_64-pc-windows-msvc.zip"),
+            vec![
+                "a3s-webview-v0.1.3-x86_64-pc-windows-msvc.zip.sha256",
+                "a3s-webview-v0.1.3-x86_64-pc-windows-msvc.sha256",
+                "checksums.txt",
+            ]
         );
     }
 }

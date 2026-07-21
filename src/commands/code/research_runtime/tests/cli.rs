@@ -11,6 +11,98 @@ struct CompletedCliReportFixture {
     claim_id: String,
 }
 
+struct CompletedReportLlm {
+    section: serde_json::Value,
+    editorial: serde_json::Value,
+    guidance: serde_json::Value,
+    presentation: serde_json::Value,
+}
+
+impl CompletedReportLlm {
+    fn response_for_messages(&self, messages: &[Message]) -> anyhow::Result<LlmResponse> {
+        let prompt = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value = if prompt.contains("CLOSED_SECTION_PACKET=") {
+            self.section.clone()
+        } else if prompt.contains("CLOSED_REPORT_EDITORIAL_PACKET=") {
+            self.editorial.clone()
+        } else if prompt.contains("CLOSED_REPORT_GUIDANCE_PACKET=") {
+            self.guidance.clone()
+        } else if prompt.contains("CLOSED_REPORT_PRESENTATION_PACKET=") {
+            self.presentation.clone()
+        } else if prompt.contains("CLOSED_SEMANTIC_AUDIT_PACKET=") {
+            let target_id = if prompt.contains("\"target_id\":\"frame\"") {
+                "frame"
+            } else if prompt.contains("\"target_id\":\"section:1\"") {
+                "section:1"
+            } else {
+                anyhow::bail!("semantic audit prompt omitted the expected target")
+            };
+            serde_json::json!({
+                "reviews": [{
+                    "target_id": target_id,
+                    "checks": {
+                        "claim_granularity": "clear",
+                        "derived_quantities": "clear",
+                        "temporal_labels": "clear",
+                        "compatibility_scope": "clear",
+                        "maintenance_scope": "clear",
+                        "replacement_properties": "clear",
+                        "promotional_attribution": "clear",
+                        "sample_scope": "clear",
+                        "unknown_item_quantifiers": "clear",
+                        "evidence_gap_scope": "clear",
+                        "recommendation_support": "clear",
+                        "reader_language_and_internal_jargon": "clear"
+                    },
+                    "issues": []
+                }]
+            })
+        } else {
+            anyhow::bail!("unexpected completed-report structured generation prompt")
+        };
+        Ok(text_response(value.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmClient for CompletedReportLlm {
+    async fn complete(
+        &self,
+        messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+    ) -> anyhow::Result<LlmResponse> {
+        self.response_for_messages(messages)
+    }
+
+    async fn complete_streaming(
+        &self,
+        messages: &[Message],
+        _system: Option<&str>,
+        _tools: &[ToolDefinition],
+        _cancel_token: CancellationToken,
+    ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        let response = self.response_for_messages(messages)?;
+        let (tx, rx) = mpsc::channel(1);
+        tokio::spawn(async move {
+            let _ = tx.send(StreamEvent::Done(response)).await;
+        });
+        Ok(rx)
+    }
+
+    fn native_structured_support(&self) -> a3s_code_core::llm::structured::NativeStructuredSupport {
+        a3s_code_core::llm::structured::NativeStructuredSupport::ForcedTool
+    }
+}
+
 fn completed_cli_report_fixture() -> CompletedCliReportFixture {
     let mut workflow = serde_json::json!({
         "query": "Explain the accepted CLI finding.",
@@ -352,8 +444,20 @@ async fn deepresearch_cli_completed_path_uses_terminal_shared_report_pipeline() 
         "section_id": "section:1",
         "markdown": "The accepted evidence establishes that the CLI report path reaches a terminal audited Inquiry. This means non-interactive publication now follows the same durable report boundary as the TUI, as shown by the [CLI fixture source](https://example.test/cli).",
     });
-    let frame = serde_json::json!({
+    let editorial_frame = serde_json::json!({
         "report_title": "Completed CLI DeepResearch report",
+        "reader_labels": {
+            "qualification_heading": "Evidence boundaries",
+            "qualification_intro": "The following consequential points remain bounded.",
+            "sources_heading": "Sources",
+            "decision_heading": "Decision guidance",
+            "evidence_limitation": "Evidence limitation",
+            "primary_source_support": "Primary-source support",
+            "independent_corroboration": "Independent corroboration",
+            "established_boundary": "The evidence establishes this point.",
+            "qualified_boundary": "The evidence supports a qualified conclusion.",
+            "unresolved_boundary": "The evidence does not establish this point."
+        },
         "editorial": {
             "thesis": "The CLI now completes and publishes through the shared audited report pipeline.",
             "track_coverage": [{
@@ -364,7 +468,12 @@ async fn deepresearch_cli_completed_path_uses_terminal_shared_report_pipeline() 
                 "implication": "Successful non-interactive reports can be published without a second synthesis route.",
                 "uncertainty": ""
             }]
-        },
+        }
+    });
+    let guidance_frame = serde_json::json!({
+        "decision_guidance": []
+    });
+    let presentation_frame = serde_json::json!({
         "presentation": {
             "narrative_mode": "briefing",
             "archetype": "analytical",
@@ -380,10 +489,12 @@ async fn deepresearch_cli_completed_path_uses_terminal_shared_report_pipeline() 
             }]
         }
     });
-    let llm: Arc<dyn LlmClient> = Arc::new(ScriptedLlmClient::new(vec![
-        text_response(section.to_string()),
-        text_response(frame.to_string()),
-    ]));
+    let llm: Arc<dyn LlmClient> = Arc::new(CompletedReportLlm {
+        section,
+        editorial: editorial_frame,
+        guidance: guidance_frame,
+        presentation: presentation_frame,
+    });
     let config = CodeConfig::from_acl(
         r#"
             default_model = "openai/x"

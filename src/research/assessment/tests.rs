@@ -316,12 +316,14 @@ mod tests {
         evidence_count: usize,
         diagnostics_per_evidence: usize,
     ) -> InquiryState {
-        let mut limits = InquiryLimits::default();
-        limits.max_events = evidence_count
-            .saturating_mul(diagnostics_per_evidence)
-            .saturating_add(32);
-        limits.max_evidence_ids_per_answer = evidence_count;
-        limits.max_citation_ids_per_section = diagnostics_per_evidence.max(evidence_count);
+        let limits = InquiryLimits {
+            max_events: evidence_count
+                .saturating_mul(diagnostics_per_evidence)
+                .saturating_add(32),
+            max_evidence_ids_per_answer: evidence_count,
+            max_citation_ids_per_section: diagnostics_per_evidence.max(evidence_count),
+            ..InquiryLimits::default()
+        };
         let obligation = ResearchObligation::new(
             "obligation:large",
             "Large contract",

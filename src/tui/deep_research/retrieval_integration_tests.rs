@@ -683,6 +683,156 @@ async fn execute(executor: &ToolExecutor, args: &serde_json::Value) -> serde_jso
 }
 
 #[tokio::test]
+async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "First ranked source",
+            "url": "https://bootstrap.example/first",
+            "engines": ["fixture"]
+        }, {
+            "title": "Second ranked source",
+            "url": "https://bootstrap.example/second",
+            "engines": ["fixture"]
+        }, {
+            "title": "Unspent candidate",
+            "url": "https://bootstrap.example/third",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://bootstrap.example/first".to_string(),
+                "The first fetched source contains substantive traceable bootstrap evidence."
+                    .to_string(),
+            ),
+            (
+                "https://bootstrap.example/second".to_string(),
+                "The second fetched source contains separate substantive bootstrap evidence."
+                    .to_string(),
+            ),
+        ]),
+    }));
+    let query = "Acquire evidence before semantic planning";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "Original request", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-bootstrap-acquisition-test");
+
+    // No generate_object fixture is registered. A successful run therefore
+    // proves that bootstrap acquisition never waits for model admission.
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*queries.lock().unwrap(), [query]);
+    assert_eq!(
+        *urls.lock().unwrap(),
+        [
+            "https://bootstrap.example/first",
+            "https://bootstrap.example/second"
+        ]
+    );
+    assert_eq!(output["mode"], "bootstrap_acquisition");
+    assert_eq!(
+        output["acquisition"]["packet"]["sources"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "provider_round_robin"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-bootstrap-acquisition-test.jsonl"),
+    )
+    .expect("durable bootstrap history");
+    assert!(history.lines().any(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["type"] == "step_completed"
+            && event["event"]["step_id"] == "checkpoint_bootstrap_acquisition"
+    }));
+}
+
+#[tokio::test]
+async fn semantic_retrieval_reuses_bootstrap_packet_without_repeating_transport() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["preserved raw evidence".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "Reuse already fetched evidence";
+    let plan = minimal_plan(
+        serde_json::json!([track("request.primary", "Original request", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    let mut args = super::deep_research_workflow_args_with_scope(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+    );
+    args["input"]["research_plan"] = plan;
+    args["input"]["execution_mode"] = serde_json::json!("collect_only");
+    args["input"]["bootstrap_acquisition"] = serde_json::json!({
+        "status": "success",
+        "packet": {
+            "version": 1,
+            "focuses": [],
+            "sources": [{
+                "source_id": "bootstrap-web-source-1",
+                "title": "Preserved source",
+                "url_or_path": "https://bootstrap.example/preserved",
+                "reliability": "Fetched and durably preserved before planning.",
+                "chunks": [{
+                    "chunk_id": "bootstrap-web-source-1:chunk:1",
+                    "text": "This preserved raw evidence remains available after planning settles."
+                }]
+            }]
+        },
+        "errors": [],
+        "metadata": {
+            "source_selection_mode": "provider_round_robin",
+            "fetched_count": 1
+        }
+    });
+    args["run_id"] = serde_json::json!("deepresearch-bootstrap-reuse-test");
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(24);
+
+    // No search or fetch fixture is registered. The final retrieval can only
+    // succeed by consuming the immutable bootstrap packet.
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["mode"], "inquiry_collection");
+    assert_eq!(output["research"]["metadata"]["bootstrap_source_count"], 1);
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        "https://bootstrap.example/preserved"
+    );
+}
+
+#[tokio::test]
 async fn provider_query_and_cross_language_semantic_selection_are_preserved() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());

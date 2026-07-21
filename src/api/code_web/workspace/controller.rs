@@ -61,6 +61,14 @@ impl WorkspaceController {
         self.service.create_dir(request).await
     }
 
+    #[post("/create-file")]
+    async fn create_workspace_file(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.create_file(request).await
+    }
+
     #[post("/write")]
     async fn write_workspace_file(
         &self,
@@ -134,12 +142,64 @@ impl WorkspaceController {
         self.service.copy_path(request).await
     }
 
+    #[get("/files")]
+    async fn list_workspace_files(
+        &self,
+        #[query("rootPath")] root_path: String,
+        #[query("query")] query: Option<String>,
+        #[query("maxResults")] max_results: Option<usize>,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .workspace_files(
+                root_path,
+                query.unwrap_or_default(),
+                max_results.unwrap_or(120),
+            )
+            .await
+    }
+
     #[get("/git-status")]
     async fn workspace_git_status(
         &self,
         #[query("rootPath")] root_path: Option<String>,
     ) -> BootResult<serde_json::Value> {
-        Ok(self.service.git_status(root_path))
+        self.service.git_status(root_path).await
+    }
+
+    #[get("/git-diff")]
+    async fn workspace_git_diff(
+        &self,
+        #[query("rootPath")] root_path: String,
+        #[query("path")] path: Option<String>,
+        #[query("staged")] staged: Option<bool>,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .git_diff(root_path, path, staged.unwrap_or(false))
+            .await
+    }
+
+    #[post("/git-stage")]
+    async fn stage_workspace_files(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.git_stage(request).await
+    }
+
+    #[post("/git-unstage")]
+    async fn unstage_workspace_files(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.git_unstage(request).await
+    }
+
+    #[post("/git-commit")]
+    async fn commit_workspace_files(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.git_commit(request).await
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -232,9 +232,7 @@ impl App {
 
     pub(crate) fn handle_queue_key(&mut self, key: &KeyEvent) -> Option<Cmd<Msg>> {
         let sequences = queue_sequences(&self.queue);
-        let Some(panel) = self.queue_panel.as_mut() else {
-            return None;
-        };
+        let panel = self.queue_panel.as_mut()?;
 
         if panel.clear_confirmation {
             match key.code {
@@ -309,9 +307,7 @@ impl App {
 
     pub(crate) fn handle_queue_mouse(&mut self, mouse: &MouseEvent) -> Option<Cmd<Msg>> {
         let sequences = queue_sequences(&self.queue);
-        let Some(state) = self.queue_panel.as_ref() else {
-            return None;
-        };
+        let state = self.queue_panel.as_ref()?;
         let width = self.width as usize;
         if width == 0 {
             return None;
@@ -346,9 +342,7 @@ impl App {
             return None;
         }
 
-        let Some(state) = self.queue_panel.as_mut() else {
-            return None;
-        };
+        let state = self.queue_panel.as_mut()?;
         if state.clear_confirmation {
             state.confirm_selected = after.min(1);
         } else {

@@ -472,7 +472,7 @@ fn deep_research_compact_report_context_ids(
         .collect()
 }
 
-fn deep_research_compact_typed_ids(values: &mut Vec<String>, limit: usize) -> Option<()> {
+fn deep_research_compact_typed_ids(values: &mut [String], limit: usize) -> Option<()> {
     if values.len() > limit
         || values
             .iter()
@@ -502,11 +502,11 @@ pub(super) fn deep_research_collection_status(value: &serde_json::Value) -> &'st
                 Some(InquiryTerminalOutcome::Completed | InquiryTerminalOutcome::Qualified)
             ) =>
         {
-            return "completed";
+            "completed"
         }
-        Ok(ValidatedInquiryProjection::Inquiry { .. }) | Err(_) => return "degraded",
+        Ok(ValidatedInquiryProjection::Inquiry { .. }) | Err(_) => "degraded",
         Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {
-            return legacy_checked_loop_collection_status(value);
+            legacy_checked_loop_collection_status(value)
         }
     }
 }

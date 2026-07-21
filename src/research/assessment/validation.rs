@@ -291,38 +291,53 @@ fn validate_obligation_assessment(
     validate_declared_evidence_requirement(
         state,
         obligation,
-        "primary source",
-        obligation.evidence_requirements.primary_source_required,
-        assessment.primary_source.as_ref(),
-        SourceEvidenceRole::Primary,
-        1,
+        EvidenceRequirementRule {
+            resource: "primary source",
+            required: obligation.evidence_requirements.primary_source_required,
+            assessment: assessment.primary_source.as_ref(),
+            required_role: SourceEvidenceRole::Primary,
+            satisfied_source_minimum: 1,
+        },
         &allowed_evidence,
     )?;
     validate_declared_evidence_requirement(
         state,
         obligation,
-        "independent corroboration",
-        obligation
-            .evidence_requirements
-            .independent_corroboration_required,
-        assessment.independent_corroboration.as_ref(),
-        SourceEvidenceRole::Independent,
-        2,
+        EvidenceRequirementRule {
+            resource: "independent corroboration",
+            required: obligation
+                .evidence_requirements
+                .independent_corroboration_required,
+            assessment: assessment.independent_corroboration.as_ref(),
+            required_role: SourceEvidenceRole::Independent,
+            satisfied_source_minimum: 2,
+        },
         &allowed_evidence,
     )?;
     Ok(())
 }
 
+struct EvidenceRequirementRule<'a> {
+    resource: &'static str,
+    required: bool,
+    assessment: Option<&'a EvidenceRequirementAssessment>,
+    required_role: SourceEvidenceRole,
+    satisfied_source_minimum: usize,
+}
+
 fn validate_declared_evidence_requirement(
     state: &InquiryState,
     obligation: &ResearchObligation,
-    resource: &str,
-    required: bool,
-    assessment: Option<&EvidenceRequirementAssessment>,
-    required_role: SourceEvidenceRole,
-    satisfied_source_minimum: usize,
+    rule: EvidenceRequirementRule<'_>,
     allowed_evidence_ids: &BTreeSet<String>,
 ) -> Result<(), ResearchContractAssessmentError> {
+    let EvidenceRequirementRule {
+        resource,
+        required,
+        assessment,
+        required_role,
+        satisfied_source_minimum,
+    } = rule;
     let Some(assessment) = assessment else {
         if required {
             return Err(ResearchContractAssessmentError::new(format!(

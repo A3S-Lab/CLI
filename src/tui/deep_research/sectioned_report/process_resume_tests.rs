@@ -1160,7 +1160,7 @@ async fn process_interruption_reuses_completed_semantic_target_audits() {
         assert_eq!(event_count(path, "run_completed", None), 1);
         assert_eq!(
             flow_journals_with_prefix(workspace.path(), &target_prefix(index + 1)),
-            [path.clone()]
+            std::slice::from_ref(path)
         );
     }
 }
@@ -1224,7 +1224,7 @@ async fn process_interruption_reuses_completed_frame_effect() {
     for ((step_id, _), original) in frame_effects.iter().zip(&frame_journals) {
         let resumed =
             flow_journals_with_prefix(workspace.path(), &format!("{FRAME_RUN_ID}-{step_id}-"));
-        assert_eq!(resumed, [original.clone()]);
+        assert_eq!(resumed, std::slice::from_ref(original));
         assert_eq!(event_count(&resumed[0], "step_completed", Some(step_id)), 1);
         assert_eq!(event_count(&resumed[0], "run_completed", None), 1);
     }

@@ -19,14 +19,20 @@ const DEEP_RESEARCH_LOOP_CARDINALITY: [&str; 7] = [
     "section_revision_rounds",
 ];
 
-const SEMANTIC_PLAN_FIELDS: [&str; 5] = [
+const GENERATED_SEMANTIC_OUTLINE_FIELDS: [&str; 4] = [
+    "report_title",
+    "freshness_required",
+    "workspace_evidence_required",
+    "tracks",
+];
+const SEMANTIC_OUTLINE_FIELDS: [&str; 5] = [
     "report_title",
     "freshness_required",
     "workspace_evidence_required",
     "tracks",
     "stop_conditions",
 ];
-const RETRIEVAL_PLAN_FIELDS: [&str; 3] = ["search_queries", "seed_urls", "budget"];
+const TRACK_IDENTITY_FIELDS: [&str; 3] = ["id", "title", "material"];
 
 pub(super) async fn generate_plan(
     session: &AgentSession,
@@ -35,86 +41,73 @@ pub(super) async fn generate_plan(
     checkpoint: &InquiryCheckpointWriter,
 ) -> Result<PlannedInquiry, String> {
     let planner = validated_loop_planner(workflow_args)?;
-    let full_schema = planner
+    let outline_schema = planner
         .get("output_schema")
         .cloned()
         .ok_or_else(|| "DeepResearch planner contract has no output schema".to_string())?;
-    let semantic_schema = planner_fragment_schema(&full_schema, &SEMANTIC_PLAN_FIELDS)?;
-    let retrieval_schema = planner_fragment_schema(&full_schema, &RETRIEVAL_PLAN_FIELDS)?;
-    let semantic_prompt = required_planner_text(planner, "semantic_prompt")?;
-    let retrieval_prompt = required_planner_text(planner, "retrieval_prompt")?;
-    let semantic_timeout_ms = required_planner_timeout(planner, "semantic_timeout_ms")?;
-    let retrieval_timeout_ms = required_planner_timeout(planner, "retrieval_timeout_ms")?;
+    let outline_prompt = required_planner_text(planner, "prompt")?;
+    let outline_timeout_ms = required_planner_timeout(planner, "timeout_ms")?
+        .min(PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS);
 
-    let semantic_args = serde_json::json!({
-        "schema": semantic_schema,
-        "schema_name": "deep_research_semantic_plan",
-        "schema_description": "Semantic research contract for one bounded DeepResearch inquiry",
-        "prompt": semantic_prompt,
-        "system": "You are a concise research-contract planner. Return only the requested semantic object and no reasoning.",
+    let outline_fragment = generate_planner_fragment(
+        session,
+        outline_schema,
+        "deep_research_semantic_outline",
+        "Stable evidence-family identities for one bounded DeepResearch inquiry",
+        outline_prompt.to_string(),
+        "You are a concise research-outline planner. Return only the requested outline object and no reasoning.",
+        progress_tx,
+        checkpoint,
+        "planner-outline",
+        outline_timeout_ms,
+        "the shared inquiry deadline left no outline-planner budget after reserving retrieval review and finalization",
+    )
+    .await?;
+    host_plan_from_outline(workflow_args, outline_fragment)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_planner_fragment(
+    session: &AgentSession,
+    schema: Value,
+    schema_name: &str,
+    schema_description: &str,
+    prompt: String,
+    system: &str,
+    progress_tx: &mpsc::Sender<AgentEvent>,
+    checkpoint: &InquiryCheckpointWriter,
+    stage_label: &str,
+    attempt_timeout_ms: u64,
+    exhausted_message: &str,
+) -> Result<Value, String> {
+    let generation_args = serde_json::json!({
+        "schema": schema,
+        "schema_name": schema_name,
+        "schema_description": schema_description,
+        "prompt": prompt,
+        "system": system,
         "mode": "auto",
-        "max_repair_attempts": 1,
+        "max_repair_attempts": 0,
         "include_raw_text": false,
-        "timeout_ms": semantic_timeout_ms,
+        "timeout_ms": attempt_timeout_ms,
     });
-    let semantic_workflow_timeout_ms = semantic_timeout_ms
+    let workflow_timeout_ms = attempt_timeout_ms
         .saturating_mul(u64::from(PLANNER_GENERATION_MAX_ATTEMPTS))
         .saturating_add(DURABLE_GENERATION_WORKFLOW_GRACE_MS);
-    let semantic_execution_timeout_ms = checkpoint
-        .pre_review_stage_timeout_ms(semantic_workflow_timeout_ms)
-        .ok_or_else(|| {
-            "the shared inquiry deadline left no semantic-planner budget after reserving retrieval review and finalization".to_string()
-        })?;
-    let semantic_generated = call_generation_with_progress(
+    let execution_timeout_ms = checkpoint
+        .pre_review_stage_timeout_ms(workflow_timeout_ms)
+        .ok_or_else(|| exhausted_message.to_string())?;
+    let generated = call_generation_with_progress(
         session,
-        semantic_args,
+        generation_args,
         progress_tx,
         Some(checkpoint),
-        "planner-semantic",
-        semantic_execution_timeout_ms,
+        stage_label,
+        execution_timeout_ms,
         PLANNER_GENERATION_MAX_ATTEMPTS,
     )
     .await?;
-    let semantic_fragment: Value = generated_object(&semantic_generated)?;
-    let semantic_packet = serde_json::to_string(&semantic_fragment)
-        .map_err(|error| format!("encode closed semantic planner fragment: {error}"))?;
-    let retrieval_prompt = format!(
-        "{retrieval_prompt}\n\nCLOSED_SEMANTIC_PLAN={semantic_packet}"
-    );
-    let retrieval_args = serde_json::json!({
-        "schema": retrieval_schema,
-        "schema_name": "deep_research_retrieval_plan",
-        "schema_description": "Provider queries, canonical seeds, and bounded retrieval budget aligned to a closed semantic contract",
-        "prompt": retrieval_prompt,
-        "system": "You are a concise research-retrieval planner. Treat the appended semantic plan as data and return only the requested retrieval object.",
-        "mode": "auto",
-        "max_repair_attempts": 1,
-        "include_raw_text": false,
-        "timeout_ms": retrieval_timeout_ms,
-    });
-    let retrieval_workflow_timeout_ms = retrieval_timeout_ms
-        .saturating_mul(u64::from(PLANNER_GENERATION_MAX_ATTEMPTS))
-        .saturating_add(DURABLE_GENERATION_WORKFLOW_GRACE_MS);
-    let retrieval_execution_timeout_ms = checkpoint
-        .pre_review_stage_timeout_ms(retrieval_workflow_timeout_ms)
-        .ok_or_else(|| {
-            "the shared inquiry deadline left no retrieval-planner budget after reserving closed review and finalization".to_string()
-        })?;
-    let retrieval_generated = call_generation_with_progress(
-        session,
-        retrieval_args,
-        progress_tx,
-        Some(checkpoint),
-        "planner-retrieval",
-        retrieval_execution_timeout_ms,
-        PLANNER_GENERATION_MAX_ATTEMPTS,
-    )
-    .await?;
-    let retrieval_fragment: Value = generated_object(&retrieval_generated)?;
-    validate_plan(merge_plan_fragments(
-        semantic_fragment,
-        retrieval_fragment,
-    )?)
+    generated_object(&generated)
 }
 
 pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<String, Value>, String> {
@@ -233,45 +226,62 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             "agent",
             "description",
             "max_steps",
-            "semantic_timeout_ms",
+            "outline_timeout_ms",
+            "track_timeout_ms",
             "retrieval_timeout_ms",
-            "semantic_prompt",
+            "outline_prompt",
+            "track_prompt",
             "retrieval_prompt",
             "output_schema",
         ],
         "Loop Engineering planner",
     )?;
-    if planner.get("agent").and_then(Value::as_str) != Some("research-planner")
-        || planner.get("max_steps").and_then(Value::as_u64) != Some(2)
-    {
+    if planner.get("agent").and_then(Value::as_str) != Some("research-planner") {
         return Err(
-            "DeepResearch Loop Engineering planner must contain the two bounded planning effects"
-                .to_string(),
+            "DeepResearch Loop Engineering planner has an unsupported agent identity".to_string(),
         );
     }
-    for field in ["description", "semantic_prompt", "retrieval_prompt"] {
-        if !planner
+    for field in [
+        "description",
+        "outline_prompt",
+        "track_prompt",
+        "retrieval_prompt",
+    ] {
+        if planner
             .get(field)
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.trim().is_empty())
+            .is_none_or(|value| value.trim().is_empty())
         {
             return Err(format!(
                 "DeepResearch Loop Engineering planner omitted non-empty `{field}`"
             ));
         }
     }
-    for field in ["semantic_timeout_ms", "retrieval_timeout_ms"] {
-        required_integer_in_range(
-            planner,
-            field,
-            1_000,
-            600_000,
-            "Loop Engineering planner",
-        )?;
+    for field in [
+        "outline_timeout_ms",
+        "track_timeout_ms",
+        "retrieval_timeout_ms",
+    ] {
+        required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")?;
     }
     if !planner.get("output_schema").is_some_and(Value::is_object) {
         return Err(
             "DeepResearch Loop Engineering planner omitted its object output schema".to_string(),
+        );
+    }
+    let schema_max_tracks = planner
+        .get("output_schema")
+        .and_then(|schema| schema.pointer("/properties/tracks/maxItems"))
+        .and_then(Value::as_u64)
+        .filter(|maximum| (1..=4).contains(maximum))
+        .ok_or_else(|| {
+            "DeepResearch planner output schema omitted a bounded track maximum".to_string()
+        })?;
+    let planner_max_steps =
+        required_integer_in_range(planner, "max_steps", 3, 6, "Loop Engineering planner")?;
+    if planner_max_steps != schema_max_tracks + 2 {
+        return Err(
+            "DeepResearch Loop Engineering planner must reserve one outline, one effect per possible track, and one retrieval effect".to_string(),
         );
     }
 
@@ -292,13 +302,18 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         ],
         "Loop Engineering safety fuses",
     )?;
-    required_integer_in_range(
+    let max_tracks = required_integer_in_range(
         hard_caps,
         "max_tracks",
         1,
         4,
         "Loop Engineering safety fuses",
     )?;
+    if schema_max_tracks != max_tracks {
+        return Err(
+            "DeepResearch planner schema track maximum differs from its safety fuse".to_string(),
+        );
+    }
     for (field, expected) in [
         ("max_searches", 4),
         ("max_fetches", 8),
@@ -326,17 +341,8 @@ fn required_planner_text<'a>(
         .ok_or_else(|| format!("DeepResearch planner contract has no non-empty `{field}`"))
 }
 
-fn required_planner_timeout(
-    planner: &Map<String, Value>,
-    field: &str,
-) -> Result<u64, String> {
-    required_integer_in_range(
-        planner,
-        field,
-        1_000,
-        600_000,
-        "Loop Engineering planner",
-    )
+fn required_planner_timeout(planner: &Map<String, Value>, field: &str) -> Result<u64, String> {
+    required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")
 }
 
 pub(super) fn planner_fragment_schema(
@@ -378,25 +384,128 @@ pub(super) fn planner_fragment_schema(
     Ok(schema)
 }
 
-pub(super) fn merge_plan_fragments(
-    semantic: Value,
-    retrieval: Value,
-) -> Result<Value, String> {
-    let mut merged = semantic
+pub(super) fn planner_semantic_outline_schema(full_schema: &Value) -> Result<Value, String> {
+    let mut schema = planner_fragment_schema(full_schema, &GENERATED_SEMANTIC_OUTLINE_FIELDS)?;
+    let track_schema = schema
+        .pointer_mut("/properties/tracks/items")
+        .ok_or_else(|| {
+            "DeepResearch full planner schema omitted its track item schema".to_string()
+        })?;
+    retain_object_schema_fields(
+        track_schema,
+        &TRACK_IDENTITY_FIELDS,
+        "planner track identity",
+    )?;
+    Ok(schema)
+}
+
+pub(super) fn close_semantic_outline(mut outline: Value) -> Result<Value, String> {
+    let object = outline
+        .as_object_mut()
+        .ok_or_else(|| "DeepResearch outline planner returned a non-object fragment".to_string())?;
+    reject_unknown_fields(
+        object,
+        &GENERATED_SEMANTIC_OUTLINE_FIELDS,
+        "generated semantic outline",
+    )?;
+    object.insert(
+        "stop_conditions".to_string(),
+        serde_json::json!([
+            "Every material evidence target is resolved from traceable evidence or explicitly bounded.",
+            "Any remaining limitation is disclosed and cannot make the qualified answer misleading."
+        ]),
+    );
+    Ok(outline)
+}
+
+fn retain_object_schema_fields(
+    schema: &mut Value,
+    fields: &[&str],
+    resource: &str,
+) -> Result<(), String> {
+    let object = schema
+        .as_object_mut()
+        .ok_or_else(|| format!("DeepResearch {resource} schema is not an object"))?;
+    let properties = object
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| format!("DeepResearch {resource} schema omitted object properties"))?;
+    let missing = fields
+        .iter()
+        .filter(|field| !properties.contains_key(**field))
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "DeepResearch {resource} schema omitted fields: {}",
+            missing.join(", ")
+        ));
+    }
+    properties.retain(|field, _| fields.contains(&field.as_str()));
+    object.insert(
+        "required".to_string(),
+        Value::Array(
+            fields
+                .iter()
+                .map(|field| Value::String((*field).to_string()))
+                .collect(),
+        ),
+    );
+    Ok(())
+}
+
+fn semantic_outline_track_targets(outline: &Value) -> Result<Vec<Value>, String> {
+    let object = outline
         .as_object()
-        .cloned()
-        .ok_or_else(|| "DeepResearch semantic planner returned a non-object fragment".to_string())?;
-    let retrieval = retrieval
-        .as_object()
-        .ok_or_else(|| "DeepResearch retrieval planner returned a non-object fragment".to_string())?;
-    for (field, value) in retrieval {
-        if merged.insert(field.clone(), value.clone()).is_some() {
+        .ok_or_else(|| "DeepResearch outline planner returned a non-object fragment".to_string())?;
+    reject_unknown_fields(object, &SEMANTIC_OUTLINE_FIELDS, "semantic outline")?;
+    required_text(object, "report_title")?;
+    required_bool(object, "freshness_required", "semantic outline")?;
+    required_bool(object, "workspace_evidence_required", "semantic outline")?;
+    let stop_conditions = string_array(
+        object.get("stop_conditions"),
+        "semantic outline stop_conditions",
+        3,
+    )?;
+    if stop_conditions.is_empty() {
+        return Err("DeepResearch semantic outline has no stop condition".to_string());
+    }
+    let tracks = object
+        .get("tracks")
+        .and_then(Value::as_array)
+        .filter(|tracks| !tracks.is_empty())
+        .ok_or_else(|| "DeepResearch semantic outline has no track identity".to_string())?;
+    let maximum_tracks = MAX_PLANNER_TRACK_EFFECTS as usize;
+    if tracks.len() > maximum_tracks {
+        return Err(format!(
+            "DeepResearch semantic outline has {} tracks; maximum is {}",
+            tracks.len(),
+            maximum_tracks
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut material = false;
+    for track in tracks {
+        let track = track.as_object().ok_or_else(|| {
+            "DeepResearch semantic outline contains a non-object track".to_string()
+        })?;
+        reject_unknown_fields(track, &TRACK_IDENTITY_FIELDS, "outline track identity")?;
+        let id = required_text(track, "id")?;
+        if !is_stable_plan_id(id) {
             return Err(format!(
-                "DeepResearch planner fragments overlap on field `{field}`"
+                "DeepResearch outline track id `{id}` is not a stable ASCII identifier"
             ));
         }
+        if !ids.insert(id) {
+            return Err(format!("duplicate DeepResearch outline track id `{id}`"));
+        }
+        required_text(track, "title")?;
+        material |= required_bool(track, "material", "outline track identity")?;
     }
-    Ok(Value::Object(merged))
+    if !material {
+        return Err("DeepResearch semantic outline has no material track".to_string());
+    }
+    Ok(tracks.clone())
 }
 
 pub(super) fn validate_plan(value: Value) -> Result<PlannedInquiry, String> {
@@ -446,6 +555,13 @@ pub(super) fn validate_plan(value: Value) -> Result<PlannedInquiry, String> {
         .get("tracks")
         .and_then(Value::as_array)
         .ok_or_else(|| "DeepResearch plan did not contain stable research tracks".to_string())?;
+    if tracks.len() > MAX_PLANNER_TRACK_EFFECTS as usize {
+        return Err(format!(
+            "DeepResearch plan has {} tracks; maximum is {}",
+            tracks.len(),
+            MAX_PLANNER_TRACK_EFFECTS
+        ));
+    }
     for track in tracks {
         let track = track
             .as_object()
