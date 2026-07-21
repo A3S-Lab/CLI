@@ -1,6 +1,7 @@
 # A3S Use Extension Design
 
-Status: Explicit local packages implemented; signed publishers deferred
+Status: Explicit local packages, TUF-signed registries, and workbench
+contributions implemented
 
 Parent: [A3S Use and Component Platform](a3s-use-component-platform.md)
 
@@ -17,6 +18,9 @@ An extension package declares one or more native surfaces:
 - CLI for deterministic human and script commands;
 - MCP for structured tools, resources, and Agent integration;
 - Skill for Agent instructions and workflows.
+
+It may also declare non-callable workbench contributions whose package-owned
+assets are rendered by a host such as A3S Web.
 
 Use does not define another universal RPC protocol. It owns the ACL manifest,
 package identity, registration, trust, route selection, policy handoff, and
@@ -40,6 +44,7 @@ semantics:
 | CLI | Humans, shell scripts, deterministic commands, pipelines | argv, stdin, stdout, stderr, exit status |
 | MCP | Agent tools, JSON Schema inputs, resources, progress, cancellation | Standard MCP client/server protocol |
 | Skill | Instructions, domain guidance, repeatable Agent workflows | `SKILL.md` package conventions |
+| Workbench Activity | Reviewed context preparation and package navigation | Integrity-bound HTML rendered by the host |
 
 Forcing all three through a new protocol would duplicate MCP, weaken normal CLI
 behavior, and turn Skill into something it is not. A3S Use therefore has no
@@ -59,7 +64,8 @@ These boundaries are normative:
 - CLI dispatch forwards argv, streams, and process status;
 - MCP clients connect directly through the existing standard MCP subsystem;
 - Skill packages are loaded through the existing `SKILL.md` loader;
-- a package may provide any combination of the three surfaces, and Use never
+- workbench Activities remain non-callable and reference a same-package Skill;
+- a package may provide any combination of the three callable surfaces, and Use never
   converts one surface into another implicitly.
 
 ## 3. Goals
@@ -72,6 +78,7 @@ These boundaries are normative:
 | EXT-4 | Each surface uses its established execution and lifecycle contract. |
 | EXT-5 | Identity, route, trust, ownership, policy, and diagnostics are consistent across surfaces. |
 | EXT-6 | Install, upgrade, disable, and uninstall are explicit and ownership-safe. |
+| EXT-7 | A package can contribute an integrity-bound host view without creating another execution protocol. |
 
 ## 4. Non-Goals
 
@@ -165,6 +172,17 @@ extension "acme/slack" {
   skill {
     path = "skills/slack/SKILL.md"
   }
+
+  contributes {
+    activity_bar "channels" {
+      title       = "Slack"
+      description = "Prepare a reviewed Slack context."
+      icon        = "messages-square"
+      entry       = "web/activity.html"
+      skill       = "slack"
+      order       = 140
+    }
+  }
 }
 ```
 
@@ -177,6 +195,7 @@ The final manifest schema includes:
 - supported platform and architecture constraints;
 - at least one CLI, MCP, or Skill surface;
 - surface entrypoints relative to the package root;
+- optional workbench contribution assets and same-package Skill bindings;
 - requested action classes and resource requirements;
 - publisher and package-integrity metadata when signed;
 - license and notice locations.
@@ -250,6 +269,19 @@ and points to the A3S Code Skill workflow.
 Skill text never grants permissions and cannot bypass CLI/MCP policy or
 approval.
 
+## 10A. Workbench Contributions
+
+`contributes.activity_bar` follows the VS Code contribution-point model without
+making HTML an executable backend surface. A contribution declares a stable ID,
+bounded display text, icon identifier, ordering hint, package-relative HTML
+entry, and same-package Skill name.
+
+A3S Use accepts only a regular UTF-8 `.html` file inside the immutable package
+root, no larger than 2 MiB, and publishes its `text/html` media type and
+lowercase SHA-256 in the capability snapshot. The consuming host independently
+checks those fields, owns iframe/CSP isolation, and requires user review before
+plugin-proposed context reaches Code. There is no generic execute message.
+
 ## 11. Surface Selection
 
 A package may include multiple surfaces because callers have different needs:
@@ -288,9 +320,10 @@ The root CLI delegates `use/` component requests to the trusted Use parent. Use
 owns ACL manifest parsing, surface validation, route registration, and extension
 receipts.
 
-For initial development, `--from` accepts an explicit local package directory
-or archive. An unsigned local package requires `--allow-unsigned`. A remote
-publisher registry requires a separate signed-registry design.
+`--from` accepts an explicit local package directory or archive. An unsigned
+local package requires `--allow-unsigned`. Remote packages come only from an
+explicitly enrolled TUF registry and are applied through an immutable,
+digest-reviewed umbrella CLI plan.
 
 ## 13. Discovery and Activation
 
@@ -308,6 +341,8 @@ Activation performs:
    - CLI bounded version and doctor probes;
    - MCP initialize/capability negotiation;
    - Skill package validation through the Skill loader contract;
+   - Activity package containment, regular-file, UTF-8, size, media-type, and
+     content-digest validation;
 7. atomic route activation and receipt write.
 
 Failure before activation leaves the previous version unchanged. A package may
@@ -323,6 +358,8 @@ Each surface retains its native lifecycle:
 - MCP follows standard server transport startup, negotiation, cancellation, and
   shutdown.
 - Skill has no process lifecycle.
+- Workbench contributions follow the package activation generation and become
+  unavailable before disable or uninstall drains the callable surfaces.
 
 Update validates all declared surfaces before switching the active route.
 Existing operations finish or are cancelled explicitly; they are not silently
@@ -383,7 +420,8 @@ untrusted
 ```
 
 - Built-in Browser and Office are first-party.
-- A future signed registry may establish verified-publisher trust.
+- A configured TUF registry with a pinned bootstrap root establishes signed
+  registry provenance and fails on expiry, rollback, length, or hash mismatch.
 - An explicitly accepted unsigned local package is local-explicit.
 - Untrusted packages remain inspectable but disabled.
 
@@ -412,6 +450,7 @@ There is no A3S Use extension-RPC version because no such protocol exists.
 - safe CLI process invocation;
 - reuse of the existing MCP client;
 - reuse of the existing Skill loader;
+- workbench contribution parsing and integrity projection;
 - doctor aggregation and component status;
 - conformance fixtures.
 
@@ -429,6 +468,8 @@ The conformance suite covers:
 - CLI argv, stdin, stdout, stderr, status, doctor, and JSON behavior;
 - MCP initialize, tool schemas, progress, cancellation, and shutdown;
 - Skill path, ownership, and loader validation;
+- Activity path, type, size, UTF-8, digest, and same-package Skill validation;
+- TUF metadata verification and digest-reviewed remote plans;
 - multi-surface selection without implicit conversion;
 - trust and policy denial;
 - atomic upgrade and ownership-safe uninstall;
@@ -442,6 +483,8 @@ The conformance suite covers:
 - An MCP extension exposes standard tools without a new wrapper protocol.
 - A Skill extension is discoverable by A3S Code without being treated as an
   executable.
+- A workbench contribution is content-bound, sandboxed by its host, and cannot
+  name or invoke a foreign Skill.
 - A multi-surface package uses the right native contract for each caller.
 - Built-in and management routes cannot be shadowed.
 - A PATH-only executable is never activated.

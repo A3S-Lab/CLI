@@ -542,6 +542,15 @@ read-only tools and asks before writes or command execution; `auto` is the
 explicit no-confirmation mode. The default listener and OAuth callback are
 loopback-only.
 
+Code Web also exposes a VS Code-style package contribution boundary under
+`/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
+digest-verified A3S Use registry. The Marketplace enumerates configured TUF
+registries, generates install/upgrade/uninstall plans with `--dry-run`, and
+applies only an explicitly reviewed `--plan-digest`. Package enablement uses
+the existing Use lifecycle. Plugin HTML remains non-callable; the browser host
+owns its opaque-origin iframe, restrictive CSP, bounded messages, and explicit
+context review before a verified same-package Skill is added to Code.
+
 The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
 for saved-file symbols, definitions, declarations, references,
 implementations, and diagnostics. Dirty editors remain local and explicitly
