@@ -17,7 +17,8 @@ concurrency:
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
   A3S_WEB_SOURCE_REF: 898f6a55554cf566e81903847c17651250d9c444
-  A3S_CODE_CORE_VERSION: 6.0.0
+  A3S_CODE_CORE_VERSION: 6.1.0
+  A3S_SEARCH_VERSION: 2.0.0
   A3S_TUI_VERSION: 0.1.13
 jobs:
   release-gate:
@@ -43,7 +44,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           bash .github/scripts/test-check-release-state.sh
           bash .github/scripts/check-release-state.sh \
-            "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION"
+            "$version" "$A3S_CODE_CORE_VERSION" "$A3S_TUI_VERSION" \
+            "$A3S_SEARCH_VERSION"
 
           git fetch --no-tags origin main:refs/remotes/origin/main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -98,7 +100,7 @@ jobs:
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
             "a3s-tui $A3S_TUI_VERSION"
-            "a3s-search 1.4.3"
+            "a3s-search $A3S_SEARCH_VERSION"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
             "a3s-use-extension 0.1.2"

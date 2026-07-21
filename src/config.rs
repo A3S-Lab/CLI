@@ -40,9 +40,11 @@ default_model = "openai/my-model"
 #   llmExtractionMaxInputChars = 8000
 # }
 
-# Optional: a3s-search configuration. HTTP engines need no browser. Enable the
-# headless block only for google, baidu, or bing_cn; manage browser runtimes
-# with `a3s search browser ...` and verify them with `a3s search doctor`.
+# Optional: a3s-search configuration. Without explicit engine entries,
+# web_search uses AnySearch (anonymous, or authenticated by ANYSEARCH_API_KEY).
+# Any engine entries replace that default. Enable the headless block only for
+# google or baidu; manage browser runtimes with `a3s search browser ...` and
+# verify them with `a3s search doctor`.
 # search {
 #   timeout = 20
 #   engine {

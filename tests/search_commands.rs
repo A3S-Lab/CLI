@@ -16,7 +16,7 @@ fn search_proxy_forwards_native_arguments_and_exit_status() {
         &format!(
             "#!/bin/sh\n\
              if [ \"$1\" = \"--version\" ]; then\n\
-               printf 'a3s-search 1.4.3\\n'\n\
+               printf 'a3s-search 2.0.0\\n'\n\
                exit 0\n\
              fi\n\
              printf '%s\\n' \"$@\" > {}\n\

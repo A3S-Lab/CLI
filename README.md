@@ -35,6 +35,11 @@ a3s search browser update chrome
 a3s search browser repair lightpanda
 ```
 
+The bundled Code runtime uses AnySearch as `web_search`'s default when no
+request or ACL engine selection is provided. AnySearch works anonymously and
+can use `ANYSEARCH_API_KEY` when set; Tavily and conventional engines remain
+available through explicit tool or ACL selection.
+
 Managed downloads remain under `~/.a3s/chromium/` and
 `~/.a3s/lightpanda/`. `a3s search doctor` reads the same project-local or
 user-global `config.acl` selected by `a3s code`, reports enabled headless
