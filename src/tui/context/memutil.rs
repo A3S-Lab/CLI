@@ -1291,7 +1291,7 @@ mod tests {
 
     #[test]
     fn panel_data_from_memory_items_preserves_live_session_details() {
-        let mut item = a3s_memory::MemoryItem::new("Prefer gated LLM memory extraction.")
+        let mut item = a3s_memory::MemoryItem::new("Prefer LLM memory value judgment.")
             .with_type(a3s_memory::MemoryType::Semantic)
             .with_importance(0.82)
             .with_tag("llm")
@@ -1308,7 +1308,7 @@ mod tests {
         assert_eq!(data.entries[0].memory_type, "semantic");
         assert_eq!(
             data.details["live-1"].content,
-            "Prefer gated LLM memory extraction."
+            "Prefer LLM memory value judgment."
         );
         assert_eq!(
             data.details["live-1"].metadata["source"],

@@ -12,7 +12,7 @@ async function run(ctx, inputs) {
           step_id: section.step_id,
           step_name: "generate_section",
           input: section.generation_args,
-          retry: { max_attempts: 1, delay_ms: 0 },
+          retry: { max_attempts: 2, delay_ms: 0 },
         })),
       };
     }
@@ -34,7 +34,15 @@ async function run(ctx, inputs) {
     };
   }
   if (inputs.kind === "step" && inputs.step_name === "generate_section") {
-    return await ctx.tool("generate_object", inputs.input);
+    const result = await ctx.tool("generate_object", inputs.input);
+    const exitCode = Number(result && (result.exitCode ?? result.exit_code));
+    if (!result || exitCode !== 0) {
+      const detail = result && typeof result.output === "string"
+        ? result.output
+        : "generate_object returned no structured tool result";
+      throw new Error(`Report structured generation failed: ${detail}`);
+    }
+    return result;
   }
   return { error: "unknown section synthesis invocation" };
 }

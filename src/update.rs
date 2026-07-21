@@ -84,16 +84,22 @@ const MAX_SELF_UPDATE_ARCHIVE_BYTES: usize = 512 * 1024 * 1024;
 const AGENT_ISLAND_HELPER_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const AGENT_ISLAND_HELPER_TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_AGENT_ISLAND_HELPER_PROBE_BYTES: u64 = 8 * 1024;
+#[cfg(any(windows, test))]
 const AGENT_ISLAND_HELPER_USAGE: &[u8] =
     b"usage: a3s-webview --agent-island --snapshot <absolute-path> --lock-file <absolute-path>";
+#[cfg(any(windows, test))]
 const SYSTEM_AGENT_SNAPSHOT_MARKER: &[u8] = b"a3s.system_agent_snapshot.v1";
 #[cfg(windows)]
 const MAX_AGENT_ISLAND_HELPER_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+#[cfg(any(windows, test))]
 const MIN_WINDOWS_PE_HEADER_OFFSET: usize = 0x40;
 // A normal PE header follows a short DOS stub. Bound the pointer independently
 // of the overall helper size before using it as a slice offset.
+#[cfg(any(windows, test))]
 const MAX_WINDOWS_PE_HEADER_OFFSET: usize = 1024 * 1024;
+#[cfg(any(windows, test))]
 const WINDOWS_PE_MACHINE_AMD64: u16 = 0x8664;
+#[cfg(any(windows, test))]
 const WINDOWS_PE_MACHINE_ARM64: u16 = 0xaa64;
 const A3S_BINARY: &str = if cfg!(windows) { "a3s.exe" } else { "a3s" };
 const WEBVIEW_BINARY: &str = if cfg!(windows) {
@@ -326,6 +332,7 @@ pub(crate) fn webview_binary_supports_agent_island(binary: &Path) -> std::io::Re
     Ok(webview_binary_contains_agent_island_contract(&bytes))
 }
 
+#[cfg(any(windows, test))]
 fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
     if !webview_binary_has_target_pe_header(bytes) {
         return false;
@@ -339,6 +346,7 @@ fn webview_binary_contains_agent_island_contract(bytes: &[u8]) -> bool {
         })
 }
 
+#[cfg(any(windows, test))]
 fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
     if bytes.get(..2) != Some(b"MZ") {
         return false;
@@ -375,16 +383,19 @@ fn webview_binary_has_target_pe_header(bytes: &[u8]) -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[cfg(any(windows, test))]
 fn target_windows_pe_machine() -> Option<u16> {
     Some(WINDOWS_PE_MACHINE_AMD64)
 }
 
 #[cfg(target_arch = "aarch64")]
+#[cfg(any(windows, test))]
 fn target_windows_pe_machine() -> Option<u16> {
     Some(WINDOWS_PE_MACHINE_ARM64)
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[cfg(any(windows, test))]
 fn target_windows_pe_machine() -> Option<u16> {
     None
 }
@@ -947,6 +958,13 @@ fn standalone_upgrade_with(
             "release archive did not contain the required {WEBVIEW_BINARY} companion"
         ));
     };
+    let new_managed_srt = match find_downloaded_managed_srt(&tmp) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(error);
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -987,30 +1005,57 @@ fn standalone_upgrade_with(
             )
         })?;
     }
+    let restore_helper = || {
+        if helper_existed {
+            install_sibling_companion(&helper_backup, &exe, WEBVIEW_BINARY).map(|_| ())
+        } else if installed_helper.exists() {
+            std::fs::remove_file(&installed_helper).map_err(|error| {
+                format!(
+                    "remove newly installed helper {}: {error}",
+                    installed_helper.display()
+                )
+            })
+        } else {
+            Ok(())
+        }
+    };
+    let support_install =
+        install_sibling_support_tree(&new_managed_srt, &exe).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&tmp);
+            format!("managed sandbox support validation passed but installation failed: {error}")
+        })?;
     if let Err(error) = install_sibling_companion(&new_webview, &exe, WEBVIEW_BINARY) {
+        let helper_rollback = restore_helper();
+        let support_rollback = support_install.rollback();
         let _ = std::fs::remove_dir_all(&tmp);
-        return Err(format!(
+        let mut detail = format!(
             "native window helper validation passed but installation failed before updating a3s: {error}"
-        ));
+        );
+        if let Err(rollback_error) = helper_rollback {
+            detail.push_str(&format!(
+                "; additionally failed to restore the previous native helper: {rollback_error}"
+            ));
+        }
+        if let Err(rollback_error) = support_rollback {
+            detail.push_str(&format!(
+                "; additionally failed to restore managed sandbox support: {rollback_error}"
+            ));
+        }
+        return Err(detail);
     }
 
     let result = match swap_binary_and_verify(runner, &new_bin, &exe, latest) {
-        Ok(()) => Ok(exe),
+        Ok(()) => {
+            support_install.commit();
+            Ok(exe)
+        }
         Err(err) => {
             eprintln!("\n✗ failed to install downloaded a3s: {err}");
-            let rollback = if helper_existed {
-                install_sibling_companion(&helper_backup, &exe, WEBVIEW_BINARY).map(|_| ())
-            } else {
-                std::fs::remove_file(&installed_helper).map_err(|error| {
-                    format!(
-                        "remove newly installed helper {}: {error}",
-                        installed_helper.display()
-                    )
-                })
-            };
-            match rollback {
-                Ok(()) => Err(err),
-                Err(rollback_error) => {
+            let helper_rollback = restore_helper();
+            let support_rollback = support_install.rollback();
+            match (helper_rollback, support_rollback) {
+                (Ok(()), Ok(())) => Err(err),
+                (Err(rollback_error), Ok(())) => {
                     if helper_existed && helper_backup.is_file() {
                         return Err(format!(
                             "{err}; additionally failed to restore the previous native helper: {rollback_error}; its recovery copy remains at {}",
@@ -1021,6 +1066,12 @@ fn standalone_upgrade_with(
                         "{err}; additionally failed to restore the previous native helper: {rollback_error}"
                     ))
                 }
+                (Ok(()), Err(rollback_error)) => Err(format!(
+                    "{err}; additionally failed to restore managed sandbox support: {rollback_error}"
+                )),
+                (Err(helper_error), Err(support_error)) => Err(format!(
+                    "{err}; additionally failed to restore the previous native helper: {helper_error}; additionally failed to restore managed sandbox support: {support_error}"
+                )),
             }
         }
     };
@@ -1097,6 +1148,100 @@ fn find_downloaded_webview_helper(root: &Path) -> Option<PathBuf> {
     find_downloaded_named_binary(root, WEBVIEW_BINARY)
 }
 
+fn find_downloaded_managed_srt(root: &Path) -> Result<PathBuf, String> {
+    let expected_suffix = Path::new(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+    let mut stack = vec![root.to_path_buf()];
+    let mut matches = Vec::new();
+    while let Some(directory) = stack.pop() {
+        let entries = std::fs::read_dir(&directory)
+            .map_err(|error| format!("read extracted release directory: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("read extracted release entry: {error}"))?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| format!("inspect extracted release entry: {error}"))?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "release archive contains a symbolic link at {}",
+                    path.display()
+                ));
+            }
+            if !metadata.is_dir() {
+                continue;
+            }
+            if path.ends_with(expected_suffix) {
+                validate_downloaded_managed_srt(&path)?;
+                matches.push(path);
+            } else {
+                stack.push(path);
+            }
+        }
+    }
+    match matches.len() {
+        1 => Ok(matches.pop().unwrap()),
+        0 => Err("release archive did not contain managed sandbox support".to_string()),
+        count => Err(format!(
+            "release archive contained {count} managed sandbox support trees"
+        )),
+    }
+}
+
+fn validate_downloaded_managed_srt(root: &Path) -> Result<(), String> {
+    let package_path = root.join("node_modules/@anthropic-ai/sandbox-runtime/package.json");
+    let package: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&package_path)
+            .map_err(|error| format!("read {}: {error}", package_path.display()))?,
+    )
+    .map_err(|error| format!("parse {}: {error}", package_path.display()))?;
+    if package.get("name").and_then(serde_json::Value::as_str)
+        != Some(a3s_code_core::sandbox::srt::SRT_NPM_PACKAGE_NAME)
+    {
+        return Err("release archive contains the wrong managed sandbox package".to_string());
+    }
+    let package_version = package
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|version| !version.trim().is_empty() && *version == version.trim())
+        .ok_or_else(|| {
+            "release archive contains no valid managed sandbox package version".to_string()
+        })?;
+
+    let lock_path = root.join("package-lock.json");
+    let lock: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&lock_path)
+            .map_err(|error| format!("read {}: {error}", lock_path.display()))?,
+    )
+    .map_err(|error| format!("parse {}: {error}", lock_path.display()))?;
+    let locked_version = lock
+        .get("packages")
+        .and_then(|packages| packages.get("node_modules/@anthropic-ai/sandbox-runtime"))
+        .and_then(|package| package.get("version"))
+        .and_then(serde_json::Value::as_str);
+    let root_dependency = lock
+        .get("packages")
+        .and_then(|packages| packages.get(""))
+        .and_then(|package| package.get("dependencies"))
+        .and_then(|dependencies| {
+            dependencies.get(a3s_code_core::sandbox::srt::SRT_NPM_PACKAGE_NAME)
+        })
+        .and_then(serde_json::Value::as_str);
+    if lock
+        .get("lockfileVersion")
+        .and_then(serde_json::Value::as_u64)
+        != Some(3)
+        || locked_version != Some(package_version)
+        || root_dependency != Some(package_version)
+    {
+        return Err("release archive contains an invalid managed sandbox lock".to_string());
+    }
+    let cli = root.join("node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js");
+    if !cli.is_file() {
+        return Err("release archive contains no managed sandbox CLI".to_string());
+    }
+
+    Ok(())
+}
+
 fn find_downloaded_named_binary(root: &Path, binary_name: &str) -> Option<PathBuf> {
     let direct = root.join(binary_name);
     if direct.is_file() {
@@ -1120,6 +1265,219 @@ fn find_downloaded_named_binary(root: &Path, binary_name: &str) -> Option<PathBu
         }
     }
     None
+}
+
+// The updater accepts a wider envelope than the running CLI's exact payload
+// verifier so an older release can transactionally install a larger, newer
+// support tree. The downloaded archive is already checksum-verified, and the
+// new CLI rechecks its own compiled tree digest before use.
+const MAX_MANAGED_SRT_SUPPORT_ENTRIES: usize = 10_000;
+const MAX_MANAGED_SRT_SUPPORT_BYTES: u64 = 128 * 1024 * 1024;
+
+struct SiblingSupportInstall {
+    target: PathBuf,
+    backup: Option<PathBuf>,
+}
+
+impl SiblingSupportInstall {
+    fn commit(self) {
+        if let Some(backup) = self.backup {
+            let _ = std::fs::remove_dir_all(backup);
+        }
+    }
+
+    fn rollback(self) -> Result<(), String> {
+        if self.target.exists() {
+            std::fs::remove_dir_all(&self.target).map_err(|error| {
+                format!(
+                    "remove newly installed support tree {}: {error}",
+                    self.target.display()
+                )
+            })?;
+        }
+        if let Some(backup) = self.backup {
+            std::fs::rename(&backup, &self.target).map_err(|error| {
+                format!(
+                    "restore previous support tree {} from {}: {error}",
+                    self.target.display(),
+                    backup.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn install_sibling_support_tree(
+    source: &Path,
+    current_exe: &Path,
+) -> Result<SiblingSupportInstall, String> {
+    validate_downloaded_managed_srt(source)?;
+    let binary_directory = current_exe.parent().ok_or_else(|| {
+        format!(
+            "cannot locate the install directory for {}",
+            current_exe.display()
+        )
+    })?;
+    let target = binary_directory.join(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("managed sandbox target has no parent: {}", target.display()))?;
+    if parent.exists() {
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| format!("inspect support directory {}: {error}", parent.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(format!(
+                "managed sandbox support parent is not a trusted directory: {}",
+                parent.display()
+            ));
+        }
+    } else {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "create managed sandbox support directory {}: {error}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let nonce = rand::random::<u64>();
+    let staging = parent.join(format!(".managed-srt.a3s-update-{nonce:016x}.new"));
+    let backup = parent.join(format!(".managed-srt.a3s-update-{nonce:016x}.bak"));
+    let mut budget = SupportCopyBudget::default();
+    copy_support_directory(source, &staging, &mut budget).map_err(|error| {
+        let _ = std::fs::remove_dir_all(&staging);
+        format!(
+            "stage managed sandbox support from {}: {error}",
+            source.display()
+        )
+    })?;
+    if let Err(error) = validate_downloaded_managed_srt(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!(
+            "staged managed sandbox support is invalid: {error}"
+        ));
+    }
+
+    let previous = if target.exists() {
+        let metadata = std::fs::symlink_metadata(&target).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&staging);
+            format!("inspect existing support tree: {error}")
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!(
+                "existing managed sandbox support is not a trusted directory: {}",
+                target.display()
+            ));
+        }
+        std::fs::rename(&target, &backup).map_err(|error| {
+            let _ = std::fs::remove_dir_all(&staging);
+            format!(
+                "preserve existing managed sandbox support {}: {error}",
+                target.display()
+            )
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    if let Err(error) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        if let Some(backup) = &previous {
+            if let Err(restore_error) = std::fs::rename(backup, &target) {
+                return Err(format!(
+                    "activate managed sandbox support at {}: {error}; failed to restore its previous tree from {}: {restore_error}",
+                    target.display(),
+                    backup.display()
+                ));
+            }
+        }
+        return Err(format!(
+            "activate managed sandbox support at {}: {error}",
+            target.display()
+        ));
+    }
+    Ok(SiblingSupportInstall {
+        target,
+        backup: previous,
+    })
+}
+
+#[derive(Default)]
+struct SupportCopyBudget {
+    entries: usize,
+    bytes: u64,
+}
+
+fn copy_support_directory(
+    source: &Path,
+    destination: &Path,
+    budget: &mut SupportCopyBudget,
+) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "support source is not a regular directory",
+        ));
+    }
+    std::fs::create_dir(destination)?;
+    let mut entries = std::fs::read_dir(source)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        budget.entries = budget.entries.checked_add(1).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "support entry count overflowed",
+            )
+        })?;
+        if budget.entries > MAX_MANAGED_SRT_SUPPORT_ENTRIES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "support tree exceeds its entry limit",
+            ));
+        }
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let metadata = std::fs::symlink_metadata(&source_path)?;
+        if metadata.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "support tree contains a symbolic link: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+        if metadata.is_dir() {
+            copy_support_directory(&source_path, &destination_path, budget)?;
+        } else if metadata.is_file() {
+            budget.bytes = budget.bytes.checked_add(metadata.len()).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "support byte count overflowed",
+                )
+            })?;
+            if budget.bytes > MAX_MANAGED_SRT_SUPPORT_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "support tree exceeds its byte limit",
+                ));
+            }
+            std::fs::copy(&source_path, &destination_path)?;
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "support tree contains a special file: {}",
+                    source_path.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn unique_update_dir() -> PathBuf {
@@ -2122,6 +2480,22 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    #[ignore = "requires support/managed-srt/node_modules prepared by the release job"]
+    fn real_managed_srt_support_install_preserves_the_verified_tree() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("support/managed-srt");
+        a3s::components::validate_managed_srt_payload(&source).unwrap();
+        let tmp = TempDir::new("managed-srt-support-install");
+        let current = tmp.path("a3s");
+        write_executable(&current, "9.9.9");
+
+        let install = install_sibling_support_tree(&source, &current).unwrap();
+        let installed = tmp.path(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+        a3s::components::validate_managed_srt_payload(&installed).unwrap();
+        install.commit();
+    }
+
+    #[cfg(unix)]
     struct FakeStandaloneRunner {
         commands: Mutex<Vec<String>>,
         archive: Vec<u8>,
@@ -2224,6 +2598,16 @@ mod tests {
         version: &str,
         helper_compatible: Option<bool>,
     ) -> Vec<u8> {
+        standalone_archive_with_payload(binary_path, version, helper_compatible, true)
+    }
+
+    #[cfg(unix)]
+    fn standalone_archive_with_payload(
+        binary_path: &str,
+        version: &str,
+        helper_compatible: Option<bool>,
+        include_managed_srt: bool,
+    ) -> Vec<u8> {
         let tmp = TempDir::new("standalone-archive");
         let root = tmp.path("root");
         let archive = tmp.path("release.tar.gz");
@@ -2232,6 +2616,9 @@ mod tests {
             Some(true) => write_webview_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
             Some(false) => write_executable(&root.join(WEBVIEW_BINARY), "0.1.2"),
             None => {}
+        }
+        if include_managed_srt {
+            write_managed_srt_support(&root);
         }
         let top_level = Path::new(binary_path)
             .components()
@@ -2248,9 +2635,73 @@ mod tests {
         if helper_compatible.is_some() {
             command.arg(WEBVIEW_BINARY);
         }
+        if include_managed_srt {
+            command.arg("support");
+        }
         let status = command.status().unwrap();
         assert!(status.success());
         std::fs::read(archive).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn write_managed_srt_support(root: &Path) {
+        let support = root.join(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+        let package = support.join("node_modules/@anthropic-ai/sandbox-runtime");
+        std::fs::create_dir_all(package.join("dist")).unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": a3s_code_core::sandbox::srt::SRT_NPM_PACKAGE_NAME,
+                "version": a3s_code_core::sandbox::srt::MANAGED_SRT_VERSION,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            support.join("package-lock.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "a3s-code-managed-srt",
+                "version": "1.0.0",
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {
+                        "dependencies": {
+                            (a3s_code_core::sandbox::srt::SRT_NPM_PACKAGE_NAME):
+                                a3s_code_core::sandbox::srt::MANAGED_SRT_VERSION,
+                        }
+                    },
+                    "node_modules/@anthropic-ai/sandbox-runtime": {
+                        "version": a3s_code_core::sandbox::srt::MANAGED_SRT_VERSION,
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(package.join("dist/cli.js"), "managed sandbox fixture").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn standalone_updater_accepts_a_self_consistent_future_sandbox_payload() {
+        let tmp = TempDir::new("future-sandbox-support");
+        write_managed_srt_support(&tmp.root);
+        let support = tmp.path(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
+        let package_path = support.join("node_modules/@anthropic-ai/sandbox-runtime/package.json");
+        let mut package: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&package_path).unwrap()).unwrap();
+        package["version"] = serde_json::Value::String("0.0.67".to_string());
+        std::fs::write(&package_path, serde_json::to_vec(&package).unwrap()).unwrap();
+        let lock_path = support.join("package-lock.json");
+        let mut lock: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&lock_path).unwrap()).unwrap();
+        lock["packages"][""]["dependencies"][a3s_code_core::sandbox::srt::SRT_NPM_PACKAGE_NAME] =
+            serde_json::Value::String("0.0.67".to_string());
+        lock["packages"]["node_modules/@anthropic-ai/sandbox-runtime"]["version"] =
+            serde_json::Value::String("0.0.67".to_string());
+        std::fs::write(&lock_path, serde_json::to_vec(&lock).unwrap()).unwrap();
+
+        validate_downloaded_managed_srt(&support).unwrap();
     }
 
     #[cfg(unix)]
@@ -2272,6 +2723,10 @@ mod tests {
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
         assert!(tmp.path(WEBVIEW_BINARY).is_file());
+        assert!(tmp
+            .path(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT)
+            .join("node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js")
+            .is_file());
 
         let commands = runner.commands();
         assert!(commands
@@ -2298,6 +2753,9 @@ mod tests {
         let out = Command::new(&current).arg("--version").output().unwrap();
         assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 9.9.9\n");
         assert!(tmp.path(WEBVIEW_BINARY).is_file());
+        assert!(tmp
+            .path(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT)
+            .is_dir());
     }
 
     #[cfg(unix)]
@@ -2362,6 +2820,26 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn standalone_upgrade_rejects_missing_managed_sandbox_support_before_mutation() {
+        let _process_guard = lock_real_process_tests().await;
+        let tmp = TempDir::new("standalone-missing-sandbox-support");
+        let current = tmp.path("a3s");
+        write_executable(&current, "0.1.0");
+        let mut runner = FakeStandaloneRunner::new("a3s");
+        runner.archive = standalone_archive_with_payload("a3s", "9.9.9", Some(true), false);
+        runner.digest = Some(a3s_updater::sha256_hex(&runner.archive));
+
+        let error = standalone_upgrade_with("9.9.9", &runner, current.clone()).unwrap_err();
+
+        assert!(error.contains("managed sandbox support"), "{error}");
+        let out = Command::new(&current).arg("--version").output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a3s 0.1.0\n");
+        assert!(!tmp.path(WEBVIEW_BINARY).exists());
+        assert!(!tmp.path("support").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn standalone_upgrade_rejects_an_incompatible_helper_before_mutation() {
         let _process_guard = lock_real_process_tests().await;
         let tmp = TempDir::new("standalone-incompatible-helper");
@@ -2392,8 +2870,11 @@ mod tests {
         let tmp = TempDir::new("standalone-helper-rollback");
         let current = tmp.path("a3s");
         let installed_helper = tmp.path(WEBVIEW_BINARY);
+        let installed_support = tmp.path(a3s::components::MANAGED_SRT_PAYLOAD_RELATIVE_ROOT);
         write_executable(&current, "0.1.0");
         write_webview_executable(&installed_helper, "0.1.1");
+        std::fs::create_dir_all(&installed_support).unwrap();
+        std::fs::write(installed_support.join("previous"), "previous").unwrap();
         let mut runner = FakeStandaloneRunner::new("a3s");
         runner.rejected_version_path = Some(current.clone());
 
@@ -2407,5 +2888,9 @@ mod tests {
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&cli.stdout), "a3s 0.1.0\n");
         assert_eq!(String::from_utf8_lossy(&helper.stdout), "a3s 0.1.1\n");
+        assert_eq!(
+            std::fs::read_to_string(installed_support.join("previous")).unwrap(),
+            "previous"
+        );
     }
 }

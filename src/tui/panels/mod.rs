@@ -52,23 +52,35 @@ pub(crate) mod sleep;
 mod banner;
 #[path = "system/bottom.rs"]
 pub(crate) mod bottom;
+#[path = "system/checkup.rs"]
+pub(crate) mod checkup;
 #[path = "system/effort.rs"]
 mod effort;
 #[path = "system/help.rs"]
 mod help;
+#[path = "system/history.rs"]
+pub(crate) mod history;
 #[path = "system/menu.rs"]
 mod menu;
 #[path = "system/model.rs"]
 pub(crate) mod model;
+#[path = "system/permissions.rs"]
+pub(crate) mod permissions;
 #[path = "system/plan.rs"]
 mod plan;
 #[path = "system/plugins.rs"]
 mod plugins;
+#[path = "system/queue.rs"]
+pub(crate) mod queue;
 #[path = "system/relay.rs"]
 pub(crate) mod relay;
 #[path = "system/relay_scan.rs"]
 mod relay_scan;
 #[path = "system/spf.rs"]
 pub(crate) mod spf;
+#[path = "system/tasks.rs"]
+pub(crate) mod tasks;
+#[path = "system/terminal.rs"]
+pub(crate) mod terminal;
 #[path = "system/theme.rs"]
 mod theme;

@@ -487,7 +487,7 @@ impl App {
 
     pub(crate) fn finish_goal_start(&mut self) -> Option<Cmd<Msg>> {
         self.effort = ULTRACODE;
-        self.mode = Mode::Auto;
+        self.set_composer_mode(Mode::Auto);
         self.autonomy_restore = None;
         self.loop_remaining = 0;
         self.gradient_until = Some(Instant::now());

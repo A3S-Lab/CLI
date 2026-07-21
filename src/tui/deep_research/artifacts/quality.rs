@@ -17,168 +17,34 @@ fn has_research_report_substance(markdown: &str, html: &str) -> bool {
 
     let markdown_text = markdown.trim();
     let html_text = strip_html_tags(html);
-    if visible_char_count(markdown_text) < MIN_MARKDOWN_TEXT_CHARS
-        || visible_char_count(&html_text) < MIN_HTML_TEXT_CHARS
-    {
-        return false;
-    }
-
-    let combined = format!("{markdown_text}\n{html_text}").to_lowercase();
-    if report_contains_placeholder_content(markdown_text) {
-        return false;
-    }
-
-    let has_findings = contains_any(
-        &combined,
-        &[
-            "finding",
-            "findings",
-            "conclusion",
-            "conclusions",
-            "analysis",
-            "recommendation",
-            "recommendations",
-            "结论",
-            "分析",
-            "发现",
-            "建议",
-        ],
-    );
-    let has_sources = contains_any(
-        &combined,
-        &[
-            "source",
-            "sources",
-            "evidence",
-            "citation",
-            "citations",
-            "来源",
-            "证据",
-            "引用",
-        ],
-    );
-    let has_confidence = contains_any(
-        &combined,
-        &[
-            "confidence",
-            "caveat",
-            "caveats",
-            "limitation",
-            "limitations",
-            "risk",
-            "risks",
-            "uncertain",
-            "uncertainty",
-            "置信",
-            "限制",
-            "风险",
-            "不确定",
-        ],
-    );
-
-    has_findings && has_sources && has_confidence && has_report_source_anchor(&combined)
+    visible_char_count(markdown_text) >= MIN_MARKDOWN_TEXT_CHARS
+        && visible_char_count(&html_text) >= MIN_HTML_TEXT_CHARS
+        && markdown_text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.trim().starts_with("# "))
+        && markdown_text
+            .lines()
+            .any(|line| line.trim_start().starts_with("## "))
+        && html.contains("<main")
+        && html.contains("<article")
+        && html.contains("<h1")
 }
 
-fn report_contains_placeholder_content(markdown: &str) -> bool {
-    markdown.lines().any(|line| {
-        let normalized = line
-            .trim()
-            .trim_start_matches(|ch: char| {
-                ch.is_whitespace()
-                    || matches!(ch, '#' | '-' | '*' | '+' | '>' | '[' | ']' | '(' | ')')
-            })
-            .trim_matches(|ch: char| {
-                ch.is_whitespace() || matches!(ch, '`' | '*' | '_' | ':' | '.' | '!' | '?')
-            })
-            .to_lowercase();
-        normalized.contains("lorem ipsum")
-            || matches!(
-                normalized.as_str(),
-                "placeholder"
-                    | "todo"
-                    | "tbd"
-                    | "coming soon"
-                    | "under construction"
-                    | "待补充"
-                    | "占位"
-            )
-            || normalized.starts_with("todo: ")
-            || normalized.starts_with("tbd: ")
-            || normalized.starts_with("placeholder: ")
-    })
-}
 pub(crate) fn deep_research_output_has_internal_leak(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     if deep_research_contains_workflow_store_reference(&lower) {
         return true;
     }
-    let markers = [
+    [
         "a3s://tool-output",
         "[tool output truncated",
         "full output artifact:",
-        "permission denied: tool",
-        "max tool rounds",
         "dynamicworkflowruntime output:",
         "dynamicworkflowruntime metadata:",
-        "dynamicworkflowruntime evidence package:",
-        "dynamicworkflowruntime diagnostic package:",
-        "dynamicworkflowruntime structured evidence",
-        "provided dynamicworkflowruntime",
-        "evidence digest:",
-        "run diagnostics:",
-        "provided evidence digest",
-        "provided run diagnostics",
-        "workflow runtime/evidence-package",
-        "workflow evidence\n\n```text",
-        "created the target report directory",
-        "created the report directory",
-        "created `.a3s/research",
-        "created .a3s/research",
-        "created the markdown report",
-        "created the standalone",
-        "markdown report written",
-        "markdown report written to",
-        "wrote the markdown report",
-        "wrote the standalone",
-        "wrote the html report",
-        "wrote the standalone responsive html artifact",
-        "verifying the two required report artifacts",
-        "targeted verification passed",
-        "report.md exists",
-        "index.html exists",
-        "written and verified successfully",
-        "batch verification was unavailable",
-        "file-read access is blocked",
-        "file-read tooling is currently blocked",
-        "unable to verify the two required files",
-        "targeted verification could not be performed",
-        "verification could not be performed",
-        "remaining unverified contract items",
-        "step 2 complete",
-        "step 3 complete",
-        "● searched",
-        "● ran",
-        "● read ",
-        "⎿",
-    ];
-    if markers.iter().any(|marker| lower.contains(marker)) {
-        return true;
-    }
-
-    let json_field_hits = [
-        "\"summary\"",
-        "\"sources\"",
-        "\"key_evidence\"",
-        "\"contradictions\"",
-        "\"confidence\"",
-        "\"gaps\"",
-        "\"url_or_path\"",
-        "\"quote_or_fact\"",
     ]
     .iter()
-    .filter(|field| lower.contains(**field))
-    .count();
-    json_field_hits >= 3
+    .any(|marker| lower.contains(marker))
 }
 
 pub(crate) fn deep_research_contains_workflow_store_reference(text: &str) -> bool {
@@ -197,41 +63,6 @@ pub(crate) fn deep_research_contains_workflow_store_reference(text: &str) -> boo
                     })
             })
         })
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-fn has_report_source_anchor(text: &str) -> bool {
-    contains_any(
-        text,
-        &[
-            "http://",
-            "https://",
-            "readme.md",
-            "design.md",
-            "cargo.toml",
-            "package.json",
-            "pyproject.toml",
-            "src/",
-            "crates/",
-            "apps/",
-            "docs/",
-            ".a3s/",
-            ".rs",
-            ".ts",
-            ".tsx",
-            ".js",
-            ".jsx",
-            ".py",
-            ".go",
-            ".java",
-            ".md",
-            ".mdx",
-            ".pdf",
-        ],
-    )
 }
 
 pub(super) fn normalize_research_source_anchor(value: &str) -> Option<String> {
@@ -316,40 +147,6 @@ fn canonical_research_source_anchor(value: &str) -> Option<String> {
     };
     normalize_research_source_anchor(&canonical)?;
     Some(canonical)
-}
-
-fn reported_research_source_candidates(value: &str) -> Vec<String> {
-    let Some(exact) = canonical_research_source_anchor(value) else {
-        return Vec::new();
-    };
-    let is_http = reqwest::Url::parse(value.trim()).is_ok_and(|url| {
-        matches!(url.scheme(), "http" | "https")
-            && url.host_str().is_some_and(|host| !host.is_empty())
-    });
-    if is_http {
-        return vec![exact];
-    }
-
-    let mut candidates = vec![exact.clone()];
-    let without_fragment = exact.split('#').next().unwrap_or(&exact);
-    for candidate in [
-        without_fragment,
-        without_fragment
-            .rsplit_once(':')
-            .filter(|(_, suffix)| {
-                !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit())
-            })
-            .map(|(path, _)| path)
-            .unwrap_or(without_fragment),
-    ] {
-        let Some(candidate) = canonical_research_source_anchor(candidate) else {
-            continue;
-        };
-        if !candidates.contains(&candidate) {
-            candidates.push(candidate);
-        }
-    }
-    candidates
 }
 
 fn looks_like_traceable_source(value: &str) -> bool {

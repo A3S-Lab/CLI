@@ -2,7 +2,7 @@
 //!
 //! Built on the `a3s-tui` TEA framework: it drives an [`AgentSession`] via
 //! `session.stream()` and renders the resulting [`AgentEvent`] stream as a live
-//! chat transcript, with an inline (y/n/a) approval prompt for tool calls.
+//! chat transcript, with a scoped approval prompt for tool calls.
 //!
 //! Streaming bridge: `session.stream()` yields a `tokio::mpsc` receiver. A
 //! self-re-issuing "pump" command reads one event, turns it into a `Msg`, and
@@ -60,12 +60,6 @@ use crate::commands::code::naming as asset_naming;
 mod deep_research_artifacts;
 #[path = "deep_research/convergence.rs"]
 mod deep_research_convergence;
-#[cfg(test)]
-#[path = "deep_research/engineered_loop_contract_tests.rs"]
-mod deep_research_engineered_loop_contract_tests;
-#[cfg(test)]
-#[path = "deep_research/engineered_loop_tests.rs"]
-mod deep_research_engineered_loop_tests;
 #[path = "deep_research/evidence_ledger.rs"]
 mod deep_research_evidence_ledger;
 #[path = "deep_research/host_digest.rs"]
@@ -82,17 +76,19 @@ mod deep_research_host_report;
 mod deep_research_host_workflow;
 #[path = "deep_research/inquiry_runtime.rs"]
 mod deep_research_inquiry_runtime;
-#[path = "deep_research/prompts.rs"]
-mod deep_research_prompts;
 #[path = "deep_research/report_audit.rs"]
 mod deep_research_report_audit;
 #[path = "deep_research/report_generation.rs"]
 mod deep_research_report_generation;
-#[path = "deep_research/report_phase.rs"]
-mod deep_research_report_phase;
 #[cfg(test)]
 #[path = "deep_research/report_pipeline_tests.rs"]
 mod deep_research_report_pipeline_tests;
+#[cfg(test)]
+#[path = "deep_research/retrieval_contract_tests.rs"]
+mod deep_research_retrieval_contract_tests;
+#[cfg(test)]
+#[path = "deep_research/retrieval_integration_tests.rs"]
+mod deep_research_retrieval_integration_tests;
 #[path = "deep_research/sectioned_report.rs"]
 mod deep_research_sectioned_report;
 #[path = "deep_research/state_journal.rs"]
@@ -104,54 +100,51 @@ pub(crate) use deep_research_artifacts::deep_research_workflow_needs_recovery_re
 #[cfg(test)]
 use deep_research_artifacts::looks_like_deep_research_fallback_draft;
 #[cfg(test)]
-pub(crate) use deep_research_artifacts::materialize_deep_research_completed_report_from_workflow_evidence;
-#[cfg(test)]
 pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft;
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
 pub(crate) use deep_research_artifacts::{
     clean_deep_research_final_text_from_artifacts, deep_research_contains_workflow_store_reference,
     deep_research_output_has_internal_leak,
-    deep_research_report_artifacts_from_output_for_current_run,
-    deep_research_report_artifacts_from_output_for_query,
-    deep_research_report_rejection_diagnostic_from_answer_text, deep_research_report_slug,
+    deep_research_report_rejection_diagnostic_from_answer_text,
     deep_research_workflow_needs_recovery_report_with_metadata,
-    materialize_deep_research_completed_report_from_answer_text,
     materialize_deep_research_completed_report_from_generation,
-    materialize_deep_research_completed_report_from_markdown,
     materialize_deep_research_recovery_report, parse_embedded_structured_evidence_json,
-    research_report_artifacts_from_output, research_report_artifacts_from_output_for_current_run,
-    snapshot_deep_research_report_artifacts, DeepResearchReportArtifactBaseline,
-    ResearchReportArtifacts,
+    research_report_artifacts_from_output, ResearchReportArtifacts,
+};
+#[cfg(test)]
+use deep_research_artifacts::{
+    deep_research_completed_report_html_for_test,
+    deep_research_report_artifacts_from_output_for_query, deep_research_report_slug,
 };
 use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
 use deep_research_convergence::{
-    evaluate_convergence, evaluate_terminal_inquiry_convergence, inquiry_terminal_outcome,
-    validated_inquiry_projection, validated_inquiry_publication_outcome, ConvergenceAction,
-    ConvergenceDecision, ConvergenceInput, InquiryTerminalOutcome, ValidatedInquiryProjection,
+    evaluate_terminal_inquiry_convergence, inquiry_terminal_outcome, validated_inquiry_projection,
+    validated_inquiry_publication_outcome, ConvergenceAction, ConvergenceDecision,
+    InquiryTerminalOutcome, ValidatedInquiryProjection,
 };
-use deep_research_evidence_ledger::{
-    accepted_evidence_ledger,
-    synthesis_payload_with_context as accepted_evidence_synthesis_payload, AcceptedEvidence,
-};
+use deep_research_evidence_ledger::{accepted_evidence_ledger, AcceptedEvidence};
 use deep_research_host_digest::*;
 use deep_research_host_evidence::*;
 use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
 use deep_research_host_report::*;
+pub(crate) use deep_research_host_workflow::DeepResearchEvidenceScope;
 use deep_research_host_workflow::*;
-use deep_research_inquiry_runtime::{
-    inquiry_projection_from_workflow, spawn_deep_research_inquiry,
-    DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS,
+use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
+pub(crate) use deep_research_inquiry_runtime::{
+    spawn_deep_research_inquiry, DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS,
+    DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS, DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS,
+    DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS,
 };
 use deep_research_report_generation::*;
-use deep_research_report_phase::{
-    suppress_tool_output as suppress_deep_research_report_phase_tool_output, ReportPhaseToolBuffer,
-};
 use deep_research_sectioned_report::{
     generate_sectioned_report, merge_sectioned_inquiry_projection, sectioned_report_available,
     SECTIONED_REPORT_BUDGET_MS,
 };
+#[cfg(test)]
+pub(crate) use deep_research_state_journal::load_inquiry_state as deep_research_test_load_inquiry_state;
+pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run,
     record_child_event as record_deep_research_child_event,
@@ -161,10 +154,16 @@ use deep_research_state_journal::{
     record_run_terminal as record_deep_research_run_terminal,
     record_workflow_completed as record_deep_research_workflow_completed,
     record_workflow_started as record_deep_research_workflow_started, research_diagnostic,
-    research_diff, ResearchDiagnosticKind, ResearchOutcome, ResearchRunProjection, ResearchSpec,
+    research_diff, ResearchDiagnosticKind, ResearchRunProjection, ResearchSpec,
+};
+#[cfg(test)]
+pub(crate) use deep_research_state_journal::{
+    record_workflow_started as deep_research_test_record_workflow_started,
+    ResearchSpec as DeepResearchTestResearchSpec,
 };
 pub(crate) use deep_research_workflow_store::{
-    ensure_deep_research_workflow_run_id, recover_deep_research_workflow_run_from_store,
+    ensure_deep_research_workflow_run_id, recover_deep_research_initial_retrieval_from_store,
+    recover_deep_research_workflow_run_from_store,
 };
 
 /// Build the same engineered workflow for `a3s code research` that the TUI
@@ -173,19 +172,22 @@ pub(crate) use deep_research_workflow_store::{
 pub(crate) fn deep_research_cli_workflow_args_for_budget(
     query: &str,
     budget: BudgetPlan,
+    evidence_scope: Option<DeepResearchEvidenceScope>,
 ) -> serde_json::Value {
-    let evidence_scope = deep_research_inferred_evidence_scope(query);
-    deep_research_workflow_args_for_budget(query, false, evidence_scope, budget)
+    let evidence_scope =
+        evidence_scope.unwrap_or_else(|| deep_research_inferred_evidence_scope(query));
+    deep_research_workflow_args_for_budget(query, evidence_scope, budget)
 }
 
-/// Close the evidence boundary for non-interactive report generation. The
-/// returned flag records whether the checker qualified the result instead of
-/// fully completing it; unsupported evidence never reaches synthesis.
-pub(crate) fn deep_research_cli_report_plan(
+/// Validate the closed evidence boundary for non-interactive report
+/// generation. The returned flag records whether the replayed research
+/// contract is qualified instead of fully satisfied; unsupported evidence
+/// never reaches synthesis.
+pub(crate) fn deep_research_cli_report_is_qualified(
     query: &str,
     workflow_output: &str,
     workflow_metadata: Option<&serde_json::Value>,
-) -> Result<(String, bool), String> {
+) -> Result<bool, String> {
     let canonical_output =
         deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
     let evidence_scope = deep_research_inferred_evidence_scope(query);
@@ -202,15 +204,15 @@ pub(crate) fn deep_research_cli_report_plan(
     if accepted.is_empty() {
         return Err("evidence collection produced no accepted evidence".to_string());
     }
-    let synthesis_evidence = accepted_evidence_synthesis_payload(&accepted, &canonical_output);
-    let prompt = deep_research_synthesis_prompt_with_scope(
-        query,
-        false,
-        &synthesis_evidence,
-        None,
-        evidence_scope,
-    );
-    Ok((prompt, matches!(outcome, DeepResearchRunOutcome::Qualified)))
+    Ok(matches!(outcome, DeepResearchRunOutcome::Qualified))
+}
+
+#[cfg(test)]
+pub(crate) fn deep_research_test_accepted_evidence_ledger(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> Vec<AcceptedEvidence> {
+    accepted_evidence_ledger(workflow_output, workflow_metadata)
 }
 
 pub(crate) fn deep_research_cli_canonical_workflow_output(
@@ -220,11 +222,112 @@ pub(crate) fn deep_research_cli_canonical_workflow_output(
     deep_research_canonical_workflow_output(workflow_output, workflow_metadata)
 }
 
-pub(crate) fn deep_research_cli_report_generation_args(
-    prompt: &str,
+pub(crate) async fn settle_deep_research_cli_run(
+    workspace: &std::path::Path,
+    run_id: &str,
+    workflow_succeeded: bool,
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+    requested_outcome: ResearchOutcome,
+    artifacts: &ResearchReportArtifacts,
+) -> Result<ResearchOutcome, String> {
+    record_deep_research_workflow_completed(workspace, run_id, workflow_succeeded)
+        .await
+        .map_err(|error| format!("record DeepResearch CLI workflow completion: {error:#}"))?;
+    let canonical = deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
+    let evidence = accepted_evidence_ledger(&canonical, workflow_metadata);
+    record_deep_research_evidence_ledger(workspace, run_id, &evidence)
+        .await
+        .map_err(|error| format!("record DeepResearch CLI accepted evidence: {error:#}"))?;
+    let projection =
+        record_deep_research_run_terminal(workspace, run_id, requested_outcome, Some(artifacts))
+            .await
+            .map_err(|error| format!("record DeepResearch CLI terminal report: {error:#}"))?;
+    if !projection.outcome.is_terminal()
+        || !projection.active_steps.is_empty()
+        || !projection.active_children.is_empty()
+    {
+        return Err(format!(
+            "DeepResearch CLI journal did not settle: outcome={:?}, active_steps={}, active_children={}",
+            projection.outcome,
+            projection.active_steps.len(),
+            projection.active_children.len()
+        ));
+    }
+    Ok(projection.outcome)
+}
+
+#[cfg(test)]
+pub(crate) async fn deep_research_test_run_status(
+    workspace: &std::path::Path,
+    run_id: &str,
+) -> Result<String, String> {
+    research_diagnostic(workspace, Some(run_id), ResearchDiagnosticKind::Status)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn deep_research_cli_sectioned_report_available(
+    workflow_output: &str,
+    workflow_metadata: Option<&serde_json::Value>,
+) -> bool {
+    sectioned_report_available(workflow_output, workflow_metadata)
+}
+
+/// Run the same replayable report pipeline used by the TUI and atomically
+/// replace the CLI workflow projection only after it reaches a publishable
+/// terminal state.
+pub(crate) async fn complete_deep_research_cli_sectioned_report(
+    session: &AgentSession,
+    query: &str,
+    workflow_output: &mut String,
+    workflow_metadata: &mut Option<serde_json::Value>,
+    run_id: &str,
     timeout_ms: u64,
-) -> serde_json::Value {
-    deep_research_report_generation_args(prompt, timeout_ms)
+) -> Result<ToolCallResult, String> {
+    if !sectioned_report_available(workflow_output, workflow_metadata.as_ref()) {
+        return Err(
+            "DeepResearch CLI report synthesis requires an Inquiry in Outlining".to_string(),
+        );
+    }
+    let report_deadline = Instant::now()
+        .checked_add(Duration::from_millis(timeout_ms))
+        .ok_or_else(|| "DeepResearch CLI report deadline overflowed".to_string())?;
+    let generated = generate_sectioned_report(
+        session,
+        query,
+        workflow_output,
+        workflow_metadata.as_ref(),
+        run_id,
+        report_deadline,
+    )
+    .await?;
+
+    let mut merged_output = workflow_output.clone();
+    let mut merged_metadata = workflow_metadata.clone();
+    merge_sectioned_inquiry_projection(
+        &mut merged_output,
+        merged_metadata.as_mut(),
+        generated.metadata.as_ref(),
+    )?;
+    match deep_research_inquiry_publication_outcome(&merged_output, merged_metadata.as_ref())? {
+        Some(DeepResearchRunOutcome::Completed | DeepResearchRunOutcome::Qualified) => {}
+        Some(outcome) => {
+            return Err(format!(
+                "DeepResearch CLI report pipeline ended with non-publishable outcome {outcome:?}"
+            ));
+        }
+        None => {
+            return Err(
+                "DeepResearch CLI report pipeline omitted terminal Inquiry publication authority"
+                    .to_string(),
+            );
+        }
+    }
+
+    *workflow_output = merged_output;
+    *workflow_metadata = merged_metadata;
+    Ok(generated)
 }
 
 /// Parse a schema-validated report object and write the Markdown/HTML pair in
@@ -276,6 +379,8 @@ pub(crate) mod skills;
 mod update;
 
 // Local workspace.
+#[path = "workspace/git_snapshot.rs"]
+mod git_snapshot;
 #[path = "workspace/gitutil.rs"]
 mod gitutil;
 
@@ -308,8 +413,12 @@ mod app_async_dispatch;
 mod app_commands;
 #[path = "app/events.rs"]
 mod app_events;
+#[path = "app/fork.rs"]
+mod app_fork;
 #[path = "app/launch.rs"]
 mod app_launch;
+#[path = "app/permission_rules.rs"]
+mod app_permission_rules;
 #[path = "app/permissions.rs"]
 mod app_permissions;
 #[path = "app/projections.rs"]
@@ -318,8 +427,14 @@ mod app_projections;
 mod app_research;
 #[path = "app/research_workflow.rs"]
 mod app_research_workflow;
+#[path = "app/rewind.rs"]
+mod app_rewind;
 #[path = "app/runtime.rs"]
 mod app_runtime;
+#[path = "app/selection.rs"]
+mod app_selection;
+#[path = "app/session_share.rs"]
+mod app_session_share;
 #[path = "app/session_state.rs"]
 mod app_session_state;
 #[path = "app/smoke.rs"]
@@ -354,6 +469,8 @@ mod file_change_view;
 mod image;
 #[path = "ui/message_chrome.rs"]
 mod message_chrome;
+#[path = "ui/plan_review.rs"]
+mod plan_review;
 #[path = "ui/program_preview.rs"]
 mod program_preview;
 #[path = "ui/render.rs"]
@@ -381,6 +498,7 @@ use app_commands::*;
 #[cfg(test)]
 use app_launch::resumed_transcript_entries;
 pub(crate) use app_launch::{resolve_tui_session_store_dir, run_in};
+use app_permission_rules::*;
 use app_permissions::*;
 use app_projections::*;
 pub(crate) use app_session_state::tui_session_state_path;
@@ -402,6 +520,7 @@ use attachments::*;
 use chrome::*;
 use design_markdown::StreamingMarkdown;
 use editor_state::*;
+use git_snapshot::*;
 use gitutil::*;
 use image::*;
 use memutil::*;
@@ -409,6 +528,7 @@ use message_chrome::*;
 pub(crate) use panels::ctx::{parse_ctx_search, strip_controls};
 pub(crate) use panels::loop_engineering;
 use panels::transcript::{SemanticTranscriptViewport, TranscriptViewportAction};
+use plan_review::*;
 use render::*;
 use runtime_policy::RuntimePolicy;
 use runtime_projection::{
@@ -418,7 +538,8 @@ use runtime_projection::{
 use skills::*;
 use syntax::*;
 use transcript::{
-    join_transcript_blocks, Transcript, TranscriptAnchor, TranscriptEntry, TranscriptEntryId,
+    join_transcript_blocks, transcript_block_separator, Transcript, TranscriptAnchor,
+    TranscriptEntry, TranscriptEntryId, TranscriptPoint, TranscriptSelection,
 };
 use update::*;
 use util::*;
@@ -428,16 +549,13 @@ const BACKGROUND_CONFIRM_TIMEOUT_MS: u64 = 500;
 const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
-const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 = 180 * 1000;
-const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = SECTIONED_REPORT_BUDGET_MS;
-const DEEP_RESEARCH_REPAIR_TIMEOUT_MS: u64 = 120 * 1000;
+pub(crate) const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = SECTIONED_REPORT_BUDGET_MS;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
-// Planning/retrieval/checking, synthesis, and the single repair pass keep
-// independent active-work clocks. The wall-clock fuse therefore covers the
-// sum of their safety ceilings plus cancellation and artifact finalization;
-// it must never silently shorten a valid phase timeout.
+// Planning/retrieval/closed-evidence assessment and the one durable completed-
+// report transaction keep independent active-work clocks. A report resume
+// consumes the original transaction deadline rather than adding another
+// sectioned-report budget.
 const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
-    + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
     + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
     + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
     + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
@@ -449,7 +567,6 @@ const GRACEFUL_QUIT_AGENT_PRESENCE_GRACE_MS: u64 = 500;
 const GRACEFUL_QUIT_SESSION_CLOSE_GRACE_MS: u64 = 8_000;
 const QUEUE_ADMISSION_RETRY_BASE_MS: u64 = 40;
 const QUEUE_ADMISSION_RETRY_MAX_MS: u64 = 500;
-const DEEP_RESEARCH_TOOL_COMPLETION_GRACE_MS: u64 = 15_000;
 const TUI_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
 #[allow(dead_code)]
 const RESUME_TIMELINE_PAGE_LIMIT: usize = 200;
@@ -495,6 +612,11 @@ struct App {
     /// `/relay` session picker and its stale-result guard.
     relay_panel: Option<panels::relay::RelayPanel>,
     relay_scan_seq: u64,
+    /// `/tasks` / Ctrl+B delegated-work inspector and cancellation surface.
+    task_panel: Option<panels::tasks::TaskPanel>,
+    task_panel_seq: u64,
+    /// `/permissions` exact session/project grant inspector and revocation surface.
+    permission_panel: Option<panels::permissions::PermissionPanel>,
     /// Picker-visible models advertised for the current Codex login.
     codex_account_models: Vec<crate::account_providers::codex::CodexModel>,
     /// Guards the asynchronous Codex catalog refresh from duplicate commands.
@@ -513,6 +635,10 @@ struct App {
     code_config: Arc<CodeConfig>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
+    /// Component storage and process PATH snapshot resolved at CLI admission.
+    /// `/checkup` reuses this immutable view instead of rediscovering process
+    /// state from a shell command.
+    component_paths: a3s::components::ComponentPaths,
     config_path: PathBuf,
     memory_dir: PathBuf,
     auto_compact_threshold: f64,
@@ -538,15 +664,14 @@ struct App {
     /// clicking the inline "Open view" button; owned workflows like `/flow` may
     /// also open their prepared designer view directly.
     last_view: Option<remote_ui::ViewSpec>,
-    /// Completed DeepResearch report view captured before all verification
-    /// layers have drained. It opens only when DeepResearch actually finishes.
+    /// Completed DeepResearch report view captured before settlement. It opens
+    /// only when DeepResearch actually finishes.
     pending_deep_research_report_view: Option<remote_ui::ViewSpec>,
-    /// Bounded DeepResearch verification state; turns generic loop continuation
-    /// into report-focused gap checks instead of another broad planning round.
+    /// Transient state for the active coverage-driven DeepResearch run.
     deep_research_loop: Option<DeepResearchLoop>,
-    /// One extra repair pass is allowed when synthesis misses the required local
-    /// report marker/artifact, including "single synthesis pass" research.
-    deep_research_report_repair_used: bool,
+    /// One durable resume of the same sectioned report transaction is allowed
+    /// after a pre-publication pipeline failure.
+    deep_research_report_resume_used: bool,
     /// Transient host hand-off data. Event-derived lifecycle and quality state
     /// deliberately remain outside this snapshot.
     deep_research_workflow: DeepResearchWorkflowSnapshot,
@@ -554,12 +679,9 @@ struct App {
     /// artifacts are useful diagnostics but must never be counted as a
     /// completed report.
     deep_research_outcome: DeepResearchRunOutcome,
-    /// One-shot prompt generated when the active DeepResearch synthesis missed
-    /// its report artifacts. It has priority over generic verification loops.
-    pending_deep_research_report_repair_prompt: Option<String>,
-    /// DeepResearch synthesis deferred behind user follow-up turns. Keeping it
-    /// outside the user queue lets a new research run invalidate stale work.
-    pending_deep_research_synthesis: Option<(String, String)>,
+    /// One-shot durable report resume after the sectioned pipeline fails
+    /// before publication. It has priority over generic `/loop` continuation.
+    pending_deep_research_report_resume: bool,
     /// Monotonic guard for DeepResearch stream watchdogs; stale timeout ticks
     /// must not affect later turns.
     deep_research_stream_timeout_token: u64,
@@ -596,9 +718,9 @@ struct App {
     auto_review: AutoReviewTracker,
     /// Shell mode: a leading `!` becomes the prompt, the rest is the command.
     shell_mode: bool,
-    /// Deep-research mode: a leading `?` turns the input into a deep-research
-    /// query — sent to the agent with a multi-source research directive. Box
-    /// turns cyan.
+    /// Deep-research mode: a leading `?` launches the fixed host-managed
+    /// semantic-plan, single-retrieval, closed-evidence, assessment, and report
+    /// pipeline. Box turns cyan.
     research_mode: bool,
     /// True from an asset-scoped review submit until its report is parsed (or
     /// the run is interrupted/fails). Gates capture_review so a turn that merely
@@ -741,7 +863,6 @@ struct App {
     textarea: Textarea,
     spinner: Spinner,
     streaming: StreamingMarkdown,
-    deep_research_report_tools: ReportPhaseToolBuffer,
     /// Whether the current turn streamed any text deltas (vs. text only at End).
     got_delta: bool,
     /// Set while `/compact` is summarizing — drives the progress bar + blocks input.
@@ -749,6 +870,9 @@ struct App {
     /// Set while `/update` is upgrading — drives a progress bar + blocks input;
     /// on success the app restarts into the new binary.
     updating: Option<Instant>,
+    /// Host-owned, read-only `/checkup` preflight. The composer stays hidden
+    /// until its typed result is handed to the strict Plan audit.
+    checkup_inflight: bool,
     /// Last time the streaming viewport was rebuilt — throttles the O(n) rebuild
     /// to ~30fps so a flood of deltas doesn't starve animation on the 1 loop.
     last_paint: Option<Instant>,
@@ -776,11 +900,29 @@ struct App {
     host_tool_call_id: Option<String>,
     interrupting: bool,
     /// Manual tool approvals waiting for a decision, in request order.
-    pending_tools: VecDeque<(String, String)>,
-    /// Selected row in the tool-approval options panel (0 yes · 1 always · 2 no).
+    pending_tools: VecDeque<PendingToolApproval>,
+    /// Exact session/project grants shared across model and effort rebuilds.
+    permission_grants: TuiPermissionGrants,
+    /// Mode-aware permission boundary shared with every rebuilt Core session.
+    /// It always tracks the immutable mode of the running turn.
+    execution_policy: TuiExecutionPolicy,
+    /// Dedicated project ACL file for reviewed persistent grants.
+    project_permission_rules_path: PathBuf,
+    /// Project rule write currently in flight. Its request remains at the FIFO
+    /// head until persistence succeeds, so a failed write cannot silently
+    /// broaden the active session.
+    permission_rule_write_inflight: Option<String>,
+    /// Monotonic identity and global lock for atomic project-grant revocation.
+    project_permission_revoke_seq: u64,
+    project_permission_revoke_inflight: Option<(u64, ExactPermissionGrant)>,
+    /// Denial feedback temporarily owns the composer while retaining its draft.
+    approval_feedback: Option<ApprovalFeedback>,
+    /// Selected row in the tool-approval options panel.
     approval_sel: usize,
     /// Submitted prompts, oldest first, for ↑/↓ recall.
     history: Vec<String>,
+    /// `/history` / Ctrl+R fuzzy prompt-history search.
+    history_panel: Option<panels::history::HistoryPanel>,
     /// Cursor into `history` while browsing; `None` means "fresh input".
     history_pos: Option<usize>,
     /// Scratch input captured when prompt-history browsing starts.
@@ -803,10 +945,34 @@ struct App {
     /// Host turns submitted while the agent is busy. Ordering and FIFO
     /// semantics come directly from a3s-lane.
     queue: PriorityQueue<Queued>,
+    /// Submission-time execution mode keyed by a3s-lane's stable sequence.
+    /// Keeping this beside the queue avoids mutable footer state changing the
+    /// semantics of a turn that was already submitted.
+    queued_turn_modes: HashMap<u64, Mode>,
+    /// Strict planning requests keyed by the same stable queue sequence.
+    queued_plan_drafts: HashMap<u64, PlanDraftRequest>,
+    /// Exact pending turn selected for Send now. This control-plane pointer
+    /// overrides normal priority/FIFO ordering without rewriting Lane metadata.
+    send_now_queued_sequence: Option<u64>,
+    /// `/queue` inspection and control modal.
+    queue_panel: Option<panels::queue::QueuePanel>,
+    /// Pre-turn state admitted with the active user stream. It becomes a
+    /// conflict-safe rewind checkpoint only after Core persistence settles.
+    active_rewind_checkpoint: Option<RewindCheckpointSeed>,
+    /// Recent completed user turns, newest at the back.
+    rewind_checkpoints: VecDeque<RewindCheckpoint>,
+    /// Monotonic identity for completed rewind checkpoints.
+    next_rewind_checkpoint_id: u64,
+    /// Stream token whose post-turn Git snapshot is being finalized.
+    rewind_finalization_pending: Option<u64>,
     /// A claimed queued turn remains here until Core admits it. Admission
     /// failure restores this exact item, including its original FIFO sequence.
     active_queued_turn: Option<PriorityItem<Queued>>,
     active_queued_turn_token: Option<u64>,
+    /// Immutable mode of the current stream, retained after queue admission.
+    active_turn_mode: Option<Mode>,
+    /// Planning request owned by the current read-only stream.
+    active_plan_draft: Option<PlanDraftRequest>,
     queue_retry_generation: u64,
     queue_retry_attempt: u8,
     /// Text of the message currently being processed (the running task).
@@ -814,6 +980,11 @@ struct App {
     /// Typed live plan/TODO projection, pinned above the input and updated from
     /// PlanningEnd/TaskUpdated or the Codex-compatible `update_plan` tool.
     plan: PlanProjection,
+    /// Review staged until the completed stream releases Core's single-flight
+    /// lease, then promoted to the modal decision boundary below.
+    pending_plan_review: Option<PlanReviewState>,
+    /// Explicit Approve / Revise / Abandon boundary for a completed plan.
+    plan_review: Option<PlanReviewState>,
     /// `/ide` file-tree + viewer panel (Some when open).
     ide: Option<Ide>,
     /// `/memory` full-screen timeline panel (Some when open).
@@ -864,9 +1035,15 @@ impl App {
     fn composer_input_is_hidden(&self) -> bool {
         self.goal_resume_prompt.is_some()
             || self.state == State::Awaiting
+            || (self.plan_review.is_some() && !self.plan_review_input_active())
             || self.transcript_view.is_some()
+            || self.queue_panel.is_some()
+            || self.history_panel.is_some()
             || self.model_menu.is_some()
             || self.relay_panel.is_some()
+            || self.task_panel.is_some()
+            || self.permission_panel.is_some()
+            || self.checkup_inflight
             || self.effort_panel.is_some()
             || self.theme_panel.is_some()
             || self.plugins_panel.is_some()
@@ -988,30 +1165,4 @@ impl App {
     }
 }
 
-fn approval_menu_lines(label: &str, selected: usize, width: usize) -> Vec<String> {
-    approval_prompt(label, selected).lines(width)
-}
-
-const FULLSCREEN_APPROVAL_ROWS_BELOW: usize = 1;
-
-fn approval_rows_below_for(transcript_open: bool, composer_rows_below: usize) -> usize {
-    if transcript_open {
-        FULLSCREEN_APPROVAL_ROWS_BELOW
-    } else {
-        composer_rows_below
-    }
-}
-
-fn approval_prompt(label: &str, selected: usize) -> ApprovalPrompt {
-    ApprovalPrompt::new(label, selected)
-}
-
-fn approval_overlay_y_offset(screen_height: usize, row_count: usize, rows_below: usize) -> u16 {
-    screen_height
-        .saturating_sub(rows_below)
-        .saturating_sub(row_count)
-        .min(u16::MAX as usize) as u16
-}
-
-#[cfg(test)]
-mod tests;
+include!("approval_layout.rs");

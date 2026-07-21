@@ -1,5 +1,5 @@
 use super::super::super::deep_research_evidence_ledger::{
-    AcceptedClaim, AcceptedEvidence, AcceptedSource, SourceTier,
+    AcceptedClaim, AcceptedEvidence, AcceptedSource,
 };
 use super::super::{DeepResearchStateJournal, ResearchSpec};
 use super::*;
@@ -7,7 +7,7 @@ use a3s::research::{
     CompletionCriterionAssessment, ContractAssessmentStatus, EvidenceRef, InquiryEvent,
     InquiryLimits, InquiryState, OutlineSection, Perspective, Question, ResearchContractAssessment,
     ResearchMethod, ResearchObligation, ResearchObligationAssessment, ResearchOutline,
-    StopConditionAssessment,
+    SourceCoverageBinding, SourceEvidenceRole, StopConditionAssessment,
 };
 
 fn inquiry_spec() -> ResearchSpec {
@@ -17,6 +17,8 @@ fn inquiry_spec() -> ResearchSpec {
         evidence_scope: "web".to_string(),
         required_claims: vec!["claim:root".to_string()],
         total_budget_ms: 60_000,
+        retrieval_stage_budget_ms: 30_000,
+        question_review_stage_budget_ms: 15_000,
         finalization_reserve_ms: 9_000,
         host_pid: 0,
     }
@@ -46,13 +48,16 @@ fn inquiry_events() -> Vec<InquiryEvent> {
         InquiryEvent::ScoutCompleted {
             source_ids: vec!["source:scout".to_string()],
         },
+        InquiryEvent::PerspectiveBudgetSelected {
+            total_retrieval_waves: 3,
+        },
         InquiryEvent::PerspectivesCommitted {
-            perspectives: vec![Perspective::new(
-                "perspective:risk",
-                "Risk",
-                "Test material risks",
-                vec!["source:scout".to_string()],
-            )],
+            perspectives: vec![Perspective {
+                id: "perspective:risk".to_string(),
+                title: "Risk".to_string(),
+                focus: "Test material risks".to_string(),
+                source_ids: vec!["source:scout".to_string()],
+            }],
         },
         InquiryEvent::QuestionsQueued {
             questions: vec![question],
@@ -62,7 +67,13 @@ fn inquiry_events() -> Vec<InquiryEvent> {
                 "evidence:accepted",
                 vec!["claim:root".to_string()],
                 vec!["source:accepted".to_string()],
-            ),
+            )
+            .with_source_coverage(vec![SourceCoverageBinding::new(
+                "source:accepted",
+                "obligation:root",
+                vec![0],
+                vec![SourceEvidenceRole::Supporting],
+            )]),
         },
         InquiryEvent::QuestionAnswered {
             question_id: "question:root".to_string(),
@@ -130,12 +141,19 @@ fn accepted_evidence() -> Vec<AcceptedEvidence> {
             date: Some("2026-07-17".to_string()),
             reliability: Some("authoritative".to_string()),
             quote_or_fact: Some("The material finding is established.".to_string()),
-            tier: SourceTier::Authoritative,
+            evidence_excerpts: Vec::new(),
         }],
         claims: vec![AcceptedClaim {
             id: "claim:root".to_string(),
             text: "The material finding is established.".to_string(),
         }],
+        source_coverage: vec![SourceCoverageBinding::new(
+            "source:accepted",
+            "obligation:root",
+            vec![0],
+            vec![SourceEvidenceRole::Supporting],
+        )],
+        relevant_obligation_ids: vec!["obligation:root".to_string()],
         contradictions: Vec::new(),
         gaps: Vec::new(),
     }]
@@ -191,7 +209,7 @@ async fn load_inquiry_state_restores_only_a_contiguous_strict_prefix() {
         .is_none());
 
     let events = inquiry_events();
-    let prefix = events[..7].to_vec();
+    let prefix = events[..8].to_vec();
     let state = a3s::research::replay(&prefix, &InquiryLimits::default()).unwrap();
     record_inquiry_state(temp.path(), run_id, &prefix, &state)
         .await
@@ -255,7 +273,7 @@ async fn incremental_inquiry_prefix_survives_reopen_and_extends_without_duplicat
         .await
         .unwrap();
     let events = inquiry_events();
-    let discovery_prefix = &events[..5];
+    let discovery_prefix = &events[..6];
     let discovery_state =
         a3s::research::replay(discovery_prefix, &InquiryLimits::default()).unwrap();
 
@@ -325,7 +343,7 @@ async fn incremental_inquiry_rejects_stale_or_divergent_prefixes() {
         .await
         .unwrap();
     let events = inquiry_events();
-    let prefix = &events[..5];
+    let prefix = &events[..6];
     let prefix_state = a3s::research::replay(prefix, &InquiryLimits::default()).unwrap();
     record_inquiry_state(temp.path(), run_id, prefix, &prefix_state)
         .await
@@ -514,7 +532,7 @@ async fn redrafted_section_replaces_stale_claim_and_source_relations() {
         date: Some("2026-07-17".to_string()),
         reliability: Some("authoritative".to_string()),
         quote_or_fact: Some("The replacement finding is established.".to_string()),
-        tier: SourceTier::Authoritative,
+        evidence_excerpts: Vec::new(),
     });
     super::super::record_evidence_ledger(temp.path(), run_id, &evidence)
         .await
@@ -523,14 +541,14 @@ async fn redrafted_section_replaces_stale_claim_and_source_relations() {
     let mut events = inquiry_events();
     let InquiryEvent::EvidenceAccepted {
         evidence: reference,
-    } = &mut events[5]
+    } = &mut events[6]
     else {
-        panic!("fixture event 5 must accept evidence");
+        panic!("fixture event 6 must accept evidence");
     };
     reference.claim_ids.push("claim:replacement".to_string());
     reference.source_ids.push("source:replacement".to_string());
-    let InquiryEvent::OutlineCommitted { outline } = &mut events[8] else {
-        panic!("fixture event 8 must commit the outline");
+    let InquiryEvent::OutlineCommitted { outline } = &mut events[9] else {
+        panic!("fixture event 9 must commit the outline");
     };
     outline.sections[0]
         .claim_ids
@@ -538,8 +556,8 @@ async fn redrafted_section_replaces_stale_claim_and_source_relations() {
     outline.sections[0]
         .source_ids
         .push("source:replacement".to_string());
-    let InquiryEvent::AuditCompleted { passed, issues } = &mut events[10] else {
-        panic!("fixture event 10 must complete the audit");
+    let InquiryEvent::AuditCompleted { passed, issues } = &mut events[11] else {
+        panic!("fixture event 11 must complete the audit");
     };
     *passed = false;
     issues.push("replace the draft evidence".to_string());
@@ -632,5 +650,22 @@ fn assert_inquiry_evidence_relations(journal: &DeepResearchStateJournal, run_id:
             "missing {relation_type}: {source} -> {target}"
         );
     }
+    let observed = relations
+        .iter()
+        .find(|relation| {
+            relation.relation_type == "deep_research.observed_in"
+                && relation.source == "evidence:accepted"
+                && relation.target == "source:accepted"
+        })
+        .expect("accepted evidence/source relation");
+    assert_eq!(
+        observed.data["source_coverage"],
+        serde_json::json!([{
+            "source_id": "source:accepted",
+            "obligation_id": "obligation:root",
+            "completion_criterion_indexes": [0],
+            "roles": ["supporting"]
+        }])
+    );
     GraphRuntime::strict_replay(journal.runtime.events()).unwrap();
 }

@@ -34,6 +34,27 @@ fn composer_attachment_key_action(
     None
 }
 
+fn is_send_now_key(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn should_send_top_queued_now(
+    key: &KeyEvent,
+    draft: &str,
+    image_count: usize,
+    queue_is_empty: bool,
+    live_turn: bool,
+    prompt_mode_active: bool,
+) -> bool {
+    key.code == KeyCode::Enter
+        && key.modifiers == KeyModifiers::NONE
+        && draft.trim().is_empty()
+        && image_count == 0
+        && !queue_is_empty
+        && live_turn
+        && !prompt_mode_active
+}
+
 impl App {
     pub(super) fn update_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         if self.quitting {
@@ -52,7 +73,6 @@ impl App {
         match msg {
             Msg::Term(Event::Resize { width, height }) => {
                 let viewport_anchor = self.capture_viewport_anchor();
-                self.selection = None; // screen-coord selection is stale after resize
                 self.width = width;
                 self.height = height;
                 if let Some(transcript) = self.transcript_view.as_mut() {
@@ -91,6 +111,15 @@ impl App {
             // lines / a3s-lane queue spam — Claude-Code-style paste DX.
             Msg::Term(Event::Paste(text)) => {
                 self.last_activity = Instant::now();
+                if self.plan_review_input_active() {
+                    self.textarea.insert_str(&text);
+                    self.relayout();
+                    return None;
+                }
+                if self.history_panel.is_some() {
+                    self.handle_history_panel_paste(&text);
+                    return None;
+                }
                 if self.composer_input_is_hidden() {
                     return None;
                 }
@@ -171,6 +200,17 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_key(&key);
                 }
+                // A completed plan is a true modal execution boundary. No
+                // underlying panel, mode shortcut, or composer action may run
+                // until the user approves, revises, or abandons it.
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_key(&key);
+                }
+                // `/queue` is a true modal: queue mutation must not leak a key
+                // into the composer or another panel behind it.
+                if self.queue_panel.is_some() {
+                    return self.handle_queue_key(&key);
+                }
                 // The semantic transcript is a true modal surface. It keeps
                 // all styles and owns navigation until explicitly closed.
                 if let Some(transcript) = self.transcript_view.as_mut() {
@@ -178,6 +218,17 @@ impl App {
                         self.transcript_view = None;
                     }
                     return None;
+                }
+                // Prompt history search owns printable input while open. The
+                // hidden composer draft remains untouched until Enter accepts
+                // an explicit historical prompt.
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_key(&key);
+                }
+                // Exact permission grants remain inspectable while a turn
+                // streams. Revocation changes future checks only.
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_key(&key);
                 }
                 // The /help overlay owns its own close + scroll keys.
                 if self.help_open {
@@ -213,14 +264,21 @@ impl App {
                     self.ide_key(&key);
                     return None;
                 }
+                // `/tasks` / Ctrl+B is a modal delegated-work inspector. It
+                // remains available while a turn streams, but its keys never
+                // leak into the live composer or interrupt the parent turn.
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_key(&key);
+                }
                 // `/relay` is a modal session picker; execution-mode shortcuts
                 // and composer input must not change behind it.
                 if self.relay_panel.is_some() {
                     return self.handle_relay_key(&key);
                 }
-                // Shift+Tab cycles run mode in any state.
+                // Shift+Tab changes the composer mode. A running or queued
+                // turn retains the immutable mode captured at submission.
                 if key.code == KeyCode::BackTab {
-                    self.mode = self.mode.next();
+                    self.set_composer_mode(self.mode.next());
                     return None;
                 }
                 // /model picker takes keys while open — consume EVERY key so
@@ -309,6 +367,18 @@ impl App {
                 if self.loop_panel.is_some() {
                     return self.handle_loop_key(&key);
                 }
+                // Ctrl+R opens searchable prompt history without disturbing
+                // the draft or a running parent turn.
+                if panels::history::is_history_panel_key(&key) {
+                    let query = self.textarea.value();
+                    self.open_history_panel(&query);
+                    return None;
+                }
+                // Cross-platform terminal control for delegated work. Higher
+                // decision modals and focused panels retain priority above it.
+                if panels::tasks::is_task_panel_key(&key) {
+                    return self.toggle_task_panel();
+                }
                 // Codex-style transcript shortcut: Ctrl+T owns the complete
                 // semantic conversation, including live tool output and the
                 // current Markdown tail. Keep the prompt draft intact.
@@ -382,44 +452,7 @@ impl App {
                     if self.interrupting {
                         return None;
                     }
-                    let goal_cancelled = self.cancel_goal_state("interrupted by Esc");
-                    self.interrupting = true;
-                    if self.stream_join.is_none()
-                        && self.rx.is_none()
-                        && !self.host_progress_inflight
-                    {
-                        self.interrupted_stream_start_token = Some(self.stream_start_token);
-                    }
-                    self.stream_start_token = self.stream_start_token.wrapping_add(1);
-                    self.deep_research_stream_timeout_token =
-                        self.deep_research_stream_timeout_token.wrapping_add(1);
-                    let status_entry = self
-                        .push_tracked_line(&Style::new().fg(TN_YELLOW).render("  ⎋ interrupting…"));
-                    let session = self.session.clone();
-                    let join = self.stream_join.take();
-                    let host_abort = self.host_tool_abort.take();
-                    return Some(cmd::cmd(move || async move {
-                        if let Some(host_abort) = host_abort {
-                            host_abort.abort();
-                        }
-                        let _ = session
-                            .cancel_and_settle(
-                                Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                            )
-                            .await;
-                        if let Some(join) = join {
-                            let _ = settle_stream_join_for_quit(
-                                join,
-                                Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                            )
-                            .await;
-                        }
-                        Msg::Interrupted {
-                            goal_cancelled,
-                            status_entry,
-                        }
-                    }));
+                    return self.begin_stream_interrupt("interrupted by Esc");
                 }
                 // During goal retry backoff the app is idle, but the goal is
                 // still active. Esc invalidates the pending generation and
@@ -481,6 +514,38 @@ impl App {
                     self.history_recall(key.code == KeyCode::Up);
                     return None;
                 }
+                // With a live turn and an empty composer, Enter promotes the
+                // current queue head and consumes it immediately. This is the
+                // zero-typing counterpart to Ctrl+O.
+                if should_send_top_queued_now(
+                    &key,
+                    &self.textarea.value(),
+                    self.pending_images.len(),
+                    self.queue.is_empty(),
+                    self.agent_island_stop_available(),
+                    self.shell_mode || self.research_mode,
+                ) {
+                    return self.send_top_queued_turn_now();
+                }
+                // Ctrl+O is a distinct Send now intent. It cancels a genuinely
+                // active turn and promotes this submission ahead of ordinary
+                // FIFO follow-ups; during terminal settlement it safely falls
+                // back to the normal queue without losing the draft.
+                if is_send_now_key(&key) {
+                    if self.state != State::Streaming
+                        || (self.textarea.value().trim().is_empty()
+                            && self.pending_images.is_empty())
+                    {
+                        return None;
+                    }
+                    let text = self.textarea.value();
+                    self.textarea.clear();
+                    return Some(cmd::msg(if self.agent_island_stop_available() {
+                        Msg::SubmitNow(text)
+                    } else {
+                        Msg::Submit(text)
+                    }));
+                }
                 match composer_attachment_key_action(
                     &key,
                     &self.textarea.value(),
@@ -532,9 +597,24 @@ impl App {
                 if self.state == State::Awaiting {
                     return self.handle_approval_mouse(&m);
                 }
+                if self.plan_review.is_some() {
+                    return self.handle_plan_review_mouse(&m);
+                }
+                if self.queue_panel.is_some() {
+                    return self.handle_queue_mouse(&m);
+                }
                 if let Some(transcript) = self.transcript_view.as_mut() {
                     transcript.handle_mouse(&m);
                     return None;
+                }
+                if self.history_panel.is_some() {
+                    return self.handle_history_panel_mouse(&m);
+                }
+                if self.permission_panel.is_some() {
+                    return self.handle_permission_panel_mouse(&m);
+                }
+                if self.task_panel.is_some() {
+                    return self.handle_task_panel_mouse(&m);
                 }
                 if self.relay_panel.is_some() {
                     return self.handle_relay_mouse(&m);
@@ -638,24 +718,37 @@ impl App {
                     // still scrolls; the app owns selection, so scroll + copy work
                     // together (no mode toggle). Release copies to the clipboard.
                     MouseEventKind::Down(MouseButton::Left) => {
-                        self.selection = viewport_mouse_cell(m.row, m.column, vp_rows, max_col)
-                            .map(|p| Selection { anchor: p, head: p });
+                        if let Some(cell) = viewport_mouse_cell(m.row, m.column, vp_rows, max_col) {
+                            self.begin_transcript_selection(cell);
+                        } else {
+                            self.selection = None;
+                        }
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if let Some(s) = self.selection.as_mut() {
-                            if let Some(p) =
-                                viewport_mouse_cell_clamped(m.row, m.column, vp_rows, max_col)
-                            {
-                                s.head = p;
+                        if self.selection.is_some() && vp_rows > 0 {
+                            let last_row = vp_rows.saturating_sub(1) as u16;
+                            if m.row == 0 && self.viewport.scroll_offset() > 0 {
+                                self.viewport.update(ViewportMsg::ScrollUp(1));
+                                self.refresh_transcript_selection_projection();
+                            } else if m.row >= last_row && !self.viewport.at_bottom() {
+                                self.viewport.update(ViewportMsg::ScrollDown(1));
+                                self.refresh_transcript_selection_projection();
                             }
+                        }
+                        if let Some(cell) =
+                            viewport_mouse_cell_clamped(m.row, m.column, vp_rows, max_col)
+                        {
+                            self.update_transcript_selection(cell);
                         }
                     }
                     MouseEventKind::Up(MouseButton::Left) => {
                         if let Some(mut s) = self.selection {
-                            if let Some(p) =
+                            if let Some(cell) =
                                 viewport_mouse_cell_clamped(m.row, m.column, vp_rows, max_col)
                             {
-                                s.head = p;
+                                let point = self.transcript_point_for_viewport_cell(cell);
+                                s.set_head(cell, point);
+                                self.selection = Some(s);
                             }
                             let view = self.viewport.view();
                             if is_remote_view_click(&view, s) {
@@ -670,8 +763,7 @@ impl App {
                             } else if s.is_empty() {
                                 self.selection = None;
                             } else {
-                                let (r1, c1, r2, c2) = s.ordered();
-                                let text = selection_to_text(&view, r1, c1, r2, c2);
+                                let text = self.selected_transcript_text(s, &view);
                                 if text.trim().is_empty() {
                                     self.selection = None;
                                 } else {
@@ -689,12 +781,14 @@ impl App {
             }
 
             Msg::Submit(text) => return self.on_submit(text),
+            Msg::SubmitNow(text) => return self.on_submit_now(text),
 
             Msg::GoalContinue { generation, prompt } => {
                 return self.handle_goal_continue(generation, prompt);
             }
 
             Msg::GoalCleared => {
+                self.discard_active_rewind_checkpoint();
                 self.finalize_streaming();
                 self.review_pending = false;
                 self.sleep_pending = false;
@@ -708,6 +802,7 @@ impl App {
                 rx,
                 join,
                 submitted_images: _submitted_images,
+                rewind_checkpoint,
             } => {
                 if self.interrupted_stream_start_token == Some(token) {
                     self.discard_active_queued_turn(token);
@@ -727,6 +822,7 @@ impl App {
                 self.host_tool_abort = None;
                 self.host_progress_inflight = false;
                 self.interrupting = false;
+                self.active_rewind_checkpoint = rewind_checkpoint;
                 return Some(pump(rx));
             }
 
@@ -736,9 +832,15 @@ impl App {
                 }
                 self.stream_join_settling = false;
                 self.stream_settle_abort = None;
-                self.state = State::Idle;
-                self.relayout();
-                return self.continue_after_stream_settled(synthesis);
+                return self.start_rewind_checkpoint_finalization(token, synthesis);
+            }
+
+            Msg::RewindCheckpointFinalized {
+                token,
+                checkpoint,
+                synthesis,
+            } => {
+                return self.finish_rewind_checkpoint_finalization(token, checkpoint, synthesis);
             }
 
             Msg::DiscardedStreamSettled { token } => {
@@ -779,9 +881,6 @@ impl App {
                 }
                 self.relayout();
                 self.push_notice(NoticeKind::Error, &e);
-                if self.recover_deep_research_report_after_model_error(&e) {
-                    return self.complete_turn();
-                }
                 self.loop_remaining = 0; // a failed turn stops the /loop
                 self.review_pending = false; // a turn that never started can't
                 self.sleep_pending = false; // deliver a review/sleep report
@@ -802,6 +901,7 @@ impl App {
                 if self.goal_run.is_some() {
                     return self.continue_goal_run(Some(e));
                 }
+                self.discard_active_rewind_checkpoint();
                 self.restore_autonomy();
                 // Don't strand messages queued while this turn was starting.
                 return self.drain_queue();
@@ -861,6 +961,7 @@ impl App {
                 if deep_research_interrupted {
                     self.invalidate_subagent_snapshots();
                 }
+                self.discard_active_rewind_checkpoint();
                 self.finish();
                 let continuation =
                     Self::interrupted_continuation(goal_cancelled, deep_research_interrupted);
@@ -904,13 +1005,6 @@ impl App {
                 self.record_local_agent_terminal(crate::system_agents::AgentActivityState::Failed);
                 self.finalize_streaming();
                 self.preserve_interrupted_tools();
-                if self.deep_research_loop.is_some()
-                    && self.recover_deep_research_report_after_model_error(
-                        "DeepResearch model stream closed before a terminal event.",
-                    )
-                {
-                    return self.complete_turn();
-                }
                 // An asset-review report fully streamed before the drop still
                 // counts — same for a `/sleep` consolidation report.
                 let turn_text = self.turn_text.clone();
@@ -945,6 +1039,7 @@ impl App {
 
             Msg::AgentPresenceTick => {
                 let mut commands = vec![agent_presence_tick()];
+                self.sync_agent_island_preference();
                 if let Some(restart) = self.poll_agent_island() {
                     commands.push(restart);
                 }
@@ -960,6 +1055,14 @@ impl App {
 
             Msg::AgentIslandLaunchFinished(result) => {
                 self.apply_agent_island_launch_result(result);
+            }
+
+            Msg::AgentIslandControl(request) => {
+                return self.apply_agent_island_control(request);
+            }
+
+            Msg::AgentIslandSubagentCancelFinished { task_id, cancelled } => {
+                self.apply_agent_island_subagent_cancel_result(task_id, cancelled);
             }
 
             Msg::BannerTick => {
@@ -1147,14 +1250,14 @@ impl App {
             Msg::ModalConfirm {
                 tool_id,
                 approved,
-                approve_all_pending,
+                reason,
             } => {
-                let pending = take_pending_tools_for_confirmation(
-                    &mut self.pending_tools,
-                    &tool_id,
-                    approved && approve_all_pending,
-                );
-                if !pending.is_empty() {
+                let pending = take_pending_tool_for_confirmation(&mut self.pending_tools, &tool_id);
+                if let Some(pending) = pending {
+                    self.restore_approval_feedback_for(&tool_id);
+                    if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                        self.permission_rule_write_inflight = None;
+                    }
                     self.approval_sel = 0;
                     self.state = if self.pending_tools.is_empty() {
                         State::Streaming
@@ -1164,9 +1267,9 @@ impl App {
                     let session = self.session.clone();
                     return Some(cmd::batch(vec![
                         cmd::cmd(move || async move {
-                            for (tool_id, _) in pending {
-                                let _ = session.confirm_tool_use(&tool_id, approved, None).await;
-                            }
+                            let _ = session
+                                .confirm_tool_use(&pending.tool_id, approved, reason)
+                                .await;
                             Msg::Resume
                         }),
                         spinner_tick(),
@@ -1178,6 +1281,70 @@ impl App {
                 } else {
                     State::Awaiting
                 };
+            }
+
+            Msg::PersistProjectPermission { tool_id, grant } => {
+                if self.permission_rule_write_inflight.as_deref() != Some(tool_id.as_str())
+                    || self
+                        .pending_tools
+                        .front()
+                        .is_none_or(|pending| pending.tool_id.as_str() != tool_id.as_str())
+                {
+                    return None;
+                }
+                let path = self.project_permission_rules_path.clone();
+                let persisted_grant = grant.clone();
+                return Some(cmd::cmd(move || async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        persist_project_permission_grant(&path, persisted_grant)
+                    })
+                    .await
+                    .map_err(|error| format!("permission rule writer failed: {error}"))
+                    .and_then(|result| result);
+                    Msg::ProjectPermissionPersisted {
+                        tool_id,
+                        grant,
+                        result,
+                    }
+                }));
+            }
+
+            Msg::ProjectPermissionPersisted {
+                tool_id,
+                grant,
+                result,
+            } => {
+                if self.permission_rule_write_inflight.as_deref() == Some(tool_id.as_str()) {
+                    self.permission_rule_write_inflight = None;
+                }
+                match result {
+                    Ok(path) => {
+                        let scope = grant.scope_label();
+                        self.permission_grants.allow_for_project(grant);
+                        self.refresh_permission_panel_grants();
+                        self.push_notice(
+                            NoticeKind::Info,
+                            format!("Project permission saved to {} · {scope}", path.display()),
+                        );
+                        if self
+                            .pending_tools
+                            .front()
+                            .is_some_and(|pending| pending.tool_id.as_str() == tool_id.as_str())
+                        {
+                            return Some(cmd::msg(Msg::ModalConfirm {
+                                tool_id,
+                                approved: true,
+                                reason: None,
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        self.push_notice(
+                            NoticeKind::Warning,
+                            format!("Project permission was not saved: {error}"),
+                        );
+                    }
+                }
             }
 
             other => return self.handle_async_message(other),
@@ -1218,5 +1385,45 @@ mod tests {
             composer_attachment_key_action(&key(KeyCode::Backspace, KeyModifiers::NONE), "", 1,),
             Some(ComposerAttachmentKeyAction::RemoveLastImage)
         );
+    }
+
+    #[test]
+    fn send_now_has_a_distinct_control_chord() {
+        assert!(is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE
+        )));
+        assert!(!is_send_now_key(&key(
+            KeyCode::Enter,
+            KeyModifiers::CONTROL
+        )));
+    }
+
+    #[test]
+    fn empty_enter_promotes_the_queue_head_only_during_a_live_turn() {
+        let enter = key(KeyCode::Enter, KeyModifiers::NONE);
+
+        assert!(should_send_top_queued_now(
+            &enter, "", 0, false, true, false
+        ));
+        assert!(!should_send_top_queued_now(
+            &enter, "draft", 0, false, true, false
+        ));
+        assert!(!should_send_top_queued_now(
+            &enter, "", 1, false, true, false
+        ));
+        assert!(!should_send_top_queued_now(
+            &enter, "", 0, true, true, false
+        ));
+        assert!(!should_send_top_queued_now(
+            &enter, "", 0, false, false, false
+        ));
+        assert!(!should_send_top_queued_now(
+            &enter, "", 0, false, true, true
+        ));
     }
 }

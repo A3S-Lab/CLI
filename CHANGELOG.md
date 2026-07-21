@@ -9,6 +9,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added the Core local workspace credential boundary to every Code TUI
+  manifest backend. Built-in reads, range reads, writes, edits, patches, and
+  grep now enforce the same sensitive-file and source-hardlink rules as
+  sandboxed Bash without blocking ordinary package-store hardlinks. Read-only
+  Git diff filters through the same path policy, option-like revisions cannot
+  become Git flags, and remote display removes embedded URL credentials and
+  query tokens.
+- Added a managed local command sandbox lifecycle for Code TUI startup.
+  Official CLI archives and Homebrew now carry the exact support tree, whose
+  package graph, file types, size bounds, and complete normalized digest are
+  verified before use. Standalone self-update replaces that tree
+  transactionally with the CLI. Offline mode and `A3S_NO_AUTO_INSTALL=1` can
+  use the release payload without mutation. Source and Cargo installs retain a
+  fixed, official-registry npm bootstrap with lifecycle scripts disabled.
+  Setup failure is non-fatal, Default can request one exact host command, and
+  Auto denies Bash without opening HITL.
+- Added `/checkup` as an audit-first A3S Code setup workflow. A typed,
+  host-owned preflight first checks the same installed-component set as
+  `a3s doctor`, active-executable/PATH shadowing, bounded ACL syntax and
+  semantic validity, skill/plugin context size and duplicates, indexed
+  `AGENTS.md` size, and in-memory MCP counts. The composer is locked while the
+  snapshot is collected, raw component paths, MCP errors, ACL contents, and
+  credentials never enter the prompt, and no MCP server is started by the
+  check. A host-enforced read-only Plan turn then audits `AGENTS.md`,
+  integrations, update state, and runtime policy before stopping at the
+  existing Approve / Revise / Abandon boundary. Auto mode is offered only as
+  an optional saved-session preference, and a read-only permission grant is
+  offered only when the transcript proves repeated denial of the same exact
+  tool and arguments. Only an explicitly approved follow-up may apply
+  confirmation-sized remediation tasks, and normal HITL remains authoritative
+  for every boundary crossing.
+- Added `/permissions` as a searchable exact-grant inspector. Session and
+  project grants remain visibly distinct, Enter opens their canonical
+  arguments, and `X` or Delete requires a second matching confirmation before
+  revocation. Both scopes stop authorizing new calls immediately; project
+  removal then atomically rewrites `.a3s/permissions.acl` through `a3s-acl` and
+  restores the in-memory grant if persistence fails. Revocation affects future
+  checks and never claims to cancel an already-running tool.
+- Added reliable TUI session sharing. `/copy` copies the latest assistant
+  source Markdown, `/copy transcript` requests the complete semantic session
+  through the native clipboard or bounded OSC 52 path, and `/export [path]`
+  atomically creates a private no-clobber Markdown snapshot inside the current
+  workspace. Exports preserve visible messages, tools, and delegated results
+  while excluding private reasoning, transient terminal chrome, and hidden
+  duplicate cells.
+- Added `/history` and `Ctrl+R` prompt-history search. The non-blocking modal
+  preserves the current draft, ranks fuzzy matches by relevance and recency,
+  retains duplicate prompts as distinct historical positions, caps rendering
+  at 100 results, supports keyboard and mouse navigation, cycles matches with
+  repeated Ctrl+R, and restores a selected prompt with Enter or Tab.
+- Added `/tasks` and `Ctrl+B` as a live delegated-work control panel. It reads
+  authoritative Core task snapshots without interrupting the parent turn,
+  retains running tasks plus bounded recent history, preserves semantic
+  selection across one-second refreshes, searches progress and output, opens
+  full task details, and requires a second matching action before invoking real
+  subagent cancellation.
+- Added a `/queue` modal for pending TUI follow-ups. It preserves Lane
+  priority/FIFO metadata while selecting by stable sequence, shows each
+  submission-time execution mode, sends the exact selected row now without
+  losing attachments or Plan state, removes individual rows, and requires a
+  second explicit decision before clearing all pending work. Enter on an empty
+  composer now sends the current queue head immediately during a live turn.
+- Added policy-aware A3S Use preparation to Code TUI startup. A missing Use
+  component is installed from its verified release before terminal takeover
+  when networking and automatic setup are allowed; offline mode and
+  `A3S_NO_AUTO_INSTALL=1` remain strict zero-network, zero-receipt boundaries.
+  Browser, native Office, built-in OCR, and verified external MCP/Skill
+  surfaces are then projected into the dedicated restricted `use` worker.
+- Added conflict-safe TUI recovery workflows. `/fork worktree` creates an
+  isolated sibling branch/worktree, transfers tracked and untracked workspace
+  content without changing the real Git index, and copies the complete session
+  plus TUI sidecar. Ordinary prompts retain bounded pre/post Git tree
+  checkpoints, and `/rewind` forks the pre-turn conversation before reversing
+  a whole-turn patch only when conflict checks pass.
 - Added pinned-root TUF registries for external Use packages, including full
   metadata refresh, review/apply-bound install plans, signed provenance
   receipts, and source-preserving upgrades. Registry upgrades query only the
@@ -19,12 +93,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checkpoints resume only while their receipt and health state still match,
   interrupted records remain inspectable, and recovered JSON operations are
   marked explicitly without changing partial-success semantics.
-- Added a source-grounded, perspective-guided DeepResearch inquiry path. An
-  LLM-authored semantic plan now selects focused or perspective-guided
-  research, commits stable research obligations and observable stop
-  conditions, scouts the source landscape before deriving perspectives, and
-  asks bounded evidence-driven follow-up questions without topic rules or
-  fixed expert templates.
+- Added a minimal host-managed DeepResearch pipeline: one LLM-authored semantic
+  plan commits stable research obligations and observable stop conditions, an
+  initial bounded retrieval pass gathers evidence, closed semantic reduction
+  returns chunk IDs plus typed source-to-obligation coverage, and one optional
+  supplemental pass fetches at most two remaining candidates beyond the eight
+  initial web-fetch slots when typed criterion/source-role coverage or an
+  operational fetch/source-selection gap remains. Provider queries are never
+  regenerated or rewritten. Questions linked to the same research obligation
+  share one durable closed-evidence review, and one Host-derived typed contract
+  assessment gates the report.
+  Active execution has no scout, perspective, maker/checker, query-generating
+  follow-up wave, or adaptive-route branch.
+- Added native AnySearch and Tavily discovery to DeepResearch's fixed web
+  ensemble alongside DuckDuckGo. Ordinary `web_search` callers retain their
+  existing default engines; the research pipeline uses the broader ensemble
+  to improve official-source and release-record recall.
+- Added automatic per-run Loop Engineering contracts to DeepResearch. The
+  transient durable input declares `quota.mode = unlimited`, an immutable
+  `coverage_driven` stage graph, and maximum cardinality two for semantic
+  iteration, retrieval, and selection, followed by cardinality one for question
+  review, Host assessment, report transaction, and targeted revision. Rust
+  Inquiry validates it and remains terminal authority. It does not create
+  `.a3s/loops/` assets or restore maker/checker loops, while per-call deadlines,
+  output limits, concurrency ceilings, and closed-catalog bounds remain safety
+  fuses rather than quota accounting.
 - Added typed DeepResearch contract assessment and report-stage Inquiry
   events. Obligations, questions, accepted evidence, outline sections, drafts,
   audit results, and their graph relations are strictly replayable through the
@@ -43,21 +136,220 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parent and child task descriptions unless
   `A3S_AGENT_STATUS_SHARE_TASKS=1` explicitly enables local sharing. The CLI
   atomically exports the same bounded, sanitized evidence to a private snapshot
-  and best-effort launches `a3s-webview --agent-island`, which owns the
-  independent desktop window, requested at screen top center, and its
-  click-to-expand interaction.
-  The island never overlays or intercepts input inside the terminal.
+  and best-effort launches `a3s-webview --agent-island` after either a fresh
+  exact non-idle lifecycle or a recognized coding-agent process appears.
+  Process-only observations count as running evidence, keep the surface alive,
+  and enable its multicolor breathing border while remaining explicitly
+  inferred and control-free. Every TUI shares the same per-user snapshot and
+  singleton lock, so concurrent `a3s code` instances render only one island.
+  The helper owns the independent desktop window, requested at screen top
+  center, and reserves transparent glow bleed around its rounded surface. On
+  macOS it reads the display safe areas, joins a centered notch at the physical
+  top edge, and places compact content in the two safe side wings. A dedicated
+  handle starts native window dragging; successful manual placement disables
+  periodic recentering, and expand/collapse preserves the moved top-center.
+  Exact HITL rows now display the bounded approval reason, use larger action
+  buttons, and accept a direct bounded reply through the existing private,
+  one-shot control queue. An approval-time reply queues a normal follow-up
+  without implicitly approving or denying the tool. The island never overlays
+  or intercepts input inside the terminal.
 
 ### Fixed
 
+- Restored Ctrl+C shutdown for foreground `a3s web` when launched from a raw
+  terminal with signal generation disabled, while preserving and restoring the
+  caller's original terminal mode.
+- Made DeepResearch generation capacity session-scoped across independent
+  host-direct Flow calls, preventing parallel obligation reviews from bypassing
+  a provider's typed single-flight contract. Replaced the ineffective use of a
+  per-Program timeout as the retrieval clock with a durable 45-minute Inquiry
+  policy: one real 25-minute whole-retrieval deadline, a protected 15-minute
+  closed-review stage, and a two-minute finalization reserve. Review groups keep
+  completed durable siblings, bound unfinished units at the stage deadline,
+  and use at most two identical 300-second active attempts after admission;
+  this recovers a stuck provider generation while the 15-minute review-stage
+  deadline remains authoritative. The planner now
+  has a 360-second active-generation fuse; the shared Inquiry deadline still
+  shortens retrieval when planning consumes that long-tail allowance.
+- Added a durable initial-evidence checkpoint before optional supplemental
+  retrieval. If the shared 25-minute retrieval deadline interrupts supplemental
+  admission, fetch, or semantic selection, the Host now validates and restores
+  the same run/query checkpoint and continues closed review instead of losing
+  completed material evidence and publishing an empty Recovery report.
+- Prevented DeepResearch semantic-selector fan-out from consuming active model
+  deadlines while an OpenAI-compatible or account provider is still waiting
+  for generation capacity. Unknown capacity is now conservatively
+  single-flight, admission is cancellation-safe, and durable
+  `generate_object` metadata separates queue wait from the active timeout.
+  Flow now acquires capacity before starting the selector's Program VM and
+  passes a one-shot identity-checked permit into the nested generation, so
+  neither deadline includes queue wait and concurrent nested calls cannot
+  reuse a reservation. Candidate admission and small-catalog selection retain a
+  bounded 210-second active fuse, while one-shot source-local selectors receive
+  270 seconds after admission.
+- Replaced the semantic selector's contradictory source-role contract with a
+  complete typed role object. Its schema requires `supporting=true` and
+  explicit `primary` and `independent` booleans; the Host validates every flag
+  before canonicalizing the edge. A schema-valid primary source can no longer
+  be rejected merely because an independently required support label was
+  omitted.
+- Added exact source/obligation relevance edges beside full criterion-coverage
+  edges. Obligation reviews now receive only relevance-linked evidence plus
+  explicitly unscoped legacy evidence, reducing prompt size without lexical
+  filtering. Provider schemas now use short Host-owned evidence references such
+  as `E1` instead of requiring models to reproduce long evidence hashes; the
+  Host maps each reference through the exact closed catalog per question, so a
+  malformed citation bounds only that question instead of discarding its valid
+  sibling. The Host now also isolates wire decoding per expected question and
+  safely demotes `answered` entries with an explicit limitation to `partial`,
+  preventing one schema-valid status contradiction from erasing every answer in
+  a shared obligation review.
+  Supplemental recovery now records each initial candidate as retained,
+  fetch-failed, or selection-empty and avoids repeating a failed transport
+  surface when a distinct candidate remains.
+- Made every committed section evidence binding an explicit citation
+  requirement. Initial section writers must cite one exact source from every
+  binding, and the single targeted revision receives the precise uncited
+  binding/source alternatives instead of an opaque claim ID, preventing an
+  otherwise unfixable repeat of the same cross-evidence audit failure.
+- Made citation repair monotonic across a complete replacement. Revision input
+  now repeats the exact accepted source alternatives for every binding, not only
+  the binding missing from the prior draft, and forbids constructing deeper
+  links from claim text. The Host canonicalizes only a strict same-origin path
+  descendant to the longest committed parent source; lexical siblings and
+  root-domain widening remain rejected.
+- Added bounded claim excerpts to closed section and revision packets and a
+  deterministic date-grounding audit. ISO, English, and Chinese full dates are
+  normalized before publication; a transcribed date absent from the section's
+  committed claims is rejected and routed through the single targeted revision.
+  Section prompts also preserve useful partial answers and forbid mentioning
+  outside knowledge even as a disclaimer.
+- Tightened the closed-evidence reasoning boundary across question review,
+  section generation and revision, and editorial framing. Models must preserve
+  source metadata semantics, cannot calculate unstated intervals, turn a
+  dependency into incompatibility, turn discontinuation into a promise of no
+  future fixes, assign unsupported properties to a recommended replacement, or
+  generalize a few reviewed examples into an ecosystem-wide claim. Internal web
+  discovery/review notes remain available to assessment but no longer appear in
+  the reader-facing source ledger. Reader-facing review, section, revision, and
+  frame text must use the query language, and a question-local evidence gap
+  cannot be widened into a report-wide absence. The editorial frame now receives
+  a 270-second active-generation allowance and obligation review receives 300
+  seconds per attempt, so source-complete reports are not degraded by their
+  former 180- and 270-second tail fuses.
+- Kept provider titles, snippets, ranking, engine names, and dates on the
+  discovery side of the DeepResearch evidence boundary. In particular, an
+  index, crawl, or documentation-build date can no longer become a claimed
+  publication date unless the fetched source text establishes it. Semantic
+  source admission now fills the fixed eight-slot initial web-fetch allowance
+  with coverage-resilient alternatives when enough candidates exist, and typed
+  criterion coverage is emitted only when the
+  selected fetched text resolves every material element; partial relevance
+  remains retained evidence but stays a typed gap that can trigger the single
+  supplemental pass. The planner now restricts every completion criterion to
+  one independently sourced target, preventing comparison-wide criteria that no
+  single source can close. GitHub release
+  catalogs are fetched through their official Atom feeds, and a child result
+  hidden by the aggregate `batch` output cap is detected and refetched alone;
+  truncated navigation can no longer be silently promoted as source text.
+- Made A3S Web startup idempotent and ownership-safe. Repeated and concurrent
+  managed starts now converge on one healthy workspace instance, while
+  foreground and legacy A3S listeners can be discovered and reused without
+  granting stop authority. Listener reservation happens before assets,
+  configuration, and session restoration; foreign port owners are never
+  signaled; `--replace` performs only authenticated graceful replacement of a
+  managed instance. Packaged Web assets are again discovered beside the
+  executable and under `share/a3s/web`, and unavailable saved-session warnings
+  are summarized without deleting their data.
+- Replaced tool-category and shell-string approval routing in Code TUI with an
+  enforced local process boundary. When the verified managed runtime is ready,
+  Default mode runs workspace file mutations, ordinary shell commands, and
+  governed nested orchestration without repeated HITL prompts; only explicit
+  host escalation, missing-sandbox shell execution, protected
+  Git/configuration changes, and annotated external side effects remain
+  interactive. Plan denies mutations, while Auto never opens HITL and fails
+  closed for sandbox escape or a missing process sandbox. The sandbox denies
+  network egress and local binding, limits writes to the workspace and per-run
+  scratch directory, protects control metadata, scrubs ambient secrets,
+  preserves streamed bounded output and timeouts, and is inherited by
+  delegated and Skill child runs without an unsandboxed fallback.
+- Froze permission and confirmation routing at run admission. Foreground,
+  queued, delegated, parallel, Skill, and background work now retain the exact
+  submitted mode even after the composer advances, so an Auto child cannot
+  start requesting HITL under a later Default turn. The managed sandbox also
+  denies existing nested `.env*` files and pre-existing multi-link source
+  aliases.
+- Restored consistent transcript vertical rhythm in both the main history and
+  the `Ctrl+T` view. One compositor-owned blank row now separates every
+  top-level message, notice, reasoning block, tool call, delegated-task result,
+  and live or finalized assistant cell; adjacent tool calls use the same rule
+  instead of forming a dense exception.
+- Wait for the initial A3S Use MCP projection within a bounded startup budget,
+  so the first model turn receives ready Use routes through `task`. Slow or
+  broken surfaces remain non-fatal and continue converging in the background.
+- Made TUI Auto mode genuinely non-interactive for every operation that
+  survives explicit policy and workspace hard denials, including confirmation
+  escalation requested by a tool implementation. Late confirmation events are
+  resolved before any approval projection is created, so hard denials fail
+  without opening or briefly flashing an approval prompt. Running and queued turns keep their
+  submission-time mode, while Plan mode remains strictly read-only.
+- Removed local lexical matching from DeepResearch source admission and
+  evidence selection. Planner-authored queries now reach search providers
+  unchanged. Safe candidate URLs are admitted by a closed semantic ID decision.
+  Fetched pages and PDFs plus exact Host-reread workspace ranges form one
+  complete multilingual chunk catalog. Catalogs of at most 10 chunks use one
+  complete selector; larger catalogs use exactly one complete source-local
+  selector per canonical source, without positional chunking or a lossy source
+  reducer. The complete-catalog ceiling is 384 chunks so an ordinary successful
+  eight-source portfolio is not discarded before source-local selection. Each
+  source retains at most four excerpts (2,800 characters), and a
+  source-local call gets one 270-second active attempt. A failed source unit
+  drops only that canonical source, preserves independently validated sibling
+  sources, and records an explicit operational gap that can trigger the one
+  supplemental replacement pass. Every fetched chunk for that source enters
+  the same selector call, and a completed sibling effect is reused after
+  interruption.
+  Duplicate, over-limit, oversized, and out-of-catalog IDs fail closed.
+  Active questions no longer receive provider queries by array position, and
+  query-term coverage counters and gates no longer affect completion.
+- Restricted the one transient fetch retry to structured `network`, `timeout`,
+  or `transport` error kinds. Transport-looking prose alone no longer schedules
+  another fetch.
+- Removed DeepResearch runtime selection and its disabled OS/adaptive-route
+  state. Interactive, smoke, and CLI runs now enter the same host-managed
+  pipeline; callers choose only the explicit web or local-only evidence scope.
 - Checkpointed DeepResearch Inquiry prefixes after logical transactions and
-  made report synthesis resume from a committed outline, existing drafts, or
-  an audit boundary. Parallel A3S Flow section work uses stable run IDs;
-  deterministic audit failures revise only affected sections for at most two
-  rounds instead of restarting the full investigation or looping indefinitely.
+  made the same sectioned-report transaction resume from a committed outline,
+  existing drafts, or an audit boundary. Completed Flow effects retain stable
+  identities across restart, while active report generation shares one global
+  targeted-section-revision allowance followed by one deterministic re-audit.
+  One idempotent `research.report.started` event anchors the complete report
+  budget across process restart; callers cannot extend it, and wall-clock
+  regression fails closed. Resume does not reset that deadline or allowance or
+  create another completed-report pipeline.
+- Replaced DeepResearch's report-writing compliance assumptions with Host
+  invariants. The Host now derives the outline from the typed
+  obligation/question/evidence graph, reviews all questions linked to one
+  obligation in one durable unit, runs at most three obligation or section calls
+  in flight, and owns the only contract assessment. Retrieval materializes
+  exactly one accepted evidence item per canonical source and keeps only that
+  source's claims and coverage on the item; the global key-evidence truncation
+  was removed. Section source IDs are derived from exact inline Markdown
+  anchors: every committed claim requires one cited source from the same
+  source-local accepted evidence binding, but unused alternative sources no
+  longer trigger a model rewrite or enter the published source ledger. Nested
+  H1/H2 syntax is deterministically demoted, and qualified cautions use typed
+  question limitations, obligation metadata, and evidence diagnostics instead
+  of leaking internal assessment rationale. An exact accepted URL emitted as
+  citation-shaped `[https://…]` text is canonicalized to a CommonMark autolink
+  outside code before citation extraction, without lexical relevance
+  inference.
 - Required host-managed DeepResearch output to carry exactly one committed
   research contract and one contract assessment before reporting, preventing
   missing event/state pairs from falling back to legacy completion authority.
+  Rust now stamps that authority while attaching every current Inquiry
+  projection, so retrieval-adapter or historical checker fields cannot regain
+  terminal control.
 - Deferred default-model validation from agent bootstrap to session creation so
   hosts can start account-only sessions with an injected Claude, Codex, Kimi,
   or WorkBuddy client while sessions lacking both sources still fail with an
@@ -69,7 +361,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restored the Code TUI `/relay` picker for native A3S Code sessions and
   Claude Code or Codex task handoff, added WorkBuddy project transcripts as a
   fourth source, and preserved the selected native session's model, effort,
-  execution mode, theme, and paused-goal state during an in-app resume.
+  execution mode, theme, and paused-goal state during an in-app resume. The
+  panel now pins the current session and surfaces saved state, model, age,
+  unfinished runs, and live background-agent counts. It keeps stable semantic
+  selection across manual or 15-second refreshes, searches a bounded 64-row
+  catalog per source, remembers each source tab independently, supports wheel
+  navigation, and provides a compact task peek before continuation.
 
 ## [0.9.1] - 2026-07-16
 

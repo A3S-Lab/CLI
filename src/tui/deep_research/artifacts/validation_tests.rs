@@ -166,7 +166,7 @@ fn generated_report_sanitizes_one_unobserved_url_without_discarding_the_report()
     assert!(cleaned.contains(observed), "{cleaned}");
     assert!(!cleaned.contains(mistyped), "{cleaned}");
     assert!(cleaned.contains("a mistyped duplicate"), "{cleaned}");
-    assert!(!cleaned.contains("- Mistyped duplicate"), "{cleaned}");
+    assert!(cleaned.contains("- Mistyped duplicate"), "{cleaned}");
 
     let html = deep_research_completed_report_html("Runtime report", &cleaned);
     deep_research_report_source_trace_diagnostic(
@@ -180,9 +180,49 @@ fn generated_report_sanitizes_one_unobserved_url_without_discarding_the_report()
 }
 
 #[test]
+fn generated_report_sanitizes_an_unobserved_autolink_inside_bold_disclosure() {
+    let observed = "https://example.com/observed";
+    let unavailable = "https://github.com/launchbadge/sqlx/issues/1669";
+    let workflow_output = observed_workflow_output(&[observed]);
+    let markdown = format!(
+        "# Runtime report\n\n\
+         > [!CAUTION]\n\
+         > **Evidence boundaries**\n\
+         >\n\
+         > - **Fetch retained no substantive text for {unavailable}.** — The unavailable page remains an explicit evidence gap.\n\n\
+         ## Findings\n\nA substantive comparison remains supported by [the observed source]({observed}).\n\n\
+         ## Sources\n\n- [Observed source]({observed})\n\n\
+         ## Limitations\n\nConfidence is bounded by the unavailable corroboration.\n"
+    );
+
+    let cleaned = sanitize_unobserved_markdown_http_citations(
+        &markdown,
+        "Runtime report",
+        &workflow_output,
+        None,
+    );
+
+    assert!(cleaned.contains(observed), "{cleaned}");
+    assert!(!cleaned.contains(unavailable), "{cleaned}");
+    assert!(
+        cleaned.contains("Fetch retained no substantive text"),
+        "{cleaned}"
+    );
+    let html = deep_research_completed_report_html("Runtime report", &cleaned);
+    deep_research_report_source_trace_diagnostic(
+        &cleaned,
+        &html,
+        "Runtime report",
+        &workflow_output,
+        None,
+    )
+    .expect("bold evidence-boundary prose must not create an unobserved citation");
+}
+
+#[test]
 fn internal_status_text_has_a_specific_rejection_diagnostic() {
     let workflow_output = observed_workflow_output(&["https://example.com/observed"]);
-    let answer = "# Runtime report\n\n## Findings\n\nCreated the report directory and wrote the HTML report. This deliberately contains enough additional text to pass the length boundary.\n\n## Sources\n\n- https://example.com/observed\n\n## Limitations\n\nConfidence is bounded.\n";
+    let answer = "# Runtime report\n\n## Findings\n\nDynamicWorkflowRuntime output: an internal transport record that must never be published. This deliberately contains enough additional text to pass the length boundary.\n\n## Sources\n\n- https://example.com/observed\n\n## Limitations\n\nConfidence is bounded.\n";
 
     let diagnostic = deep_research_report_rejection_diagnostic_from_answer_text(
         "Runtime report",

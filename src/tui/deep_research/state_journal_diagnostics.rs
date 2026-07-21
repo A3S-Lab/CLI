@@ -22,12 +22,12 @@ pub(crate) async fn research_diagnostic(
         load_latest_journal(workspace).await?
     };
     let head = graph_event_head(runtime.events()).unwrap_or("none");
-    let coverage = projection
-        .report_claim_coverage_basis_points
-        .map(|basis_points| format!("{:.1}%", f32::from(basis_points) / 100.0))
+    let cited_sources = projection
+        .report_cited_source_count
+        .map(|count| count.to_string())
         .unwrap_or_else(|| "not audited".to_string());
     let common = format!(
-        "DeepResearch run {}\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\nactive: {} steps · {} children\nclaim coverage: {}",
+        "DeepResearch run {}\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\nactive: {} steps · {} children\ncited sources: {}",
         projection.run_id,
         outcome_name(projection.outcome),
         projection.accepted_evidence_count,
@@ -35,7 +35,7 @@ pub(crate) async fn research_diagnostic(
         projection.claim_count,
         projection.active_steps.len(),
         projection.active_children.len(),
-        coverage,
+        cited_sources,
     );
     Ok(match kind {
         ResearchDiagnosticKind::Status => common,

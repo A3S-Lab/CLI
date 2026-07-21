@@ -736,9 +736,11 @@ impl App {
         );
         let automatic_delegation = effort_uses_automatic_delegation(profile.effort);
         let mut opts = with_recent_workspace_context(
-            tui_session_options_with_gate(
+            tui_session_options_with_gate_grants_and_execution(
                 self.confirmation.clone(),
                 self.deep_research_report_tool_gate.clone(),
+                self.permission_grants.clone(),
+                self.execution_policy.clone(),
             )
             .with_session_store(self.store.clone())
             .with_session_id(profile.session_id.as_str())
@@ -1012,6 +1014,22 @@ impl App {
                             )));
                             return self.drain_queue();
                         }
+                        SessionRebuildAction::Rewind {
+                            session_id,
+                            files_rewound,
+                            ..
+                        } => {
+                            let file_note = if *files_rewound {
+                                " Workspace files were rewound safely."
+                            } else {
+                                ""
+                            };
+                            self.push_line(&Style::new().fg(TN_RED).render(&format!(
+                                "  rewound session could not be opened: {error}.{file_note} \
+                                 Resume the saved conversation with: a3s code resume {session_id}"
+                            )));
+                            return self.drain_queue();
+                        }
                         _ => {}
                     }
                     if matches!(action, SessionRebuildAction::Compact { .. }) {
@@ -1025,6 +1043,7 @@ impl App {
                         SessionRebuildAction::GoalRestore => unreachable!("handled above"),
                         SessionRebuildAction::Compact { .. } => "compact context",
                         SessionRebuildAction::Fork { .. } => "fork session",
+                        SessionRebuildAction::Rewind { .. } => "resume rewound session",
                         SessionRebuildAction::Relay { .. } => "resume relay session",
                         SessionRebuildAction::Clear { .. } => "clear session",
                         SessionRebuildAction::Reload { .. } => "reload session",
@@ -1071,7 +1090,7 @@ impl App {
                     )));
                 }
                 if selected == ULTRACODE {
-                    self.mode = Mode::Auto;
+                    self.set_composer_mode(Mode::Auto);
                     self.gradient_until = Some(Instant::now());
                     self.gradient_frame = 0;
                     let native = codex_effort
@@ -1082,7 +1101,7 @@ impl App {
                         })
                         .unwrap_or_default();
                     self.push_line(&Style::new().fg(ACCENT).bold().render(&format!(
-                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (auto-approve on){native}",
+                        "  ◆ ultracode — planning a dynamic workflow + parallel subagents (non-interactive Auto on){native}",
                     )));
                 } else if let Some(status) = codex_effort {
                     let cap = if status.capped { " (model limit)" } else { "" };
@@ -1171,6 +1190,45 @@ impl App {
                     &format!("⑂ forked into a new session ({short}) — the original is kept"),
                 ));
             }
+            SessionRebuildAction::Rewind {
+                session_id,
+                files_rewound,
+                warning,
+            } => {
+                let history = session.history();
+                let entries = app_launch::resumed_transcript_entries(&history);
+                self.restore_autonomy();
+                self.session_id = session_id;
+                self.replace_session(session);
+                self.messages = Transcript::from_entries(entries);
+                self.compact_summary = None;
+                self.plan.clear();
+                self.runtime.clear_turn_entities();
+                self.runtime.clear_subagent_entities();
+                self.active_rewind_checkpoint = None;
+                self.rewind_checkpoints.clear();
+                self.rewind_finalization_pending = None;
+                self.output_tokens = 0;
+                self.last_prompt_tokens = 0;
+                self.ctx_warned_tier = 0;
+                let scope = if files_rewound {
+                    "conversation and workspace"
+                } else {
+                    "conversation"
+                };
+                self.push_line(&gutter(
+                    TN_CYAN,
+                    &format!("↶ rewound the last turn ({scope}) — original session kept"),
+                ));
+                if let Some(warning) = warning {
+                    self.push_line(
+                        &Style::new()
+                            .fg(TN_YELLOW)
+                            .render(&format!("  rewind note: {warning}")),
+                    );
+                }
+                self.rebuild_viewport();
+            }
             SessionRebuildAction::Relay { restore } => {
                 self.commit_relay_session(session, restore);
             }
@@ -1186,8 +1244,16 @@ impl App {
                 self.runtime.clear_turn_entities();
                 self.runtime.clear_subagent_entities();
                 self.queue.clear();
+                self.queued_turn_modes.clear();
+                self.queued_plan_drafts.clear();
+                self.send_now_queued_sequence = None;
+                self.queue_panel = None;
                 self.active_queued_turn = None;
                 self.active_queued_turn_token = None;
+                self.active_turn_mode = None;
+                self.active_plan_draft = None;
+                self.pending_plan_review = None;
+                self.plan_review = None;
                 self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
                 self.queue_retry_attempt = 0;
                 self.completed = 0;

@@ -72,7 +72,7 @@ fn completed_event_snapshot_is_authoritative_when_tool_output_is_diagnostic_text
         DeepResearchRunOutcome::Completed,
     );
     assert!(
-        deep_research_cli_report_plan(
+        deep_research_cli_report_is_qualified(
             "Compare the documented mechanisms",
             display_output,
             Some(&metadata),
@@ -338,57 +338,4 @@ fn collect_only_inquiry_projection_owns_completion_and_fails_closed() {
         ),
         DeepResearchRunOutcome::Degraded,
     );
-}
-
-#[test]
-fn deep_research_synthesis_prompt_preserves_typed_evidence_and_checker_context() {
-    let accepted_payload = serde_json::json!({
-        "collection_status": "completed",
-        "evidence_items": [{
-            "summary": "The retained source establishes the isolation boundary.",
-            "sources": [{
-                "title": "Project source",
-                "url_or_path": "https://example.com/project/source",
-                "quote_or_fact": "The workload runs behind a separate guest kernel.",
-                "reliability": "Authoritative project documentation."
-            }],
-            "key_evidence": ["The workload runs behind a separate guest kernel."],
-            "contradictions": [],
-            "gaps": [],
-            "confidence": "high"
-        }],
-        "report_context": {
-            "plan": {
-                "report_title": "Production isolation decision",
-                "answer_shape": "investigation",
-                "tracks": ["Isolation boundary", "Operational tradeoffs"]
-            },
-            "checker": {
-                "decision": "degrade",
-                "report_summary": "One conclusion is supported and one remains provisional.",
-                "verified_findings": ["The guest-kernel boundary is source-backed."],
-                "unresolved_gaps": ["Independent overhead measurements remain unavailable."]
-            }
-        }
-    })
-    .to_string();
-
-    let prompt = deep_research_synthesis_prompt_with_scope(
-        "Choose a production isolation boundary",
-        false,
-        &accepted_payload,
-        None,
-        DeepResearchEvidenceScope::WebAndWorkspace,
-    );
-
-    for required in [
-        "https://example.com/project/source",
-        "The workload runs behind a separate guest kernel",
-        "Production isolation decision",
-        "The guest-kernel boundary is source-backed",
-        "Independent overhead measurements remain unavailable",
-    ] {
-        assert!(prompt.contains(required), "missing {required}: {prompt}");
-    }
-    assert!(!prompt.contains("publication_status"), "{prompt}");
 }

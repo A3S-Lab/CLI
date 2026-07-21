@@ -5,108 +5,8 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DeepResearchLoop {
     pub(super) query: String,
-    pub(super) total_layers: usize,
-    pub(super) os_runtime: bool,
     pub(super) evidence_scope: DeepResearchEvidenceScope,
     pub(super) started_at: Instant,
-    pub(super) phase_started_at: Option<Instant>,
-}
-
-impl DeepResearchLoop {
-    pub(super) fn verification_prompt(&self, next_layer: usize) -> String {
-        let report_target = deep_research_report_target_note(&self.query);
-        deep_research_prompts::verification_prompt(deep_research_prompts::VerificationPrompt {
-            next_layer,
-            total_layers: self.total_layers,
-            query: &self.query,
-            report_target: &report_target,
-        })
-    }
-}
-
-pub(super) fn deep_research_report_repair_prompt_from_state(
-    loop_state: Option<&DeepResearchLoop>,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-    review_text: &str,
-) -> Option<String> {
-    let loop_state = loop_state?;
-    Some(deep_research_repair_prompt_with_scope(
-        &loop_state.query,
-        loop_state.os_runtime,
-        workflow_output,
-        workflow_metadata,
-        review_text,
-        loop_state.evidence_scope,
-    ))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WorkflowSubagentBackfill {
-    pub(super) task_id: String,
-    pub(super) agent: String,
-    pub(super) description: String,
-    pub(super) success: bool,
-}
-
-pub(super) fn workflow_parallel_subagent_backfills(
-    metadata: &serde_json::Value,
-) -> Vec<WorkflowSubagentBackfill> {
-    let Some(steps) = metadata
-        .pointer("/dynamic_workflow/snapshot/steps")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return Vec::new();
-    };
-
-    let mut backfills = Vec::new();
-    for step in steps.values() {
-        if step.get("step_name").and_then(serde_json::Value::as_str) != Some("parallel_task") {
-            continue;
-        }
-        let descriptions = step
-            .pointer("/input/tasks")
-            .and_then(serde_json::Value::as_array)
-            .map(|tasks| {
-                tasks
-                    .iter()
-                    .map(|task| {
-                        task.get("description")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("")
-                            .to_string()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let Some(results) = step
-            .pointer("/output/metadata/results")
-            .and_then(serde_json::Value::as_array)
-        else {
-            continue;
-        };
-        for (index, result) in results.iter().enumerate() {
-            let Some(task_id) = result.get("task_id").and_then(serde_json::Value::as_str) else {
-                continue;
-            };
-            let agent = result
-                .get("agent")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("general")
-                .to_string();
-            let success = result
-                .get("success")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            backfills.push(WorkflowSubagentBackfill {
-                task_id: task_id.to_string(),
-                agent,
-                description: descriptions.get(index).cloned().unwrap_or_default(),
-                success,
-            });
-        }
-    }
-    backfills
 }
 
 pub(super) fn is_new_remote_view(
@@ -116,35 +16,30 @@ pub(super) fn is_new_remote_view(
     last_view != Some(spec)
 }
 
-pub(super) fn take_pending_tool_label(
-    pending_tools: &mut VecDeque<(String, String)>,
+pub(super) fn take_pending_tool_approval(
+    pending_tools: &mut VecDeque<PendingToolApproval>,
     tool_id: &str,
-) -> Option<(String, bool)> {
+) -> Option<(PendingToolApproval, bool)> {
     let index = pending_tools
         .iter()
-        .position(|(pending_id, _)| pending_id == tool_id)?;
+        .position(|pending| pending.tool_id == tool_id)?;
     let was_front = index == 0;
     pending_tools
         .remove(index)
-        .map(|(_, label)| (label, was_front))
+        .map(|pending| (pending, was_front))
 }
 
-pub(super) fn take_pending_tools_for_confirmation(
-    pending_tools: &mut VecDeque<(String, String)>,
+pub(super) fn take_pending_tool_for_confirmation(
+    pending_tools: &mut VecDeque<PendingToolApproval>,
     expected_tool_id: &str,
-    take_all: bool,
-) -> Vec<(String, String)> {
+) -> Option<PendingToolApproval> {
     if pending_tools
         .front()
-        .is_none_or(|(tool_id, _)| tool_id != expected_tool_id)
+        .is_none_or(|pending| pending.tool_id != expected_tool_id)
     {
-        return Vec::new();
+        return None;
     }
-    if take_all {
-        pending_tools.drain(..).collect()
-    } else {
-        pending_tools.pop_front().into_iter().collect()
-    }
+    pending_tools.pop_front()
 }
 
 /// Presentation ownership for a model-requested tool call.

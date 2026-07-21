@@ -7,6 +7,82 @@ use crate::cli::context::InvocationContext;
 const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 
+fn tui_manifest_backend(workspace: &Path) -> Arc<ManifestWorkspaceBackend> {
+    ManifestWorkspaceBackend::new_with_access_policy(
+        workspace,
+        a3s_code_core::workspace::LocalWorkspaceAccessPolicy::CredentialBoundary,
+    )
+}
+
+struct CodeUseResolution {
+    executable: Option<PathBuf>,
+    warning: Option<String>,
+}
+
+async fn resolve_code_use_with<D, F, Fut>(
+    allow_first_use_install: bool,
+    offline: bool,
+    discover: D,
+    install: F,
+) -> CodeUseResolution
+where
+    D: FnOnce() -> anyhow::Result<Option<PathBuf>>,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<PathBuf>>,
+{
+    match discover() {
+        Ok(Some(executable)) => CodeUseResolution {
+            executable: Some(executable),
+            warning: None,
+        },
+        Ok(None) if allow_first_use_install => match install().await {
+            Ok(executable) => CodeUseResolution {
+                executable: Some(executable),
+                warning: None,
+            },
+            Err(error) => CodeUseResolution {
+                executable: None,
+                warning: Some(format!(
+                    "A3S Use first-use setup failed; Code will continue without application capabilities: {error}. Run /use repair for recovery guidance"
+                )),
+            },
+        },
+        Ok(None) => CodeUseResolution {
+            executable: None,
+            warning: Some(if offline {
+                "A3S Use is not ready and first-use setup is disabled in offline mode; run /use repair after going online"
+                    .to_string()
+            } else {
+                "A3S Use is not ready and first-use setup is disabled by A3S_NO_AUTO_INSTALL; run /use repair for explicit setup"
+                    .to_string()
+            }),
+        },
+        Err(error) => CodeUseResolution {
+            executable: None,
+            warning: Some(format!(
+                "A3S Use discovery failed; Code will continue without application capabilities: {error}. Run /use repair for recovery guidance"
+            )),
+        },
+    }
+}
+
+async fn resolve_code_use(context: &InvocationContext) -> CodeUseResolution {
+    resolve_code_use_with(
+        context.network.allow_first_use_install,
+        context.network.offline,
+        || a3s::components::find_ready_executable_with("use", &context.component_paths),
+        || {
+            a3s::components::resolve_or_install_with(
+                "use",
+                &context.component_paths,
+                context.network.allow_first_use_install,
+                context.output.progress,
+            )
+        },
+    )
+    .await
+}
+
 pub(crate) fn resolve_tui_session_store_dir(workspace: &Path) -> PathBuf {
     let tui_dir = workspace.join(".a3s/tui");
     let canonical = tui_dir.join("sessions");
@@ -396,6 +472,10 @@ pub(crate) async fn run_in(
         .and_then(TuiSessionState::effort_index)
         .or_else(load_tui_effort_preference)
         .unwrap_or(DEFAULT_TUI_EFFORT_INDEX);
+    let initial_mode = tui_session_state
+        .as_ref()
+        .map(TuiSessionState::mode)
+        .unwrap_or(Mode::Default);
     let sidecar_model_preference = tui_session_state
         .as_ref()
         .and_then(|state| state.model.clone());
@@ -464,6 +544,46 @@ pub(crate) async fn run_in(
     let initial_auto_delegation = effort_uses_automatic_delegation(initial_effort);
     let deep_research_report_tool_gate = DeepResearchReportToolGate::default();
     deep_research_report_tool_gate.set_workspace(Path::new(&workspace));
+    let project_permission_rules_path = project_permission_rules_path(Path::new(&workspace));
+    let permission_rules_to_load = project_permission_rules_path.clone();
+    let project_permission_load = tokio::task::spawn_blocking(move || {
+        load_project_permission_grants(&permission_rules_to_load)
+    })
+    .await
+    .map_err(|error| format!("permission rule loader failed: {error}"))
+    .and_then(|result| result);
+    let (project_permission_grants, project_permission_load_error) = match project_permission_load {
+        Ok(grants) => (grants, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
+    let managed_srt = a3s::components::resolve_managed_srt(
+        &context.component_paths,
+        Path::new(&workspace),
+        context.network.allow_first_use_install,
+        context.network.offline,
+        context.output.progress,
+    )
+    .await;
+    let (sandbox_handle, sandbox_load_warning) = match managed_srt.runtime {
+        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
+            Ok(sandbox) => (
+                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
+                None,
+            ),
+            Err(error) => (
+                None,
+                Some(format!(
+                    "Local command sandbox failed its bounded OS capability probe: {error}. \
+                     Default mode will ask before exact host Bash execution; Auto mode will deny \
+                     Bash. Repair the reported platform prerequisite and restart `a3s code`"
+                )),
+            ),
+        },
+        None => (None, managed_srt.warning),
+    };
+    let execution_policy =
+        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace), sandbox_handle);
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -491,7 +611,7 @@ pub(crate) async fn run_in(
             o.with_prompt_slots(SystemPromptSlots::default().with_extra(parts.join("\n\n")))
         }
     };
-    let manifest_backend = ManifestWorkspaceBackend::new(std::path::PathBuf::from(&workspace));
+    let manifest_backend = tui_manifest_backend(Path::new(&workspace));
     let workspace_manifest = manifest_backend.manifest();
     let initial_manifest = workspace_manifest.snapshot();
     let initial_files = initial_manifest.file_paths();
@@ -514,9 +634,11 @@ pub(crate) async fn run_in(
             session_id.as_str(),
             apply_launch_model_options(
                 with_instr(with_recent_workspace_context(
-                    tui_session_options_with_gate(
+                    tui_session_options_with_gate_grants_and_execution(
                         confirmation.clone(),
                         deep_research_report_tool_gate.clone(),
+                        permission_grants.clone(),
+                        execution_policy.clone(),
                     )
                     .with_session_store(store.clone())
                     .with_workspace_backend(workspace_services.clone())
@@ -555,9 +677,11 @@ pub(crate) async fn run_in(
                     workspace.clone(),
                     Some(apply_launch_model_options(
                         with_instr(with_recent_workspace_context(
-                            tui_session_options_with_gate(
+                            tui_session_options_with_gate_grants_and_execution(
                                 confirmation.clone(),
                                 deep_research_report_tool_gate.clone(),
+                                permission_grants.clone(),
+                                execution_policy.clone(),
                             )
                             .with_session_store(store.clone())
                             .with_session_id(session_id.as_str())
@@ -639,46 +763,42 @@ pub(crate) async fn run_in(
     let session = Arc::new(session);
     let active_session = Arc::new(std::sync::Mutex::new(Arc::clone(&session)));
 
-    // Headless smoke mode: exercise the agent-stream integration (the hard part
-    // the TUI depends on) without taking over the terminal. Useful for CI/probes
-    // and for validating a model/config end-to-end.
+    // A3S Use is a first-use component. Resolve an existing healthy install or
+    // prepare the verified release before terminal takeover, while preserving
+    // offline/A3S_NO_AUTO_INSTALL as strict no-mutation policies. Setup failure
+    // is non-fatal to Code and remains diagnosable through `/use`.
+    let use_resolution = resolve_code_use(context).await;
+    let (use_registry, registry_warning) = match use_resolution.executable {
+        Some(executable) => {
+            let (handle, warning) = crate::use_registry::start(
+                executable,
+                context.directory.clone(),
+                context.cancellation.child_token(),
+                Arc::clone(&session),
+            )
+            .await;
+            (Some(handle), warning)
+        }
+        None => (None, None),
+    };
+    for warning in [use_resolution.warning, registry_warning]
+        .into_iter()
+        .flatten()
+    {
+        initial_messages.push(TranscriptEntry::preformatted(
+            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+        ));
+    }
+
+    // Headless smoke mode exercises the same Use-projected session that the
+    // interactive TUI receives, without taking over the terminal.
     if std::env::var_os("A3S_CODE_TUI_SMOKE").is_some() {
         return run_smoke(
             session,
             Path::new(&workspace),
-            os_session.is_some(),
             deep_research_report_tool_gate,
         )
         .await;
-    }
-
-    // A3S Use is optional for Code, so TUI startup never installs it as a side
-    // effect. When a ready component exists, project its immutable registry
-    // generations into this session and keep watching for hot-plug changes.
-    let (use_registry, use_registry_warning) =
-        match a3s::components::find_ready_executable_with("use", &context.component_paths) {
-            Ok(Some(executable)) => {
-                let (handle, warning) = crate::use_registry::start(
-                    executable,
-                    context.directory.clone(),
-                    context.cancellation.child_token(),
-                    Arc::clone(&session),
-                )
-                .await;
-                (Some(handle), warning)
-            }
-            Ok(None) => (None, None),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "A3S Use hot-plug is unavailable for this session: {error}"
-                )),
-            ),
-        };
-    if let Some(warning) = use_registry_warning {
-        initial_messages.push(TranscriptEntry::preformatted(
-            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
-        ));
     }
 
     let running_tracker_children = session
@@ -722,10 +842,6 @@ pub(crate) async fn run_in(
 
     remote_ui::prime_webview_lookup();
 
-    let initial_mode = tui_session_state
-        .as_ref()
-        .map(TuiSessionState::mode)
-        .unwrap_or(Mode::Default);
     let initial_paused_goal = tui_session_state
         .as_ref()
         .and_then(|state| state.paused_goal.clone());
@@ -753,6 +869,9 @@ pub(crate) async fn run_in(
         model_tab: 0,
         relay_panel: None,
         relay_scan_seq: 0,
+        task_panel: None,
+        task_panel_seq: 0,
+        permission_panel: None,
         codex_account_models: crate::account_providers::codex::cached_codex_models(),
         codex_models_loading: false,
         codex_models_refreshed_at: None,
@@ -762,6 +881,7 @@ pub(crate) async fn run_in(
         llm_override: launch_llm_override,
         code_config: Arc::new(code_config),
         asset_directories,
+        component_paths: context.component_paths.clone(),
         config_path: config_path.clone(),
         memory_dir,
         auto_compact_threshold,
@@ -774,11 +894,10 @@ pub(crate) async fn run_in(
         last_view: None,
         pending_deep_research_report_view: None,
         deep_research_loop: None,
-        deep_research_report_repair_used: false,
+        deep_research_report_resume_used: false,
         deep_research_workflow: DeepResearchWorkflowSnapshot::default(),
         deep_research_outcome: DeepResearchRunOutcome::Active,
-        pending_deep_research_report_repair_prompt: None,
-        pending_deep_research_synthesis: None,
+        pending_deep_research_report_resume: false,
         deep_research_stream_timeout_token: 0,
         stream_start_token: 0,
         interrupted_stream_start_token: None,
@@ -860,10 +979,10 @@ pub(crate) async fn run_in(
             .with_submit_on_enter(true),
         spinner: Spinner::new().with_title(""),
         streaming: StreamingMarkdown::new(transcript_markdown_width_for(width)),
-        deep_research_report_tools: ReportPhaseToolBuffer::default(),
         got_delta: false,
         compacting: None,
         updating: None,
+        checkup_inflight: false,
         last_paint: None,
         thinking: String::new(),
         state: State::Idle,
@@ -877,8 +996,16 @@ pub(crate) async fn run_in(
         host_tool_call_id: None,
         interrupting: false,
         pending_tools: VecDeque::new(),
+        permission_grants,
+        execution_policy,
+        project_permission_rules_path,
+        permission_rule_write_inflight: None,
+        project_permission_revoke_seq: 0,
+        project_permission_revoke_inflight: None,
+        approval_feedback: None,
         approval_sel: 0,
         history: history_seed,
+        history_panel: None,
         history_pos: None,
         history_draft: None,
         model: launch_model,
@@ -888,12 +1015,24 @@ pub(crate) async fn run_in(
         anim: 0,
         mode: initial_mode,
         queue: PriorityQueue::new(),
+        queued_turn_modes: HashMap::new(),
+        queued_plan_drafts: HashMap::new(),
+        send_now_queued_sequence: None,
+        queue_panel: None,
+        active_rewind_checkpoint: None,
+        rewind_checkpoints: VecDeque::new(),
+        next_rewind_checkpoint_id: 0,
+        rewind_finalization_pending: None,
         active_queued_turn: None,
         active_queued_turn_token: None,
+        active_turn_mode: None,
+        active_plan_draft: None,
         queue_retry_generation: 0,
         queue_retry_attempt: 0,
         running_task: None,
         plan: PlanProjection::default(),
+        pending_plan_review: None,
+        plan_review: None,
         ide: None,
         memory: None,
         asset_list: None,
@@ -919,6 +1058,16 @@ pub(crate) async fn run_in(
         height,
         keymap,
     };
+
+    if let Some(error) = project_permission_load_error {
+        app.push_notice(
+            NoticeKind::Warning,
+            format!("Project permission rules were ignored: {error}"),
+        );
+    }
+    if let Some(warning) = sandbox_load_warning {
+        app.push_notice(NoticeKind::Warning, warning);
+    }
 
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
@@ -1074,7 +1223,12 @@ pub(crate) async fn run_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use a3s_code_core::workspace::{
+        WorkspaceFileSystem, WorkspaceGrepRequest, WorkspacePath, WorkspacePathResolver,
+        WorkspaceSearch,
+    };
     use a3s_tui::style::strip_ansi;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn resume_hint_highlights_the_complete_command_when_color_is_enabled() {
@@ -1109,6 +1263,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn tui_workspace_backend_enforces_the_direct_credential_boundary() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join(".env"), "TUI_BOUNDARY_TOKEN=secret\n").unwrap();
+        std::fs::write(
+            workspace.path().join("README.md"),
+            "TUI_BOUNDARY_TOKEN is supplied externally\n",
+        )
+        .unwrap();
+        let backend = tui_manifest_backend(workspace.path());
+
+        let secret = backend.normalize(".env").unwrap();
+        let read_error = backend
+            .read_text(&secret)
+            .await
+            .expect_err("the TUI backend must deny direct credential reads");
+        assert!(read_error.to_string().contains("credential boundary"));
+
+        let mut snapshots = backend.manifest().subscribe();
+        tokio::time::timeout(Duration::from_secs(5), snapshots.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let grep = backend
+            .grep(WorkspaceGrepRequest {
+                base: WorkspacePath::root(),
+                pattern: "TUI_BOUNDARY_TOKEN".to_string(),
+                glob: None,
+                context_lines: 0,
+                case_insensitive: false,
+                max_output_size: 1024,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(grep.match_count, 1);
+        assert!(grep.output.contains("README.md"));
+        assert!(!grep.output.contains("secret"));
+        assert!(!grep.output.contains(".env"));
+    }
+
     #[test]
     fn legacy_session_config_model_beats_an_unrelated_global_choice() {
         let configured = vec!["openai/session-model".to_string()];
@@ -1138,5 +1333,65 @@ mod tests {
             &preference,
             "gpt-another-session"
         ));
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_installs_once_when_the_component_is_missing() {
+        let installed = PathBuf::from("/managed/a3s-use");
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_use_with(
+            true,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                Ok(installed.clone())
+            },
+        )
+        .await;
+
+        assert!(called.load(Ordering::SeqCst));
+        assert_eq!(resolution.executable.as_deref(), Some(installed.as_path()));
+        assert!(resolution.warning.is_none());
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_honors_the_no_auto_install_boundary() {
+        let called = AtomicBool::new(false);
+
+        let resolution = resolve_code_use_with(
+            false,
+            false,
+            || Ok(None),
+            || async {
+                called.store(true, Ordering::SeqCst);
+                anyhow::bail!("installer must not run")
+            },
+        )
+        .await;
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(resolution.executable.is_none());
+        assert!(resolution
+            .warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("A3S_NO_AUTO_INSTALL")));
+    }
+
+    #[tokio::test]
+    async fn code_use_resolution_keeps_install_failure_non_fatal_and_actionable() {
+        let resolution = resolve_code_use_with(
+            true,
+            false,
+            || Ok(None),
+            || async { anyhow::bail!("release unavailable") },
+        )
+        .await;
+
+        assert!(resolution.executable.is_none());
+        let warning = resolution.warning.unwrap();
+        assert!(warning.contains("release unavailable"), "{warning}");
+        assert!(warning.contains("/use repair"), "{warning}");
     }
 }

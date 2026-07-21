@@ -40,32 +40,32 @@ impl Model for App {
             return prompt;
         }
         if let Some(transcript) = &self.transcript_view {
-            return self.overlay_approval(transcript.render());
+            return self.overlay_decision_modals(transcript.render());
         }
         if self.help_open {
-            return self.overlay_approval(self.render_help());
+            return self.overlay_decision_modals(self.render_help());
         }
         if let Some(m) = &self.memory {
-            return self.overlay_approval(self.render_memory(m));
+            return self.overlay_decision_modals(self.render_memory(m));
         }
         if let Some(panel) = &self.asset_list {
-            return self.overlay_approval(self.render_asset_list(panel));
+            return self.overlay_decision_modals(self.render_asset_list(panel));
         }
         if let Some(panel) = &self.runtime_activity {
-            return self.overlay_approval(self.render_runtime_activity(panel));
+            return self.overlay_decision_modals(self.render_runtime_activity(panel));
         }
         if let Some(kb) = &self.kb {
             let page = self.render_kb(kb);
-            return self.overlay_approval(page);
+            return self.overlay_decision_modals(page);
         }
         if let Some(panel) = &self.loop_panel {
-            return self.overlay_approval(self.render_loop_panel(panel));
+            return self.overlay_decision_modals(self.render_loop_panel(panel));
         }
         if let Some(ide) = &self.ide {
             // A pending tool approval overlays the full-screen page so it is
             // never invisible (its keys take priority in the key dispatch).
             let page = self.render_ide(ide);
-            return self.overlay_approval(page);
+            return self.overlay_decision_modals(page);
         }
         let width = self.width as usize;
         let composer_width = self.viewport_content_width();
@@ -224,6 +224,9 @@ impl Model for App {
         let composed = self.overlay_file_menu(composed);
         let composed = self.overlay_model_menu(composed);
         let composed = self.overlay_relay_menu(composed);
+        let composed = self.overlay_task_menu(composed);
+        let composed = self.overlay_permission_menu(composed);
+        let composed = self.overlay_history_menu(composed);
         let composed = self.overlay_review_menu(composed);
         let composed = self.overlay_flow_menu(composed);
         let composed = self.overlay_agent_menu(composed);
@@ -233,7 +236,7 @@ impl Model for App {
         let composed = self.overlay_effort(composed);
         let composed = self.overlay_theme(composed);
         let composed = self.overlay_plugins(composed);
-        self.overlay_approval(composed)
+        self.overlay_decision_modals(composed)
     }
 
     fn cursor(&self) -> Option<(u16, u16)> {

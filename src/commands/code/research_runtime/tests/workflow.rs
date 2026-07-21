@@ -1,62 +1,107 @@
 use super::*;
 
 #[test]
-fn deepresearch_cli_reuses_the_engineered_tui_workflow_contract() {
+fn deepresearch_cli_reuses_the_minimal_tui_workflow_contract() {
     let args = deep_research_workflow_args(
         "Compare two general-purpose storage approaches using current evidence",
-        false,
     );
     let source = args["source"].as_str().expect("workflow source");
 
     assert!(
         args["input"]["loop_contract"]["planner"].is_object(),
-        "the shared workflow must start from the semantic LLM planner"
+        "the shared workflow must automatically create its Loop Engineering contract"
+    );
+    assert!(args["input"].get("semantic_plan_contract").is_none());
+    assert_eq!(args["input"]["loop_contract"]["quota"]["mode"], "unlimited");
+    assert_eq!(
+        args["input"]["loop_contract"]["execution"]["mode"],
+        "coverage_driven"
     );
     assert!(
-        args["input"]["loop_contract"]["checker"].is_object(),
-        "the shared workflow must retain the independent checker"
+        args["input"]["loop_contract"].get("checker").is_none()
+            && args["input"]["loop_contract"].get("maker").is_none()
+            && args["input"]["loop_contract"].get("scout").is_none()
+            && args["input"]["loop_contract"].get("perspective").is_none()
+            && args["input"]["loop_contract"]
+                .get("adaptive_routes")
+                .is_none(),
+        "closed-evidence review is host-owned and must not reintroduce a workflow control plane"
     );
-    assert!(source.contains("research_planner"), "{source}");
-    assert!(source.contains("track_assessments"), "{source}");
-    assert!(source.contains("stop_condition_assessments"), "{source}");
+    assert!(source.contains("web_search"), "{source}");
+    assert!(source.contains("web_fetch"), "{source}");
+    assert!(source.contains("semantic_chunk_ids"), "{source}");
+    assert!(source.contains("select_evidence_chunks"), "{source}");
     assert!(
-        !source.contains("fallbackTracks") && !source.contains("complexityMarkers"),
-        "the removed CLI workflow must not survive as a hidden rule engine"
+        !source.contains("research_planner")
+            && !source.contains("checker")
+            && !source.contains("maker")
+            && !source.contains("followUp")
+            && !source.contains("queryTerms"),
+        "the CLI workflow must contain retrieval only"
     );
 }
 
 #[test]
 fn deepresearch_cli_uses_the_shared_hard_safety_envelope() {
-    let args = deep_research_workflow_args("Investigate a broad technical decision", false);
+    let args = deep_research_workflow_args("Investigate a broad technical decision");
 
-    assert_eq!(args["input"]["os_runtime"], false);
+    assert!(args["input"].get("os_runtime").is_none());
     assert_eq!(args["input"]["evidence_scope"], "web_and_workspace");
-    assert!(args["input"]["local_max_parallel_tasks"]
-        .as_u64()
-        .is_some_and(|value| value <= 4));
+    assert!(args["input"].get("local_max_parallel_tasks").is_none());
     assert!(
         args["input"]["local_max_steps"]
             .as_u64()
             .is_some_and(|value| value <= 2),
         "a child task must never inherit the old 80-240 turn budget"
     );
-    assert_eq!(args["input"]["local_parallel_task_timeout_ms"], 120_000);
+    assert!(args["input"]
+        .get("local_parallel_task_timeout_ms")
+        .is_none());
     assert_eq!(args["limits"]["timeoutMs"], 300_000);
     assert_eq!(
-        deep_research_workflow_host_timeout_ms(&args),
-        300_000 + DEEP_RESEARCH_WORKFLOW_HOST_GRACE_MS
+        crate::tui::DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS,
+        45 * 60 * 1_000
+    );
+    assert_eq!(
+        crate::tui::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS,
+        25 * 60 * 1_000
+    );
+    assert_eq!(
+        crate::tui::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS,
+        15 * 60 * 1_000
+    );
+    assert_eq!(
+        crate::tui::DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS,
+        2 * 60 * 1_000
     );
 }
 
 #[test]
-fn deepresearch_cli_and_tui_share_authoritative_evidence_scope() {
-    let local =
-        deep_research_workflow_args("仅本地分析当前工作区，不要联网，并说明证据缺口", false);
-    let web = deep_research_workflow_args("Compare current public documentation", false);
+fn deepresearch_cli_scope_is_query_agnostic_and_only_explicitly_selected() {
+    let local_wording =
+        deep_research_workflow_args("仅本地分析当前工作区，不要联网，并说明证据缺口");
+    let web_wording = deep_research_workflow_args("Compare current public documentation");
+    let explicit_local = crate::tui::deep_research_cli_workflow_args_for_budget(
+        "Compare current public documentation",
+        deep_research_default_budget(),
+        Some(crate::tui::DeepResearchEvidenceScope::LocalOnly),
+    );
+    let explicit_web = crate::tui::deep_research_cli_workflow_args_for_budget(
+        "Do not use web; inspect only local files",
+        deep_research_default_budget(),
+        Some(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace),
+    );
 
-    assert_eq!(local["input"]["evidence_scope"], "local_only");
-    assert_eq!(local["limits"]["timeoutMs"], 210_000);
-    assert_eq!(web["input"]["evidence_scope"], "web_and_workspace");
-    assert_eq!(web["limits"]["timeoutMs"], 300_000);
-    assert_eq!(local["source"], web["source"]);
+    assert_eq!(
+        local_wording["input"]["evidence_scope"],
+        "web_and_workspace"
+    );
+    assert_eq!(local_wording["limits"]["timeoutMs"], 300_000);
+    assert_eq!(web_wording["input"]["evidence_scope"], "web_and_workspace");
+    assert_eq!(web_wording["limits"]["timeoutMs"], 300_000);
+    assert_eq!(explicit_local["input"]["evidence_scope"], "local_only");
+    assert_eq!(explicit_local["limits"]["timeoutMs"], 210_000);
+    assert_eq!(explicit_web["input"]["evidence_scope"], "web_and_workspace");
+    assert_eq!(explicit_web["limits"]["timeoutMs"], 300_000);
+    assert_eq!(local_wording["source"], web_wording["source"]);
 }

@@ -8,6 +8,22 @@ const PARAMETER_HELP_ROWS: &[(&str, &str)] = &[
         "/login <token>",
         "sign in with a copied OS access token instead of browser auth",
     ),
+    (
+        "/use [status]",
+        "inspect the live Use registry, MCP connections, Skills, and providers",
+    ),
+    (
+        "/use repair",
+        "show explicit repair commands without installing or changing anything",
+    ),
+    (
+        "/copy [transcript]",
+        "copy the latest response or the complete semantic session Markdown",
+    ),
+    (
+        "/export [path]",
+        "atomically create a Markdown session file inside the workspace",
+    ),
     ("/ctx <query>", "search past ctx-indexed agent sessions"),
     (
         "/ctx <n>",
@@ -266,7 +282,7 @@ fn help_panel() -> HelpPanel {
                 .row("! <cmd>", "run a shell command directly")
                 .row(
                     "? <query>",
-                    "web seed + local DynamicWorkflowRuntime workflow fan-out; say `no web` for offline evidence",
+                    "one planned retrieval pass; use `--local-only` for offline evidence",
                 )
                 .row("@<path>", "attach a workspace file from the file picker")
                 .row(
@@ -278,10 +294,17 @@ fn help_panel() -> HelpPanel {
             HelpSection::new("Keys")
                 .row(
                     "Enter",
-                    "send; while busy, queue the message (Esc interrupts and runs it now)",
+                    "send; while busy, append the message to the FIFO queue",
+                )
+                .row(
+                    "Ctrl+O",
+                    "Send now: cancel the active turn and promote this prompt",
                 )
                 .row("Shift+Enter", "insert a newline in the input")
-                .row("Shift+Tab", "cycle run mode: default -> plan -> auto")
+                .row(
+                    "Shift+Tab",
+                    "cycle default -> read-only plan/review -> non-interactive auto",
+                )
                 .row(
                     "Up / Down",
                     "recall input history; inside menus, move selection",
@@ -292,6 +315,11 @@ fn help_panel() -> HelpPanel {
                     "Ctrl+T",
                     "open the complete live semantic transcript with full tool output",
                 )
+                .row(
+                    "Ctrl+B",
+                    "inspect delegated tasks, recent output, and safe cancellation",
+                )
+                .row("Ctrl+R", "fuzzy-search prompts from the current session")
                 .row(
                     "wheel / drag",
                     "scroll; select transcript text and copy on release",
@@ -315,6 +343,10 @@ fn help_panel() -> HelpPanel {
                 .row(
                     "/memory",
                     "memory graph with entities, tiers, aliases, and forget candidates",
+                )
+                .row(
+                    "/permissions",
+                    "search exact session/project grants, inspect arguments, and revoke with confirmation",
                 )
                 .row(
                     "/model",
@@ -676,8 +708,8 @@ mod tests {
         assert!(body.contains("/agent clone"));
         assert!(body.contains("/skill clone"));
         assert!(body.contains("typed OS services"));
-        assert!(body.contains("DynamicWorkflowRuntime"));
-        assert!(body.contains("local DynamicWorkflowRuntime workflow"));
+        assert!(body.contains("one planned retrieval pass"));
+        assert!(body.contains("--local-only"));
         assert!(body.contains("Ctrl+T"));
         assert!(body.contains("complete live semantic transcript"));
         assert!(!body.contains("uses runtime when signed in"));

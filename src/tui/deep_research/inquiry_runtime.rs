@@ -1,8 +1,8 @@
-//! Host-side orchestration for replayable, perspective-guided research.
+//! Host-side orchestration for replayable, coverage-driven research.
 //!
-//! DynamicWorkflow remains the bounded retrieval executor. Strategy selection,
-//! scout/result boundaries, and inquiry state live in Rust so the workflow
-//! JavaScript does not grow into a second research state machine.
+//! Rust owns the plan, typed evidence contract, one final closed-evidence
+//! review, and report contract. JavaScript may run one initial retrieval plus
+//! one typed-coverage supplement, but it has no terminal authority.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -23,16 +23,16 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use self::execution::{
-    assess_completed_research_contract, attach_inquiry_projection,
-    resolve_questions_with_bounded_follow_up_waves, run_dynamic_workflow, run_perspective_guided,
-    InquiryExecution,
+    assess_completed_research_contract, attach_inquiry_projection, resolve_questions_once,
+    run_retrieval_stage, InquiryExecution,
 };
 use self::plan::{
     bound_questions, bound_workflow_timeout, commit_plan_research_contract, generate_plan,
-    plan_max_iterations, queue_plan_questions, single_wave_research_plan, workflow_args_with_plan,
+    queue_plan_questions, workflow_args_with_plan,
 };
 use super::deep_research_state_journal::{
-    load_inquiry_state, record_inquiry_state, record_workflow_started, ResearchSpec,
+    load_inquiry_state, load_research_run_started_at_ms, record_inquiry_state,
+    record_workflow_started, ResearchSpec,
 };
 use super::{
     deep_research_canonical_workflow_output, deep_research_evidence_scope_from_args,
@@ -40,17 +40,41 @@ use super::{
 };
 
 const PROGRESS_CHANNEL_CAPACITY: usize = 256;
-const PERSPECTIVE_DISCOVERY_TIMEOUT_MS: u64 = 90_000;
-const QUESTION_RESOLUTION_TIMEOUT_MS: u64 = 90_000;
-const RESEARCH_CONTRACT_ASSESSMENT_TIMEOUT_MS: u64 = 90_000;
-const MAX_FOLLOW_UP_QUESTIONS_PER_WAVE: usize = 4;
+// Planning is one logical semantic step with one durable retry. The retry
+// reuses the exact hashed Flow input; it does not create another plan or widen
+// the research contract.
+const PLANNER_GENERATION_ATTEMPT_TIMEOUT_MS: u64 = 480_000;
+const PLANNER_GENERATION_MAX_ATTEMPTS: u8 = 2;
+const DURABLE_GENERATION_WORKFLOW_GRACE_MS: u64 = 15_000;
+pub(crate) const DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS: u64 = PLANNER_GENERATION_ATTEMPT_TIMEOUT_MS
+    * PLANNER_GENERATION_MAX_ATTEMPTS as u64
+    + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
+// Active model time only; admission queue time remains outside each attempt.
+// Closed review packets now carry explicit reasoning and language guardrails;
+// Real material reviews have repeatedly reached the five-minute active fuse
+// after waiting behind provider admission. Two six-minute attempts preserve a
+// bounded retry while the shared thirty-minute stage can settle the complete
+// four-obligation portfolio under constrained external concurrency.
+const QUESTION_RESOLUTION_ATTEMPT_TIMEOUT_MS: u64 = 360_000;
+const QUESTION_RESOLUTION_MAX_ATTEMPTS: u8 = 2;
+const QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS: u64 = QUESTION_RESOLUTION_ATTEMPT_TIMEOUT_MS
+    * QUESTION_RESOLUTION_MAX_ATTEMPTS as u64
+    + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
+const MAX_CONCURRENT_QUESTION_REVIEWS: usize = 3;
 const MAX_QUESTION_EVIDENCE_ITEMS: usize = 24;
-pub(super) const DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS: u64 = 12 * 60 * 1_000;
-const SCOUT_WORKFLOW_TIMEOUT_MS: u64 = 150_000;
-const FOLLOW_UP_WORKFLOW_TIMEOUT_MS: u64 = 180_000;
+const MAX_QUESTION_EVIDENCE_PACKET_CHARS: usize = 60_000;
+pub(crate) const DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 25 * 60 * 1_000;
+pub(crate) const DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
+pub(crate) const DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS: u64 = 2 * 60 * 1_000;
+pub(crate) const DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS: u64 = DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS
+    + DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS
+    + DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
+    + DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS;
+const RETRIEVAL_STEP_ACTIVE_TIMEOUT_MS: u64 = 300_000;
 const MIN_INQUIRY_STAGE_TIMEOUT_MS: u64 = 1_000;
 const JOURNAL_INITIALIZATION_ATTEMPTS: usize = 8;
 const JOURNAL_INITIALIZATION_RETRY_MS: u64 = 10;
+const DURABLE_GENERATION_WORKFLOW_SOURCE: &str = include_str!("workflow/generation.js");
 
 #[path = "inquiry_runtime/execution.rs"]
 mod execution;
@@ -60,7 +84,7 @@ mod plan;
 /// Spawn the complete evidence inquiry while preserving the event stream used
 /// by the TUI. The returned result deliberately has the same shape as the
 /// former single DynamicWorkflow call, so report publication stays compatible.
-pub(super) fn spawn_deep_research_inquiry(
+pub(crate) fn spawn_deep_research_inquiry(
     session: Arc<AgentSession>,
     args: Value,
 ) -> (
@@ -107,145 +131,225 @@ async fn run_inquiry(
     .await?;
 
     let checkpoint = InquiryCheckpointWriter::initialize(&session, &args).await?;
-    let plan = generate_plan(&session, &args, &progress_tx).await?;
     let limits = InquiryLimits::default();
     let mut state = InquiryState::default();
     let mut inquiry_events = Vec::new();
-    apply_event(
+    match execute_inquiry_pipeline(
+        &session,
+        &args,
+        &progress_tx,
+        &checkpoint,
+        &limits,
         &mut state,
         &mut inquiry_events,
-        InquiryEvent::StrategySelected {
-            method: plan.method,
-        },
-        &limits,
-    )?;
-    commit_plan_research_contract(&plan.value, &mut state, &mut inquiry_events, &limits)?;
-    let mut execution = match plan.method {
-        ResearchMethod::Focused => {
-            queue_plan_questions(&plan.value, None, &mut state, &mut inquiry_events, &limits)?;
-            checkpoint.checkpoint(&inquiry_events, &state).await?;
-            let follow_up_waves_remaining = plan_max_iterations(&plan.value)
-                .saturating_sub(1)
-                .min(limits.max_question_round as u64)
-                as usize;
-            let retrieval_plan = single_wave_research_plan(&plan.value)?;
-            let mut workflow_args =
-                workflow_args_with_plan(args.clone(), retrieval_plan.clone(), None)?;
-            let requested_timeout =
-                configured_workflow_timeout_ms(&workflow_args, FOLLOW_UP_WORKFLOW_TIMEOUT_MS);
-            let Some(timeout_ms) = checkpoint.stage_timeout_ms(requested_timeout) else {
-                let reason = "the shared inquiry deadline left no retrieval budget after reserving finalization time";
-                terminalize_budget_exhaustion(
-                    Some(&checkpoint),
-                    &mut state,
-                    &mut inquiry_events,
-                    &limits,
-                    reason,
-                )
-                .await?;
-                return attach_inquiry_projection(
-                    budget_terminal_result(&args, reason),
-                    &inquiry_events,
-                    &state,
-                );
-            };
-            bound_workflow_timeout(&mut workflow_args, timeout_ms)?;
-            InquiryExecution {
-                result: run_dynamic_workflow(&session, workflow_args.clone(), &progress_tx).await?,
-                retrieval_plan,
-                workflow_args,
-                follow_up_waves_remaining,
-            }
-        }
-        ResearchMethod::PerspectiveGuided => {
-            checkpoint.checkpoint(&inquiry_events, &state).await?;
-            run_perspective_guided(
-                &session,
-                args,
-                plan,
-                &progress_tx,
+    )
+    .await
+    {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            let reason = bounded_inquiry_failure_reason(&error);
+            terminalize_budget_exhaustion(
+                Some(&checkpoint),
                 &mut state,
                 &mut inquiry_events,
                 &limits,
-                &checkpoint,
+                &reason,
             )
-            .await?
+            .await?;
+            attach_inquiry_projection(
+                budget_terminal_result(&args, &reason),
+                &inquiry_events,
+                &state,
+            )
         }
+    }
+}
+
+async fn execute_inquiry_pipeline(
+    session: &AgentSession,
+    args: &Value,
+    progress_tx: &mpsc::Sender<AgentEvent>,
+    checkpoint: &InquiryCheckpointWriter,
+    limits: &InquiryLimits,
+    state: &mut InquiryState,
+    inquiry_events: &mut Vec<InquiryEvent>,
+) -> Result<ToolCallResult, String> {
+    let plan = generate_plan(session, args, progress_tx, checkpoint).await?;
+    apply_event(
+        state,
+        inquiry_events,
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        limits,
+    )?;
+    commit_plan_research_contract(&plan.value, state, inquiry_events, limits)?;
+    queue_plan_questions(&plan.value, state, inquiry_events, limits)?;
+    checkpoint.checkpoint(inquiry_events, state).await?;
+    let mut workflow_args = workflow_args_with_plan(args.clone(), plan.value, None)?;
+    let requested_step_timeout =
+        configured_workflow_timeout_ms(&workflow_args, RETRIEVAL_STEP_ACTIVE_TIMEOUT_MS);
+    let Some(retrieval_stage_timeout_ms) =
+        checkpoint.pre_review_stage_timeout_ms(DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS)
+    else {
+        let reason =
+            "the shared inquiry deadline left no retrieval budget after reserving closed-evidence review and finalization";
+        terminalize_budget_exhaustion(Some(&checkpoint), state, inquiry_events, limits, reason)
+            .await?;
+        return attach_inquiry_projection(
+            budget_terminal_result(args, reason),
+            inquiry_events,
+            state,
+        );
+    };
+    bound_workflow_timeout(
+        &mut workflow_args,
+        requested_step_timeout.min(retrieval_stage_timeout_ms),
+    )?;
+    let mut execution = InquiryExecution {
+        result: run_retrieval_stage(
+            session,
+            workflow_args.clone(),
+            progress_tx,
+            retrieval_stage_timeout_ms,
+        )
+        .await?,
     };
 
     if !state.phase.is_terminal() {
-        resolve_questions_with_bounded_follow_up_waves(
-            &session,
-            &progress_tx,
+        if let Err(error) = resolve_questions_once(
+            session,
+            progress_tx,
             &mut execution,
-            &mut state,
-            &mut inquiry_events,
-            &limits,
-            Some(&checkpoint),
+            state,
+            inquiry_events,
+            limits,
+            Some(checkpoint),
         )
-        .await?;
+        .await
+        {
+            let reason = bounded_inquiry_failure_reason(&error);
+            terminalize_budget_exhaustion(Some(checkpoint), state, inquiry_events, limits, &reason)
+                .await?;
+            return attach_inquiry_projection(execution.result, inquiry_events, state);
+        }
     }
 
     if state.phase == a3s::research::InquiryPhase::Outlining {
-        let outcome = assess_completed_research_contract(
-            &session,
-            &progress_tx,
-            &execution,
-            &mut state,
-            &mut inquiry_events,
-            &limits,
-            Some(&checkpoint),
+        let outcome = match assess_completed_research_contract(
+            state,
+            inquiry_events,
+            limits,
+            Some(checkpoint),
         )
-        .await?;
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let reason = bounded_inquiry_failure_reason(&error);
+                terminalize_budget_exhaustion(
+                    Some(checkpoint),
+                    state,
+                    inquiry_events,
+                    limits,
+                    &reason,
+                )
+                .await?;
+                return attach_inquiry_projection(execution.result, inquiry_events, state);
+            }
+        };
         if outcome == a3s::research::ResearchContractOutcome::Unsatisfied
             && state.phase != InquiryPhase::Exhausted
         {
             apply_event_and_checkpoint(
-                Some(&checkpoint),
-                &mut state,
-                &mut inquiry_events,
+                Some(checkpoint),
+                state,
+                inquiry_events,
                 InquiryEvent::BudgetExhausted {
-                    reason: "the LLM-selected retrieval budget ended before the material research contract and stop conditions were satisfied".to_string(),
+                    reason: "the semantic-plan retrieval pass ended before the material research contract reached its minimum evidence floor".to_string(),
                 },
-                &limits,
+                limits,
             )
             .await?;
         }
     }
 
-    attach_inquiry_projection(execution.result, &inquiry_events, &state)
+    attach_inquiry_projection(execution.result, inquiry_events, state)
+}
+
+fn bounded_inquiry_failure_reason(error: &str) -> String {
+    const MAX_DETAIL_CHARS: usize = 1_000;
+
+    let detail = error.split_whitespace().collect::<Vec<_>>().join(" ");
+    let detail = if detail.is_empty() {
+        "the stage returned no diagnostic"
+    } else {
+        detail.as_str()
+    };
+    let bounded = detail.chars().take(MAX_DETAIL_CHARS).collect::<String>();
+    format!("DeepResearch inquiry stopped before completion: {bounded}")
 }
 
 #[derive(Clone, Debug)]
 struct InquiryDeadline {
     deadline: Instant,
+    question_review_reserve: Duration,
     finalization_reserve: Duration,
 }
 
 impl InquiryDeadline {
-    fn from_args(
-        args: &Value,
+    fn from_started_at_ms(
+        started_at_ms: u64,
         total_budget_ms: u64,
+        question_review_reserve_ms: u64,
         finalization_reserve_ms: u64,
         now: Instant,
     ) -> Self {
-        let wall_now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
-        let elapsed_ms = args
-            .pointer("/input/run_started_at_ms")
-            .and_then(Value::as_u64)
-            .map(|started_at_ms| wall_now_ms.saturating_sub(started_at_ms))
-            .unwrap_or_default()
-            .min(total_budget_ms);
-        Self::from_elapsed(now, total_budget_ms, finalization_reserve_ms, elapsed_ms)
+        let Ok(wall_now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
+            return Self::from_elapsed(
+                now,
+                total_budget_ms,
+                question_review_reserve_ms,
+                finalization_reserve_ms,
+                u64::MAX,
+            );
+        };
+        let wall_now_ms = wall_now.as_millis().min(u128::from(u64::MAX)) as u64;
+        Self::from_wall_clock(
+            started_at_ms,
+            wall_now_ms,
+            total_budget_ms,
+            question_review_reserve_ms,
+            finalization_reserve_ms,
+            now,
+        )
+    }
+
+    fn from_wall_clock(
+        started_at_ms: u64,
+        wall_now_ms: u64,
+        total_budget_ms: u64,
+        question_review_reserve_ms: u64,
+        finalization_reserve_ms: u64,
+        now: Instant,
+    ) -> Self {
+        // Monotonic time does not survive a process restart. If the durable
+        // wall-clock origin is now in the future, fail closed instead of
+        // granting this Inquiry another complete budget.
+        let elapsed_ms = wall_now_ms.checked_sub(started_at_ms).unwrap_or(u64::MAX);
+        Self::from_elapsed(
+            now,
+            total_budget_ms,
+            question_review_reserve_ms,
+            finalization_reserve_ms,
+            elapsed_ms,
+        )
     }
 
     fn from_elapsed(
         now: Instant,
         total_budget_ms: u64,
+        question_review_reserve_ms: u64,
         finalization_reserve_ms: u64,
         elapsed_ms: u64,
     ) -> Self {
@@ -254,21 +358,45 @@ impl InquiryDeadline {
             deadline: now
                 .checked_add(Duration::from_millis(remaining_ms))
                 .unwrap_or(now),
+            question_review_reserve: Duration::from_millis(
+                question_review_reserve_ms.min(total_budget_ms),
+            ),
             finalization_reserve: Duration::from_millis(
                 finalization_reserve_ms.min(total_budget_ms),
             ),
         }
     }
 
-    fn stage_timeout_ms_at(&self, now: Instant, requested_timeout_ms: u64) -> Option<u64> {
+    fn pre_review_stage_timeout_ms_at(
+        &self,
+        now: Instant,
+        requested_timeout_ms: u64,
+    ) -> Option<u64> {
+        let available = self
+            .deadline
+            .saturating_duration_since(now)
+            .saturating_sub(self.question_review_reserve)
+            .saturating_sub(self.finalization_reserve);
+        bounded_stage_timeout_ms(available, requested_timeout_ms)
+    }
+
+    fn question_review_stage_timeout_ms_at(
+        &self,
+        now: Instant,
+        requested_timeout_ms: u64,
+    ) -> Option<u64> {
         let available = self
             .deadline
             .saturating_duration_since(now)
             .saturating_sub(self.finalization_reserve);
-        let available_ms = available.as_millis().min(u128::from(u64::MAX)) as u64;
-        let selected = requested_timeout_ms.min(available_ms);
-        (selected >= MIN_INQUIRY_STAGE_TIMEOUT_MS).then_some(selected)
+        bounded_stage_timeout_ms(available, requested_timeout_ms)
     }
+}
+
+fn bounded_stage_timeout_ms(available: Duration, requested_timeout_ms: u64) -> Option<u64> {
+    let available_ms = available.as_millis().min(u128::from(u64::MAX)) as u64;
+    let selected = requested_timeout_ms.min(available_ms);
+    (selected >= MIN_INQUIRY_STAGE_TIMEOUT_MS).then_some(selected)
 }
 
 /// The host inquiry owns exactly one sequential checkpoint writer. Each write
@@ -278,6 +406,8 @@ impl InquiryDeadline {
 struct InquiryCheckpointWriter {
     workspace: PathBuf,
     run_id: String,
+    durable_events: Vec<InquiryEvent>,
+    durable_state: InquiryState,
     persisted_events: AtomicUsize,
     deadline: InquiryDeadline,
 }
@@ -291,23 +421,18 @@ impl InquiryCheckpointWriter {
             .ok_or_else(|| "DeepResearch inquiry checkpointing requires a run_id".to_string())?
             .to_string();
         let workspace = session.workspace().to_path_buf();
-        if let Some((events, _)) = load_inquiry_state(&workspace, &run_id)
+        let (durable_events, durable_state) = load_inquiry_state(&workspace, &run_id)
             .await
             .map_err(|error| format!("load existing DeepResearch inquiry prefix: {error}"))?
-        {
-            if !events.is_empty() {
-                return Err(format!(
-                    "DeepResearch inquiry `{run_id}` has a durable {}-event prefix but no complete execution payload; replaying planner or retrieval work would diverge, so this run cannot be resumed",
-                    events.len()
-                ));
-            }
-        }
+            .unwrap_or_else(|| (Vec::new(), InquiryState::default()));
         let query = args
             .pointer("/input/query")
             .and_then(Value::as_str)
             .unwrap_or_default();
         let total_budget_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
-        let finalization_reserve_ms = total_budget_ms.saturating_mul(15) / 100;
+        let retrieval_stage_budget_ms = DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS;
+        let question_review_stage_budget_ms = DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS;
+        let finalization_reserve_ms = DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS;
         let spec = ResearchSpec {
             query: query.to_string(),
             current_date: args
@@ -320,25 +445,43 @@ impl InquiryCheckpointWriter {
                 .to_string(),
             required_claims: Vec::new(),
             total_budget_ms,
+            retrieval_stage_budget_ms,
+            question_review_stage_budget_ms,
             finalization_reserve_ms,
             host_pid: std::process::id(),
         };
-        let deadline = InquiryDeadline::from_args(
-            args,
-            total_budget_ms,
-            finalization_reserve_ms,
-            Instant::now(),
-        );
         let mut last_error = None;
         for attempt in 0..JOURNAL_INITIALIZATION_ATTEMPTS {
             match record_workflow_started(&workspace, &run_id, spec.clone()).await {
                 Ok(()) => {
+                    let started_at_ms = load_research_run_started_at_ms(&workspace, &run_id)
+                        .await
+                        .map_err(|error| {
+                            format!(
+                                "load durable DeepResearch deadline origin for `{run_id}`: {error}"
+                            )
+                        })?
+                        .ok_or_else(|| {
+                            format!(
+                                "DeepResearch run `{run_id}` persisted without a durable deadline origin"
+                            )
+                        })?;
+                    let deadline = InquiryDeadline::from_started_at_ms(
+                        started_at_ms,
+                        total_budget_ms,
+                        question_review_stage_budget_ms,
+                        finalization_reserve_ms,
+                        Instant::now(),
+                    );
+                    let persisted_events = durable_events.len();
                     return Ok(Self {
                         workspace,
                         run_id,
-                        persisted_events: AtomicUsize::new(0),
+                        durable_events,
+                        durable_state,
+                        persisted_events: AtomicUsize::new(persisted_events),
                         deadline,
-                    })
+                    });
                 }
                 Err(error) => {
                     last_error = Some(error);
@@ -355,9 +498,18 @@ impl InquiryCheckpointWriter {
         Err(format!("initialize DeepResearch inquiry journal: {detail}"))
     }
 
-    fn stage_timeout_ms(&self, requested_timeout_ms: u64) -> Option<u64> {
+    fn pre_review_stage_timeout_ms(&self, requested_timeout_ms: u64) -> Option<u64> {
         self.deadline
-            .stage_timeout_ms_at(Instant::now(), requested_timeout_ms)
+            .pre_review_stage_timeout_ms_at(Instant::now(), requested_timeout_ms)
+    }
+
+    fn question_review_stage_timeout_ms(&self, requested_timeout_ms: u64) -> Option<u64> {
+        self.deadline
+            .question_review_stage_timeout_ms_at(Instant::now(), requested_timeout_ms)
+    }
+
+    fn run_id(&self) -> &str {
+        &self.run_id
     }
 
     async fn checkpoint(
@@ -365,7 +517,50 @@ impl InquiryCheckpointWriter {
         events: &[InquiryEvent],
         state: &InquiryState,
     ) -> Result<(), String> {
+        let replayed = a3s::research::replay(events, &InquiryLimits::default())
+            .map_err(|error| format!("strictly replay inquiry checkpoint prefix: {error}"))?;
+        if &replayed != state {
+            return Err(
+                "DeepResearch inquiry checkpoint differs from its strict replay".to_string(),
+            );
+        }
+
+        let shared_len = events.len().min(self.durable_events.len());
+        if events[..shared_len] != self.durable_events[..shared_len] {
+            let mismatch = events
+                .iter()
+                .zip(&self.durable_events)
+                .position(|(replayed, durable)| replayed != durable)
+                .unwrap_or(shared_len);
+            return Err(format!(
+                "DeepResearch inquiry replay for `{}` diverged from its durable prefix at event {}",
+                self.run_id,
+                mismatch.saturating_add(1)
+            ));
+        }
+
         let persisted = self.persisted_events.load(Ordering::Acquire);
+        if events.len() < self.durable_events.len() {
+            if persisted > self.durable_events.len() {
+                return Err(format!(
+                    "DeepResearch inquiry checkpoint for `{}` regressed from {persisted} to {} events",
+                    self.run_id,
+                    events.len()
+                ));
+            }
+            return Ok(());
+        }
+        if events.len() == self.durable_events.len() {
+            if state != &self.durable_state {
+                return Err(format!(
+                    "DeepResearch inquiry replay for `{}` reached its durable event head with a different state",
+                    self.run_id
+                ));
+            }
+            if persisted == events.len() {
+                return Ok(());
+            }
+        }
         if events.len() < persisted {
             return Err(format!(
                 "DeepResearch inquiry checkpoint for `{}` regressed from {persisted} to {} events",
@@ -374,14 +569,6 @@ impl InquiryCheckpointWriter {
             ));
         }
         if events.len() == persisted {
-            let replayed = a3s::research::replay(events, &InquiryLimits::default())
-                .map_err(|error| format!("strictly replay unchanged inquiry prefix: {error}"))?;
-            if &replayed != state {
-                return Err(
-                    "unchanged DeepResearch inquiry prefix differs from its strict replay"
-                        .to_string(),
-                );
-            }
             return Ok(());
         }
         record_inquiry_state(&self.workspace, &self.run_id, events, state)
@@ -613,8 +800,8 @@ async fn send_progress(
 #[path = "inquiry_runtime/integration_tests.rs"]
 mod integration_tests;
 #[cfg(test)]
-#[path = "inquiry_runtime/retry_tests.rs"]
-mod retry_tests;
+#[path = "inquiry_runtime/process_resume_tests.rs"]
+mod process_resume_tests;
 #[cfg(test)]
 #[path = "inquiry_runtime/tests.rs"]
 mod tests;

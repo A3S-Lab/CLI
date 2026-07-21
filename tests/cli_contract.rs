@@ -512,7 +512,7 @@ fn code_has_a_typed_canonical_tree_and_rejects_prompt_guessing() {
 }
 
 #[test]
-fn research_machine_failures_use_the_canonical_command_contract() {
+fn research_rejects_removed_runtime_selection() {
     let directory = tempfile::tempdir().expect("temp directory");
     let config = directory.path().join("config.acl");
     std::fs::write(&config, test_config()).expect("write config");
@@ -530,16 +530,63 @@ fn research_machine_failures_use_the_canonical_command_contract() {
             "os",
         ])
         .output()
-        .expect("run unavailable research runtime");
+        .expect("run removed research runtime option");
 
     assert!(!output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["command"], "code.research");
+    assert_eq!(value["command"], "a3s");
     assert_eq!(value["ok"], false);
-    assert!(value["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("temporarily disabled"));
+    assert_eq!(value["error"]["code"], "usage.invalid");
+    assert_eq!(value["error"]["details"]["kind"], "UnknownArgument");
+}
+
+#[test]
+fn research_help_exposes_explicit_evidence_scope_controls() {
+    let help = Command::new(a3s_binary())
+        .args(["code", "research", "--help"])
+        .output()
+        .expect("run research help");
+    assert!(help.status.success());
+    let stdout = String::from_utf8_lossy(&help.stdout);
+    assert!(stdout.contains("--local-only"), "{stdout}");
+    assert!(stdout.contains("--web"), "{stdout}");
+    assert!(!stdout.contains("--runtime"), "{stdout}");
+
+    let conflict = Command::new(a3s_binary())
+        .args([
+            "--output",
+            "json",
+            "code",
+            "research",
+            "--local-only",
+            "--web",
+            "conflicting scope",
+        ])
+        .output()
+        .expect("reject conflicting research evidence scopes");
+    assert_eq!(conflict.status.code(), Some(2));
+    let value: serde_json::Value =
+        serde_json::from_slice(&conflict.stdout).expect("structured scope conflict");
+    assert_eq!(value["command"], "a3s");
+    assert_eq!(value["error"]["code"], "usage.invalid");
+
+    let offline_conflict = Command::new(a3s_binary())
+        .args([
+            "--output",
+            "json",
+            "--offline",
+            "code",
+            "research",
+            "--web",
+            "conflicting network policy",
+        ])
+        .output()
+        .expect("reject web research under the global offline policy");
+    assert_eq!(offline_conflict.status.code(), Some(2));
+    let value: serde_json::Value =
+        serde_json::from_slice(&offline_conflict.stdout).expect("structured offline conflict");
+    assert_eq!(value["command"], "code.research");
+    assert_eq!(value["error"]["code"], "usage.invalid");
 }
 
 #[test]

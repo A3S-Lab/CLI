@@ -203,17 +203,23 @@ pub(crate) enum LoopRuntimeMode {
     LocalAgentDev,
 }
 
-/// Build the transient maker/checker contract used by DeepResearch. Persistent
-/// `/loop` specs and transient research runs intentionally share the same loop
-/// engineering vocabulary; DeepResearch stores its live state in the research
-/// event journal instead of creating another user-managed loop directory.
+/// Build the transient coverage-driven Loop Engineering contract for
+/// DeepResearch.
+///
+/// This contract is durable workflow input, not a user-managed `.a3s/loops`
+/// directory. It describes one fixed semantic pipeline; the Rust Inquiry
+/// reducer remains the execution and terminal authority.
 pub(crate) fn deep_research_loop_contract(
     query: &str,
     current_date: &str,
     evidence_scope: &str,
-    max_parallel_tasks: usize,
-    max_child_steps: usize,
+    max_tracks: usize,
 ) -> serde_json::Value {
+    let direct_fetches = if evidence_scope == "offline/local-only evidence" {
+        0
+    } else {
+        8
+    };
     let planner_track_schema = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
@@ -226,18 +232,17 @@ pub(crate) fn deep_research_loop_contract(
             },
             "title": { "type": "string", "minLength": 1, "maxLength": 160 },
             "focus": { "type": "string", "minLength": 1, "maxLength": 1200 },
-            "perspective": { "type": "string", "maxLength": 600 },
             "material": { "type": "boolean" },
             "questions": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 3,
+                "maxItems": 2,
                 "items": { "type": "string", "minLength": 1, "maxLength": 400 }
             },
             "completion_criteria": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": 3,
+                "maxItems": 2,
                 "items": { "type": "string", "minLength": 1, "maxLength": 400 }
             },
             "evidence_requirements": {
@@ -253,80 +258,54 @@ pub(crate) fn deep_research_loop_contract(
             }
         },
         "required": [
-            "id", "title", "focus", "perspective", "material", "questions",
+            "id", "title", "focus", "material", "questions",
             "completion_criteria", "evidence_requirements"
         ]
-    });
-    let continuation_track_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "title": { "type": "string", "maxLength": 160 },
-            "focus": { "type": "string", "maxLength": 1200 }
-        },
-        "required": ["title", "focus"]
     });
     let plan_schema = serde_json::json!({
         "type": "object",
         "additionalProperties": false,
         "properties": {
-            "answer_shape": {
-                "type": "string",
-                "enum": ["lookup", "briefing", "investigation"]
-            },
-            "report_title": { "type": "string", "maxLength": 100 },
+            "report_title": { "type": "string", "minLength": 1, "maxLength": 160 },
             "freshness_required": { "type": "boolean" },
             "workspace_evidence_required": { "type": "boolean" },
-            "research_method": {
-                "type": "string",
-                "enum": ["focused", "perspective_guided"]
-            },
-            "execution_route": {
-                "type": "string",
-                "enum": ["direct_only", "direct_then_review", "direct_then_maker", "maker_first"]
-            },
-            "phases": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 100 }
-            },
             "tracks": {
                 "type": "array",
                 "minItems": 1,
-                "maxItems": max_parallel_tasks.clamp(1, 4),
+                "maxItems": max_tracks.clamp(1, 4),
                 "items": planner_track_schema
-            },
-            "scout_queries": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "minLength": 1, "maxLength": 180 }
             },
             "search_queries": {
                 "type": "array",
                 "maxItems": 4,
-                "items": { "type": "string", "maxLength": 180 }
+                "items": { "type": "string", "minLength": 1, "maxLength": 400 }
             },
             "seed_urls": {
                 "type": "array",
                 "maxItems": 3,
-                "items": { "type": "string", "maxLength": 500 }
+                "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
             },
             "budget": {
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                    "retrieval_timeout_secs": { "type": "integer", "minimum": 30, "maximum": 150 },
-                    "synthesis_timeout_secs": { "type": "integer", "minimum": 120, "maximum": 180 },
-                    "max_iterations": { "type": "integer", "minimum": 1, "maximum": 4 },
-                    "max_parallel_tasks": { "type": "integer", "minimum": 1, "maximum": max_parallel_tasks.max(1) },
-                    "max_steps_per_task": { "type": "integer", "minimum": 1, "maximum": max_child_steps.clamp(1, 2) },
-                    "direct_searches": { "type": "integer", "minimum": 0, "maximum": 4 },
-                    "direct_fetches": { "type": "integer", "minimum": 0, "maximum": 8 }
+                    "retrieval_timeout_secs": {
+                        "type": "integer",
+                        "minimum": 30,
+                        "maximum": 150
+                    },
+                    "direct_searches": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4
+                    },
+                    "direct_fetches": {
+                        "type": "integer",
+                        "enum": [direct_fetches]
+                    }
                 },
                 "required": [
-                    "retrieval_timeout_secs", "synthesis_timeout_secs", "max_iterations",
-                    "max_parallel_tasks", "max_steps_per_task", "direct_searches",
-                    "direct_fetches"
+                    "retrieval_timeout_secs", "direct_searches", "direct_fetches"
                 ]
             },
             "stop_conditions": {
@@ -337,135 +316,65 @@ pub(crate) fn deep_research_loop_contract(
             }
         },
         "required": [
-            "answer_shape", "report_title", "freshness_required",
-            "workspace_evidence_required", "research_method", "execution_route", "phases",
-            "tracks", "scout_queries", "search_queries", "seed_urls", "budget",
-            "stop_conditions"
-        ]
-    });
-    let checker_assessment_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "plan_index": { "type": "integer", "minimum": 0, "maximum": 5 },
-            "status": {
-                "type": "string",
-                "enum": ["supported", "bounded", "uncovered"]
-            },
-            "finding": { "type": "string", "minLength": 1, "maxLength": 1600 },
-            "source_urls": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 2000 }
-            }
-        },
-        "required": ["plan_index", "status", "finding", "source_urls"]
-    });
-    let checker_schema = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "decision": { "type": "string", "enum": ["finalize", "continue", "degrade"] },
-            "coverage_summary": { "type": "string", "maxLength": 2400 },
-            "report_summary": { "type": "string", "maxLength": 4800 },
-            "verified_findings": {
-                "type": "array",
-                "maxItems": 5,
-                "items": { "type": "string", "maxLength": 1600 }
-            },
-            "track_assessments": {
-                "type": "array",
-                "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": checker_assessment_schema.clone()
-            },
-            "stop_condition_assessments": {
-                "type": "array",
-                "maxItems": 3,
-                "items": checker_assessment_schema
-            },
-            "unresolved_gaps": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "limitations": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "contradictions": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 1200 }
-            },
-            "next_action": {
-                "type": "string",
-                "enum": ["none", "direct_retrieval", "maker"]
-            },
-            "search_queries": {
-                "type": "array",
-                "maxItems": 3,
-                "items": { "type": "string", "maxLength": 600 }
-            },
-            "seed_urls": {
-                "type": "array",
-                "maxItems": 4,
-                "items": { "type": "string", "maxLength": 2000 }
-            },
-            "next_tracks": {
-                "type": "array",
-                "maxItems": max_parallel_tasks.clamp(1, 4),
-                "items": continuation_track_schema
-            },
-            "reason": { "type": "string", "maxLength": 1600 }
-        },
-        "required": [
-            "decision", "coverage_summary", "report_summary", "verified_findings",
-            "track_assessments", "stop_condition_assessments", "unresolved_gaps",
-            "limitations", "next_action"
+            "report_title", "freshness_required", "workspace_evidence_required",
+            "tracks", "search_queries", "seed_urls", "budget", "stop_conditions"
         ]
     });
     let planner_prompt = format!(
-        "Plan this DeepResearch run semantically; return only the required object. Never infer stages, depth, route, or budget from keyword counts, query length, answer shape, track count, or a task-specific template.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nChoose research_method from the meaning of this request, never from keywords, named entities, or a task template. Do not use a fixed expert-role table, topic classifier, or domain-specific research recipe. focused skips the scout-and-perspective expansion and must return an empty scout_queries array. Choose perspective_guided only when useful investigative viewpoints cannot be responsibly fixed before seeing initial source material; it must return one to four broad but targeted scout_queries. perspective_guided must scout first and derive its perspectives from the retrieved material in a later independent planner step. The initial tracks are stable research obligations and initial questions, not final perspectives; keep perspective empty or clearly provisional for perspective_guided, and never claim that this initial plan has already discovered the final viewpoints. scout_queries discover the source landscape for perspective formation; search_queries retrieve evidence for the stable obligations.\n\nWrite a concise reader-facing report_title and choose the smallest useful set of phases and independent evidence tracks. Every track must have a stable id, reader-facing title, bounded focus, zero or one provisional perspective string, a material flag, one to three focused questions, one to three observable completion criteria, and explicit evidence_requirements. Select primary_source_required and independent_corroboration_required separately for each track from its semantic burden. Require a primary source only when a direct, original, or first-party record is materially necessary and realistically obtainable. Require independent corroboration only when a consequential conclusion needs separately attributable support beyond one source identity. Neither requirement is a global default; false is valid when the obligation can be defensibly closed without it. Never choose these booleans from domain keywords, source-count formulas, or a task template. The Host enforces every requirement declared true. Set material=true only when failure to resolve that track would prevent a defensible answer to the user's core request; set material=false for useful supporting context whose bounded absence must qualify but not invalidate the report. At least one track must be material. Use the same language as the query for report_title, phases, track content, scout_queries, search_queries, and stop_conditions. Keep each phase and track as one execution objective; do not repeat the query or add prose rationales. Choose execution_route semantically: direct_only for a bounded question that direct search/fetch plus an independent checker can answer; direct_then_review when bounded multi-query web retrieval can gather all material evidence and one structured review can synthesize it across the planned tracks and check coverage; direct_then_maker when direct retrieval should seed sources but the planned tracks still require adaptive source reading or multi-step evidence collection before the independent checker; maker_first only when useful initial evidence requires workspace inspection, evidence production, or other work that direct retrieval cannot establish. Ordinary public-web research defaults to direct_then_review when its material evidence can be gathered by bounded search/fetch, even when the investigation is substantial or has several tracks. Reserve maker routes for genuinely adaptive or parallel evidence production that bounded direct retrieval cannot perform, but choose the route from the semantic work and available operations rather than task labels, track counts, or size heuristics. Evidence scope describes available tools, not required tracks. Set workspace_evidence_required only when the query explicitly asks about this repository, a local codebase, or attached/local artifacts; general product, technology, migration, or deployment research is web evidence even when a workspace happens to be available. Search queries must each target one evidence question and give every consequential track a real chance to retrieve primary or authoritative evidence plus independent corroboration when available; generic comparison pages cannot substitute for official status, governance, or quantitative claims. For a comparison, cover both axes of the request: every consequential criterion and every explicitly requested alternative must have at least one targeted query or confident seed opportunity. Do not collapse all named alternatives into one broad comparison query when the available query budget can give them distinct discovery paths. Include seed URLs only when you confidently know a canonical, directly fetchable URL; otherwise use a targeted discovery query instead of guessing a page. Make the plan internally executable: allocate enough direct searches and fetches for every consequential public evidence track and observable stop condition to receive a real retrieval opportunity within the hard caps; do not create a multi-track investigation whose own retrieval budget can sample only one track. `max_iterations` is the total number of evidence passes including initial collection, so reserve enough checked recovery passes for the source failures that are realistically likely in this plan. Set independent retrieval and synthesis clocks plus checked iteration, parallelism, and per-task evidence depth; a timeout is a hard cancellation boundary, so budget enough time for a reasoning model to return the complete report rather than merely begin it. The execution runtime separately gives each maker enough wall-clock time for tool selection, retrieval, and schema finalization. Stop conditions must be observable. The checker decides sufficiency after the planned route has run. Do not expose reasoning."
+        "Plan one bounded initial DeepResearch evidence pass and return only the required object. The Host may use at most one additional retrieval pass when typed source coverage remains open.\n\nQuery: {query}\nDate: {current_date}\nEvidence scope: {evidence_scope}\n\nCreate the smallest set of stable research tracks needed for a defensible answer. Do not use keyword counts, query length, named-entity rules, topic classifiers, fixed expert roles, task templates, or language-specific routing. Use the same language as the query for report_title, tracks, questions, and stop_conditions.\n\nEvery track needs a stable ASCII id, reader-facing title, bounded focus, material flag, one or two answerable questions, one or two observable completion criteria, and explicit evidence requirements. Normally create one integrated material track containing the minimum evidence path needed for a defensible core answer. Add another material track only when its complete absence would make any report misleading; requested secondary dimensions whose absence can be stated transparently belong in supporting tracks with material=false. Never mark every track material merely because the user requested a broad comparison. At least one track must be material.\n\nKeep the contract achievable within the bounded initial pass and, only when needed, one typed-coverage supplemental pass. Do not invent arbitrary source counts, crate counts, case-study quotas, download totals, commit statistics, contributor counts, or other quantitative completion gates unless the user explicitly requested that measurement. A completion criterion must be decidable from retained evidence or an explicit bounded gap. Stop conditions must permit a qualified answer with transparent limitations; never require every question or criterion to be satisfied.\n\nRequire a primary source only when a direct or first-party record is materially necessary and realistically obtainable. Require independent corroboration only when a consequential conclusion needs separately attributable support.\n\nFor web evidence, author up to four concise provider-friendly search_queries, each aimed at one evidence target, use the required eight direct_fetches slots, and include only seed_urls you confidently know are canonical and directly fetchable. Seed URLs enter the same semantic candidate catalog as provider results and do not reserve fetch slots, so include them only as useful retrieval opportunities. Do not pack several comparison dimensions or a list of years into one query. Prefer official project, release, governance, and documentation sources over generic comparison pages. These queries are sent to search providers unchanged. Give each material track a real retrieval opportunity within direct_searches and direct_fetches. A supplemental pass reuses only the already returned provider candidate catalog and does not rewrite or generate provider queries. For local-only scope, return no web search query or seed URL, set direct_fetches to zero, and set workspace_evidence_required=true. For general public research, set workspace_evidence_required=false even when a workspace exists. Choose one retrieval_timeout_secs value for each bounded retrieval pass. Do not expose reasoning."
+    );
+    let planner_prompt = planner_prompt.replace(
+        "Normally create one integrated material track containing the minimum evidence path needed for a defensible core answer. Add another material track only when its complete absence would make any report misleading; requested secondary dimensions whose absence can be stated transparently belong in supporting tracks with material=false.",
+        "Create one material track for each coherent evidence family whose complete absence would make any report misleading; requested secondary dimensions whose absence can be stated transparently belong in supporting tracks with material=false.",
+    );
+    let planner_prompt = format!(
+        "{planner_prompt}\n\nKeep each track aligned to one coherent evidence family. Treat each independently published project, product, institution, or artifact as a distinct evidence target even when the query asks for a comparison. Split materially necessary claims into separate tracks when they require different publishers or artifact types. Every completion criterion must be atomic enough for one fetched source to resolve directly and may name only one independently sourced target; never join independent facts that require different sources into one criterion. For example, never write one criterion that asks for both Tokio and async-std versions. Use separate criteria such as `Obtain Tokio's latest version and date from a Tokio record` and `Obtain async-std's latest version and date from an async-std record`, or separate tracks when each target also needs its own governance evidence. When a track has the same number of questions and completion criteria, list them in matching semantic order: question i must ask exactly for criterion i, because the Host binds them by index. Within the four-query cap, give each materially distinct source target its own provider query. A material track with criteria that require different publishers or artifact families needs a separate provider query opportunity for each such target; never combine an HTTP-library documentation target with a database-library documentation target in one query. Allocate provider queries to every material evidence target before dedicating a query to a supporting track; a supporting track may remain explicitly bounded when the query cap is already needed by the report's material source families. Exact canonical seed URLs are retrieval opportunities that can free provider-query slots for other material criteria. Never spend a provider query on supporting context while any material criterion lacks its own query or exact canonical seed opportunity. Never combine independently published material targets into one provider query merely to make room for supporting context. Use seed_urls for exact canonical release, repository, governance, or documentation pages that provide resilient fetch alternatives for material targets. Do not seed a bare homepage unless that homepage itself is likely to contain evidence for a completion criterion."
     );
 
     serde_json::json!({
-        "pattern": "adaptive-deep-research",
+        "version": 1,
+        "pattern": "minimal-deep-research",
         "goal": query,
-        "maker_role": "evidence-researcher",
-        "checker_role": "evidence-coverage-checker",
+        "controller": "host_inquiry_reducer",
+        "quota": {
+            "mode": "unlimited"
+        },
+        "execution": {
+            "mode": "coverage_driven",
+            "stages": [
+                "semantic_plan",
+                "initial_retrieval",
+                "semantic_chunk_selection",
+                "typed_coverage_evaluation",
+                "optional_supplemental_retrieval",
+                "final_closed_question_review",
+                "host_contract_reduction",
+                "sectioned_report_transaction"
+            ]
+        },
+        "cardinality": {
+            "semantic_iterations": 2,
+            "retrieval_passes": 2,
+            "semantic_selections": 2,
+            "question_reviews": 1,
+            "contract_assessments": 1,
+            "report_transactions": 1,
+            "section_revision_rounds": 2
+        },
         "planner": {
-            "agent": "loop-planner",
-            "description": "Plan research",
+            "agent": "research-planner",
+            "description": "Plan one initial semantic evidence pass",
             "max_steps": 1,
-            // v5.2.2 streams and repairs structured output inside this single
-            // call. Keep planning independent from retrieval while allowing
-            // reasoning models to finish the schema-valid plan they already
-            // started instead of cancelling them at the old workflow deadline.
-            "timeout_ms": 120000,
+            "timeout_ms": 480000,
             "prompt": planner_prompt,
             "output_schema": plan_schema
         },
-        "checker": {
-            "agent": "loop-checker",
-            "description": "Check evidence",
-            "max_steps": 2,
-            // The schema uses a bounded provider-facing acceptance envelope;
-            // the host compacts accepted checker context again at the synthesis
-            // boundary. One repair remains available for structural defects
-            // rather than harmless prose-length drift.
-            // Checker calls are independent from planning, retrieval, maker,
-            // and report clocks. Slow reasoning providers can exceed 120s on
-            // evidence review even when the 300s workflow fuse has ample room.
-            "timeout_ms": 180000,
-            "output_schema": checker_schema
-        },
         "hard_caps": {
-            "max_iterations": 4,
-            "max_parallel_tasks": max_parallel_tasks.max(1),
-            "max_steps_per_task": max_child_steps.clamp(1, 2),
-            "retrieval_timeout_ms": 150000,
-            "synthesis_timeout_ms": 180000
+            "max_tracks": max_tracks.clamp(1, 4),
+            "max_searches": 4,
+            "max_fetches": 8,
+            "max_supplemental_fetches": 2,
+            "retrieval_timeout_ms": 150000
         }
     })
 }
@@ -926,144 +835,4 @@ pub(crate) fn find_loop(cwd: &str, name: &str) -> Result<LoopSpec, String> {
         .ok_or_else(|| format!("loop `{name}` not found"))
 }
 
-fn exists_nonempty(path: &Path) -> bool {
-    path.is_file()
-        && std::fs::metadata(path)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-}
-
-pub(crate) fn audit_loop(spec: &LoopSpec) -> LoopAudit {
-    let mut score = 0u8;
-    let mut passed = Vec::new();
-    let mut missing = Vec::new();
-    let mut warnings = Vec::new();
-    let mut add = |points: u8, ok: bool, pass: &str, miss: &str| {
-        if ok {
-            score = score.saturating_add(points);
-            passed.push(pass.to_string());
-        } else {
-            missing.push(miss.to_string());
-        }
-    };
-    add(
-        10,
-        !spec.goal.trim().is_empty(),
-        "single clear goal",
-        "add a single-sentence goal",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(STATE_FILE)),
-        "durable STATE.md",
-        "create STATE.md",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(RUN_LOG_FILE)),
-        "append-only RUN_LOG.md",
-        "create RUN_LOG.md",
-    );
-    add(
-        10,
-        exists_nonempty(&spec.dir.join(BUDGET_FILE)) && spec.budget_tokens_per_day > 0,
-        "budget and kill-switch file",
-        "create budget.toml with daily caps",
-    );
-    add(
-        10,
-        !spec.denylist.is_empty(),
-        "denylist paths configured",
-        "add denylist paths for secrets/infra",
-    );
-    add(
-        15,
-        !spec.maker_agent.is_empty()
-            && !spec.checker_agent.is_empty()
-            && spec.maker_agent != spec.checker_agent,
-        "maker/checker split",
-        "configure separate maker_agent and checker_agent",
-    );
-    let agent_loop = spec.level == "A2";
-    let goal_loop = spec.level == "G1";
-    add(
-        10,
-        spec.worktree || agent_loop || goal_loop,
-        if agent_loop {
-            "agent asset scope requested"
-        } else if goal_loop {
-            "goal scope is guarded by the active session"
-        } else {
-            "worktree isolation requested"
-        },
-        if agent_loop {
-            "scope the loop to one agent definition"
-        } else {
-            "enable worktree isolation before L2"
-        },
-    );
-    add(
-        10,
-        if agent_loop || goal_loop {
-            !spec.os_runtime && !spec.connectors.iter().any(|c| c == "os-runtime")
-        } else {
-            spec.os_runtime && spec.connectors.iter().any(|c| c == "os-runtime")
-        },
-        if agent_loop {
-            "local agent loop runtime"
-        } else if goal_loop {
-            "local goal loop runtime"
-        } else {
-            "OS Runtime connector enabled"
-        },
-        if agent_loop {
-            "disable OS Runtime for local /agent loops"
-        } else {
-            "enable os_runtime/connectors=[\"os-runtime\"]"
-        },
-    );
-    let skill_pair = if goal_loop {
-        exists_nonempty(&spec.dir.join("skills").join("maker.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
-    } else {
-        exists_nonempty(&spec.dir.join("skills").join("triage.md"))
-            && exists_nonempty(&spec.dir.join("skills").join("verifier.md"))
-    };
-    add(
-        15,
-        skill_pair,
-        if goal_loop {
-            "maker and verifier skills"
-        } else {
-            "triage and verifier skills"
-        },
-        if goal_loop {
-            "add skills/maker.md and skills/verifier.md"
-        } else {
-            "add skills/triage.md and skills/verifier.md"
-        },
-    );
-    if spec.level == "L3" && score < 90 {
-        warnings.push("L3 requested but readiness is below unattended threshold".to_string());
-    }
-    if spec.level != "L1" && spec.level != "A2" && spec.level != "G1" && !spec.worktree {
-        warnings.push("acting loops should use worktree isolation".to_string());
-    }
-    let level = if score >= 90 {
-        "L3-ready"
-    } else if score >= 75 {
-        "L2-ready"
-    } else if score >= 50 {
-        "L1-ready"
-    } else {
-        "L0-draft"
-    }
-    .to_string();
-    LoopAudit {
-        score,
-        level,
-        passed,
-        missing,
-        warnings,
-    }
-}
+include!("audit.rs");

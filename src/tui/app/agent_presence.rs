@@ -4,16 +4,27 @@
 //! OS-level `a3s-webview --agent-island` process owns all island rendering and
 //! reads only the private, sanitized shared snapshot.
 
+#[path = "agent_presence/control.rs"]
+mod control;
+#[path = "agent_presence/preference.rs"]
+mod preference;
+#[path = "agent_presence/projection.rs"]
+mod projection;
+
 use super::*;
 use crate::system_agents::{
-    epoch_ms, AgentActivityState, AgentChildPresence, AgentPresence, AgentPresencePublisher,
+    epoch_ms, AgentActivityState, AgentChildPresence, AgentControlActionKind,
+    AgentControlGrantSpec, AgentControlRequest, AgentPresence, AgentPresencePublisher, AgentVendor,
     SystemAgentRefreshResult,
 };
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::oneshot;
+
+use self::projection::{child_presence, parent_presence_state};
 
 pub(super) const AGENT_PRESENCE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const TERMINAL_STATE_RETENTION: Duration = Duration::from_secs(8);
@@ -34,6 +45,7 @@ struct RecentTerminalState {
     state: AgentActivityState,
     task: Option<String>,
     started_at_ms: Option<u64>,
+    finished_at_ms: u64,
     recorded_at: Instant,
 }
 
@@ -50,16 +62,21 @@ pub(super) struct AgentPresenceRuntime {
     pub(super) refreshing: bool,
     terminal: Option<RecentTerminalState>,
     island: AgentIslandSupervisor,
+    cancel_requested: HashSet<String>,
     last_warnings: Vec<String>,
 }
 
 impl AgentPresenceRuntime {
     pub(super) fn new() -> Self {
+        let publisher = AgentPresencePublisher::from_environment();
+        let mut island = AgentIslandSupervisor::default();
+        island.set_enabled(publisher.island_preference_enabled());
         Self {
-            publisher: AgentPresencePublisher::from_environment(),
+            publisher,
             refreshing: false,
             terminal: None,
-            island: AgentIslandSupervisor::default(),
+            island,
+            cancel_requested: HashSet::new(),
             last_warnings: Vec::new(),
         }
     }
@@ -83,6 +100,7 @@ impl AgentPresenceRuntime {
             state,
             task,
             started_at_ms,
+            finished_at_ms: epoch_ms(),
             recorded_at: Instant::now(),
         });
     }
@@ -102,10 +120,13 @@ impl AgentPresenceRuntime {
         else {
             return None;
         };
-        self.island.observe_snapshot(AgentIslandLaunchRequest {
-            snapshot_path,
-            lock_path,
-        })
+        self.island.observe_snapshot(
+            AgentIslandLaunchRequest {
+                snapshot_path,
+                lock_path,
+            },
+            result.launch_requested,
+        )
     }
 
     fn poll_island(&mut self, now: Instant) -> Option<AgentIslandLaunchRequest> {
@@ -122,49 +143,109 @@ impl AgentPresenceRuntime {
 }
 
 impl App {
-    pub(super) fn local_agent_presence(&self) -> AgentPresence {
+    pub(super) fn local_agent_presence(&mut self) -> AgentPresence {
         let now_ms = epoch_ms();
         let now = Instant::now();
-        let children = self
+        let parent_vendor = self.local_agent_vendor();
+        let mut children = self
             .runtime
             .subagent_ids()
             .into_iter()
             .zip(self.runtime.subagents())
-            .filter_map(|(id, child)| child_presence(id, child, now, now_ms))
-            .collect();
+            .filter_map(|(id, child)| child_presence(id, child, parent_vendor, now, now_ms))
+            .collect::<Vec<_>>();
+        let live_child_ids = children
+            .iter()
+            .filter(|child| child.state == AgentActivityState::Working)
+            .map(|child| child.id.clone())
+            .collect::<HashSet<_>>();
+        self.agent_presence
+            .cancel_requested
+            .retain(|task_id| live_child_ids.contains(task_id));
 
         let recent_terminal = self.agent_presence.recent_terminal(&self.session_id);
-        let state =
-            match self.state {
-                State::Awaiting => AgentActivityState::WaitingApproval,
-                State::Rebuilding => AgentActivityState::Working,
-                State::Streaming
-                    if self.plan.tasks().iter().any(|task| {
-                        task.status == a3s_code_core::planning::TaskStatus::InProgress
-                    }) =>
-                {
-                    AgentActivityState::Planning
-                }
-                State::Streaming => AgentActivityState::Working,
-                State::Idle => recent_terminal
-                    .map(|terminal| terminal.state)
-                    .unwrap_or(AgentActivityState::Idle),
-            };
-        let task = self
-            .running_task
-            .clone()
-            .or_else(|| recent_terminal.and_then(|terminal| terminal.task.clone()));
+        let terminal_state = recent_terminal.map(|terminal| terminal.state);
+        let terminal_task = recent_terminal.and_then(|terminal| terminal.task.clone());
+        let terminal_started_at_ms = recent_terminal.and_then(|terminal| terminal.started_at_ms);
+        let terminal_finished_at_ms = recent_terminal.map(|terminal| terminal.finished_at_ms);
+        let state = parent_presence_state(
+            self.state,
+            self.plan
+                .tasks()
+                .iter()
+                .any(|task| task.status == a3s_code_core::planning::TaskStatus::InProgress),
+            terminal_state,
+        );
+        let task = self.running_task.clone().or(terminal_task);
         let started_at_ms = self
             .stream_started
             .map(|started| {
                 now_ms
                     .saturating_sub(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64)
             })
-            .or_else(|| recent_terminal.and_then(|terminal| terminal.started_at_ms))
+            .or(terminal_started_at_ms)
             .unwrap_or_else(|| self.agent_presence.publisher.started_at_ms());
+        let finished_at_ms = (self.state == State::Idle)
+            .then_some(terminal_finished_at_ms)
+            .flatten();
+
+        let parent_id = self.agent_presence.publisher.instance_id().to_string();
+        let attention_reason = (self.state == State::Awaiting)
+            .then(|| {
+                self.pending_tools
+                    .front()
+                    .map(|pending| format!("Permission required to run {}.", pending.label.trim()))
+            })
+            .flatten();
+        let mut control_specs = Vec::new();
+        if self.state == State::Awaiting {
+            if let Some(pending) = self.pending_tools.front() {
+                control_specs.push(AgentControlGrantSpec::new(
+                    parent_id.clone(),
+                    self.agent_island_approval_context(&pending.tool_id),
+                    [
+                        AgentControlActionKind::ApproveOnce,
+                        AgentControlActionKind::ApproveAlways,
+                        AgentControlActionKind::Deny,
+                        AgentControlActionKind::Reply,
+                    ],
+                ));
+            }
+        } else if self.state == State::Streaming && !self.interrupting {
+            let mut actions = vec![AgentControlActionKind::Reply];
+            if self.agent_island_stop_available() {
+                actions.insert(0, AgentControlActionKind::Stop);
+            }
+            control_specs.push(AgentControlGrantSpec::new(
+                parent_id.clone(),
+                self.agent_island_parent_context(),
+                actions,
+            ));
+        }
+        for child in &children {
+            if child.state == AgentActivityState::Working
+                && !self.agent_presence.cancel_requested.contains(&child.id)
+            {
+                control_specs.push(AgentControlGrantSpec::new(
+                    format!("{parent_id}:{}", child.id),
+                    self.agent_island_child_context(&child.id),
+                    [AgentControlActionKind::Cancel],
+                ));
+            }
+        }
+        let mut controls = self
+            .agent_presence
+            .publisher
+            .reconcile_control_grants(control_specs, now_ms);
+        let parent_actions = controls.remove(&parent_id).unwrap_or_default();
+        for child in &mut children {
+            child.actions = controls
+                .remove(&format!("{parent_id}:{}", child.id))
+                .unwrap_or_default();
+        }
 
         AgentPresence::new(
-            self.agent_presence.publisher.instance_id(),
+            &parent_id,
             std::process::id(),
             &self.cwd,
             task,
@@ -172,12 +253,16 @@ impl App {
             children,
             started_at_ms,
         )
+        .with_vendor(parent_vendor)
+        .with_attention_reason(attention_reason)
+        .with_finished_at_ms(finished_at_ms)
+        .with_actions(parent_actions)
     }
 
     pub(super) fn refresh_agent_presence(&mut self) -> Cmd<Msg> {
         self.agent_presence.refreshing = true;
-        let publisher = self.agent_presence.publisher.clone();
         let local = self.local_agent_presence();
+        let publisher = self.agent_presence.publisher.clone();
         cmd::cmd(move || async move {
             Msg::AgentPresenceRefreshed(publisher.publish_collect_and_export(local).await)
         })
@@ -185,11 +270,25 @@ impl App {
 
     pub(super) fn apply_agent_presence_refresh(
         &mut self,
-        result: SystemAgentRefreshResult,
+        mut result: SystemAgentRefreshResult,
     ) -> Option<Cmd<Msg>> {
-        self.agent_presence
+        let requests = std::mem::take(&mut result.control_requests);
+        let mut commands = self
+            .agent_presence
             .apply_refresh(result)
             .map(launch_agent_island)
+            .into_iter()
+            .collect::<Vec<_>>();
+        commands.extend(
+            requests
+                .into_iter()
+                .map(|request| cmd::msg(Msg::AgentIslandControl(request))),
+        );
+        match commands.len() {
+            0 => None,
+            1 => commands.pop(),
+            _ => Some(cmd::batch(commands)),
+        }
     }
 
     pub(super) fn poll_agent_island(&mut self) -> Option<Cmd<Msg>> {
@@ -220,48 +319,8 @@ impl App {
     }
 }
 
-fn child_presence(
-    id: String,
-    child: &runtime_projection::SubagentRun,
-    now: Instant,
-    now_ms: u64,
-) -> Option<AgentChildPresence> {
-    if child
-        .ended
-        .is_some_and(|ended| now.saturating_duration_since(ended) > TERMINAL_STATE_RETENTION)
-    {
-        return None;
-    }
-
-    let state = match child.outcome {
-        Some(runtime_projection::SubagentOutcome::Succeeded) => AgentActivityState::Completed,
-        Some(runtime_projection::SubagentOutcome::Failed) => AgentActivityState::Failed,
-        Some(runtime_projection::SubagentOutcome::Cancelled) => AgentActivityState::Cancelled,
-        Some(runtime_projection::SubagentOutcome::TrackingLost) => AgentActivityState::Unknown,
-        None => AgentActivityState::Working,
-    };
-    Some(AgentChildPresence {
-        id,
-        agent: child.display_agent(),
-        task: nonempty_presence_text(&child.description),
-        state,
-        started_at_ms: Some(
-            now_ms.saturating_sub(
-                now.saturating_duration_since(child.started)
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64,
-            ),
-        ),
-    })
-}
-
 pub(super) fn agent_presence_tick() -> Cmd<Msg> {
     cmd::tick(AGENT_PRESENCE_REFRESH_INTERVAL, Msg::AgentPresenceTick)
-}
-
-fn nonempty_presence_text(value: &str) -> Option<String> {
-    let value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!value.is_empty()).then_some(value)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,6 +347,7 @@ enum AgentIslandLifecycle {
 
 #[derive(Debug)]
 struct AgentIslandSupervisor {
+    enabled: bool,
     lifecycle: AgentIslandLifecycle,
     request: Option<AgentIslandLaunchRequest>,
     consecutive_failures: u8,
@@ -296,6 +356,7 @@ struct AgentIslandSupervisor {
 impl Default for AgentIslandSupervisor {
     fn default() -> Self {
         Self {
+            enabled: true,
             lifecycle: AgentIslandLifecycle::AwaitingSnapshot,
             request: None,
             consecutive_failures: 0,
@@ -307,7 +368,20 @@ impl AgentIslandSupervisor {
     fn observe_snapshot(
         &mut self,
         request: AgentIslandLaunchRequest,
+        launch_requested: bool,
     ) -> Option<AgentIslandLaunchRequest> {
+        if !self.enabled {
+            self.request = None;
+            return None;
+        }
+        if !launch_requested {
+            self.request = None;
+            if matches!(self.lifecycle, AgentIslandLifecycle::Backoff { .. }) {
+                self.lifecycle = AgentIslandLifecycle::AwaitingSnapshot;
+                self.consecutive_failures = 0;
+            }
+            return None;
+        }
         self.request = Some(request);
         if !matches!(self.lifecycle, AgentIslandLifecycle::AwaitingSnapshot) {
             return None;
@@ -317,6 +391,9 @@ impl AgentIslandSupervisor {
     }
 
     fn poll(&mut self, now: Instant) -> Option<AgentIslandLaunchRequest> {
+        if !self.enabled {
+            return None;
+        }
         let exit = match &mut self.lifecycle {
             AgentIslandLifecycle::Running(monitor) => monitor.try_take_exit(),
             _ => None,
@@ -330,8 +407,12 @@ impl AgentIslandSupervisor {
             AgentIslandLifecycle::Backoff { retry_at } if now >= retry_at
         );
         if retry_due {
+            let Some(request) = self.request.clone() else {
+                self.lifecycle = AgentIslandLifecycle::AwaitingSnapshot;
+                return None;
+            };
             self.lifecycle = AgentIslandLifecycle::Launching;
-            return self.request.clone();
+            return Some(request);
         }
         None
     }
@@ -341,8 +422,19 @@ impl AgentIslandSupervisor {
         result: Result<AgentIslandLaunchOutcome, String>,
         now: Instant,
     ) {
-        if !matches!(self.lifecycle, AgentIslandLifecycle::Launching) {
+        if !self.enabled || !matches!(self.lifecycle, AgentIslandLifecycle::Launching) {
+            if let Ok(AgentIslandLaunchOutcome::Spawned(mut monitor)) = result {
+                monitor.stop();
+            }
             tracing::debug!("ignoring stale native system-agent island launch result");
+            return;
+        }
+        if self.request.is_none() {
+            self.consecutive_failures = 0;
+            if let Ok(AgentIslandLaunchOutcome::Spawned(mut monitor)) = result {
+                monitor.stop();
+            }
+            self.lifecycle = AgentIslandLifecycle::AwaitingSnapshot;
             return;
         }
         match result {
@@ -366,6 +458,11 @@ impl AgentIslandSupervisor {
     }
 
     fn apply_exit(&mut self, exit: AgentIslandExit, now: Instant) {
+        if self.request.is_none() {
+            self.consecutive_failures = 0;
+            self.lifecycle = AgentIslandLifecycle::AwaitingSnapshot;
+            return;
+        }
         if exit.success && exit.ran_for <= AGENT_ISLAND_SINGLETON_EXIT_MAX {
             // Lock contention is a successful, immediate exit: another TUI's
             // helper already owns the per-user island. Recheck infrequently so
@@ -475,9 +572,16 @@ struct AgentIslandExit {
 pub(super) struct AgentIslandMonitor {
     exit: oneshot::Receiver<AgentIslandExit>,
     started_at: Instant,
+    shutdown: Option<oneshot::Sender<()>>,
 }
 
 impl AgentIslandMonitor {
+    fn stop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
+
     fn try_take_exit(&mut self) -> Option<AgentIslandExit> {
         match self.exit.try_recv() {
             Ok(exit) => Some(exit),
@@ -654,8 +758,17 @@ async fn launch_agent_island_with_environment(
 fn monitor_agent_island_child(mut child: tokio::process::Child) -> AgentIslandMonitor {
     let started_at = Instant::now();
     let (exit_tx, exit) = oneshot::channel();
+    let (shutdown, mut shutdown_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let status = child.wait().await;
+        let status = tokio::select! {
+            status = child.wait() => status,
+            signal = &mut shutdown_rx => {
+                if signal.is_ok() {
+                    let _ = child.start_kill();
+                }
+                child.wait().await
+            }
+        };
         let ran_for = started_at.elapsed();
         let exit = match status {
             Ok(status) => AgentIslandExit {
@@ -673,7 +786,11 @@ fn monitor_agent_island_child(mut child: tokio::process::Child) -> AgentIslandMo
         };
         let _ = exit_tx.send(exit);
     });
-    AgentIslandMonitor { exit, started_at }
+    AgentIslandMonitor {
+        exit,
+        started_at,
+        shutdown: Some(shutdown),
+    }
 }
 
 #[cfg(unix)]

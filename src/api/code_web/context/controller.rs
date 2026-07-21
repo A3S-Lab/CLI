@@ -20,9 +20,13 @@ impl ContextController {
     async fn memory(
         &self,
         #[query("query")] query: Option<String>,
+        #[query("offset")] offset: Option<usize>,
         #[query("limit")] limit: Option<usize>,
+        #[query("includeGraph")] include_graph: Option<bool>,
     ) -> BootResult<serde_json::Value> {
-        self.service.memory(query, limit).await
+        self.service
+            .memory(query, offset, limit, include_graph)
+            .await
     }
 
     #[get("/memory/{id}")]

@@ -6,15 +6,23 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum ResearchMethod {
     Focused,
+    /// Legacy journal replay only. New inquiries always use `Focused`.
     PerspectiveGuided,
 }
+
+// Historical perspective journals encoded this bounded wave count. The active
+// runtime never reads or produces a perspective retrieval budget.
+pub(super) const MIN_PERSPECTIVE_RETRIEVAL_WAVES: u8 = 1;
+pub(super) const MAX_PERSPECTIVE_RETRIEVAL_WAVES: u8 = 4;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InquiryPhase {
     #[default]
     StrategySelection,
+    /// Legacy journal replay only.
     Scouting,
+    /// Legacy journal replay only.
     PerspectiveDiscovery,
     Questioning,
     Outlining,
@@ -180,27 +188,14 @@ impl EvidenceQualityRequirements {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+/// Legacy perspective payload retained so historical Inquiry events remain
+/// strictly replayable. The active planner does not construct this type.
+#[doc(hidden)]
 pub struct Perspective {
     pub id: String,
     pub title: String,
     pub focus: String,
     pub source_ids: Vec<String>,
-}
-
-impl Perspective {
-    pub fn new(
-        id: impl Into<String>,
-        title: impl Into<String>,
-        focus: impl Into<String>,
-        source_ids: Vec<String>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            title: title.into(),
-            focus: focus.into(),
-            source_ids,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -215,21 +210,35 @@ pub enum QuestionStatus {
 #[serde(deny_unknown_fields)]
 pub struct Question {
     pub id: String,
+    /// Legacy journal replay only. Active questions are obligation-linked and
+    /// never belong to a generated perspective.
     pub perspective_id: Option<String>,
+    /// Legacy journal replay only. Active planning commits one closed question
+    /// set and never appends child questions.
     pub parent_question_id: Option<String>,
     /// Stable research obligations this question is responsible for closing.
     /// Legacy journals may omit the field, but host-managed Inquiry runs fail
     /// closed unless every planned obligation is linked before outlining.
     #[serde(default)]
     pub obligation_ids: Vec<String>,
-    /// A model-authored, search-engine-ready query for retrieving evidence for
-    /// this question. The human-facing question remains in `prompt`.
+    /// Exact completion-criterion indexes this question is responsible for
+    /// assessing within each linked obligation. Active plans populate this
+    /// structural coverage edge; legacy journals default to all criteria.
+    #[serde(default)]
+    pub completion_criterion_indexes: Vec<usize>,
+    /// Legacy journal replay only. Active provider queries remain on the
+    /// validated plan and are not positionally assigned to questions.
     #[serde(default)]
     pub retrieval_query: Option<String>,
     pub material: bool,
+    /// Legacy journal replay only. Active questions always use round zero.
     #[serde(alias = "iteration")]
     pub round: u32,
     pub prompt: String,
+    /// `Answered` covers both fully answered and traceable partial answers.
+    /// A partial answer carries `bound_reason = Some(...)`; a full answer does
+    /// not. Keeping the terminal enum stable preserves historical projections
+    /// while the event stream records the stronger distinction explicitly.
     pub status: QuestionStatus,
     pub answer: Option<String>,
     pub bound_reason: Option<String>,
@@ -247,6 +256,7 @@ impl Question {
             perspective_id,
             parent_question_id: None,
             obligation_ids: Vec::new(),
+            completion_criterion_indexes: Vec::new(),
             retrieval_query: None,
             material: true,
             round: 0,
@@ -256,19 +266,6 @@ impl Question {
             bound_reason: None,
             evidence_ids: Vec::new(),
         }
-    }
-
-    pub fn follow_up(
-        id: impl Into<String>,
-        perspective_id: Option<String>,
-        parent_question_id: impl Into<String>,
-        round: u32,
-        prompt: impl Into<String>,
-    ) -> Self {
-        let mut question = Self::queued(id, perspective_id, prompt);
-        question.parent_question_id = Some(parent_question_id.into());
-        question.round = round;
-        question
     }
 }
 
@@ -283,7 +280,8 @@ pub struct SectionDraft {
 /// A durable, replayable section-revision attempt.
 ///
 /// The attempt is counted when it starts, not when a model call happens to
-/// return. This keeps the global repair budget stable across process restarts.
+/// return. This keeps the single revision allowance stable across process
+/// restarts.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SectionRevision {
@@ -310,9 +308,12 @@ pub struct InquiryLimits {
     pub max_obligations: usize,
     pub max_completion_criteria_per_obligation: usize,
     pub max_stop_conditions: usize,
+    /// Historical scout-event replay limit; unused by active inquiries.
     pub max_scout_sources: usize,
+    /// Historical perspective-event replay limit; unused by active inquiries.
     pub max_perspectives: usize,
     pub max_questions: usize,
+    /// Historical follow-up replay limit; active questions are always round 0.
     pub max_question_round: usize,
     pub max_outline_sections: usize,
     pub max_evidence_ids_per_answer: usize,
@@ -351,46 +352,4 @@ impl Default for InquiryLimits {
             max_audit_attempts: 4,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InquiryBudgetInput {
-    pub events_applied: usize,
-    pub scout_sources: usize,
-    pub perspectives: usize,
-    pub questions: usize,
-    pub material_questions: usize,
-    pub answered_questions: usize,
-    pub bounded_questions: usize,
-    pub outline_sections: usize,
-    pub drafted_sections: usize,
-    pub answer_chars: usize,
-    pub draft_chars: usize,
-    pub audit_attempts: usize,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct InquiryConvergenceInput {
-    pub method: Option<ResearchMethod>,
-    pub phase: InquiryPhase,
-    pub scout_completed: bool,
-    pub perspectives_required: bool,
-    pub perspectives_committed: usize,
-    pub questions_queued: usize,
-    pub material_questions: usize,
-    pub questions_answered: usize,
-    pub questions_bounded: usize,
-    pub unresolved_questions: usize,
-    pub unresolved_material_questions: usize,
-    pub research_obligations: usize,
-    pub material_obligations: usize,
-    pub contract_assessed: bool,
-    pub contract_outcome: Option<ResearchContractOutcome>,
-    pub outline_sections: usize,
-    pub drafted_sections: usize,
-    pub undrafted_sections: usize,
-    pub audit_passed: Option<bool>,
-    pub budget_exhausted: bool,
 }

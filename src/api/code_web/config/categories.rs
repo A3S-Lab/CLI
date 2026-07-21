@@ -14,8 +14,8 @@ use serde::{Deserialize, Deserializer};
 use serde_json::{json, Map, Value};
 
 use super::secrets::{
-    preserve_document_parser_secret, preserve_mcp_secrets, preserve_provider_secrets,
-    preserve_secret, redact_headers, redact_secret, sanitized_json_value,
+    preserve_mcp_secrets, preserve_provider_secrets, preserve_secret, redact_headers,
+    redact_secret, sanitized_json_value,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,10 +362,6 @@ fn apply_integrations_patch(
         sections.push(ConfigSection::Search);
     }
     if let Patch::Value(value) = patch.document_parser {
-        let mut value = value;
-        if let Some(parser) = value.as_mut() {
-            preserve_document_parser_secret(parser, config.document_parser.as_ref());
-        }
         config.document_parser = value;
         sections.push(ConfigSection::DocumentParser);
     }

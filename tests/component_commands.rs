@@ -45,6 +45,9 @@ fn list_json_separates_catalog_components_from_external_tools() {
     assert!(components
         .iter()
         .any(|component| component["id"] == "use/browser"));
+    assert!(components
+        .iter()
+        .any(|component| component["id"] == "use/ocr"));
     assert_eq!(report["data"]["externalTools"][0]["command"], "local-tool");
     assert!(
         !marker.exists(),
@@ -70,6 +73,7 @@ fn install_without_components_lists_the_typed_catalog_without_mutation() {
     assert!(ids.contains(&"use"));
     assert!(ids.contains(&"use/browser"));
     assert!(ids.contains(&"use/office"));
+    assert!(ids.contains(&"use/ocr"));
     assert!(!temp.path("state/components").exists());
 }
 
@@ -350,6 +354,64 @@ fn info_and_doctor_have_machine_readable_results() {
     assert_eq!(result["ok"], true);
     assert_eq!(result["data"]["healthy"], true);
     assert_eq!(result["data"]["checks"][0]["id"], "code");
+}
+
+#[test]
+fn delegated_ocr_supports_catalog_info_and_doctor() {
+    let temp = TempWorkspace::new("component-ocr-inspection");
+    let bin = temp.path("bin");
+    make_executable(
+        &bin.join("a3s-use"),
+        r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'a3s-use 0.1.1\n'
+  exit 0
+fi
+if [ "$1" = "component" ] && [ "$2" = "status" ]; then
+  if [ "$3" = "ocr" ]; then
+    printf '{"component":{"id":"use/ocr","description":"Native OCR runtime readiness","presence":"managed","health":"ready","version":"0.1.1"}}\n'
+  else
+    printf '{"component":{"id":"use/%s","presence":"missing","health":"unknown"}}\n' "$3"
+  fi
+  exit 0
+fi
+exit 2
+"#,
+    );
+
+    let mut info = Command::new(a3s_bin());
+    configure_component_env(&mut info, &temp);
+    let output = info
+        .args(["info", "use/ocr", "--sources", "--json"])
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["data"]["component"]["id"], "use/ocr");
+    assert_eq!(result["data"]["component"]["health"], "ready");
+    assert_eq!(result["data"]["sources"][0], "delegated:use");
+
+    let mut doctor = Command::new(a3s_bin());
+    configure_component_env(&mut doctor, &temp);
+    let output = doctor
+        .args(["doctor", "use/ocr", "--json"])
+        .env("PATH", &bin)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["ok"], true);
+    assert_eq!(result["data"]["healthy"], true);
+    assert_eq!(result["data"]["checks"][0]["id"], "use/ocr");
 }
 
 #[test]

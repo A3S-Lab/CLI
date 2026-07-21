@@ -12,8 +12,8 @@ mod transport;
 
 use a3s_code_core::llm::{
     structured::{NativeStructuredSupport, StructuredDirective},
-    ContentBlock, LlmClient, LlmResponse, Message, NonRetryableLlmError, StreamEvent,
-    ToolDefinition,
+    ContentBlock, LlmClient, LlmResponse, Message, ModelGenerationConcurrency,
+    NonRetryableLlmError, StreamEvent, ToolDefinition,
 };
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -671,6 +671,13 @@ fn codex_user_agent() -> String {
 
 #[async_trait]
 impl LlmClient for CodexClient {
+    fn model_generation_concurrency(&self) -> ModelGenerationConcurrency {
+        // The ChatGPT account backend can queue concurrent Responses requests
+        // behind account/session admission. Keep that wait local and explicit
+        // so callers do not burn active-generation deadlines in the backend.
+        ModelGenerationConcurrency::single_flight()
+    }
+
     fn fork_for_session(&self, session_id: &str) -> Option<Arc<dyn LlmClient>> {
         let mut client = self.clone();
         let is_new_session = self.session_id != session_id;

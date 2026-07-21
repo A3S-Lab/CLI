@@ -214,11 +214,24 @@ pub(super) fn fit_viewport_row(row: &str, width: usize) -> String {
 /// The OSC 52 escape that asks the terminal to set the system clipboard to
 /// `text` (base64). Works over SSH on terminals that support OSC 52. Capped so a
 /// long reply can't blow past a terminal's OSC 52 size limit.
+pub(super) const OSC52_PAYLOAD_BYTE_LIMIT: usize = 64_000;
+
 pub(super) fn osc52_copy(text: &str) -> String {
     use base64::Engine;
-    let capped: String = text.chars().take(64_000).collect();
+    let capped = osc52_payload(text);
     let b64 = base64::engine::general_purpose::STANDARD.encode(capped.as_bytes());
     format!("\x1b]52;c;{b64}\x07")
+}
+
+fn osc52_payload(text: &str) -> &str {
+    if text.len() <= OSC52_PAYLOAD_BYTE_LIMIT {
+        return text;
+    }
+    let mut end = OSC52_PAYLOAD_BYTE_LIMIT;
+    while !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    &text[..end]
 }
 
 /// Marker the agent puts inline in its reply to offer the RemoteUI popup. The
@@ -238,39 +251,109 @@ pub(super) fn remote_view_button(detail: &str) -> String {
         .view()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ClipboardCopyOutcome {
+    /// The terminal accepted the OSC 52 request on stdout. The terminal may
+    /// still decline it according to its own clipboard policy.
+    pub(super) terminal_requested: bool,
+    /// A platform clipboard helper completed successfully.
+    pub(super) native_delivered: bool,
+    /// OSC 52 carried only the bounded prefix of a larger payload.
+    pub(super) terminal_truncated: bool,
+    /// Number of complete UTF-8 characters carried by the OSC 52 payload.
+    pub(super) terminal_character_count: usize,
+}
+
 /// Put `text` on the system clipboard: OSC 52 (portable, survives SSH on
 /// supporting terminals) plus the native tool where we have one (macOS pbcopy).
-pub(super) fn copy_to_clipboard(text: &str) {
+/// The outcome distinguishes a terminal request from verified native delivery.
+pub(super) fn copy_to_clipboard(text: &str) -> ClipboardCopyOutcome {
     use std::io::Write;
     let mut out = std::io::stdout();
-    let _ = out.write_all(osc52_copy(text).as_bytes());
-    let _ = out.flush();
+    let terminal_requested = out
+        .write_all(osc52_copy(text).as_bytes())
+        .and_then(|()| out.flush())
+        .is_ok();
+    let terminal_payload = osc52_payload(text);
+    let terminal_truncated = terminal_payload.len() < text.len();
+    let terminal_character_count = terminal_payload.chars().count();
     #[cfg(target_os = "macos")]
-    {
+    let native_delivered = {
+        let mut delivered = false;
         if let Ok(mut child) = std::process::Command::new("pbcopy")
             .stdin(std::process::Stdio::piped())
             .spawn()
         {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
-            let _ = child.wait();
+            let wrote = child
+                .stdin
+                .take()
+                .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+            let succeeded = child.wait().is_ok_and(|status| status.success());
+            delivered = wrote && succeeded;
         }
+        delivered
+    };
+    #[cfg(not(target_os = "macos"))]
+    let native_delivered = false;
+    ClipboardCopyOutcome {
+        terminal_requested,
+        native_delivered,
+        terminal_truncated,
+        terminal_character_count,
     }
 }
 
 /// Background of an active text selection in the transcript.
 pub(super) const SELECTION_BG: Color = SURFACE_SELECTED;
 
-/// An in-progress mouse text-selection in the transcript viewport, in screen
-/// cells (visible row, column). `anchor` = drag start, `head` = current point.
-#[derive(Clone, Copy)]
+/// Mouse selection projected into the visible transcript viewport.
+///
+/// Screen cells drive the current highlight. When both endpoints belong to
+/// committed transcript entries, `semantic` retains their stable identities so
+/// content refresh and resize can project fresh cells without losing the
+/// selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Selection {
     pub(super) anchor: (u16, u16),
     pub(super) head: (u16, u16),
+    semantic: Option<TranscriptSelection>,
 }
 
 impl Selection {
+    pub(super) fn start(cell: (u16, u16), point: Option<TranscriptPoint>) -> Self {
+        Self {
+            anchor: cell,
+            head: cell,
+            semantic: point.map(TranscriptSelection::collapsed),
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_cells(anchor: (u16, u16), head: (u16, u16)) -> Self {
+        Self {
+            anchor,
+            head,
+            semantic: None,
+        }
+    }
+
+    pub(super) fn set_head(&mut self, cell: (u16, u16), point: Option<TranscriptPoint>) {
+        self.head = cell;
+        match (&mut self.semantic, point) {
+            (Some(selection), Some(point)) => selection.set_head(point),
+            _ => self.semantic = None,
+        }
+    }
+
+    pub(super) fn semantic(&self) -> Option<TranscriptSelection> {
+        self.semantic
+    }
+
+    pub(super) fn project(&mut self, anchor: (u16, u16), head: (u16, u16)) {
+        self.anchor = anchor;
+        self.head = head;
+    }
+
     pub(super) fn is_empty(&self) -> bool {
         self.anchor == self.head
     }
@@ -561,9 +644,9 @@ pub(super) fn textarea_width_for(width: u16) -> u16 {
 pub(super) enum Mode {
     /// Standard risk-aware mode: safe reads run quietly and side effects prompt.
     Default,
-    /// Exploration/planning mode: safe reads run quietly and side effects prompt.
+    /// Strict read-only planning mode. Implementation starts only after review.
     Plan,
-    /// Streamlined mode: bounded workspace edits auto-run; unbounded operations still prompt.
+    /// Non-interactive execution. Hard policy and workspace denials still win.
     Auto,
 }
 
@@ -600,35 +683,16 @@ impl Mode {
             Mode::Auto => COMPOSER_CHROME.warning,
         }
     }
-
-    /// Whether a pending risk-aware confirmation is auto-approved in this mode.
-    pub(super) fn auto_approves(
-        self,
-        tool: &str,
-        args: &serde_json::Value,
-        workspace: &Path,
-    ) -> bool {
-        match self {
-            Mode::Auto => {
-                let checker =
-                    a3s_code_core::permissions::InteractiveToolGuardrail::for_mode("auto")
-                        .with_workspace(workspace);
-                a3s_code_core::permissions::PermissionChecker::check(&checker, tool, args)
-                    == a3s_code_core::permissions::PermissionDecision::Allow
-            }
-            // Known-safe operations never emit a confirmation event. If one is
-            // pending, default and plan modes always leave the decision to HITL.
-            Mode::Plan | Mode::Default => false,
-        }
-    }
 }
 
 /// Highest runnable host-turn priority. Safety decisions and stream lifecycle
 /// barriers are control-plane operations and therefore remain outside the
 /// pending-turn queue.
-pub(super) const USER_TURN_PRIORITY: a3s_lane::Priority = 0;
+pub(super) const PLAN_REVIEW_PRIORITY: a3s_lane::Priority = 0;
+/// Explicit user submissions run before autonomous continuations.
+pub(super) const USER_TURN_PRIORITY: a3s_lane::Priority = 1;
 /// Host-generated work that must never overtake an explicit user turn.
-pub(super) const SYNTHETIC_TURN_PRIORITY: a3s_lane::Priority = 1;
+pub(super) const SYNTHETIC_TURN_PRIORITY: a3s_lane::Priority = 2;
 
 /// A host-owned turn queued while the agent is busy. Priority and FIFO
 /// metadata are owned by `a3s_lane::PriorityQueue`, not duplicated in the UI
@@ -640,5 +704,5 @@ pub(super) struct Queued {
     /// Attachments captured for this exact queued turn.
     pub(super) images: Vec<PendingImage>,
     pub(super) runtime_expectation: Option<RuntimeExpectation>,
-    pub(super) deep_research: Option<(String, bool, DeepResearchEvidenceScope)>,
+    pub(super) deep_research: Option<(String, DeepResearchEvidenceScope)>,
 }

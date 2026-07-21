@@ -5,6 +5,33 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::ProjectPermissionRevoked {
+                request_id,
+                stable_key,
+                result,
+            } => {
+                self.apply_project_permission_revoke_result(request_id, stable_key, result);
+            }
+            Msg::TaskPanelData {
+                session_id,
+                generation,
+                request_id,
+                tasks,
+            } => {
+                self.apply_task_panel_data(session_id, generation, request_id, tasks);
+            }
+            Msg::TaskPanelTick { generation } => {
+                return self.handle_task_panel_tick(generation);
+            }
+            Msg::TaskPanelCancelFinished {
+                session_id,
+                generation,
+                task_id,
+                cancelled,
+            } => {
+                return self
+                    .apply_task_panel_cancel_result(session_id, generation, task_id, cancelled);
+            }
             Msg::BackgroundSubagentFinished {
                 session_id,
                 generation,
@@ -287,6 +314,37 @@ impl App {
                 let body = text.lines().take(40).collect::<Vec<_>>().join("\n");
                 self.push_line(&gutter(TN_GRAY, body.trim_end()));
             }
+            Msg::SessionExported {
+                status_entry,
+                result,
+            } => match result {
+                Ok((path, bytes)) => {
+                    let shown = path
+                        .strip_prefix(Path::new(&self.cwd))
+                        .unwrap_or(path.as_path());
+                    self.replace_tracked_line(
+                        status_entry,
+                        &Style::new().fg(TN_GREEN).render(&format!(
+                            "  ✓ exported session → {} · {}",
+                            shown.display(),
+                            panels::spf::human_size(bytes)
+                        )),
+                    );
+                }
+                Err(error) => self.replace_tracked_line(
+                    status_entry,
+                    &Style::new()
+                        .fg(TN_RED)
+                        .render(&format!("  session export failed: {error}")),
+                ),
+            },
+            Msg::UseStatus { status_entry, text } => {
+                self.replace_tracked_line(status_entry, &gutter(TN_CYAN, &text));
+            }
+            Msg::CheckupPreflightCompleted {
+                status_entry,
+                result,
+            } => return self.on_checkup_preflight_completed(status_entry, result),
             Msg::ResearchDiagnostic(result) => match result {
                 Ok(text) => self.push_line(&gutter(TN_CYAN, &text)),
                 Err(error) => self.push_line(
@@ -298,7 +356,6 @@ impl App {
 
             Msg::DeepResearchWorkflowCompleted {
                 query,
-                os_runtime,
                 args,
                 result,
                 convergence,
@@ -306,7 +363,6 @@ impl App {
             } => {
                 return self.on_deep_research_workflow_completed(
                     query,
-                    os_runtime,
                     args,
                     result,
                     convergence,
@@ -320,24 +376,6 @@ impl App {
                 phase,
                 result,
             } => return self.on_deep_research_report_generated(token, query, phase, result),
-
-            Msg::DeepResearchSynthesisTimedOut { token } => {
-                return self.on_deep_research_synthesis_timed_out(token);
-            }
-
-            Msg::DeepResearchSynthesisTimedOutAfterCancel {
-                token,
-                status,
-                streamed_text,
-                report_completed,
-            } => {
-                return self.on_deep_research_synthesis_timed_out_after_cancel(
-                    token,
-                    status,
-                    streamed_text,
-                    report_completed,
-                );
-            }
 
             Msg::UpdatePlan(latest) => {
                 self.updating = None;
@@ -650,8 +688,17 @@ impl App {
                     }
                 }
             }
+            Msg::WorktreeForked { request_id, result } => {
+                return self.finish_worktree_fork(request_id, result);
+            }
+            Msg::Rewound { request_id, result } => {
+                return self.finish_rewind_command(request_id, result);
+            }
             Msg::RelayData { request_id, result } => {
                 self.apply_relay_scan(request_id, result);
+            }
+            Msg::RelayRefreshTick { generation } => {
+                return self.handle_relay_refresh_tick(generation);
             }
             Msg::MemoryLoaded(data) => {
                 if let Some(m) = &mut self.memory {

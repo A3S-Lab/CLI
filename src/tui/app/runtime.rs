@@ -1,6 +1,7 @@
 //! Agent stream lifecycle, queue draining, and autonomous-run settlement.
 
 use super::*;
+use crate::tui::app_rewind::capture_rewind_checkpoint_seed;
 
 fn take_matching_queue_claim<T>(
     active: &mut Option<PriorityItem<T>>,
@@ -15,6 +16,16 @@ fn take_matching_queue_claim<T>(
 }
 
 impl App {
+    /// Change the composer mode without mutating the semantics of an admitted
+    /// turn. When no turn is active, keep Core's live policy in sync
+    /// immediately so the footer and authorization boundary cannot diverge.
+    pub(super) fn set_composer_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        if self.active_turn_mode.is_none() {
+            self.execution_policy.set_mode(mode);
+        }
+    }
+
     pub(super) fn start_stream_inner(
         &mut self,
         prompt: String,
@@ -42,6 +53,7 @@ impl App {
         synthesis: bool,
         runtime_expectation: Option<RuntimeExpectation>,
     ) -> Option<Cmd<Msg>> {
+        let execution_mode = self.mode;
         let submitted_images = if include_attachments {
             std::mem::take(&mut self.pending_images)
         } else {
@@ -54,6 +66,9 @@ impl App {
             synthesis,
             runtime_expectation,
             submitted_images,
+            execution_mode,
+            None,
+            false,
         )
     }
 
@@ -65,6 +80,9 @@ impl App {
         synthesis: bool,
         runtime_expectation: Option<RuntimeExpectation>,
         submitted_images: Vec<PendingImage>,
+        execution_mode: Mode,
+        plan_draft: Option<PlanDraftRequest>,
+        capture_rewind: bool,
     ) -> Option<Cmd<Msg>> {
         let attachments = match submitted_images
             .iter()
@@ -82,6 +100,9 @@ impl App {
                 return None;
             }
         };
+        self.active_turn_mode = Some(execution_mode);
+        self.active_plan_draft = plan_draft;
+        self.execution_policy.set_mode(execution_mode);
         if clear_turn_artifacts && !synthesis {
             self.auto_review.on_user_turn();
             self.last_activity = Instant::now();
@@ -113,6 +134,7 @@ impl App {
         } else {
             self.runtime.clear_live_tools();
         }
+        let rewind_task = display_task.clone();
         self.running_task = Some(display_task);
         self.state = State::Streaming;
         self.relayout();
@@ -120,6 +142,15 @@ impl App {
         self.spinner.start();
         self.rebuild_viewport();
         let session = self.session.clone();
+        let rewind_request = capture_rewind.then(|| {
+            (
+                self.store.clone(),
+                self.session_id.clone(),
+                PathBuf::from(&self.cwd),
+                rewind_task,
+                session.history(),
+            )
+        });
         // Keep the agent aligned with the standing goal (display stays clean).
         // Internal synthesis keeps its marker first so Core can reliably
         // suppress runtime auto-delegation for that final-answer-only turn.
@@ -130,46 +161,6 @@ impl App {
         };
         self.stream_start_token = self.stream_start_token.wrapping_add(1);
         let stream_start_token = self.stream_start_token;
-        let deep_research_timeout = if let Some(loop_state) = self.deep_research_loop.as_mut() {
-            if !self.host_progress_inflight {
-                let now = Instant::now();
-                loop_state.phase_started_at = Some(now);
-                self.deep_research_stream_timeout_token =
-                    self.deep_research_stream_timeout_token.wrapping_add(1);
-                let token = self.deep_research_stream_timeout_token;
-                let sectioned_report = sectioned_report_available(
-                    self.deep_research_workflow
-                        .output
-                        .as_deref()
-                        .unwrap_or_default(),
-                    self.deep_research_workflow.metadata.as_ref(),
-                );
-                let timeout_ms = if sectioned_report {
-                    DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
-                } else if self.deep_research_report_repair_used {
-                    DEEP_RESEARCH_REPAIR_TIMEOUT_MS
-                } else {
-                    deep_research_planned_synthesis_timeout_ms(
-                        self.deep_research_workflow.output.as_deref(),
-                    )
-                    .unwrap_or(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS)
-                };
-                let delay = deep_research_synthesis_timeout_delay(
-                    loop_state.started_at,
-                    now,
-                    now,
-                    Duration::from_millis(timeout_ms),
-                    0,
-                    true,
-                )
-                .unwrap_or(Duration::ZERO);
-                Some((delay, token))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
         // (A `/ctx <n>` staged transcript window is attached upstream, only to a
         // genuine typed user message — see on_submit — never to a `/loop`,
         // asset review, `?`, or synthesis continuation.)
@@ -178,8 +169,21 @@ impl App {
         // (PlanningMode::Auto) plus the `parallel_task` tool description — not an
         // unconditional per-turn imperative, which made even "hi" trigger a plan
         // and workspace exploration.
-        let mut commands = vec![
+        let commands = vec![
             cmd::cmd(move || async move {
+                let rewind_checkpoint = match rewind_request {
+                    Some((store, session_id, workspace, task, history_before)) => Some(
+                        capture_rewind_checkpoint_seed(
+                            store,
+                            session_id,
+                            workspace,
+                            task,
+                            history_before,
+                        )
+                        .await,
+                    ),
+                    None => None,
+                };
                 let res =
                     tokio::time::timeout(Duration::from_millis(STREAM_START_TIMEOUT_MS), async {
                         if attachments.is_empty() {
@@ -198,6 +202,7 @@ impl App {
                         rx: Arc::new(Mutex::new(rx)),
                         join,
                         submitted_images,
+                        rewind_checkpoint,
                     },
                     Ok(Err(error)) => {
                         let retryable_admission = matches!(&error, CodeError::SessionBusy { .. });
@@ -221,17 +226,34 @@ impl App {
             spinner_tick(),
             stream_commit_tick(),
         ];
-        if let Some((delay, token)) = deep_research_timeout {
-            commands.push(cmd::cmd(move || async move {
-                tokio::time::sleep(delay).await;
-                Msg::DeepResearchSynthesisTimedOut { token }
-            }));
-        }
         Some(cmd::batch(commands))
     }
 
-    /// Pop exactly one queued user turn. Once user input is exhausted, resume
-    /// a DeepResearch synthesis that was deliberately deferred behind it.
+    /// Enqueue a turn together with the execution mode visible at submission.
+    /// a3s-lane owns ordering; this sidecar owns immutable execution semantics.
+    pub(super) fn enqueue_turn(
+        &mut self,
+        priority: a3s_lane::Priority,
+        queued: Queued,
+        mode: Mode,
+    ) -> u64 {
+        let sequence = self.queue.push(priority, queued);
+        self.queued_turn_modes.insert(sequence, mode);
+        sequence
+    }
+
+    pub(super) fn enqueue_plan_turn(
+        &mut self,
+        priority: a3s_lane::Priority,
+        queued: Queued,
+        request: PlanDraftRequest,
+    ) -> u64 {
+        let sequence = self.enqueue_turn(priority, queued, Mode::Plan);
+        self.queued_plan_drafts.insert(sequence, request);
+        sequence
+    }
+
+    /// Pop exactly one queued user turn.
     pub(super) fn drain_queue(&mut self) -> Option<Cmd<Msg>> {
         // A queued successor must not race a session rebuild or an interrupted
         // stream admission that still has a chance to acquire the core's
@@ -241,21 +263,39 @@ impl App {
             || self.session_rebuild_pending.is_some()
             || self.interrupted_stream_start_token.is_some()
             || self.active_queued_turn.is_some()
+            || self.pending_plan_review.is_some()
+            || self.plan_review.is_some()
         {
             return None;
         }
-        if let Some(next) = self.queue.pop() {
+        let next = panels::queue::take_next_priority_item(
+            &mut self.queue,
+            &mut self.send_now_queued_sequence,
+        );
+        if let Some(next) = next {
+            let sequence = next.sequence();
+            let execution_mode = self
+                .queued_turn_modes
+                .get(&sequence)
+                .copied()
+                .unwrap_or(self.mode);
+            let plan_draft = self.queued_plan_drafts.get(&sequence).cloned();
             let queued = next.value().clone();
-            if let Some((query, os_runtime, evidence_scope)) = queued.deep_research {
+            if let Some((query, evidence_scope)) = queued.deep_research {
                 let command = self.start_deep_research_workflow(
                     query,
-                    os_runtime,
                     evidence_scope,
                     queued.runtime_expectation,
                 );
                 if command.is_none() {
                     self.queue.restore(next);
                     self.relayout();
+                } else {
+                    if self.send_now_queued_sequence == Some(sequence) {
+                        self.send_now_queued_sequence = None;
+                    }
+                    self.queued_turn_modes.remove(&sequence);
+                    self.queued_plan_drafts.remove(&sequence);
                 }
                 return command;
             }
@@ -266,6 +306,9 @@ impl App {
                 false,
                 queued.runtime_expectation,
                 queued.images,
+                execution_mode,
+                plan_draft,
+                true,
             );
             if command.is_some() {
                 self.active_queued_turn_token = Some(self.stream_start_token);
@@ -277,26 +320,24 @@ impl App {
             return command;
         }
 
-        let (prompt, display) = self.pending_deep_research_synthesis.take()?;
-        self.start_deep_research_report_generation(
-            prompt,
-            display,
-            DeepResearchReportGenerationPhase::Synthesis,
-        )
+        None
     }
 
     /// Commit the queue claim once Core has admitted its stream. Before this
     /// point the exact a3s-lane entry remains restorable on `SessionBusy` or an
     /// admission timeout.
     pub(super) fn commit_active_queued_turn(&mut self, token: u64) -> bool {
-        if take_matching_queue_claim(
+        let Some(item) = take_matching_queue_claim(
             &mut self.active_queued_turn,
             &mut self.active_queued_turn_token,
             token,
-        )
-        .is_none()
-        {
+        ) else {
             return false;
+        };
+        self.queued_turn_modes.remove(&item.sequence());
+        self.queued_plan_drafts.remove(&item.sequence());
+        if self.send_now_queued_sequence == Some(item.sequence()) {
+            self.send_now_queued_sequence = None;
         }
         self.queue_retry_generation = self.queue_retry_generation.wrapping_add(1);
         self.queue_retry_attempt = 0;
@@ -320,11 +361,17 @@ impl App {
     }
 
     pub(super) fn discard_active_queued_turn(&mut self, token: u64) {
-        let _ = take_matching_queue_claim(
+        if let Some(item) = take_matching_queue_claim(
             &mut self.active_queued_turn,
             &mut self.active_queued_turn_token,
             token,
-        );
+        ) {
+            self.queued_turn_modes.remove(&item.sequence());
+            self.queued_plan_drafts.remove(&item.sequence());
+            if self.send_now_queued_sequence == Some(item.sequence()) {
+                self.send_now_queued_sequence = None;
+            }
+        }
     }
 
     pub(super) fn retry_queued_turn_after_admission_failure(&mut self) -> Cmd<Msg> {
@@ -405,7 +452,7 @@ impl App {
     }
 
     pub(super) fn has_queued_turn(&self) -> bool {
-        !self.queue.is_empty() || self.pending_deep_research_synthesis.is_some()
+        !self.queue.is_empty()
     }
 
     pub(super) fn wait_for_completed_stream_join(
@@ -440,7 +487,7 @@ impl App {
             state.started_at.elapsed() >= Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
         }) {
             self.loop_remaining = 0;
-            self.pending_deep_research_report_repair_prompt = None;
+            self.pending_deep_research_report_resume = false;
         }
         let degraded_deep_research = self.deep_research_loop.is_some()
             && matches!(self.deep_research_outcome, DeepResearchRunOutcome::Degraded);
@@ -448,21 +495,28 @@ impl App {
             self.completed += 1;
         }
         self.warn_missing_runtime_evidence();
+        let plan_review = self.take_plan_review_candidate();
         // Goal iterations are evaluated by Core before End. A generic hidden
         // synthesis turn must not replace that event gate or consume the turn
         // as if it were complete.
-        let synthesis = if degraded_deep_research || self.goal_run.is_some() {
+        let synthesis = if plan_review.is_some()
+            || self.deep_research_loop.is_some()
+            || degraded_deep_research
+            || self.goal_run.is_some()
+        {
             None
         } else {
             self.prepare_ultracode_synthesis()
         };
         let completed_stream_join = self.stream_join.take();
         self.finish();
+        self.pending_plan_review = plan_review;
         if let Some(completed_stream_join) = completed_stream_join {
             // Keep input queue-only until the worker has completed persistence,
             // cleanup, and release of core's single-flight admission lease.
             return Some(self.wait_for_completed_stream_join(completed_stream_join, synthesis));
         }
+        self.discard_active_rewind_checkpoint();
         self.continue_after_stream_settled(synthesis)
     }
 
@@ -470,6 +524,9 @@ impl App {
         &mut self,
         synthesis: Option<(String, String)>,
     ) -> Option<Cmd<Msg>> {
+        if self.activate_pending_plan_review() {
+            return None;
+        }
         if self.goal_run.as_ref().is_some_and(|run| run.achieved) {
             self.pending_goal_failure = None;
             return self.finish_achieved_goal();
@@ -485,10 +542,10 @@ impl App {
             return self.continue_goal_run(failure);
         }
         self.pending_goal_failure = None;
-        // A real user follow-up supersedes the hidden answer-only synthesis for
-        // the previous turn. It must become the next model turn, not sit behind
-        // another autonomous request.
-        if self.has_queued_turn() {
+        // A DeepResearch run completes its closed report transaction before
+        // queued turns can change session context. Esc remains the explicit
+        // way to interrupt the active run.
+        if self.deep_research_loop.is_none() && self.has_queued_turn() {
             return self.drain_queue();
         }
         if let Some((prompt, display_task)) = synthesis {
@@ -502,18 +559,18 @@ impl App {
     /// DeepResearch starts `tool_with_events` synchronously, while normal model
     /// streams start when their returned command is polled.
     pub(super) fn continue_completed_turn(&mut self) -> Option<Cmd<Msg>> {
-        // Codex-style follow-ups consume one turn at a time before any hidden
-        // synthesis or autonomous loop continuation. The same rule applies to
-        // DeepResearch so a user steer cannot wait for the whole research run.
-        if self.has_queued_turn() {
+        // Do not interleave queued turns between DeepResearch retrieval,
+        // report generation, its one durable resume, and terminal journaling.
+        if self.deep_research_loop.is_none() && self.has_queued_turn() {
             return self.drain_queue();
         }
         if self.loop_remaining > 0 {
-            if let Some(prompt) = self.pending_deep_research_report_repair_prompt.take() {
+            if self.pending_deep_research_report_resume {
+                self.pending_deep_research_report_resume = false;
                 self.loop_remaining -= 1;
                 let n = self.loop_remaining;
                 self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                    "  ↻ deep research report repair ({n} left · Esc to stop)"
+                    "  ↻ deep research report resume ({n} left · Esc to stop)"
                 )));
                 self.loop_continuation = true;
                 let query = self
@@ -522,9 +579,8 @@ impl App {
                     .map(|state| state.query.clone())
                     .unwrap_or_else(|| "report".to_string());
                 return self.start_deep_research_report_generation(
-                    prompt,
-                    format!("✦\u{200A}repair report {query}"),
-                    DeepResearchReportGenerationPhase::Repair,
+                    format!("✦\u{200A}resume report {query}"),
+                    DeepResearchReportGenerationPhase::Resume,
                 );
             }
         }
@@ -547,31 +603,26 @@ impl App {
             }
         }
         // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
-        // Queued user messages take priority.
+        // DeepResearch may reach this point only for its explicit one-shot
+        // report resume above; it never receives a hidden continuation.
         if self.loop_remaining > 0 {
-            self.loop_remaining -= 1;
-            let n = self.loop_remaining;
-            let (label, prompt) = if let Some(deep_research) = &self.deep_research_loop {
-                let layer = deep_research.total_layers.saturating_sub(n);
-                (
-                    "deep research verification",
-                    deep_research.verification_prompt(layer.max(1)),
-                )
+            if self.deep_research_loop.is_some() {
+                self.loop_remaining = 0;
             } else {
-                (
-                    "loop",
-                    "Continue. If the task is fully complete, reply DONE and stop.".to_string(),
-                )
-            };
-            self.push_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render(&format!("  ↻ {label} ({n} left · Esc to stop)")),
-            );
-            // Mark the continuation as machine-driven so on_submit doesn't
-            // attach a staged `/ctx` window to it.
-            self.loop_continuation = true;
-            return Some(cmd::msg(Msg::Submit(prompt)));
+                self.loop_remaining -= 1;
+                let n = self.loop_remaining;
+                let prompt =
+                    "Continue. If the task is fully complete, reply DONE and stop.".to_string();
+                self.push_line(
+                    &Style::new()
+                        .fg(TN_GRAY)
+                        .render(&format!("  ↻ loop ({n} left · Esc to stop)")),
+                );
+                // Mark the continuation as machine-driven so on_submit doesn't
+                // attach a staged `/ctx` window to it.
+                self.loop_continuation = true;
+                return Some(cmd::msg(Msg::Submit(prompt)));
+            }
         }
         // The loop is drained (or was never armed): an autonomous run that
         // auto-switched to auto mode is over — restore the user's mode.
@@ -758,8 +809,8 @@ impl App {
     }
 
     /// An autonomous directive run is starting (/sleep, asset reviews,
-    /// asset run/deploy, /flow drafts, /loop): switch to auto-approve so tool
-    /// prompts can't stall it, and arm the loop budget that re-prompts until
+    /// asset run/deploy, /flow drafts, /loop): switch to non-interactive Auto
+    /// so tool prompts cannot stall it, and arm the loop budget that re-prompts until
     /// the deliverable lands. The prior mode is restored when the run ends
     /// (loop drained, interrupt, error, or /clear). A user already in auto
     /// mode keeps it — nothing is remembered or restored.
@@ -767,7 +818,7 @@ impl App {
         self.loop_remaining = self.loop_remaining.max(budget);
         if self.mode != Mode::Auto {
             self.autonomy_restore = Some(self.mode);
-            self.mode = Mode::Auto;
+            self.set_composer_mode(Mode::Auto);
             self.push_line(&Style::new().fg(TN_GRAY).render(
                 "  ⏵⏵ auto mode engaged for this task — restores when it completes (Esc stops)",
             ));
@@ -777,7 +828,7 @@ impl App {
     pub(super) fn engage_single_turn_autonomy(&mut self) {
         if self.mode != Mode::Auto {
             self.autonomy_restore = Some(self.mode);
-            self.mode = Mode::Auto;
+            self.set_composer_mode(Mode::Auto);
             self.push_line(&Style::new().fg(TN_GRAY).render(
                 "  ⏵⏵ auto mode engaged for this task — restores when it completes (Esc stops)",
             ));
@@ -820,34 +871,25 @@ impl App {
             self.goal = goal;
             self.goal_since = goal_since;
         }
-        self.deep_research_report_repair_used = false;
+        self.deep_research_report_resume_used = false;
         self.deep_research_workflow.clear();
         self.deep_research_outcome = DeepResearchRunOutcome::Active;
         self.deep_research_journal_finalization_inflight = false;
         self.deep_research_terminal_artifacts = None;
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
-        self.pending_deep_research_report_repair_prompt = None;
-        self.pending_deep_research_synthesis = None;
+        self.pending_deep_research_report_resume = false;
         self.pending_deep_research_report_view = None;
-        self.deep_research_report_tools.clear();
-        self.deep_research_report_tool_gate.set_report_only(false);
+        self.deep_research_report_tool_gate.reset();
         self.deep_research_subagent_settlement_inflight = false;
         if let Some(prev) = self.autonomy_restore.take() {
-            self.mode = prev;
+            self.set_composer_mode(prev);
             self.push_line(
                 &Style::new()
                     .fg(TN_GRAY)
                     .render("  ⏵ autonomous task ended — auto mode restored to your previous mode"),
             );
         }
-    }
-
-    pub(super) fn should_delay_deep_research_report_tool(&self) -> bool {
-        should_delay_deep_research_report_tool(
-            self.deep_research_loop.is_some(),
-            &self.deep_research_report_tool_gate,
-        )
     }
 
     pub(super) fn record_deep_research_child_event_cmd(

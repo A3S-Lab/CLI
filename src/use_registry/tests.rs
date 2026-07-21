@@ -144,6 +144,11 @@ impl a3s_code_core::LlmClient for UseCallingLlm {
 fn dedicated_use_worker_allows_only_use_mcp_tools() {
     let worker = use_worker_spec(&DesiredCapabilities::default()).into_agent_definition();
     assert_eq!(
+        worker.confirmation_inheritance,
+        Some(ConfirmationInheritance::InheritParent),
+        "Use Ask decisions must reach the parent TUI instead of auto-approval"
+    );
+    assert_eq!(
         worker
             .permissions
             .check("mcp__use_browser__browser_open", &serde_json::json!({})),
@@ -358,6 +363,370 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn registry_command_timeout_kills_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("slow-a3s-use");
+    let started = temp.path().join("started");
+    let descendant_started = temp.path().join("descendant-started");
+    let leaked = temp.path().join("timeout-leak");
+    let script = format!(
+        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 1.50; : > '{}') &\nwait\n",
+        shell_single_quote(&started.display().to_string()),
+        shell_single_quote(&descendant_started.display().to_string()),
+        shell_single_quote(&leaked.display().to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    let client = UseRegistryClient::for_test(executable, temp.path().to_path_buf());
+    let request = tokio::spawn(async move {
+        client
+            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(1))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !started.exists() || !descendant_started.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fixture registry command did not start its descendant");
+
+    let error = request.await.unwrap().unwrap_err();
+
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    tokio::time::sleep(Duration::from_millis(1_700)).await;
+    assert!(
+        !leaked.exists(),
+        "a timed-out registry command must not leave descendants"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn registry_command_cancellation_kills_descendants() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("cancelled-a3s-use");
+    let started = temp.path().join("started");
+    let descendant_started = temp.path().join("descendant-started");
+    let leaked = temp.path().join("cancellation-leak");
+    let script = format!(
+        "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 0.60; : > '{}') &\nwait\n",
+        shell_single_quote(&started.display().to_string()),
+        shell_single_quote(&descendant_started.display().to_string()),
+        shell_single_quote(&leaked.display().to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+    let cancellation = CancellationToken::new();
+    let client =
+        UseRegistryClient::new(executable, temp.path().to_path_buf(), cancellation.clone());
+    let request = tokio::spawn(async move {
+        client
+            .run_json::<serde_json::Value>(Vec::new(), Duration::from_secs(5))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !started.exists() || !descendant_started.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fixture registry command did not start");
+
+    cancellation.cancel();
+    let error = request.await.unwrap().unwrap_err();
+
+    assert!(error.to_string().contains("cancelled"), "{error:#}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !leaked.exists(),
+        "a cancelled registry command must not leave descendants"
+    );
+}
+
+#[tokio::test]
+async fn builtin_ocr_projects_as_use_ocr_tools_and_worker_guidance() {
+    use sha2::Digest;
+
+    let temp = tempfile::tempdir().unwrap();
+    let package = temp.path().join("package");
+    let skill_path = package.join("skills/a3s-use-ocr/SKILL.md");
+    std::fs::create_dir_all(skill_path.parent().unwrap()).unwrap();
+    let content = r#"---
+name: a3s-use-ocr
+description: Extract text from local images through A3S Use OCR
+---
+# A3S Use OCR
+
+Call mcp__use_ocr__ocr_doctor before extraction.
+"#;
+    std::fs::write(&skill_path, content).unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(content.as_bytes()));
+    let binding = CapabilityBinding {
+        id: "use/ocr".to_string(),
+        route: "ocr".to_string(),
+        version: "0.1.1".to_string(),
+        origin: CapabilityOrigin::BuiltIn,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: package,
+        surfaces: vec!["mcp".to_string(), "skill".to_string()],
+        mcp: Some(ProjectedMcpSurface {
+            target: "ocr-native".to_string(),
+            transport: ProjectedMcpTransport::Stdio,
+        }),
+        skills: vec![ProjectedSkillSurface {
+            path: skill_path,
+            sha256: digest,
+        }],
+    };
+    let client = UseRegistryClient::for_test(
+        temp.path().join("unused-a3s-use"),
+        temp.path().to_path_buf(),
+    );
+    let mut desired = DesiredCapabilities::default();
+    client
+        .add_projected_capabilities(&mut desired, &binding)
+        .await
+        .unwrap();
+
+    let ocr = desired.mcp.get("use_ocr").unwrap();
+    assert_eq!(ocr.capability_id, "use/ocr");
+    assert_eq!(ocr.target, "ocr-native");
+    assert_eq!(desired.skills["a3s-use-ocr"].package_id, "use/ocr");
+    let worker = use_worker_spec(&desired).into_agent_definition();
+    assert!(worker
+        .permissions
+        .expose_to_model("mcp__use_ocr__ocr_extract"));
+    let prompt = worker.prompt.unwrap();
+    assert!(prompt.contains("mcp__use_ocr__*"));
+    assert!(prompt.contains("mcp__use_ocr__ocr_doctor"));
+}
+
+#[test]
+fn status_renderer_keeps_native_office_ready_when_officecli_is_missing() {
+    let revision = "a".repeat(64);
+    let office = CapabilityBinding {
+        id: "use/office".to_string(),
+        route: "office".to_string(),
+        version: "0.4.0".to_string(),
+        origin: CapabilityOrigin::BuiltIn,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: PathBuf::new(),
+        surfaces: vec!["mcp".to_string(), "skill".to_string()],
+        mcp: Some(ProjectedMcpSurface {
+            target: "office-native".to_string(),
+            transport: ProjectedMcpTransport::Stdio,
+        }),
+        skills: Vec::new(),
+    };
+    let office_compat = CapabilityBinding {
+        id: "use/office-compat".to_string(),
+        route: "office-compat".to_string(),
+        version: "0.4.0".to_string(),
+        origin: CapabilityOrigin::BuiltIn,
+        enabled: true,
+        readiness: CapabilityReadiness::Missing,
+        package_root: PathBuf::new(),
+        surfaces: vec!["mcp".to_string()],
+        mcp: None,
+        skills: Vec::new(),
+    };
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 8,
+        revision: revision.clone(),
+        capabilities: vec![office, office_compat],
+    };
+    let desired = DesiredCapabilities {
+        generation: 8,
+        revision,
+        mcp: BTreeMap::from([(
+            "use_office".to_string(),
+            DesiredMcp {
+                server_name: "use_office".to_string(),
+                capability_id: "use/office".to_string(),
+                target: "office-native".to_string(),
+                fingerprint: "office-v1".to_string(),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let doctor = UseDoctorData {
+        diagnostics: vec![UseDomainDiagnostic {
+            domain: "office".to_string(),
+            readiness: CapabilityReadiness::Missing,
+            provider: None,
+            version: None,
+            path: None,
+            message: "The optional OfficeCLI compatibility provider is missing.".to_string(),
+        }],
+    };
+    let mcp_status = HashMap::from([(
+        "use_office".to_string(),
+        McpServerStatus {
+            name: "use_office".to_string(),
+            connected: true,
+            enabled: true,
+            tool_count: 18,
+            error: None,
+        },
+    )]);
+
+    let status = render_status(
+        Path::new("/opt/a3s-use"),
+        Ok(UseVersionData {
+            version: "0.4.0".to_string(),
+        }),
+        Ok(snapshot),
+        Ok(doctor),
+        None,
+        &desired,
+        &mcp_status,
+        &[],
+        false,
+    );
+
+    assert!(
+        status.contains("use/office · ready · v0.4.0 · provider native"),
+        "{status}"
+    );
+    assert!(status.contains("MCP connected (18 tools)"), "{status}");
+    assert!(status.contains("use/office-compat · missing"), "{status}");
+    assert!(
+        status.contains("optional OfficeCLI compatibility provider is missing"),
+        "{status}"
+    );
+}
+
+#[test]
+fn status_renderer_discloses_local_ppocr_v6_and_never_runs_repairs() {
+    let revision = "b".repeat(64);
+    let ocr = CapabilityBinding {
+        id: "use/ocr".to_string(),
+        route: "ocr".to_string(),
+        version: "0.1.1".to_string(),
+        origin: CapabilityOrigin::BuiltIn,
+        enabled: true,
+        readiness: CapabilityReadiness::Ready,
+        package_root: PathBuf::from("/opt/a3s-use-ocr"),
+        surfaces: vec!["mcp".to_string(), "skill".to_string()],
+        mcp: Some(ProjectedMcpSurface {
+            target: "ocr-native".to_string(),
+            transport: ProjectedMcpTransport::Stdio,
+        }),
+        skills: Vec::new(),
+    };
+    let snapshot = RegistrySnapshot {
+        schema_version: SCHEMA_VERSION,
+        generation: 3,
+        revision: revision.clone(),
+        capabilities: vec![ocr],
+    };
+    let desired = DesiredCapabilities {
+        generation: 3,
+        revision,
+        mcp: BTreeMap::from([(
+            "use_ocr".to_string(),
+            DesiredMcp {
+                server_name: "use_ocr".to_string(),
+                capability_id: "use/ocr".to_string(),
+                target: "ocr-native".to_string(),
+                fingerprint: "ocr-v1".to_string(),
+            },
+        )]),
+        ..DesiredCapabilities::default()
+    };
+    let status = render_status(
+        Path::new("/opt/a3s-use"),
+        Ok(UseVersionData {
+            version: "0.4.0".to_string(),
+        }),
+        Ok(snapshot.clone()),
+        Ok(UseDoctorData {
+            diagnostics: Vec::new(),
+        }),
+        Some(Ok(serde_json::json!({
+            "readiness": "ready",
+            "provider": "pp-ocr-v6",
+            "engine": "onnx-runtime",
+            "model": "PP-OCRv6_small",
+            "sendsSourceOffDevice": false,
+            "message": "Local PP-OCRv6 detection and recognition models are ready."
+        }))),
+        &desired,
+        &HashMap::new(),
+        &[],
+        true,
+    );
+
+    assert!(
+        status.contains("pp-ocr-v6 · PP-OCRv6_small · local ONNX"),
+        "{status}"
+    );
+    assert!(
+        status.contains("repair guidance (never run automatically)"),
+        "{status}"
+    );
+    assert!(
+        status.contains("a3s install use --source release"),
+        "{status}"
+    );
+    assert!(
+        !status.contains("a3s install use/ocr"),
+        "ready PP-OCRv6 models must not receive model repair guidance: {status}"
+    );
+
+    let missing_status = render_status(
+        Path::new("/opt/a3s-use"),
+        Ok(UseVersionData {
+            version: "0.4.0".to_string(),
+        }),
+        Ok(snapshot),
+        Ok(UseDoctorData {
+            diagnostics: Vec::new(),
+        }),
+        Some(Ok(serde_json::json!({
+            "readiness": "missing",
+            "provider": "pp-ocr-v6",
+            "engine": "onnx-runtime",
+            "model": "PP-OCRv6_small",
+            "sendsSourceOffDevice": false,
+            "message": "The local PP-OCRv6 model bundle is not installed."
+        }))),
+        &desired,
+        &HashMap::new(),
+        &[],
+        true,
+    );
+    assert!(
+        missing_status.contains("pp-ocr-v6 · PP-OCRv6_small · local ONNX"),
+        "{missing_status}"
+    );
+    assert!(
+        missing_status.contains("OCR model: a3s install use/ocr"),
+        "{missing_status}"
+    );
+
+    let unavailable = unavailable_status_text(true);
+    assert!(unavailable.contains("not discovered"), "{unavailable}");
+    assert!(
+        unavailable.contains("Built-in OCR: update or repair Use"),
+        "{unavailable}"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn generation_watch_hot_plugs_and_disables_skill_and_mcp() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -437,7 +806,7 @@ if [ "$1" = "mcp" ] && [ "$2" = "serve" ]; then
         ;;
       *'"method":"notifications/initialized"'*) ;;
       *'"method":"tools/list"'*)
-        printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}}}}]}}}}'
+        printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}}}]}}}}'
         ;;
       *'"method":"tools/call"'*)
         printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"content":[{{"type":"text","text":"fixture-ok"}}],"isError":false}}}}'
@@ -690,7 +1059,29 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     .await;
     assert!(warning.is_none(), "{warning:?}");
     wait_for_capabilities(&session, true).await;
+    wait_for_builtin_use_surfaces(&session).await;
     assert_fixture_tool(&session, "fixture-v1").await;
+    let ocr_doctor = session
+        .tool("mcp__use_ocr__ocr_doctor", serde_json::json!({}))
+        .await
+        .expect("built-in OCR doctor must be callable");
+    assert!(ocr_doctor.output.contains("readiness"), "{ocr_doctor:?}");
+    let office_list = session
+        .tool("mcp__use_office__office_list", serde_json::json!({}))
+        .await
+        .expect("built-in Office list must be callable");
+    assert!(
+        office_list.output.contains("\"count\":0"),
+        "{office_list:?}"
+    );
+    let status = handle.status_text(Arc::clone(&session), false).await;
+    assert!(status.contains("A3S Use status"), "{status}");
+    assert!(status.contains("use/acme/report"), "{status}");
+    assert!(status.contains("use/browser"), "{status}");
+    assert!(status.contains("use/office"), "{status}");
+    assert!(status.contains("use/ocr"), "{status}");
+    assert!(status.contains("MCP connected (1 tools)"), "{status}");
+    assert!(status.contains("Skill verified + loaded (1/1)"), "{status}");
 
     write_real_extension_fixture(&package, "2.0.0", "fixture-v2");
     run_real_use(
@@ -734,7 +1125,12 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
         .skill_names()
         .iter()
         .any(|name| name == "fixture-report"));
+    assert!(replacement
+        .skill_names()
+        .iter()
+        .any(|name| name == "a3s-use-ocr"));
     wait_for_capabilities(&replacement, true).await;
+    wait_for_builtin_use_surfaces(&replacement).await;
     assert_fixture_tool(&replacement, "fixture-v2").await;
     session.close().await;
 
@@ -808,7 +1204,7 @@ while IFS= read -r line; do
       ;;
     *'"method":"notifications/initialized"'*) ;;
     *'"method":"tools/list"'*)
-      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"tools\":[{{\"name\":\"fixture_tool\",\"description\":\"Real Use fixture\",\"inputSchema\":{{\"type\":\"object\"}}}}]}}}}"
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"tools\":[{{\"name\":\"fixture_tool\",\"description\":\"Real Use fixture\",\"inputSchema\":{{\"type\":\"object\"}},\"annotations\":{{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true,\"openWorldHint\":false}}}}]}}}}"
       ;;
     *'"method":"tools/call"'*)
       printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{response}\"}}],\"isError\":false}}}}"
@@ -866,6 +1262,33 @@ async fn wait_for_capabilities(session: &AgentSession, present: bool) {
     })
     .await
     .unwrap_or_else(|_| panic!("capabilities did not converge to present={present}"));
+}
+
+#[cfg(unix)]
+async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let skills = session.skill_names();
+            let tools = session.tool_names();
+            let skills_present = ["a3s-use-browser", "a3s-use-office", "a3s-use-ocr"]
+                .iter()
+                .all(|expected| skills.iter().any(|name| name == expected));
+            let tools_present = [
+                "mcp__use_browser__agent_browser_doctor",
+                "mcp__use_browser__agent_browser_install",
+                "mcp__use_office__office_list",
+                "mcp__use_ocr__ocr_doctor",
+            ]
+            .iter()
+            .all(|expected| tools.iter().any(|name| name == expected));
+            if skills_present && tools_present {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("built-in Browser, Office, and OCR did not project into the Code session");
 }
 
 #[cfg(unix)]
@@ -929,6 +1352,105 @@ async fn startup_discovery_respects_its_budget() {
     );
 
     drop(handle);
+    session.close().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_gives_initial_mcp_more_time_than_registry_discovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("slow-initial-mcp");
+    let snapshot = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"registry": {
+            "schemaVersion": 1,
+            "generation": 1,
+            "revision": "1111111111111111111111111111111111111111111111111111111111111111",
+            "capabilities": [{
+                "id": "use/acme/report",
+                "route": "report",
+                "version": "1.0.0",
+                "origin": "extension",
+                "enabled": true,
+                "packageRoot": temp.path(),
+                "surfaces": ["mcp"],
+                "mcp": {"target": "acme/report", "transport": "stdio"},
+                "skills": []
+            }]
+        }}
+    });
+    let unchanged = serde_json::json!({
+        "schemaVersion": 1,
+        "ok": true,
+        "data": {"changed": false, "registry": null}
+    });
+    let script = format!(
+        r#"#!/bin/sh
+if [ "$1" = "mcp" ] && [ "$2" = "serve" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      *'"method":"initialize"'*)
+        sleep 1.25
+        printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{}},"serverInfo":{{"name":"slow-fixture","version":"1.0.0"}}}}}}'
+        ;;
+      *'"method":"notifications/initialized"'*) ;;
+      *'"method":"tools/list"'*)
+        printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"fixture_tool","description":"Fixture tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}}}}]}}}}'
+        ;;
+    esac
+  done
+  exit 0
+fi
+
+case "$1 $2" in
+  "capability snapshot") printf '%s\n' '{}' ;;
+  "capability watch") printf '%s\n' '{}' ;;
+  *) exit 2 ;;
+esac
+"#,
+        shell_single_quote(&snapshot.to_string()),
+        shell_single_quote(&unchanged.to_string()),
+    );
+    std::fs::write(&executable, script).unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(temp.path().display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let started = std::time::Instant::now();
+    let (handle, warning) = start(
+        executable,
+        temp.path().to_path_buf(),
+        CancellationToken::new(),
+        Arc::clone(&session),
+    )
+    .await;
+
+    assert!(warning.is_none(), "{warning:?}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "fixture did not exercise the longer projection budget"
+    );
+    assert!(
+        session
+            .tool_names()
+            .iter()
+            .any(|name| name == "mcp__use_report__fixture_tool"),
+        "initial MCP route was not ready when startup returned"
+    );
+
+    handle.shutdown().await;
     session.close().await;
 }
 
@@ -1092,6 +1614,7 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
     let handle = UseRegistryHandle {
         inner: Arc::new(UseRegistryInner {
             executable: temp.path().join("unused-a3s-use"),
+            directory: temp.path().to_path_buf(),
             desired_tx,
             cancellation: CancellationToken::new(),
             projections: Mutex::new(BTreeMap::new()),
@@ -1261,6 +1784,7 @@ fn skill_content_fingerprint_changes_without_restarting_its_mcp_surface() {
         version: "1.0.0".to_string(),
         origin: CapabilityOrigin::Extension,
         enabled: true,
+        readiness: CapabilityReadiness::Ready,
         package_root: package.path().to_path_buf(),
         surfaces: vec!["mcp".to_string(), "skill".to_string()],
         mcp: Some(mcp.clone()),

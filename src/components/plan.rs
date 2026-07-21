@@ -846,7 +846,7 @@ fn fingerprint_local_package_blocking(path: &Path) -> anyhow::Result<PlannedLoca
     } else if metadata.is_dir() {
         let mut entries = Vec::new();
         collect_local_entries(path, path, &mut entries)?;
-        entries.sort_by(|left, right| path_identity(&left.0).cmp(&path_identity(&right.0)));
+        entries.sort_by_key(|entry| path_identity(&entry.0));
         let mut file_count = 0_u64;
         let mut byte_count = 0_u64;
         for (relative, absolute, metadata) in entries {

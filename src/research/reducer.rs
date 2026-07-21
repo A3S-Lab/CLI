@@ -2,15 +2,17 @@
 
 use std::collections::HashSet;
 
+use super::model::{MAX_PERSPECTIVE_RETRIEVAL_WAVES, MIN_PERSPECTIVE_RETRIEVAL_WAVES};
 use super::validation::{
     ensure_limit, ensure_nonempty, ensure_string, ensure_strings, ensure_unique_ids,
     validate_outline_limits, validate_queued_questions, validate_research_obligations,
     validate_section_citations,
 };
 use super::{
-    research_contract_outcome, validate_research_contract_assessment, validate_research_outline,
-    InquiryAudit, InquiryError, InquiryEvent, InquiryLimits, InquiryPhase, InquiryState,
-    QuestionStatus, ResearchContractOutcome, ResearchMethod, SectionDraft, SectionRevision,
+    material_evidence_floor, research_contract_outcome, validate_research_contract_assessment,
+    validate_research_outline, InquiryAudit, InquiryError, InquiryEvent, InquiryLimits,
+    InquiryPhase, InquiryState, QuestionStatus, ResearchContractOutcome, ResearchMethod,
+    SectionDraft, SectionRevision, SourceEvidenceRole,
 };
 
 pub fn reduce(
@@ -49,6 +51,7 @@ pub fn reduce(
             if !state.obligations.is_empty()
                 || !state.stop_conditions.is_empty()
                 || state.scout_completed
+                || state.perspective_retrieval_wave_budget.is_some()
                 || !state.perspectives.is_empty()
                 || !state.questions.is_empty()
                 || !state.evidence_catalog.is_empty()
@@ -59,6 +62,8 @@ pub fn reduce(
             next.obligations.clone_from(obligations);
             next.stop_conditions.clone_from(stop_conditions);
         }
+        // The following three arms are retained exclusively to replay journals
+        // written by the removed scout/perspective runtime.
         InquiryEvent::ScoutCompleted { source_ids } => {
             require_phase(state, event, &[InquiryPhase::Scouting])?;
             ensure_nonempty(source_ids, "scout sources")?;
@@ -68,6 +73,22 @@ pub fn reduce(
             next.scout_completed = true;
             next.scout_source_ids.clone_from(source_ids);
             next.phase = InquiryPhase::PerspectiveDiscovery;
+        }
+        InquiryEvent::PerspectiveBudgetSelected {
+            total_retrieval_waves,
+        } => {
+            require_phase(state, event, &[InquiryPhase::PerspectiveDiscovery])?;
+            if state.perspective_retrieval_wave_budget.is_some()
+                || !(MIN_PERSPECTIVE_RETRIEVAL_WAVES..=MAX_PERSPECTIVE_RETRIEVAL_WAVES)
+                    .contains(total_retrieval_waves)
+            {
+                return Err(InquiryError::InvalidResearchPlan {
+                    reason: format!(
+                        "perspective retrieval wave budget must be selected exactly once between {MIN_PERSPECTIVE_RETRIEVAL_WAVES} and {MAX_PERSPECTIVE_RETRIEVAL_WAVES}; got {total_retrieval_waves}"
+                    ),
+                });
+            }
+            next.perspective_retrieval_wave_budget = Some(*total_retrieval_waves);
         }
         InquiryEvent::PerspectivesCommitted { perspectives } => {
             require_phase(state, event, &[InquiryPhase::PerspectiveDiscovery])?;
@@ -181,6 +202,110 @@ pub fn reduce(
                 limits.max_identifier_chars,
             )?;
             ensure_limit(
+                "evidence source coverage",
+                evidence.source_coverage.len(),
+                limits.max_citation_ids_per_section,
+            )?;
+            let evidence_source_ids = evidence
+                .source_ids
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>();
+            let mut coverage_edges = HashSet::new();
+            for binding in &evidence.source_coverage {
+                ensure_string(
+                    &binding.source_id,
+                    "source coverage source id",
+                    limits.max_identifier_chars,
+                )?;
+                ensure_string(
+                    &binding.obligation_id,
+                    "source coverage obligation id",
+                    limits.max_identifier_chars,
+                )?;
+                if !evidence_source_ids.contains(binding.source_id.as_str()) {
+                    return Err(InquiryError::UnknownId {
+                        resource: "evidence source",
+                        id: binding.source_id.clone(),
+                    });
+                }
+                let obligation = state
+                    .obligations
+                    .iter()
+                    .find(|obligation| obligation.id == binding.obligation_id)
+                    .ok_or_else(|| InquiryError::UnknownId {
+                        resource: "research obligation",
+                        id: binding.obligation_id.clone(),
+                    })?;
+                if !coverage_edges
+                    .insert((binding.source_id.as_str(), binding.obligation_id.as_str()))
+                {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "evidence `{}` repeats source coverage edge `{}` -> `{}`",
+                            evidence.evidence_id, binding.source_id, binding.obligation_id
+                        ),
+                    });
+                }
+                ensure_nonempty(
+                    &binding.completion_criterion_indexes,
+                    "source coverage completion criterion indexes",
+                )?;
+                ensure_limit(
+                    "source coverage completion criterion indexes",
+                    binding.completion_criterion_indexes.len(),
+                    limits.max_completion_criteria_per_obligation,
+                )?;
+                let mut criterion_indexes = HashSet::new();
+                for criterion_index in &binding.completion_criterion_indexes {
+                    if *criterion_index >= obligation.completion_criteria.len()
+                        || !criterion_indexes.insert(*criterion_index)
+                    {
+                        return Err(InquiryError::InvalidResearchPlan {
+                            reason: format!(
+                                "source coverage edge `{}` -> `{}` has invalid or duplicate completion criterion index `{criterion_index}`",
+                                binding.source_id, binding.obligation_id
+                            ),
+                        });
+                    }
+                }
+                ensure_nonempty(&binding.roles, "source coverage roles")?;
+                ensure_limit("source coverage roles", binding.roles.len(), 3)?;
+                let roles = binding.roles.iter().copied().collect::<HashSet<_>>();
+                if roles.len() != binding.roles.len()
+                    || !roles.contains(&SourceEvidenceRole::Supporting)
+                {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "source coverage edge `{}` -> `{}` must contain unique roles including `supporting`",
+                            binding.source_id, binding.obligation_id
+                        ),
+                    });
+                }
+                if roles.contains(&SourceEvidenceRole::Primary)
+                    && !obligation.evidence_requirements.primary_source_required
+                {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "source coverage edge `{}` -> `{}` declares an unrequested primary role",
+                            binding.source_id, binding.obligation_id
+                        ),
+                    });
+                }
+                if roles.contains(&SourceEvidenceRole::Independent)
+                    && !obligation
+                        .evidence_requirements
+                        .independent_corroboration_required
+                {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "source coverage edge `{}` -> `{}` declares an unrequested independent role",
+                            binding.source_id, binding.obligation_id
+                        ),
+                    });
+                }
+            }
+            ensure_limit(
                 "evidence diagnostics",
                 evidence.diagnostics.len(),
                 limits.max_citation_ids_per_section,
@@ -192,6 +317,12 @@ pub fn reduce(
                     .map(|diagnostic| diagnostic.id.as_str()),
                 "evidence diagnostic",
             )?;
+            let accepted_diagnostic_ids = state
+                .evidence_catalog
+                .values()
+                .flat_map(|accepted| accepted.diagnostics.iter())
+                .map(|diagnostic| diagnostic.id.as_str())
+                .collect::<HashSet<_>>();
             for diagnostic in &evidence.diagnostics {
                 ensure_string(
                     &diagnostic.id,
@@ -203,6 +334,12 @@ pub fn reduce(
                     "evidence diagnostic detail",
                     limits.max_text_chars,
                 )?;
+                if accepted_diagnostic_ids.contains(diagnostic.id.as_str()) {
+                    return Err(InquiryError::DuplicateId {
+                        resource: "evidence diagnostic",
+                        id: diagnostic.id.clone(),
+                    });
+                }
             }
             if let Some(accepted) = state.evidence_catalog.get(&evidence.evidence_id) {
                 return if accepted == evidence {
@@ -229,39 +366,37 @@ pub fn reduce(
             evidence_ids,
         } => {
             require_phase(state, event, &[InquiryPhase::Questioning])?;
-            ensure_string(question_id, "question id", limits.max_identifier_chars)?;
-            ensure_string(answer, "question answer", limits.max_answer_chars)?;
-            ensure_nonempty(evidence_ids, "answer evidence ids")?;
-            ensure_limit(
-                "answer evidence ids",
-                evidence_ids.len(),
-                limits.max_evidence_ids_per_answer,
+            apply_answer_resolution(
+                state,
+                &mut next,
+                question_id,
+                answer,
+                None,
+                evidence_ids,
+                limits,
             )?;
-            ensure_unique_ids(evidence_ids.iter().map(String::as_str), "evidence")?;
-            ensure_strings(evidence_ids, "evidence id", limits.max_identifier_chars)?;
-            for evidence_id in evidence_ids {
-                if !state.evidence_catalog.contains_key(evidence_id) {
-                    return Err(InquiryError::UnknownId {
-                        resource: "accepted evidence",
-                        id: evidence_id.clone(),
-                    });
-                }
-            }
-            let question = queued_question_mut(&mut next, question_id)?;
-            question.status = QuestionStatus::Answered;
-            question.answer = Some(answer.clone());
-            question.bound_reason = None;
-            question.evidence_ids.clone_from(evidence_ids);
-            let answer_chars = next
-                .questions
-                .iter()
-                .filter_map(|question| question.answer.as_deref())
-                .map(char_count)
-                .sum();
-            ensure_limit(
-                "total answer chars",
-                answer_chars,
-                limits.max_total_answer_chars,
+            advance_after_question_resolution(&mut next);
+        }
+        InquiryEvent::QuestionPartiallyAnswered {
+            question_id,
+            answer,
+            limitation,
+            evidence_ids,
+        } => {
+            require_phase(state, event, &[InquiryPhase::Questioning])?;
+            ensure_string(
+                limitation,
+                "question answer limitation",
+                limits.max_text_chars,
+            )?;
+            apply_answer_resolution(
+                state,
+                &mut next,
+                question_id,
+                answer,
+                Some(limitation),
+                evidence_ids,
+                limits,
             )?;
             advance_after_question_resolution(&mut next);
         }
@@ -269,6 +404,8 @@ pub fn reduce(
             question_id,
             reason,
         } => {
+            // Historical follow-up waves left questions queued with a reason.
+            // The active closed-evidence review never emits this event.
             require_phase(state, event, &[InquiryPhase::Questioning])?;
             ensure_string(question_id, "question id", limits.max_identifier_chars)?;
             ensure_string(reason, "question defer reason", limits.max_text_chars)?;
@@ -311,11 +448,6 @@ pub fn reduce(
                 .iter()
                 .filter(|question| question.material)
                 .count();
-            let unresolved_material = state
-                .questions
-                .iter()
-                .filter(|question| question.material && question.status != QuestionStatus::Answered)
-                .count();
             if material_questions == 0 {
                 return Err(InquiryError::InvalidOutline {
                     reason:
@@ -323,11 +455,22 @@ pub fn reduce(
                             .to_string(),
                 });
             }
-            if unresolved_material > 0 {
+            let bounded_material = state
+                .questions
+                .iter()
+                .filter(|question| question.material && question.status != QuestionStatus::Answered)
+                .count();
+            if state.obligations.is_empty() && bounded_material > 0 {
                 return Err(InquiryError::InvalidOutline {
                     reason: format!(
-                        "every material research question must be answered before outlining; {unresolved_material} remain bounded"
+                        "every material research question must be answered before outlining; {bounded_material} remain bounded"
                     ),
+                });
+            }
+            if !material_evidence_floor(state) {
+                return Err(InquiryError::InvalidOutline {
+                    reason: "every material research obligation requires a traceable answered material question before outlining"
+                        .to_string(),
                 });
             }
             validate_obligation_coverage(state)?;
@@ -582,6 +725,51 @@ pub fn reduce(
     Ok(next)
 }
 
+fn apply_answer_resolution(
+    state: &InquiryState,
+    next: &mut InquiryState,
+    question_id: &str,
+    answer: &str,
+    limitation: Option<&str>,
+    evidence_ids: &[String],
+    limits: &InquiryLimits,
+) -> Result<(), InquiryError> {
+    ensure_string(question_id, "question id", limits.max_identifier_chars)?;
+    ensure_string(answer, "question answer", limits.max_answer_chars)?;
+    ensure_nonempty(evidence_ids, "answer evidence ids")?;
+    ensure_limit(
+        "answer evidence ids",
+        evidence_ids.len(),
+        limits.max_evidence_ids_per_answer,
+    )?;
+    ensure_unique_ids(evidence_ids.iter().map(String::as_str), "evidence")?;
+    ensure_strings(evidence_ids, "evidence id", limits.max_identifier_chars)?;
+    for evidence_id in evidence_ids {
+        if !state.evidence_catalog.contains_key(evidence_id) {
+            return Err(InquiryError::UnknownId {
+                resource: "accepted evidence",
+                id: evidence_id.clone(),
+            });
+        }
+    }
+    let question = queued_question_mut(next, question_id)?;
+    question.status = QuestionStatus::Answered;
+    question.answer = Some(answer.to_string());
+    question.bound_reason = limitation.map(str::to_string);
+    question.evidence_ids = evidence_ids.to_vec();
+    let answer_chars = next
+        .questions
+        .iter()
+        .filter_map(|question| question.answer.as_deref())
+        .map(char_count)
+        .sum();
+    ensure_limit(
+        "total answer chars",
+        answer_chars,
+        limits.max_total_answer_chars,
+    )
+}
+
 fn validate_obligation_coverage(state: &InquiryState) -> Result<(), InquiryError> {
     if state.obligations.is_empty() {
         return Ok(());
@@ -600,6 +788,21 @@ fn validate_obligation_coverage(state: &InquiryState) -> Result<(), InquiryError
                 ),
             });
         }
+        for criterion_index in 0..obligation.completion_criteria.len() {
+            if !linked.iter().any(|question| {
+                question.completion_criterion_indexes.is_empty()
+                    || question
+                        .completion_criterion_indexes
+                        .contains(&criterion_index)
+            }) {
+                return Err(InquiryError::InvalidOutline {
+                    reason: format!(
+                        "research obligation `{}` completion criterion {criterion_index} has no traceable question path",
+                        obligation.id
+                    ),
+                });
+            }
+        }
         if obligation.material {
             let material = linked
                 .iter()
@@ -613,14 +816,16 @@ fn validate_obligation_coverage(state: &InquiryState) -> Result<(), InquiryError
                     ),
                 });
             }
-            let unresolved = material
+            let answered = material
                 .iter()
-                .filter(|question| question.status != QuestionStatus::Answered)
+                .filter(|question| {
+                    question.status == QuestionStatus::Answered && !question.evidence_ids.is_empty()
+                })
                 .count();
-            if unresolved > 0 {
+            if answered == 0 {
                 return Err(InquiryError::InvalidOutline {
                     reason: format!(
-                        "material research obligation `{}` has {unresolved} unanswered material question(s)",
+                        "material research obligation `{}` has no traceable answered material question",
                         obligation.id
                     ),
                 });

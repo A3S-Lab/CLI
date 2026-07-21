@@ -111,6 +111,12 @@ impl TuiSessionState {
         }
     }
 
+    pub(super) fn capture_for_session(app: &App, session_id: impl Into<String>) -> Self {
+        let mut state = Self::capture(app);
+        state.session_id = session_id.into();
+        state
+    }
+
     pub(super) fn effort_index(&self) -> Option<usize> {
         let effort = self.effort.as_deref()?;
         EFFORT_LEVELS
@@ -192,7 +198,7 @@ pub(super) fn load_tui_session_state(
     Ok(Some(state.normalize()))
 }
 
-fn save_tui_session_state(
+pub(super) fn save_tui_session_state(
     workspace: &Path,
     session_id: &str,
     state: &TuiSessionState,

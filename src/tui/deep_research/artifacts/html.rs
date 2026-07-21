@@ -23,121 +23,52 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
 ) -> String {
     let lower_markdown = markdown.to_ascii_lowercase();
     let recovery = lower_markdown.contains("# deepresearch recovery report");
-    let qualified = lower_markdown.contains("evidence grade: official-source snapshot")
-        || markdown.contains("证据等级：官方来源快照");
     let title = concise_report_title(&deep_research_markdown_report_title(markdown, query));
-    let language = if contains_cjk(markdown) || contains_cjk(query) {
-        "zh-CN"
-    } else {
-        "en"
-    };
+    let language = "und";
     let raw_body = strip_first_h1(&deep_research_markdown_to_html_fragment(markdown));
-    let declared_source_count = markdown_cited_source_count(markdown);
-    let source_count = if declared_source_count == 0 {
-        unique_external_source_count(&raw_body)
-    } else {
-        declared_source_count
-    };
+    let source_count = unique_external_source_count(&raw_body);
     let section_plan = presentation
         .map(|presentation| presentation.section_plan.as_slice())
         .unwrap_or_default();
-    let composition = compose_report_fragment(&raw_body, language, section_plan);
+    let composition = compose_report_fragment(&raw_body, section_plan);
     let finding_count = composition.finding_count.max(
         markdown
             .lines()
             .filter(|line| line.starts_with("### "))
             .count(),
     );
-    let reading_minutes = estimated_reading_minutes(markdown, language);
+    let reading_minutes = estimated_reading_minutes(markdown);
     let theme = presentation
         .map(ReportPresentation::body_classes)
-        .unwrap_or_else(|| report_theme(query, markdown).to_string());
+        .unwrap_or_else(|| ReportPresentation::default().body_classes());
     let body_class = if recovery {
         format!("{theme} report-degraded")
-    } else if qualified {
-        format!("{theme} report-qualified")
     } else {
         theme.to_string()
     };
-    let evidence_label = if recovery && language == "zh-CN" {
-        "证据不足 · 已降级"
-    } else if recovery {
+    let evidence_label = if recovery {
         "Insufficient evidence · Degraded"
-    } else if qualified && language == "zh-CN" {
-        "官方快照 · 待独立核验"
-    } else if qualified {
-        "Official snapshot · Cross-check pending"
-    } else if language == "zh-CN" {
-        "来源可追溯"
     } else {
         "Traceable evidence"
     };
-    let sources_label = if language == "zh-CN" {
-        "引用来源"
-    } else {
-        "Cited sources"
-    };
-    let confidence_label = if recovery && language == "zh-CN" {
-        "不可作为最终定论"
-    } else if recovery {
+    let sources_label = "Cited sources";
+    let confidence_label = if recovery {
         "Not a final domain conclusion"
-    } else if qualified && language == "zh-CN" {
-        "可交付，但不是双源定论"
-    } else if qualified {
-        "Usable, not a two-source conclusion"
-    } else if language == "zh-CN" {
-        "明确置信度与局限"
     } else {
         "Confidence & limits stated"
     };
-    let brief_label = if recovery && language == "zh-CN" {
-        "A3S 深度研究 · 降级报告"
-    } else if recovery {
+    let brief_label = if recovery {
         "A3S Deep Research · Degraded"
-    } else if qualified && language == "zh-CN" {
-        "A3S 深度研究 · 权威快照"
-    } else if qualified {
-        "A3S Deep Research · Authoritative snapshot"
-    } else if language == "zh-CN" {
-        "A3S 深度研究"
     } else {
         "A3S Deep Research"
     };
-    let reading_label = if language == "zh-CN" {
-        "研究报告"
-    } else {
-        "Research report"
-    };
-    let metadata_label = if language == "zh-CN" {
-        "报告元数据"
-    } else {
-        "Report metadata"
-    };
-    let profile_label = if language == "zh-CN" {
-        "证据画像"
-    } else {
-        "Evidence profile"
-    };
-    let findings_label = if language == "zh-CN" {
-        "核心发现"
-    } else {
-        "Key findings"
-    };
-    let reading_time_label = if language == "zh-CN" {
-        "分钟阅读"
-    } else {
-        "Min read"
-    };
-    let fallback_thesis = if recovery && language == "zh-CN" {
-        "本次证据链未达到完成门槛；页面仅保留可核验来源、失败边界与下一步。"
-    } else if recovery {
+    let reading_label = "Research report";
+    let metadata_label = "Report metadata";
+    let profile_label = "Evidence profile";
+    let findings_label = "Key findings";
+    let reading_time_label = "Min read";
+    let fallback_thesis = if recovery {
         "This run did not meet the evidence gate; the page preserves only traceable sources, failure limits, and next actions."
-    } else if qualified && language == "zh-CN" {
-        "官方数据已经形成可用快照；独立来源本次未返回，因此证据等级保持为待交叉核验。"
-    } else if qualified {
-        "Official data produced a usable snapshot; the independent source did not return, so cross-verification remains pending."
-    } else if language == "zh-CN" {
-        "以可追溯证据为轴，分开展示核心结论、证据强度与尚未解决的边界。"
     } else {
         "A source-backed reading experience separating conclusions, evidence strength, and unresolved limits."
     };
@@ -178,21 +109,13 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
     )
 }
 
-fn estimated_reading_minutes(markdown: &str, language: &str) -> usize {
-    let units = if language == "zh-CN" {
-        markdown
-            .chars()
-            .filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
-            .count()
-            .div_ceil(450)
-    } else {
-        markdown.split_whitespace().count().div_ceil(220)
-    };
-    units.max(1)
-}
-
-fn report_theme(_query: &str, _markdown: &str) -> &'static str {
-    "theme-editorial"
+fn estimated_reading_minutes(markdown: &str) -> usize {
+    markdown
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_control())
+        .count()
+        .div_ceil(900)
+        .max(1)
 }
 
 fn unique_external_source_count(fragment: &str) -> usize {
@@ -214,89 +137,9 @@ fn unique_external_source_count(fragment: &str) -> usize {
     sources.len()
 }
 
-fn markdown_cited_source_count(markdown: &str) -> usize {
-    let mut in_sources = false;
-    let mut sources = HashSet::new();
-    for line in markdown.lines() {
-        let trimmed = line.trim();
-        if let Some(heading) = trimmed.strip_prefix("## ") {
-            let heading = heading.trim();
-            in_sources = heading.eq_ignore_ascii_case("sources")
-                || heading.eq_ignore_ascii_case("references")
-                || matches!(heading, "来源" | "资料来源" | "参考文献");
-            continue;
-        }
-        if !in_sources || !trimmed.starts_with("- ") {
-            continue;
-        }
-        let item = trimmed.trim_start_matches("- ").trim();
-        let url = if let Some(start) = item.find("](") {
-            let rest = &item[start + 2..];
-            rest.find(')').map(|end| &rest[..end])
-        } else {
-            [item.find("https://"), item.find("http://")]
-                .into_iter()
-                .flatten()
-                .min()
-                .map(|start| {
-                    item[start..]
-                        .split(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ']' | '>'))
-                        .next()
-                        .unwrap_or_default()
-                        .trim_end_matches(['.', ',', ';', '。', '，', '；'])
-                })
-        };
-        if let Some(url) =
-            url.filter(|url| url.starts_with("https://") || url.starts_with("http://"))
-        {
-            sources.insert(url.to_string());
-        }
-    }
-    sources.len()
-}
-
-fn contains_cjk(value: &str) -> bool {
-    value
-        .chars()
-        .any(|ch| ('\u{3400}'..='\u{9fff}').contains(&ch))
-}
-
 fn concise_report_title(value: &str) -> String {
-    let mut clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    for prefix in ["请研究", "请分析"] {
-        if let Some(rest) = clean.strip_prefix(prefix) {
-            clean = rest
-                .trim_start_matches(['：', ':', '，', ',', ' '])
-                .to_string();
-            break;
-        }
-    }
-    for suffix in [
-        "…研究报告",
-        "研究报告",
-        "Deep Research Report",
-        "Research Report",
-    ] {
-        if let Some(rest) = clean.strip_suffix(suffix) {
-            clean = rest
-                .trim_end_matches(['：', ':', '，', ',', ' ', '…', '—', '–', '-'])
-                .to_string();
-            break;
-        }
-    }
-    if contains_cjk(&clean) {
-        if let Some((subject, _)) = clean.split_once('的') {
-            let subject = subject.trim_end_matches(['：', ':', '，', ',', ' ', '…']);
-            if (4..=36).contains(&subject.chars().count()) {
-                return format!("{subject}研究");
-            }
-        }
-    }
-    // Preserve a model-authored report title when it still fits comfortably
-    // in the responsive hero. The previous 40-character CJK cap clipped
-    // ordinary descriptive titles (and the document title) by only a few
-    // characters, which made a completed report look unfinished.
-    let limit = if contains_cjk(&clean) { 56 } else { 110 };
+    let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let limit = 96;
     if clean.chars().count() <= limit {
         return clean;
     }

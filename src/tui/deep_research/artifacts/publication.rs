@@ -4,72 +4,6 @@ pub(crate) struct ResearchReportArtifacts {
     pub(crate) html: PathBuf,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct DeepResearchReportArtifactBaseline {
-    markdown: Option<ResearchReportFileFingerprint>,
-    html: Option<ResearchReportFileFingerprint>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ResearchReportFileFingerprint {
-    len: u64,
-    modified: Option<SystemTime>,
-    content_hash: u64,
-}
-
-impl DeepResearchReportArtifactBaseline {
-    fn accepts_current_run_artifacts(&self, artifacts: &ResearchReportArtifacts) -> bool {
-        let markdown = research_report_file_fingerprint(&artifacts.markdown);
-        let html = research_report_file_fingerprint(&artifacts.html);
-        markdown.is_some() && html.is_some() && markdown != self.markdown && html != self.html
-    }
-}
-
-pub(crate) fn snapshot_deep_research_report_artifacts(
-    workspace: &Path,
-    query: &str,
-) -> DeepResearchReportArtifactBaseline {
-    let report_dir = workspace
-        .join(".a3s")
-        .join("research")
-        .join(deep_research_report_slug(query));
-    DeepResearchReportArtifactBaseline {
-        markdown: research_report_file_fingerprint(&report_dir.join("report.md")),
-        html: research_report_file_fingerprint(&report_dir.join("index.html")),
-    }
-}
-
-fn research_report_file_fingerprint(path: &Path) -> Option<ResearchReportFileFingerprint> {
-    const MAX_REPORT_FINGERPRINT_BYTES: u64 = 2 * 1024 * 1024;
-
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAX_REPORT_FINGERPRINT_BYTES
-    {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        if metadata.nlink() > 1 {
-            return None;
-        }
-    }
-    let bytes = std::fs::read(path).ok()?;
-    let mut content_hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        content_hash ^= byte as u64;
-        content_hash = content_hash.wrapping_mul(0x100000001b3);
-    }
-    Some(ResearchReportFileFingerprint {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-        content_hash,
-    })
-}
-
 fn ensure_plain_directory(path: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
@@ -287,6 +221,7 @@ pub(crate) fn research_report_artifacts_from_output(
     research_report_artifacts_from_output_with_slug(output, workspace, None)
 }
 
+#[cfg(test)]
 pub(crate) fn research_report_artifacts_from_output_for_query(
     output: &str,
     workspace: &Path,
@@ -296,18 +231,7 @@ pub(crate) fn research_report_artifacts_from_output_for_query(
     research_report_artifacts_from_output_with_slug(output, workspace, Some(&expected_slug))
 }
 
-pub(crate) fn research_report_artifacts_from_output_for_current_run(
-    output: &str,
-    workspace: &Path,
-    query: &str,
-    baseline: &DeepResearchReportArtifactBaseline,
-) -> Option<ResearchReportArtifacts> {
-    let artifacts = research_report_artifacts_from_output_for_query(output, workspace, query)?;
-    baseline
-        .accepts_current_run_artifacts(&artifacts)
-        .then_some(artifacts)
-}
-
+#[cfg(test)]
 pub(crate) fn deep_research_report_artifacts_from_output_for_query(
     output: &str,
     workspace: &Path,
@@ -316,25 +240,6 @@ pub(crate) fn deep_research_report_artifacts_from_output_for_query(
     workflow_metadata: Option<&serde_json::Value>,
 ) -> Option<ResearchReportArtifacts> {
     let artifacts = research_report_artifacts_from_output_for_query(output, workspace, query)?;
-    deep_research_report_sources_trace_workflow(
-        &artifacts,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .then_some(artifacts)
-}
-
-pub(crate) fn deep_research_report_artifacts_from_output_for_current_run(
-    output: &str,
-    workspace: &Path,
-    query: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-    baseline: &DeepResearchReportArtifactBaseline,
-) -> Option<ResearchReportArtifacts> {
-    let artifacts =
-        research_report_artifacts_from_output_for_current_run(output, workspace, query, baseline)?;
     deep_research_report_sources_trace_workflow(
         &artifacts,
         query,
@@ -360,178 +265,6 @@ pub(crate) fn clean_deep_research_final_text_from_artifacts(
         return None;
     }
     Some(format!("{body}\n\n{RESEARCH_VIEW_MARKER} {rel_html}"))
-}
-
-pub(crate) fn materialize_deep_research_completed_report_from_markdown(
-    workspace: &Path,
-    query: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Option<ResearchReportArtifacts> {
-    let slug = deep_research_report_slug(query);
-    let (root, report_dir) = prepare_research_report_directory(workspace, &slug).ok()?;
-    let markdown_path = report_dir.join("report.md");
-    let markdown = read_small_utf8_file(&markdown_path)?;
-    let html = deep_research_completed_report_html(query, &markdown);
-    if validate_deep_research_completed_report_content(
-        &markdown,
-        &html,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .is_err()
-    {
-        return None;
-    }
-    write_research_report_file(&report_dir.join("index.html"), html).ok()?;
-
-    let rel_html = format!(".a3s/research/{slug}/index.html");
-    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    completed_research_report_artifacts(&artifacts).then_some(artifacts)
-}
-
-pub(crate) fn materialize_deep_research_completed_report_from_answer_text(
-    workspace: &Path,
-    query: &str,
-    answer_text: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Option<ResearchReportArtifacts> {
-    let markdown = completed_report_markdown_from_answer_text(query, answer_text)?;
-    let html = deep_research_completed_report_html(query, &markdown);
-    if validate_deep_research_completed_report_content(
-        &markdown,
-        &html,
-        query,
-        workflow_output,
-        workflow_metadata,
-    )
-    .is_err()
-    {
-        return None;
-    }
-
-    let slug = deep_research_report_slug(query);
-    let (root, report_dir) = prepare_research_report_directory(workspace, &slug).ok()?;
-    write_research_report_pair(
-        &report_dir.join("report.md"),
-        markdown,
-        &report_dir.join("index.html"),
-        html,
-    )
-    .ok()?;
-
-    let rel_html = format!(".a3s/research/{slug}/index.html");
-    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    completed_research_report_artifacts(&artifacts).then_some(artifacts)
-}
-
-#[cfg(test)]
-pub(crate) fn materialize_deep_research_completed_report_from_workflow_evidence(
-    workspace: &Path,
-    query: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Option<ResearchReportArtifacts> {
-    let workflow = serde_json::from_str::<serde_json::Value>(workflow_output.trim()).ok()?;
-    if deep_research_collection_status(&workflow) != "completed" {
-        return None;
-    }
-    let evidence =
-        deep_research_structured_evidence_from_workflow(workflow_output, workflow_metadata);
-    if evidence.is_empty()
-        || !evidence.iter().any(|item| {
-            item.sources
-                .iter()
-                .any(|source| normalize_research_source_anchor(&source.url_or_path).is_some())
-        })
-    {
-        return None;
-    }
-
-    let finalized_checker = workflow.get("checker").filter(|checker| {
-        checker.get("decision").and_then(serde_json::Value::as_str) == Some("finalize")
-    });
-    let report_title = workflow
-        .pointer("/plan/report_title")
-        .and_then(serde_json::Value::as_str);
-    let verified_summary = finalized_checker
-        .and_then(|checker| {
-            checker
-                .get("report_summary")
-                .or_else(|| checker.get("coverage_summary"))
-        })
-        .and_then(serde_json::Value::as_str);
-    let verified_findings = finalized_checker
-        .and_then(|checker| checker.get("verified_findings"))
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    let mut verified_caveats = ["unresolved_gaps", "contradictions"]
-        .into_iter()
-        .flat_map(|field| {
-            finalized_checker
-                .and_then(|checker| checker.get(field))
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-        })
-        .filter_map(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
-    if workflow
-        .pointer("/verification/status")
-        .and_then(serde_json::Value::as_str)
-        == Some("degraded")
-    {
-        verified_caveats.insert(
-            0,
-            if query
-                .chars()
-                .any(|ch| ('\u{3400}'..='\u{9fff}').contains(&ch))
-            {
-                "本次运行未完成独立核验；结论直接来自所列可追溯证据，应视为有待复核的阶段性判断。"
-                    .to_string()
-            } else {
-                "Independent verification did not complete in this run; conclusions are derived directly from the cited traceable evidence and remain provisional."
-                    .to_string()
-            },
-        );
-    }
-    let markdown = completed_report_markdown_with_verified_context(
-        query,
-        &evidence,
-        report_title,
-        verified_summary,
-        &verified_findings,
-        &verified_caveats,
-    )?;
-    if deep_research_output_has_internal_leak(&markdown) {
-        return None;
-    }
-    let html = deep_research_completed_report_html(query, &markdown);
-    if !has_research_report_substance(&markdown, &html) {
-        return None;
-    }
-
-    let slug = deep_research_report_slug(query);
-    let (root, report_dir) = prepare_research_report_directory(workspace, &slug).ok()?;
-    write_research_report_pair(
-        &report_dir.join("report.md"),
-        markdown,
-        &report_dir.join("index.html"),
-        html,
-    )
-    .ok()?;
-
-    let rel_html = format!(".a3s/research/{slug}/index.html");
-    let artifacts = trusted_research_report_artifact_paths(&rel_html, &root)?;
-    // Sources are emitted exclusively from verified structured evidence.
-    Some(artifacts)
 }
 
 pub(crate) fn materialize_deep_research_recovery_report(
@@ -622,12 +355,13 @@ pub(crate) fn deep_research_workflow_needs_recovery_report_with_metadata(
     if deep_research_collection_status(&value) == "completed" {
         return false;
     }
+    match validated_inquiry_projection(&value) {
+        Ok(ValidatedInquiryProjection::Inquiry { .. }) | Err(_) => return true,
+        Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {}
+    }
 
-    // An independent checker may deliberately close a bounded run as
-    // `degrade`: the evidence is useful and traceable, but one or more planned
-    // gaps remain. That package should produce a qualified reader-facing
-    // report, not the generic Recovery artifact. Unreviewed partial evidence
-    // still takes the recovery path.
+    // Historical checked-loop compatibility only. Inquiry-backed runs return
+    // above and can never use a legacy checker field to bypass recovery.
     let checker_degraded = value
         .pointer("/checker/decision")
         .and_then(serde_json::Value::as_str)
@@ -637,7 +371,7 @@ pub(crate) fn deep_research_workflow_needs_recovery_report_with_metadata(
     !(checker_degraded && has_traceable_evidence)
 }
 
-fn completed_report_markdown_from_answer_text(query: &str, answer_text: &str) -> Option<String> {
+fn normalize_report_markdown_candidate(query: &str, answer_text: &str) -> Option<String> {
     let mut body = answer_text.trim().to_string();
     if body.is_empty()
         || looks_like_deep_research_fallback_draft(&body)
@@ -756,7 +490,7 @@ pub(crate) fn deep_research_report_rejection_diagnostic_from_answer_text(
                 .to_string(),
         );
     }
-    let markdown = completed_report_markdown_from_answer_text(query, answer)?;
+    let markdown = normalize_report_markdown_candidate(query, answer)?;
     let html = deep_research_completed_report_html(query, &markdown);
     validate_deep_research_completed_report_content(
         &markdown,
@@ -770,24 +504,9 @@ pub(crate) fn deep_research_report_rejection_diagnostic_from_answer_text(
 
 fn deep_research_recovery_result_text(answer_text: &str, workflow_output: &str) -> String {
     let answer = answer_text.trim();
-    let answer_lower = answer.to_ascii_lowercase();
-    if answer_lower.starts_with("content rejected:")
-        || answer_lower.starts_with("structured report")
-        || answer_lower.starts_with("report plan rejected:")
-    {
-        return format!(
-            "Host publication validation rejected the generated report: {}",
-            deep_research_sanitize_evidence_text(answer)
-        );
-    }
-    if visible_char_count(answer) >= 120
+    if visible_char_count(answer) >= 24
         && !is_deep_research_model_failure_text(answer)
         && !deep_research_output_has_internal_leak(answer)
-        && has_report_source_anchor(answer)
-        && (answer_lower.contains("## sources")
-            || answer_lower.contains("\nsources:")
-            || answer.contains("## 来源")
-            || answer.contains("来源："))
     {
         return truncate_recovery_text(&deep_research_sanitize_evidence_text(answer), 20_000);
     }

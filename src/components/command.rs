@@ -37,6 +37,40 @@ pub struct ComponentFailure {
     pub message: String,
 }
 
+/// Secret-free component readiness returned to in-process diagnostics.
+///
+/// Unlike the full discovery state, this type deliberately omits executable
+/// paths, probe messages, versions, and provenance so a host can safely pass
+/// the result into an untrusted diagnostic prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComponentHealthStatus {
+    Ready,
+    Broken,
+    Missing,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentHealthCheck {
+    pub component: ComponentId,
+    pub status: ComponentHealthStatus,
+}
+
+impl ComponentHealthCheck {
+    pub fn is_ready(&self) -> bool {
+        self.status == ComponentHealthStatus::Ready
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentHealthReport {
+    pub healthy: bool,
+    pub checks: Vec<ComponentHealthCheck>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComponentBatchFailure {
@@ -571,6 +605,22 @@ pub fn run_doctor(args: Vec<String>) -> anyhow::Result<bool> {
     run_doctor_with(args, &paths)
 }
 
+/// Inspect every installed (plus always-required built-in) component without
+/// printing and without exposing executable paths or probe output.
+pub fn component_health_report(paths: &ComponentPaths) -> anyhow::Result<ComponentHealthReport> {
+    let checks = installed_component_checks(discover(paths)?)
+        .into_iter()
+        .map(|state| ComponentHealthCheck {
+            component: state.id,
+            status: component_health_status(state.presence, state.health),
+        })
+        .collect::<Vec<_>>();
+    Ok(ComponentHealthReport {
+        healthy: checks.iter().all(ComponentHealthCheck::is_ready),
+        checks,
+    })
+}
+
 pub fn run_doctor_with(args: Vec<String>, paths: &ComponentPaths) -> anyhow::Result<bool> {
     let options = DoctorOptions::parse(&args)?;
     let report = discover(paths)?;
@@ -582,13 +632,7 @@ pub fn run_doctor_with(args: Vec<String>, paths: &ComponentPaths) -> anyhow::Res
             .find(|state| state.id == id)
             .with_context(|| format!("component '{id}' is not registered"))?]
     } else {
-        report
-            .components
-            .into_iter()
-            .filter(|state| {
-                state.presence != Presence::Missing || state.kind == ComponentKind::BuiltIn
-            })
-            .collect()
+        installed_component_checks(report)
     };
     let healthy = checks.iter().all(|state| state.is_ready());
     if options.json {
@@ -612,6 +656,23 @@ pub fn run_doctor_with(args: Vec<String>, paths: &ComponentPaths) -> anyhow::Res
         }
     }
     Ok(healthy)
+}
+
+fn installed_component_checks(report: ComponentReport) -> Vec<super::state::ComponentState> {
+    report
+        .components
+        .into_iter()
+        .filter(|state| state.presence != Presence::Missing || state.kind == ComponentKind::BuiltIn)
+        .collect()
+}
+
+fn component_health_status(presence: Presence, health: Health) -> ComponentHealthStatus {
+    match (presence, health) {
+        (Presence::Missing, _) => ComponentHealthStatus::Missing,
+        (_, Health::Broken) => ComponentHealthStatus::Broken,
+        (_, Health::Ready) => ComponentHealthStatus::Ready,
+        (_, Health::Unknown) => ComponentHealthStatus::Unknown,
+    }
 }
 
 pub async fn run_proxy(component: &str, args: Vec<OsString>) -> anyhow::Result<ExitStatus> {
@@ -1279,5 +1340,60 @@ mod tests {
             ComponentKind::Product,
             Presence::External,
         )));
+    }
+
+    #[test]
+    fn component_health_report_reuses_doctor_install_filter_without_paths() {
+        let state = |id: &str, kind, presence, health| ComponentState {
+            id: ComponentId::parse(id).unwrap(),
+            kind,
+            description: String::new(),
+            presence,
+            health,
+            update: UpdateState::Unknown,
+            trust: Trust::FirstParty,
+            provenance: None,
+            version: Some("1.0.0".to_string()),
+            path: Some(PathBuf::from("/sensitive/install/path")),
+            message: Some("probe output must stay private".to_string()),
+        };
+        let checks = installed_component_checks(ComponentReport {
+            schema_version: 1,
+            components: vec![
+                state(
+                    "code",
+                    ComponentKind::BuiltIn,
+                    Presence::Bundled,
+                    Health::Ready,
+                ),
+                state(
+                    "box",
+                    ComponentKind::Product,
+                    Presence::Managed,
+                    Health::Broken,
+                ),
+                state(
+                    "search",
+                    ComponentKind::Product,
+                    Presence::Missing,
+                    Health::Unknown,
+                ),
+            ],
+            external_tools: Vec::new(),
+        });
+        let public = checks
+            .into_iter()
+            .map(|state| ComponentHealthCheck {
+                component: state.id,
+                status: component_health_status(state.presence, state.health),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(public.len(), 2);
+        assert_eq!(public[0].status, ComponentHealthStatus::Ready);
+        assert_eq!(public[1].status, ComponentHealthStatus::Broken);
+        let serialized = serde_json::to_string(&public).unwrap();
+        assert!(!serialized.contains("sensitive"));
+        assert!(!serialized.contains("probe output"));
     }
 }

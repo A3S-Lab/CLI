@@ -18,11 +18,163 @@ use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::Instant;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+const PROCESS_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_ACCOUNT_CLI_LINE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ACCOUNT_CLI_STREAM_BYTES: usize = 32 * 1024 * 1024;
+const MAX_ACCOUNT_CLI_STDERR_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLine {
+    Eof,
+    Line(String),
+    TooLong,
+}
+
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    max_bytes: usize,
+) -> std::io::Result<BoundedLine>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    let mut read_any = false;
+    let mut too_long = false;
+
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            if !read_any {
+                return Ok(BoundedLine::Eof);
+            }
+            break;
+        }
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let content_len = newline.unwrap_or(available.len());
+        read_any = true;
+        if !too_long {
+            let remaining = max_bytes.saturating_sub(line.len());
+            if content_len <= remaining {
+                line.extend_from_slice(&available[..content_len]);
+            } else {
+                too_long = true;
+            }
+        }
+        let consumed = content_len + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    if too_long {
+        return Ok(BoundedLine::TooLong);
+    }
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    String::from_utf8(std::mem::take(line))
+        .map(BoundedLine::Line)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn read_bounded_tail<R>(mut reader: R, max_bytes: usize) -> String
+where
+    R: AsyncRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(max_bytes.min(4096));
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let count = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if max_bytes == 0 {
+            continue;
+        }
+        if count >= max_bytes {
+            retained.clear();
+            retained.extend_from_slice(&chunk[count - max_bytes..count]);
+            continue;
+        }
+        let excess = retained
+            .len()
+            .saturating_add(count)
+            .saturating_sub(max_bytes);
+        if excess > 0 {
+            retained.drain(..excess);
+        }
+        retained.extend_from_slice(&chunk[..count]);
+    }
+    String::from_utf8_lossy(&retained).into_owned()
+}
+
+fn configure_account_cli_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.as_std_mut().process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+struct AccountCliProcessGroup {
+    #[cfg(unix)]
+    process_group: Option<libc::pid_t>,
+}
+
+impl AccountCliProcessGroup {
+    fn attach(child: &Child) -> Self {
+        Self {
+            #[cfg(unix)]
+            process_group: child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()),
+        }
+    }
+
+    fn terminate(&mut self) {
+        #[cfg(unix)]
+        if let Some(process_group) = self.process_group.take() {
+            // SAFETY: the account CLI was spawned as the leader of a dedicated
+            // process group, so the negative pid covers all descendants.
+            unsafe {
+                libc::kill(-process_group, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for AccountCliProcessGroup {
+    fn drop(&mut self) {
+        self.terminate();
+    }
+}
+
+async fn terminate_account_cli(child: &mut Child, process_group: &mut AccountCliProcessGroup) {
+    process_group.terminate();
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(PROCESS_SETTLEMENT_TIMEOUT, child.wait()).await;
+}
+
+async fn settle_stderr(mut task: JoinHandle<String>) -> String {
+    match tokio::time::timeout(PROCESS_SETTLEMENT_TIMEOUT, &mut task).await {
+        Ok(Ok(stderr)) => stderr,
+        Ok(Err(_)) => String::new(),
+        Err(_) => {
+            task.abort();
+            String::new()
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct CliInvocation {
@@ -143,15 +295,19 @@ pub(crate) async fn complete_streaming(
 ) -> Result<mpsc::Receiver<StreamEvent>> {
     let request_started_at = Instant::now();
     let prompt = account_cli_prompt(messages);
-    let mut child = Command::new(&invocation.program)
+    let mut command = Command::new(&invocation.program);
+    command
         .args(&invocation.args)
         .envs(invocation.env.iter().cloned())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    configure_account_cli_process_group(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("start {} account CLI", invocation.provider))?;
+    let mut process_group = AccountCliProcessGroup::attach(&child);
 
     let mut stdin = child
         .stdin
@@ -173,12 +329,10 @@ pub(crate) async fn complete_streaming(
     let (tx, rx) = mpsc::channel(100);
     let host_tools = tools.to_vec();
     tokio::spawn(async move {
-        let mut stderr_reader = BufReader::new(stderr);
-        let stderr_task = tokio::spawn(async move {
-            let mut stderr = String::new();
-            let _ = stderr_reader.read_to_string(&mut stderr).await;
-            stderr
-        });
+        let stderr_task = tokio::spawn(read_bounded_tail(
+            BufReader::new(stderr),
+            MAX_ACCOUNT_CLI_STDERR_BYTES,
+        ));
 
         let meta = StreamMeta {
             provider: invocation.provider,
@@ -186,7 +340,9 @@ pub(crate) async fn complete_streaming(
             request_url: invocation.request_label,
             started_at: request_started_at,
         };
-        let mut lines = BufReader::new(stdout).lines();
+        let mut stdout = BufReader::new(stdout);
+        let mut line_buffer = Vec::new();
+        let mut stream_bytes = 0usize;
         let mut native_mapper = host_tools
             .is_empty()
             .then(|| AnthropicEventMapper::new(meta.clone()));
@@ -194,30 +350,47 @@ pub(crate) async fn complete_streaming(
             (!host_tools.is_empty()).then(|| AccountCliHostToolMapper::new(meta, host_tools));
         let mut failure = None;
         let mut completed = false;
+        let mut terminate_after_stream = false;
 
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    let _ = stderr_task.await;
+                    terminate_account_cli(&mut child, &mut process_group).await;
+                    let _ = settle_stderr(stderr_task).await;
                     return;
                 }
-                line = lines.next_line() => {
+                line = read_bounded_line(
+                    &mut stdout,
+                    &mut line_buffer,
+                    MAX_ACCOUNT_CLI_LINE_BYTES,
+                ) => {
                     let line = match line {
-                        Ok(Some(line)) => line,
-                        Ok(None) => break,
+                        Ok(BoundedLine::Line(line)) => line,
+                        Ok(BoundedLine::Eof) => break,
+                        Ok(BoundedLine::TooLong) => {
+                            failure = Some(CliFailure::OutputLimit);
+                            terminate_after_stream = true;
+                            break;
+                        }
                         Err(_) => {
                             failure = Some(CliFailure::StreamRead);
+                            terminate_after_stream = true;
                             break;
                         }
                     };
+                    stream_bytes = stream_bytes.saturating_add(line.len());
+                    if stream_bytes > MAX_ACCOUNT_CLI_STREAM_BYTES {
+                        failure = Some(CliFailure::OutputLimit);
+                        terminate_after_stream = true;
+                        break;
+                    }
                     let Some(event) = parse_account_cli_stream_event(&line) else {
                         failure = failure.or_else(|| classify_unstructured_output(&line));
                         continue;
                     };
                     if matches!(event, AnthropicStreamEvent::Error) {
                         failure = Some(CliFailure::Provider);
+                        terminate_after_stream = true;
                         break;
                     }
                     let done = if completed {
@@ -241,8 +414,22 @@ pub(crate) async fn complete_streaming(
             }
         }
 
-        let status = child.wait().await.ok();
-        let stderr = stderr_task.await.unwrap_or_default();
+        let status = if terminate_after_stream {
+            terminate_account_cli(&mut child, &mut process_group).await;
+            None
+        } else {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    terminate_account_cli(&mut child, &mut process_group).await;
+                    let _ = settle_stderr(stderr_task).await;
+                    return;
+                }
+                status = child.wait() => status.ok(),
+            }
+        };
+        // Account requests own no service process after their stream ends.
+        process_group.terminate();
+        let stderr = settle_stderr(stderr_task).await;
         if completed {
             return;
         }
@@ -267,6 +454,7 @@ enum CliFailure {
     Model,
     Provider,
     StreamRead,
+    OutputLimit,
     Incomplete,
 }
 
@@ -301,6 +489,9 @@ fn failure_message(
         ),
         CliFailure::Provider => format!("{provider} returned a provider error for `{model}`"),
         CliFailure::StreamRead => format!("{provider} account stream could not be read"),
+        CliFailure::OutputLimit => {
+            format!("{provider} account stream exceeded the bounded transport output limit")
+        }
         CliFailure::Incomplete => match status {
             Some(code) => format!("{provider} account CLI exited with status {code}"),
             None => format!("{provider} account stream ended before completion"),
@@ -523,6 +714,155 @@ fn partial_tool_protocol_suffix_len(text: &str) -> usize {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn bounded_line_reader_drains_an_oversized_record_before_the_next_line() {
+        let input = b"0123456789\nok\r\n";
+        let mut reader = BufReader::new(&input[..]);
+        let mut line = Vec::new();
+
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, 8).await.unwrap(),
+            BoundedLine::TooLong
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, 8).await.unwrap(),
+            BoundedLine::Line("ok".to_string())
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, 8).await.unwrap(),
+            BoundedLine::Eof
+        );
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_retains_only_the_bounded_tail() {
+        let stderr = read_bounded_tail(BufReader::new(&b"0123456789"[..]), 6).await;
+        assert_eq!(stderr, "456789");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_after_stdout_eof_kills_account_cli_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("account-cli");
+        let started = directory.path().join("started");
+        let descendant_started = directory.path().join("descendant-started");
+        let leaked = directory.path().join("cancellation-leak");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n: > '{}'\nexec 1>&- 2>&-\n(: > '{}'; sleep 0.60; : > '{}') &\nwait\n",
+                started.display(),
+                descendant_started.display(),
+                leaked.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let invocation = CliInvocation::new(
+            executable,
+            Vec::new(),
+            "fixture",
+            "fixture-model",
+            "fixture account CLI",
+        );
+        let cancellation = CancellationToken::new();
+        let mut receiver = complete_streaming(
+            invocation,
+            &[Message::user("hello")],
+            &[],
+            cancellation.clone(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.exists() || !descendant_started.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("fixture account CLI did not start its descendant");
+
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while receiver.recv().await.is_some() {}
+        })
+        .await
+        .expect("account CLI task did not settle after cancellation");
+        tokio::time::sleep(Duration::from_millis(700)).await;
+
+        assert!(
+            !leaked.exists(),
+            "cancelling an account request must kill every CLI descendant"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_protocol_output_kills_account_cli_descendants() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("account-cli");
+        let descendant_started = directory.path().join("descendant-started");
+        let leaked = directory.path().join("protocol-leak");
+        std::fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\n(: > '{}'; sleep 0.30; : > '{}') &\n\
+                 while [ ! -e '{}' ]; do :; done\n\
+                 printf '\\377\\n'\nwait\n",
+                descendant_started.display(),
+                leaked.display(),
+                descendant_started.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        let invocation = CliInvocation::new(
+            executable,
+            Vec::new(),
+            "fixture",
+            "fixture-model",
+            "fixture account CLI",
+        );
+        let mut receiver = complete_streaming(
+            invocation,
+            &[Message::user("hello")],
+            &[],
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+        let diagnostic = tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("transport did not report its protocol failure")
+            .expect("transport closed without a protocol diagnostic");
+        assert!(matches!(
+            diagnostic,
+            StreamEvent::TextDelta(ref detail)
+                if detail.contains("account stream could not be read")
+        ));
+        assert!(
+            descendant_started.exists(),
+            "fixture must start its descendant before emitting malformed output"
+        );
+        while receiver.recv().await.is_some() {}
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        assert!(
+            !leaked.exists(),
+            "a malformed account stream must terminate every CLI descendant"
+        );
+    }
 
     #[test]
     fn prompt_preserves_tool_history_as_structured_blocks() {

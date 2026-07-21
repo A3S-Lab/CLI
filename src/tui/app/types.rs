@@ -23,7 +23,6 @@ pub(super) struct LlmTurnUiCheckpoint {
     pub(super) turn_had_agent_activity: bool,
     pub(super) turn_text_after_activity: bool,
     pub(super) runtime_tools: RuntimeToolCheckpoint,
-    pub(super) report_tools: ReportPhaseToolBuffer,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -185,6 +184,11 @@ pub(super) enum SessionRebuildAction {
     Fork {
         session_id: String,
     },
+    Rewind {
+        session_id: String,
+        files_rewound: bool,
+        warning: Option<String>,
+    },
     Relay {
         restore: RelayRestoreState,
     },
@@ -197,6 +201,44 @@ pub(super) enum SessionRebuildAction {
     Refresh {
         failure_context: Option<&'static str>,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorktreeForkResult {
+    pub(super) session_id: String,
+    pub(super) workspace: PathBuf,
+    pub(super) worktree_root: PathBuf,
+    pub(super) branch: String,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RewindCheckpointSeed {
+    pub(super) source_session_id: String,
+    pub(super) task: String,
+    pub(super) history_before: Vec<Message>,
+    pub(super) session_before: Option<a3s_code_core::store::SessionData>,
+    pub(super) git_before: Option<GitTreeSnapshot>,
+    pub(super) warning: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RewindCheckpoint {
+    pub(super) id: u64,
+    pub(super) source_session_id: String,
+    pub(super) task: String,
+    pub(super) history_before: Vec<Message>,
+    pub(super) session_before: Option<a3s_code_core::store::SessionData>,
+    pub(super) file_patch: Option<GitBinaryPatch>,
+    pub(super) repository_root: Option<PathBuf>,
+    pub(super) warning: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct RewindResult {
+    pub(super) checkpoint_id: u64,
+    pub(super) session_id: String,
+    pub(super) files_rewound: bool,
+    pub(super) warning: Option<String>,
 }
 
 pub(super) struct SessionRebuildProfile {
@@ -254,6 +296,9 @@ pub(super) enum Msg {
         event: Box<AgentEvent>,
     },
     Submit(String),
+    /// Cancel the active turn and run this immutable submission before normal
+    /// queued follow-ups.
+    SubmitNow(String),
     StreamStarted {
         token: u64,
         session: Arc<AgentSession>,
@@ -261,6 +306,8 @@ pub(super) enum Msg {
         join: StreamJoin,
         /// Temporary previews retained until stream admission succeeds.
         submitted_images: Vec<PendingImage>,
+        /// Pre-turn conversation and Git state captured before admission.
+        rewind_checkpoint: Option<RewindCheckpointSeed>,
     },
     StreamEnded(SharedRx),
     StreamJoinSettled {
@@ -309,6 +356,13 @@ pub(super) enum Msg {
     AgentPresenceRefreshed(crate::system_agents::SystemAgentRefreshResult),
     /// Best-effort native system-island helper launch result.
     AgentIslandLaunchFinished(Result<AgentIslandLaunchOutcome, String>),
+    /// One validated, one-shot inline decision submitted by the native island.
+    AgentIslandControl(crate::system_agents::AgentControlRequest),
+    /// Result of routing a child-row cancellation to Core's real task tracker.
+    AgentIslandSubagentCancelFinished {
+        task_id: String,
+        cancelled: bool,
+    },
     /// Drive the short, high-frame-rate Ultracode activation transition.
     UltracodeTick {
         epoch: u64,
@@ -316,7 +370,40 @@ pub(super) enum Msg {
     ModalConfirm {
         tool_id: String,
         approved: bool,
-        approve_all_pending: bool,
+        reason: Option<String>,
+    },
+    PersistProjectPermission {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+    },
+    ProjectPermissionPersisted {
+        tool_id: String,
+        grant: ExactPermissionGrant,
+        result: Result<PathBuf, String>,
+    },
+    /// Result of an explicitly confirmed project-grant revocation.
+    ProjectPermissionRevoked {
+        request_id: u64,
+        stable_key: String,
+        result: Result<ProjectPermissionRevocation, String>,
+    },
+    /// Authoritative delegated-task snapshot for an open `/tasks` panel.
+    TaskPanelData {
+        session_id: String,
+        generation: u64,
+        request_id: u64,
+        tasks: Vec<a3s_code_core::SubagentTaskSnapshot>,
+    },
+    /// Periodic in-memory refresh scoped to one `/tasks` panel generation.
+    TaskPanelTick {
+        generation: u64,
+    },
+    /// Result of the panel's explicitly confirmed task cancellation.
+    TaskPanelCancelFinished {
+        session_id: String,
+        generation: u64,
+        task_id: String,
+        cancelled: bool,
     },
     BackgroundSubagentFinished {
         session_id: String,
@@ -363,11 +450,26 @@ pub(super) enum Msg {
     },
     /// Output of a `!`-prefixed shell command.
     ShellOutput(String),
+    /// Atomic, no-clobber Markdown export of the current semantic transcript.
+    SessionExported {
+        status_entry: TranscriptEntryId,
+        result: Result<(PathBuf, u64), String>,
+    },
+    /// Live A3S Use capability projection and provider readiness.
+    UseStatus {
+        status_entry: TranscriptEntryId,
+        text: String,
+    },
+    /// Typed, secret-free host inspection completed before `/checkup` starts
+    /// its strict read-only workspace audit.
+    CheckupPreflightCompleted {
+        status_entry: TranscriptEntryId,
+        result: Result<panels::checkup::CheckupPreflight, String>,
+    },
     ResearchDiagnostic(Result<String, String>),
     /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
     DeepResearchWorkflowCompleted {
         query: String,
-        os_runtime: bool,
         args: serde_json::Value,
         result: Result<ToolCallResult, String>,
         convergence: ConvergenceDecision,
@@ -380,17 +482,6 @@ pub(super) enum Msg {
         query: String,
         phase: DeepResearchReportGenerationPhase,
         result: Result<ToolCallResult, String>,
-    },
-    /// A DeepResearch synthesis/repair stream exceeded its host-side model budget.
-    DeepResearchSynthesisTimedOut {
-        token: u64,
-    },
-    /// A timed-out DeepResearch synthesis/repair stream was cancelled at the session layer.
-    DeepResearchSynthesisTimedOutAfterCancel {
-        token: u64,
-        status: String,
-        streamed_text: String,
-        report_completed: bool,
     },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
@@ -441,10 +532,33 @@ pub(super) enum Msg {
         request_id: u64,
         result: Result<String, String>,
     },
+    /// `/fork worktree` created an isolated Git worktree and copied the complete
+    /// session into its workspace-local store. The current TUI stays attached
+    /// to its original workspace.
+    WorktreeForked {
+        request_id: u64,
+        result: Result<WorktreeForkResult, String>,
+    },
+    /// Post-turn Git capture finished and queued continuation may proceed.
+    RewindCheckpointFinalized {
+        token: u64,
+        checkpoint: RewindCheckpoint,
+        synthesis: Option<(String, String)>,
+    },
+    /// `/rewind` created a pre-turn session fork and safely reversed its file
+    /// patch, or refused without changing files.
+    Rewound {
+        request_id: u64,
+        result: Result<RewindResult, String>,
+    },
     /// A background scan of native and external coding-agent transcripts.
     RelayData {
         request_id: u64,
         result: Result<Vec<panels::relay::RelaySession>, String>,
+    },
+    /// Periodic `/relay` refresh scoped to one open-panel generation.
+    RelayRefreshTick {
+        generation: u64,
     },
     /// `/memory` graph data loaded (timeline + details + derived graph).
     MemoryLoaded(MemPanelData),
@@ -530,12 +644,12 @@ pub(super) struct DeepResearchSubagentSettlement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeepResearchReportGenerationPhase {
     Synthesis,
-    Repair,
+    Resume,
 }
 
 impl DeepResearchReportGenerationPhase {
-    pub(super) fn is_repair(self) -> bool {
-        matches!(self, Self::Repair)
+    pub(super) fn is_resume(self) -> bool {
+        matches!(self, Self::Resume)
     }
 }
 

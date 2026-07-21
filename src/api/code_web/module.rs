@@ -14,6 +14,7 @@ use super::os::OsModule;
 use super::plugins::PluginsModule;
 use super::processes::ProcessesModule;
 use super::state::CodeWebState;
+use super::work::WorkModule;
 use super::workspace::WorkspaceModule;
 
 pub(in crate::api) struct CodeWebModule {
@@ -36,6 +37,7 @@ impl Module for CodeWebModule {
             Arc::new(CodeWebStateModule::new(Arc::clone(&self.state))),
             Arc::new(HealthModule),
             Arc::new(ConfigModule),
+            Arc::new(WorkModule),
             Arc::new(WorkspaceModule),
             Arc::new(CodeIntelligenceModule),
             Arc::new(CapabilitiesModule),

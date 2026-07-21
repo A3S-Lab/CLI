@@ -1,18 +1,31 @@
-//! Deterministic claim/source audit for a materialized research report.
+//! Structural source audit for a materialized research report.
+//!
+//! Natural-language claims are never matched back to evidence text here.
+//! Closed claim/source IDs and their bindings are validated before generation;
+//! this final gate verifies only exact accepted source anchors in rendered
+//! citations.
 
 use comrak::{nodes::NodeValue, parse_document, Arena, Options};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
-use regex::Regex;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CitationRequirement {
+    AtLeastOne,
+    EveryDeclared,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReportSourceReference {
+    pub(crate) source_id: String,
+    pub(crate) anchor: String,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ReportAudit {
     pub(crate) passed: bool,
-    pub(crate) accepted_claims: usize,
-    pub(crate) matched_claims: usize,
-    pub(crate) claim_coverage_basis_points: u16,
     pub(crate) accepted_sources: usize,
     pub(crate) cited_sources: usize,
     #[serde(default)]
@@ -20,104 +33,125 @@ pub(crate) struct ReportAudit {
     pub(crate) reason: String,
 }
 
-/// A machine-addressable audit failure. Indexes refer to the claim and source
-/// slices passed to [`audit_report`], so callers can map a failure back to the
-/// section that owns the evidence without parsing a human-readable reason.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ReportAuditIssue {
-    ClaimNotCovered { claim_index: usize },
-    SourceNotCited { source_index: usize },
     AcceptedSourcesEmpty,
+    SourceCatalogInvalid {
+        source_id: String,
+    },
+    SourceNotCited {
+        source_id: String,
+    },
+    SemanticBoundaryViolation {
+        target_id: String,
+        category: String,
+        excerpt: String,
+        detail: String,
+    },
 }
 
 pub(crate) fn audit_report(
     markdown: &str,
     html: &str,
-    claims: &[String],
-    source_anchors: &[String],
+    sources: &[ReportSourceReference],
+    requirement: CitationRequirement,
 ) -> ReportAudit {
-    if claims.is_empty() && source_anchors.is_empty() {
+    if sources.is_empty() {
         return ReportAudit {
-            passed: true,
-            accepted_claims: 0,
-            matched_claims: 0,
-            claim_coverage_basis_points: 10_000,
+            passed: false,
             accepted_sources: 0,
             cited_sources: 0,
-            issues: Vec::new(),
-            reason: "legacy report has no event-sourced evidence graph to audit".to_string(),
+            issues: vec![ReportAuditIssue::AcceptedSourcesEmpty],
+            reason: "report audit received no accepted source catalog".to_string(),
         };
     }
-    let report = normalize(&format!("{markdown}\n{html}"));
-    let matched_claim_indexes = claims
-        .iter()
-        .enumerate()
-        .filter_map(|(index, claim)| claim_matches(&report, claim).then_some(index))
-        .collect::<HashSet<_>>();
-    let matched_claims = matched_claim_indexes.len();
-    let claim_coverage_basis_points = if claims.is_empty() {
-        10_000
-    } else {
-        ((matched_claims.saturating_mul(10_000) / claims.len()).min(10_000)) as u16
-    };
-    let citation_targets = extract_citation_targets(markdown, html);
-    let cited_source_indexes = source_anchors
-        .iter()
-        .enumerate()
-        .filter_map(|(index, anchor)| {
-            normalize_citation_target(anchor)
-                .is_some_and(|anchor| citation_targets.contains(&anchor))
-                .then_some(index)
-        })
-        .collect::<HashSet<_>>();
-    let cited_sources = cited_source_indexes.len();
-    let sources_pass = !source_anchors.is_empty() && cited_sources > 0;
-    let claims_pass = claims.is_empty() || claim_coverage_basis_points >= 5_000;
-    let passed = sources_pass && claims_pass;
+
+    let mut catalog = BTreeMap::new();
     let mut issues = Vec::new();
-    if !claims_pass {
-        issues.extend(
-            (0..claims.len())
-                .filter(|index| !matched_claim_indexes.contains(index))
-                .map(|claim_index| ReportAuditIssue::ClaimNotCovered { claim_index }),
+    for source in sources {
+        let source_id = source.source_id.as_str();
+        let normalized_anchor = normalize_citation_target(&source.anchor);
+        let valid_id = !source_id.is_empty() && source_id.trim() == source_id;
+        let duplicate = catalog.contains_key(source_id);
+        if !valid_id || normalized_anchor.is_none() || duplicate {
+            issues.push(ReportAuditIssue::SourceCatalogInvalid {
+                source_id: source.source_id.clone(),
+            });
+            continue;
+        }
+        catalog.insert(
+            source.source_id.clone(),
+            normalized_anchor.expect("checked above"),
         );
     }
-    if !sources_pass {
-        if source_anchors.is_empty() {
-            issues.push(ReportAuditIssue::AcceptedSourcesEmpty);
-        } else {
+
+    let citation_targets = extract_citation_targets(markdown, html);
+    let cited_source_ids = catalog
+        .iter()
+        .filter_map(|(source_id, anchor)| {
+            citation_targets
+                .contains(anchor)
+                .then_some(source_id.clone())
+        })
+        .collect::<HashSet<_>>();
+
+    match requirement {
+        CitationRequirement::AtLeastOne if cited_source_ids.is_empty() => {
             issues.extend(
-                (0..source_anchors.len())
-                    .filter(|index| !cited_source_indexes.contains(index))
-                    .map(|source_index| ReportAuditIssue::SourceNotCited { source_index }),
+                catalog
+                    .keys()
+                    .cloned()
+                    .map(|source_id| ReportAuditIssue::SourceNotCited { source_id }),
             );
         }
+        CitationRequirement::EveryDeclared => {
+            issues.extend(
+                catalog
+                    .keys()
+                    .filter(|source_id| !cited_source_ids.contains(*source_id))
+                    .cloned()
+                    .map(|source_id| ReportAuditIssue::SourceNotCited { source_id }),
+            );
+        }
+        CitationRequirement::AtLeastOne => {}
     }
-    let reason = if !sources_pass {
-        "report cites none of the accepted evidence sources"
-    } else if !claims_pass {
-        "report covers less than half of the accepted claims"
+
+    let passed = issues.is_empty();
+    let reason = if issues
+        .iter()
+        .any(|issue| matches!(issue, ReportAuditIssue::SourceCatalogInvalid { .. }))
+    {
+        "report source catalog is not a closed set of unique IDs and valid anchors"
+    } else if issues
+        .iter()
+        .any(|issue| matches!(issue, ReportAuditIssue::SourceNotCited { .. }))
+    {
+        match requirement {
+            CitationRequirement::AtLeastOne => "report cites none of the accepted evidence sources",
+            CitationRequirement::EveryDeclared => {
+                "report does not cite every source declared by its closed evidence plan"
+            }
+        }
     } else {
-        "report claims and citations trace to accepted evidence"
+        "report citations resolve to the exact accepted source anchors"
     };
+
     ReportAudit {
         passed,
-        accepted_claims: claims.len(),
-        matched_claims,
-        claim_coverage_basis_points,
-        accepted_sources: source_anchors.len(),
-        cited_sources,
+        accepted_sources: sources.len(),
+        cited_sources: cited_source_ids.len(),
         issues,
         reason: reason.to_string(),
     }
 }
 
-pub(crate) fn cites_source_anchor(markdown: &str, html: &str, anchor: &str) -> bool {
-    let Some(anchor) = normalize_citation_target(anchor) else {
-        return false;
-    };
-    extract_citation_targets(markdown, html).contains(&anchor)
+pub(crate) fn report_citation_targets(markdown: &str, html: &str) -> HashSet<String> {
+    extract_citation_targets(markdown, html)
+}
+
+pub(crate) fn canonical_citation_target(target: &str) -> Option<String> {
+    normalize_citation_target(target)
 }
 
 fn extract_citation_targets(markdown: &str, html: &str) -> HashSet<String> {
@@ -127,6 +161,14 @@ fn extract_citation_targets(markdown: &str, html: &str) -> HashSet<String> {
     let root = parse_document(&arena, markdown, &options);
     let mut targets = HashSet::new();
     for node in root.descendants() {
+        if node.ancestors().skip(1).any(|ancestor| {
+            matches!(
+                &ancestor.data.borrow().value,
+                NodeValue::Heading(heading) if heading.level == 1
+            )
+        }) {
+            continue;
+        }
         let data = node.data.borrow();
         match &data.value {
             NodeValue::Link(link) => {
@@ -171,6 +213,9 @@ fn normalize_citation_target(target: &str) -> Option<String> {
         .trim();
     if target.is_empty() {
         return None;
+    }
+    if target.starts_with('#') {
+        return Some(target.to_string());
     }
     if let Some(scheme_end) = target.find("://") {
         let scheme = target[..scheme_end].to_ascii_lowercase();
@@ -228,406 +273,90 @@ fn decode_basic_html_entities(target: &str) -> String {
         .replace("&#X22;", "\"")
 }
 
-/// Reject quantitative assertions that are absent from the closed evidence
-/// package. This is intentionally a host-side publication gate: a model can
-/// paraphrase prose, but it cannot introduce a new threshold, range, version,
-/// date, multiplier, or approximate magnitude and still publish the report.
-pub(crate) fn validate_quantitative_grounding(
-    markdown: &str,
-    grounding_texts: &[String],
-) -> Result<(), String> {
-    let unsupported = unsupported_quantitative_atoms(markdown, grounding_texts);
-    if unsupported.is_empty() {
-        return Ok(());
-    }
-    Err(format!(
-        "content rejected: report introduced ungrounded quantitative claim(s): {}",
-        unsupported
-            .into_iter()
-            .take(8)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ))
-}
-
-/// Preserve a checker-qualified report without preserving claims the evidence
-/// gate rejected. Structural Markdown rows are removed as a unit; prose is
-/// reduced sentence by sentence. A deterministic boundary note makes the
-/// omission visible without spending another model turn or publishing a
-/// generic recovery report.
-pub(crate) fn sanitize_ungrounded_quantitative_claims(
-    markdown: &str,
-    grounding_texts: &[String],
-) -> Option<String> {
-    let mut changed = false;
-    let mut output = Vec::new();
-    for line in markdown.lines() {
-        if unsupported_quantitative_atoms(line, grounding_texts).is_empty() {
-            output.push(line.to_string());
-            continue;
-        }
-        changed = true;
-        let trimmed = line.trim_start();
-        if trimmed.starts_with('#')
-            || trimmed.starts_with('|')
-            || trimmed.starts_with('>')
-            || trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-            || ordered_prefix_regex().is_match(line)
-        {
-            continue;
-        }
-        let retained = line
-            .split_inclusive(['.', '!', '?', '。', '！', '？', ';', '；'])
-            .filter(|sentence| unsupported_quantitative_atoms(sentence, grounding_texts).is_empty())
-            .map(str::trim)
-            .filter(|sentence| !sentence.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !retained.is_empty() {
-            output.push(retained);
-        }
-    }
-    if !changed {
-        return None;
-    }
-    while output.last().is_some_and(|line| line.trim().is_empty()) {
-        output.pop();
-    }
-    let cjk = markdown.chars().any(is_cjk);
-    output.push(String::new());
-    if cjk {
-        output.push("## 证据边界".to_string());
-        output.push(String::new());
-        output.push(
-            "宿主证据校验已移除缺少已接纳来源依据的定量阈值或建议；不得从保留内容反推出被移除的阈值。"
-                .to_string(),
-        );
-    } else {
-        output.push("## Evidence boundary".to_string());
-        output.push(String::new());
-        output.push(
-            "Host evidence validation removed quantitative thresholds or recommendations that were absent from the accepted source facts; no omitted threshold should be inferred from the retained report."
-                .to_string(),
-        );
-    }
-    Some(output.join("\n"))
-}
-
-fn unsupported_quantitative_atoms(text: &str, grounding_texts: &[String]) -> Vec<String> {
-    let accepted = grounding_texts
-        .iter()
-        .flat_map(|text| quantitative_atoms(text))
-        .collect::<HashSet<_>>();
-    let mut unsupported = quantitative_atoms(text)
-        .into_iter()
-        .filter(|atom| !quantity_is_grounded(atom, &accepted))
-        .collect::<Vec<_>>();
-    unsupported.sort();
-    unsupported.dedup();
-    unsupported
-}
-
-pub(crate) fn quantitative_claim_is_grounded(text: &str, grounding_texts: &[String]) -> bool {
-    let accepted = grounding_texts
-        .iter()
-        .flat_map(|text| quantitative_atoms(text))
-        .collect::<HashSet<_>>();
-    quantitative_atoms(text)
-        .iter()
-        .all(|atom| quantity_is_grounded(atom, &accepted))
-}
-
-fn quantity_is_grounded(atom: &str, accepted: &HashSet<String>) -> bool {
-    if accepted.contains(atom) {
-        return true;
-    }
-    // A non-comparative point may be quoted from a grounded range. The reverse
-    // is unsafe: seeing `1M-10M` never licenses a new `<1M` recommendation.
-    if has_comparator(atom) {
-        return false;
-    }
-    accepted
-        .iter()
-        .filter(|candidate| !has_comparator(candidate))
-        .any(|candidate| range_components(candidate).any(|part| part == atom))
-}
-
-fn has_comparator(atom: &str) -> bool {
-    atom.starts_with(['<', '>', '~'])
-        || atom.contains("以下")
-        || atom.contains("以上")
-        || atom.contains("以内")
-        || atom.contains("左右")
-        || atom.starts_with("数")
-        || atom.starts_with("几")
-        || atom.starts_with("多")
-}
-
-fn range_components(atom: &str) -> impl Iterator<Item = &str> {
-    atom.split(['-', '–', '—', '~', '至', '到'])
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-}
-
-fn quantitative_atoms(text: &str) -> Vec<String> {
-    let scrubbed = scrub_markdown_scaffolding(text);
-    let mut atoms = quantity_regex()
-        .find_iter(&scrubbed)
-        .map(|found| normalize_quantity(found.as_str()))
-        .filter(|atom| material_quantity(atom))
-        .collect::<Vec<_>>();
-    atoms.extend(
-        cjk_quantity_regex()
-            .find_iter(&scrubbed)
-            .map(|found| normalize_quantity(found.as_str()))
-            .filter(|atom| material_cjk_quantity(atom)),
-    );
-    atoms.sort();
-    atoms.dedup();
-    atoms
-}
-
-fn scrub_markdown_scaffolding(text: &str) -> String {
-    let without_urls = url_regex().replace_all(text, " ");
-    let without_citations = citation_regex().replace_all(&without_urls, " ");
-    ordered_prefix_regex()
-        .replace_all(&without_citations, "${prefix}")
-        .into_owned()
-}
-
-fn normalize_quantity(value: &str) -> String {
-    let mut value = value
-        .to_lowercase()
-        .replace([' ', '\t', '\n', ',', '_'], "")
-        .replace(['–', '—', '−', '－'], "-")
-        .replace('×', "x");
-    for (from, to) in [
-        ("atleast", ">="),
-        ("atmost", "<="),
-        ("lessthan", "<"),
-        ("morethan", ">"),
-        ("upto", "<="),
-        ("under", "<"),
-        ("below", "<"),
-        ("over", ">"),
-        ("above", ">"),
-        ("大约", "~"),
-        ("至少", ">="),
-        ("至多", "<="),
-        ("低于", "<"),
-        ("少于", "<"),
-        ("高于", ">"),
-        ("超过", ">"),
-        ("about", "~"),
-        ("around", "~"),
-        ("约", "~"),
-        ("≈", "~"),
-        ("≤", "<="),
-        ("≥", ">="),
-    ] {
-        value = value.replace(from, to);
-    }
-    for (suffix, prefix) in [("以下", "<"), ("以内", "<="), ("以上", ">"), ("左右", "~")] {
-        if let Some(stem) = value.strip_suffix(suffix) {
-            value = format!("{prefix}{stem}");
-        }
-    }
-    value
-}
-
-fn material_quantity(atom: &str) -> bool {
-    if atom.is_empty() {
-        return false;
-    }
-    let digits = atom.chars().filter(char::is_ascii_digit).count();
-    let plain_integer = atom.chars().all(|ch| ch.is_ascii_digit());
-    !plain_integer || digits >= 4 || atom.parse::<u64>().is_ok_and(|value| value >= 1_000)
-}
-
-fn material_cjk_quantity(atom: &str) -> bool {
-    atom.contains(['万', '亿'])
-        || atom.contains("以下")
-        || atom.contains("以上")
-        || atom.contains("以内")
-        || atom.contains("左右")
-        || atom.starts_with(['数', '几', '多', '<', '>', '~'])
-}
-
-fn is_cjk(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{3400}'..='\u{4dbf}'
-            | '\u{4e00}'..='\u{9fff}'
-            | '\u{f900}'..='\u{faff}'
-            | '\u{3040}'..='\u{30ff}'
-            | '\u{ac00}'..='\u{d7af}'
-    )
-}
-
-fn quantity_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?ix)
-            (?:(?:at\s+least|at\s+most|less\s+than|more\s+than|up\s+to|under|over|below|above|about|around)\s*|[<>≤≥≈~]\s*|(?:低于|高于|少于|超过|至少|至多|约|大约)\s*)?
-            v?\d[\d,_]*(?:\.\d+)*
-            (?:\s*(?:vcpu|seconds?|minutes?|hours?|days?|years?|vectors?|bytes?|qps|rps|kib|mib|gib|tib|kb|mb|gb|tb|ms|sec|dims?|%|x|×|万|亿|维|倍|个|项|条|人|次|度|年|月|日|小时|分钟|秒|k|m|b))?
-            (?:\s*(?:[-–—~至到/:])\s*v?\d[\d,_]*(?:\.\d+)*(?:\s*(?:vcpu|seconds?|minutes?|hours?|days?|years?|vectors?|bytes?|qps|rps|kib|mib|gib|tib|kb|mb|gb|tb|ms|sec|dims?|%|x|×|万|亿|维|倍|个|项|条|人|次|度|年|月|日|小时|分钟|秒|k|m|b))?){0,2}
-            \s*(?:\+|以下|以上|以内|左右)?",
-        )
-        .expect("quantitative grounding regex must compile")
-    })
-}
-
-fn cjk_quantity_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(
-            r"(?:约|大约|超过|不足|低于|高于|至少|至多)?(?:数|几|多|[一二三四五六七八九两])?(?:十|百|千|万|亿){1,3}(?:余|多|级)?(?:以下|以上|以内|左右)?",
-        )
-        .expect("CJK quantitative grounding regex must compile")
-    })
-}
-
-fn url_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| Regex::new(r"https?://[^\s<>()]+").expect("URL regex must compile"))
-}
-
-fn citation_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"\[(?:\d+(?:\s*[-,–]\s*\d+)*)\]").expect("citation regex must compile")
-    })
-}
-
-fn ordered_prefix_regex() -> &'static Regex {
-    static REGEX: OnceLock<Regex> = OnceLock::new();
-    REGEX.get_or_init(|| {
-        Regex::new(r"(?m)^(?P<prefix>\s*(?:#{1,6}\s*)?)\d{1,3}[.)、]\s+")
-            .expect("ordered-list prefix regex must compile")
-    })
-}
-
 fn html_href_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
         Regex::new(
-            r#"(?is)\bhref\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>[^\s\"'=<>`]+))"#,
+            r#"(?is)(?:^|[\s<])href\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>[^\s\"'=<>`]+))"#,
         )
         .expect("HTML href regex must compile")
     })
-}
-
-fn claim_matches(report: &str, claim: &str) -> bool {
-    let claim = normalize(claim);
-    if claim.is_empty() || report.contains(&claim) {
-        return !claim.is_empty();
-    }
-    let terms = claim
-        .split_whitespace()
-        .filter(|term| term.len() >= 3)
-        .collect::<HashSet<_>>();
-    if terms.is_empty() {
-        return false;
-    }
-    let matched = terms
-        .iter()
-        .filter(|term| report.split_whitespace().any(|word| word == **term))
-        .count();
-    matched.saturating_mul(100) / terms.len() >= 60
-}
-
-fn normalize(text: &str) -> String {
-    text.chars()
-        .map(|ch| {
-            if ch.is_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn accepts_report_with_source_and_claim_coverage() {
-        let audit = audit_report(
-            "The release date is July 12. Source: https://example.gov/release",
-            "<p>The release was published on July 12.</p>",
-            &["The release date is July 12.".to_string()],
-            &["https://example.gov/release".to_string()],
-        );
-        assert!(audit.passed);
-        assert_eq!(audit.claim_coverage_basis_points, 10_000);
+    fn source(id: &str, anchor: &str) -> ReportSourceReference {
+        ReportSourceReference {
+            source_id: id.to_string(),
+            anchor: anchor.to_string(),
+        }
     }
 
     #[test]
-    fn rejects_polished_report_without_accepted_claims() {
+    fn accepts_exact_declared_source_citations_without_inspecting_prose() {
         let audit = audit_report(
-            "A polished but unrelated conclusion. https://example.gov/release",
-            "<p>Unrelated analysis.</p>",
-            &["The release date is July 12.".to_string()],
-            &["https://example.gov/release".to_string()],
+            "任意语言的综合结论。[来源](https://example.gov/release)",
+            "",
+            &[source("source:release", "https://example.gov/release")],
+            CitationRequirement::EveryDeclared,
         );
-        assert!(!audit.passed);
-        assert!(audit.reason.contains("less than half"));
-        assert_eq!(
-            audit.issues,
-            vec![ReportAuditIssue::ClaimNotCovered { claim_index: 0 }]
-        );
+        assert!(audit.passed);
+        assert_eq!(audit.cited_sources, 1);
     }
 
     #[test]
     fn rejects_source_anchor_that_is_only_a_prefix_of_a_link_target() {
         let audit = audit_report(
-            "The release date is July 12. [Source](https://example.gov/release-notes)",
+            "[Source](https://example.gov/release-notes)",
             "",
-            &["The release date is July 12.".to_string()],
-            &["https://example.gov/release".to_string()],
+            &[source("source:release", "https://example.gov/release")],
+            CitationRequirement::EveryDeclared,
         );
         assert!(!audit.passed);
-        assert_eq!(audit.cited_sources, 0);
-        assert!(audit.reason.contains("cites none"));
         assert_eq!(
             audit.issues,
-            vec![ReportAuditIssue::SourceNotCited { source_index: 0 }]
+            vec![ReportAuditIssue::SourceNotCited {
+                source_id: "source:release".to_string(),
+            }]
         );
     }
 
     #[test]
-    fn reports_every_failed_evidence_coordinate_without_embedding_evidence_text() {
+    fn every_declared_requires_each_exact_source_anchor() {
         let audit = audit_report(
-            "An unrelated report.",
+            "[One](https://example.gov/one)",
             "",
             &[
-                "The first accepted claim.".to_string(),
-                "The second accepted claim.".to_string(),
+                source("source:one", "https://example.gov/one"),
+                source("source:two", "https://example.gov/two"),
             ],
-            &[
-                "https://example.gov/one".to_string(),
-                "https://example.gov/two".to_string(),
-            ],
+            CitationRequirement::EveryDeclared,
         );
-
+        assert!(!audit.passed);
+        assert_eq!(audit.cited_sources, 1);
         assert_eq!(
             audit.issues,
-            vec![
-                ReportAuditIssue::ClaimNotCovered { claim_index: 0 },
-                ReportAuditIssue::ClaimNotCovered { claim_index: 1 },
-                ReportAuditIssue::SourceNotCited { source_index: 0 },
-                ReportAuditIssue::SourceNotCited { source_index: 1 },
-            ]
+            vec![ReportAuditIssue::SourceNotCited {
+                source_id: "source:two".to_string(),
+            }]
         );
+    }
+
+    #[test]
+    fn at_least_one_accepts_one_exact_anchor_from_a_larger_catalog() {
+        let audit = audit_report(
+            "[One](https://example.gov/one)",
+            "",
+            &[
+                source("source:one", "https://example.gov/one"),
+                source("source:two", "https://example.gov/two"),
+            ],
+            CitationRequirement::AtLeastOne,
+        );
+        assert!(audit.passed);
+        assert_eq!(audit.cited_sources, 1);
     }
 
     #[test]
@@ -641,11 +370,10 @@ mod tests {
             let audit = audit_report(
                 markdown,
                 "",
-                &[],
-                &["https://example.gov/release".to_string()],
+                &[source("source:release", "https://example.gov/release")],
+                CitationRequirement::EveryDeclared,
             );
             assert!(audit.passed, "{markdown}: {}", audit.reason);
-            assert_eq!(audit.cited_sources, 1, "{markdown}");
         }
     }
 
@@ -654,19 +382,18 @@ mod tests {
         let accepted = audit_report(
             "[Workspace source](docs/./research.md)",
             "",
-            &[],
-            &["./docs/research.md".to_string()],
+            &[source("source:local", "./docs/research.md")],
+            CitationRequirement::EveryDeclared,
         );
         assert!(accepted.passed, "{}", accepted.reason);
 
         let rejected = audit_report(
             "[Nested readme](docs/README.md)",
             "",
-            &[],
-            &["README.md".to_string()],
+            &[source("source:local", "README.md")],
+            CitationRequirement::EveryDeclared,
         );
         assert!(!rejected.passed);
-        assert_eq!(rejected.cited_sources, 0);
     }
 
     #[test]
@@ -674,67 +401,62 @@ mod tests {
         let audit = audit_report(
             "```html\n<a href=\"https://example.gov/release\">not a citation</a>\n```",
             "",
-            &[],
-            &["https://example.gov/release".to_string()],
+            &[source("source:release", "https://example.gov/release")],
+            CitationRequirement::EveryDeclared,
         );
         assert!(!audit.passed);
-        assert_eq!(audit.cited_sources, 0);
     }
 
     #[test]
-    fn rejects_new_threshold_even_when_the_magnitude_appears_in_a_range() {
-        let error = validate_quantitative_grounding(
-            "Use pgvector below 1M vectors; the benchmark covers 1M-10M vectors.",
-            &["The benchmark covers 1M-10M vectors.".to_string()],
-        )
-        .unwrap_err();
-        assert!(error.contains("<1m"), "{error}");
+    fn html_citations_require_the_exact_href_attribute_name() {
+        let targets = report_citation_targets(
+            "",
+            "<a data-href=\"https://example.gov/metadata\" xhref=\"https://example.gov/lookalike\" href=\"https://example.gov/source\">source</a>",
+        );
+        assert_eq!(
+            targets,
+            HashSet::from(["https://example.gov/source".to_string()])
+        );
     }
 
     #[test]
-    fn rejects_the_unverified_threshold_forms_seen_in_a_real_report() {
-        let error = validate_quantitative_grounding(
-            "向量规模 < 100 万；百万级以下可选 A；> 数百万考虑 B；规模 <1 GB。",
-            &["公开基准覆盖 1M-10M 向量，最大样例约 8.6GB。".to_string()],
-        )
-        .unwrap_err();
-        assert!(error.contains("<100万"), "{error}");
-        assert!(error.contains("数百万"), "{error}");
-        assert!(error.contains("<1gb"), "{error}");
+    fn same_document_fragments_remain_non_source_targets() {
+        assert_eq!(
+            canonical_citation_target("#section-1"),
+            Some("#section-1".to_string())
+        );
     }
 
     #[test]
-    fn accepts_grounded_ranges_versions_dates_and_multipliers() {
-        validate_quantitative_grounding(
-            "Version v0.8.5 was reviewed in 2026. The 1M-10M test reports 10x.",
-            &["v0.8.5; 2026; 1M-10M vectors; 10x".to_string()],
-        )
-        .unwrap();
+    fn markdown_report_title_links_are_not_evidence_citations() {
+        let targets = report_citation_targets("# Analyze https://example.gov/request\n\nBody.", "");
+        assert!(!targets.contains("https://example.gov/request"));
+
+        let body_targets = report_citation_targets(
+            "# Analyze https://example.gov/request\n\nBody citation: https://example.gov/request",
+            "",
+        );
+        assert!(body_targets.contains("https://example.gov/request"));
     }
 
     #[test]
-    fn ignores_markdown_list_and_citation_numbers() {
-        validate_quantitative_grounding(
-            "1. First point [1]\n2. Second point [2]\n\n[1] https://example.com/2026/item",
-            &[],
-        )
-        .unwrap();
-    }
+    fn rejects_empty_duplicate_or_unaddressable_source_catalogs() {
+        let empty = audit_report("", "", &[], CitationRequirement::AtLeastOne);
+        assert_eq!(empty.issues, vec![ReportAuditIssue::AcceptedSourcesEmpty]);
 
-    #[test]
-    fn qualified_sanitization_removes_only_ungrounded_sentences() {
-        let sanitized = sanitize_ungrounded_quantitative_claims(
-            "# Report\n\nUse A below 1M vectors. The benchmark covers 1M-10M vectors.\n\n| Choice | Boundary |\n| --- | --- |\n| A | below 1M |\n\n## Sources\n\n- https://example.com/benchmark",
-            &["The benchmark covers 1M-10M vectors.".to_string()],
-        )
-        .expect("the unsupported threshold should be removed");
-        assert!(!sanitized.contains("below 1M"), "{sanitized}");
-        assert!(sanitized.contains("covers 1M-10M"), "{sanitized}");
-        assert!(sanitized.contains("## Evidence boundary"), "{sanitized}");
-        validate_quantitative_grounding(
-            &sanitized,
-            &["The benchmark covers 1M-10M vectors.".to_string()],
-        )
-        .unwrap();
+        let duplicate = audit_report(
+            "[Source](https://example.gov/release)",
+            "",
+            &[
+                source("source:release", "https://example.gov/release"),
+                source("source:release", "https://example.gov/other"),
+            ],
+            CitationRequirement::EveryDeclared,
+        );
+        assert!(duplicate.issues.iter().any(|issue| matches!(
+            issue,
+            ReportAuditIssue::SourceCatalogInvalid { source_id }
+                if source_id == "source:release"
+        )));
     }
 }

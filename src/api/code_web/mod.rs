@@ -15,6 +15,7 @@ mod processes;
 mod session_runtime;
 mod session_store;
 mod state;
+mod work;
 mod workspace;
 mod workspace_backend_cache;
 

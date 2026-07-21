@@ -17,9 +17,18 @@ pub enum InquiryEvent {
         obligations: Vec<ResearchObligation>,
         stop_conditions: Vec<String>,
     },
+    /// Legacy journal replay only. New inquiries begin with planner-authored
+    /// questions and never execute a scout phase.
     ScoutCompleted {
         source_ids: Vec<String>,
     },
+    /// Legacy journal replay only. The active runtime has a fixed bounded
+    /// coverage loop and no perspective-wave budget.
+    PerspectiveBudgetSelected {
+        total_retrieval_waves: u8,
+    },
+    /// Legacy journal replay only. New plans use stable research obligations
+    /// and questions directly.
     PerspectivesCommitted {
         perspectives: Vec<Perspective>,
     },
@@ -34,8 +43,18 @@ pub enum InquiryEvent {
         answer: String,
         evidence_ids: Vec<String>,
     },
-    /// Records that the current evidence wave could not answer a question,
-    /// while keeping it open because a model-authored follow-up was queued.
+    /// A traceable answer that materially advances the question but retains a
+    /// consequential evidence limitation. The projection keeps it answerable
+    /// for material-evidence purposes while `bound_reason` preserves why the
+    /// linked completion criterion remains qualified.
+    QuestionPartiallyAnswered {
+        question_id: String,
+        answer: String,
+        limitation: String,
+        evidence_ids: Vec<String>,
+    },
+    /// Legacy journal replay only. The active closed-evidence review resolves
+    /// every question exactly once as answered or bounded.
     QuestionDeferred {
         question_id: String,
         reason: String,
@@ -79,10 +98,12 @@ impl InquiryEvent {
             Self::StrategySelected { .. } => "strategy_selected",
             Self::ResearchObligationsCommitted { .. } => "research_obligations_committed",
             Self::ScoutCompleted { .. } => "scout_completed",
+            Self::PerspectiveBudgetSelected { .. } => "perspective_budget_selected",
             Self::PerspectivesCommitted { .. } => "perspectives_committed",
             Self::QuestionsQueued { .. } => "questions_queued",
             Self::EvidenceAccepted { .. } => "evidence_accepted",
             Self::QuestionAnswered { .. } => "question_answered",
+            Self::QuestionPartiallyAnswered { .. } => "question_partially_answered",
             Self::QuestionDeferred { .. } => "question_deferred",
             Self::QuestionBounded { .. } => "question_bounded",
             Self::ResearchContractAssessed { .. } => "research_contract_assessed",

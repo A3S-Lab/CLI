@@ -21,7 +21,7 @@ a3s-lane = "=0.5.1"
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.2"
 a3s-tui = "=0.1.12"
-a3s-search = { version = "1.4.3", features = ["lightpanda"] }
+a3s-search = { version = "2.0.0", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
 a3s-use-extension = "=0.1.1"

@@ -7,6 +7,11 @@
 //! marked as inferred because a live process does not prove that a task is
 //! executing.
 
+mod control;
+mod preference;
+mod projection;
+mod text;
+
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -19,6 +24,25 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
+use self::control::{
+    sanitize_control_action, sanitize_received_actions, AgentControlGrants, MAX_CONTROL_ACTIONS,
+};
+pub(crate) use self::control::{
+    AgentControlAction, AgentControlActionKind, AgentControlGrantSpec, AgentControlRequest,
+};
+#[cfg(test)]
+use self::control::{
+    AgentControlProtocolRequest, CONTROL_REQUEST_DIRECTORY, CONTROL_REQUEST_SCHEMA,
+};
+#[cfg(test)]
+use self::projection::root_agent_processes;
+#[allow(unused_imports)]
+pub(crate) use self::projection::{activities_for_presence, sort_activities};
+use self::projection::{aggregate_activities, snapshot_requests_island_launch};
+#[cfg(test)]
+use self::text::sanitize_display_text;
+use self::text::{sanitize_nonempty, sanitize_optional, workspace_basename};
+
 #[cfg(test)]
 static AGENT_ISLAND_PROCESS_TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
@@ -27,9 +51,11 @@ pub(crate) fn agent_island_process_test_lock() -> &'static Mutex<()> {
     AGENT_ISLAND_PROCESS_TEST_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+use crate::top::collect_processes;
 #[cfg(test)]
 use crate::top::AgentKind;
-use crate::top::{collect_processes, ProcessRow};
+#[cfg(test)]
+use crate::top::ProcessRow;
 
 const PRESENCE_SCHEMA: &str = "a3s.agent_presence.v1";
 const SYSTEM_SNAPSHOT_SCHEMA: &str = "a3s.system_agent_snapshot.v1";
@@ -45,6 +71,7 @@ const MAX_TASK_CHARS: usize = 240;
 const MAX_AGENT_CHARS: usize = 64;
 const MAX_CHILD_ID_CHARS: usize = 64;
 const MAX_WORKSPACE_CHARS: usize = 128;
+const MAX_ATTENTION_REASON_CHARS: usize = 240;
 const MAX_CHILDREN: usize = 64;
 const MAX_SYSTEM_ACTIVITIES: usize = 256;
 const MAX_SYSTEM_SNAPSHOT_BYTES: u64 = 1024 * 1024;
@@ -78,6 +105,10 @@ impl AgentActivityState {
             Self::Completed => 6,
         }
     }
+
+    fn keeps_island_visible(self) -> bool {
+        self != Self::Idle
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +120,64 @@ pub(crate) enum AgentActivityConfidence {
     Process,
 }
 
+impl AgentActivityConfidence {
+    fn evidence_rank(self) -> u8 {
+        match self {
+            Self::Exact => 0,
+            Self::Process => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentVendor {
+    A3s,
+    OpenAi,
+    Anthropic,
+    Google,
+    Cursor,
+    Moonshot,
+    Tencent,
+    Alibaba,
+    DeepSeek,
+    Mistral,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl AgentVendor {
+    pub(crate) fn from_hint(value: &str) -> Option<Self> {
+        let value = value.to_ascii_lowercase();
+        [
+            (Self::A3s, &["a3s"][..]),
+            (Self::Anthropic, &["anthropic", "claude"][..]),
+            (
+                Self::OpenAi,
+                &["openai", "codex", "chatgpt", "gpt-", "o1", "o3", "o4"][..],
+            ),
+            (Self::Google, &["google", "gemini"][..]),
+            (Self::Cursor, &["cursor"][..]),
+            (Self::Moonshot, &["moonshot", "kimi"][..]),
+            (
+                Self::Tencent,
+                &["tencent", "workbuddy", "codebuddy", "hunyuan"][..],
+            ),
+            (Self::Alibaba, &["alibaba", "qwen", "dashscope"][..]),
+            (Self::DeepSeek, &["deepseek"][..]),
+            (Self::Mistral, &["mistral", "codestral"][..]),
+        ]
+        .into_iter()
+        .find_map(|(vendor, hints)| {
+            hints
+                .iter()
+                .any(|hint| value.contains(hint))
+                .then_some(vendor)
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SystemAgentActivity {
     pub(crate) id: String,
@@ -96,10 +185,14 @@ pub(crate) struct SystemAgentActivity {
     pub(crate) agent: String,
     pub(crate) workspace: Option<String>,
     pub(crate) task: Option<String>,
+    pub(crate) reason: Option<String>,
     pub(crate) state: AgentActivityState,
     pub(crate) confidence: AgentActivityConfidence,
+    pub(crate) vendor: AgentVendor,
     pub(crate) started_at_ms: Option<u64>,
+    pub(crate) finished_at_ms: Option<u64>,
     pub(crate) expires_at_ms: u64,
+    pub(crate) actions: Vec<AgentControlAction>,
     pub(crate) local: bool,
 }
 
@@ -117,6 +210,8 @@ pub(crate) struct SystemAgentSnapshot {
 pub(crate) struct SystemAgentRefreshResult {
     pub(crate) snapshot_path: Option<PathBuf>,
     pub(crate) lock_path: Option<PathBuf>,
+    pub(crate) launch_requested: bool,
+    pub(crate) control_requests: Vec<AgentControlRequest>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -138,11 +233,18 @@ struct SystemAgentProtocolActivity {
     workspace: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
     state: AgentActivityState,
     confidence: AgentActivityConfidence,
+    vendor: AgentVendor,
     #[serde(skip_serializing_if = "Option::is_none")]
     started_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finished_at_ms: Option<u64>,
     expires_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    actions: Vec<AgentControlAction>,
 }
 
 #[derive(Debug, Default)]
@@ -163,10 +265,19 @@ impl SystemAgentProtocolSnapshot {
                 agent: sanitize_nonempty(&activity.agent, MAX_AGENT_CHARS, "agent"),
                 workspace: sanitize_optional(activity.workspace.as_deref(), MAX_WORKSPACE_CHARS),
                 task: sanitize_optional(activity.task.as_deref(), MAX_TASK_CHARS),
+                reason: sanitize_optional(activity.reason.as_deref(), MAX_ATTENTION_REASON_CHARS),
                 state: activity.state,
                 confidence: activity.confidence,
+                vendor: activity.vendor,
                 started_at_ms: activity.started_at_ms,
+                finished_at_ms: activity.finished_at_ms,
                 expires_at_ms: activity.expires_at_ms,
+                actions: activity
+                    .actions
+                    .iter()
+                    .filter_map(sanitize_control_action)
+                    .take(MAX_CONTROL_ACTIONS)
+                    .collect(),
             })
             .collect();
         Self {
@@ -185,7 +296,13 @@ pub(crate) struct AgentChildPresence {
     pub(crate) agent: String,
     pub(crate) task: Option<String>,
     pub(crate) state: AgentActivityState,
+    #[serde(default)]
+    pub(crate) vendor: AgentVendor,
     pub(crate) started_at_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) actions: Vec<AgentControlAction>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -195,9 +312,17 @@ pub(crate) struct AgentPresence {
     pub(crate) pid: u32,
     pub(crate) workspace: String,
     pub(crate) task: Option<String>,
+    #[serde(default)]
+    pub(crate) reason: Option<String>,
     pub(crate) state: AgentActivityState,
+    #[serde(default)]
+    pub(crate) vendor: AgentVendor,
     pub(crate) children: Vec<AgentChildPresence>,
     pub(crate) started_at_ms: u64,
+    #[serde(default)]
+    pub(crate) finished_at_ms: Option<u64>,
+    #[serde(default)]
+    pub(crate) actions: Vec<AgentControlAction>,
     pub(crate) updated_at_ms: u64,
 }
 
@@ -228,11 +353,35 @@ impl AgentPresence {
             // Task text remains local and unredacted. `protocol_copy` decides
             // whether a sanitized label may cross the process boundary.
             task,
+            reason: None,
             state,
+            vendor: AgentVendor::Other,
             children,
             started_at_ms,
+            finished_at_ms: None,
+            actions: Vec::new(),
             updated_at_ms: epoch_ms(),
         }
+    }
+
+    pub(crate) fn with_vendor(mut self, vendor: AgentVendor) -> Self {
+        self.vendor = vendor;
+        self
+    }
+
+    pub(crate) fn with_attention_reason(mut self, reason: Option<String>) -> Self {
+        self.reason = reason;
+        self
+    }
+
+    pub(crate) fn with_finished_at_ms(mut self, finished_at_ms: Option<u64>) -> Self {
+        self.finished_at_ms = finished_at_ms;
+        self
+    }
+
+    pub(crate) fn with_actions(mut self, actions: Vec<AgentControlAction>) -> Self {
+        self.actions = actions;
+        self
     }
 
     fn protocol_copy(&self, share_tasks: bool) -> Self {
@@ -244,7 +393,9 @@ impl AgentPresence {
             task: share_tasks
                 .then(|| sanitize_optional(self.task.as_deref(), MAX_TASK_CHARS))
                 .flatten(),
+            reason: sanitize_optional(self.reason.as_deref(), MAX_ATTENTION_REASON_CHARS),
             state: self.state,
+            vendor: self.vendor,
             children: self
                 .children
                 .iter()
@@ -256,10 +407,23 @@ impl AgentPresence {
                         .then(|| sanitize_optional(child.task.as_deref(), MAX_TASK_CHARS))
                         .flatten(),
                     state: child.state,
+                    vendor: child.vendor,
                     started_at_ms: child.started_at_ms,
+                    finished_at_ms: child.finished_at_ms,
+                    actions: sanitize_received_actions(
+                        child.actions.clone(),
+                        &self.instance_id,
+                        self.updated_at_ms,
+                    ),
                 })
                 .collect(),
             started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+            actions: sanitize_received_actions(
+                self.actions.clone(),
+                &self.instance_id,
+                self.updated_at_ms,
+            ),
             updated_at_ms: self.updated_at_ms,
         }
     }
@@ -267,11 +431,22 @@ impl AgentPresence {
     fn sanitize_received(&mut self) {
         self.workspace = workspace_basename(&self.workspace);
         self.task = sanitize_optional(self.task.as_deref(), MAX_TASK_CHARS);
+        self.reason = sanitize_optional(self.reason.as_deref(), MAX_ATTENTION_REASON_CHARS);
+        self.actions = sanitize_received_actions(
+            std::mem::take(&mut self.actions),
+            &self.instance_id,
+            self.updated_at_ms,
+        );
         self.children.truncate(MAX_CHILDREN);
         for child in &mut self.children {
             child.id = sanitize_nonempty(&child.id, MAX_CHILD_ID_CHARS, "child");
             child.agent = sanitize_nonempty(&child.agent, MAX_AGENT_CHARS, "agent");
             child.task = sanitize_optional(child.task.as_deref(), MAX_TASK_CHARS);
+            child.actions = sanitize_received_actions(
+                std::mem::take(&mut child.actions),
+                &self.instance_id,
+                self.updated_at_ms,
+            );
         }
     }
 
@@ -300,6 +475,7 @@ pub(crate) struct AgentPresencePublisher {
     share_tasks: bool,
     closed: Arc<AtomicBool>,
     write_lock: Arc<Mutex<()>>,
+    control_grants: Arc<AgentControlGrants>,
 }
 
 impl AgentPresencePublisher {
@@ -344,6 +520,7 @@ impl AgentPresencePublisher {
             share_tasks,
             closed: Arc::new(AtomicBool::new(false)),
             write_lock: Arc::new(Mutex::new(())),
+            control_grants: Arc::new(AgentControlGrants::default()),
         }
     }
 
@@ -353,6 +530,21 @@ impl AgentPresencePublisher {
 
     pub(crate) fn started_at_ms(&self) -> u64 {
         self.started_at_ms
+    }
+
+    /// Reconcile the exact controls that are valid for the next heartbeat.
+    ///
+    /// Alternatives for one activity share one short-lived token, so accepting
+    /// any one decision atomically invalidates the others. The private context
+    /// never crosses the process boundary; it is returned only after a matching
+    /// request consumes the grant and lets the TUI reject stale UI decisions.
+    pub(crate) fn reconcile_control_grants(
+        &self,
+        specs: impl IntoIterator<Item = AgentControlGrantSpec>,
+        now_ms: u64,
+    ) -> HashMap<String, Vec<AgentControlAction>> {
+        self.control_grants
+            .reconcile(&self.instance_id, specs, now_ms)
     }
 
     /// Publish the local exact state, collect whole-system evidence, and export
@@ -420,17 +612,24 @@ impl AgentPresencePublisher {
                 .directory
                 .as_ref()
                 .map(|directory| directory.join(ISLAND_LOCK_FILE)),
+            launch_requested: snapshot_requests_island_launch(&snapshot),
+            control_requests: Vec::new(),
             warnings: snapshot.warnings.clone(),
         };
         match self.write_system_snapshot(&snapshot, now_ms).await {
             Ok(path) => result.snapshot_path = Some(path),
             Err(error) => result.warnings.push(format!("snapshot: {error}")),
         }
+        match self.consume_control_requests(now_ms).await {
+            Ok(requests) => result.control_requests = requests,
+            Err(error) => result.warnings.push(format!("controls: {error}")),
+        }
         result
     }
 
     pub(crate) async fn remove(&self) {
         self.closed.store(true, Ordering::Release);
+        self.control_grants.clear();
         let _write = self.write_lock.lock().await;
         if let Some(path) = &self.path {
             let _ = tokio::fs::remove_file(path).await;
@@ -630,6 +829,15 @@ impl AgentPresencePublisher {
             truncated,
         })
     }
+
+    async fn consume_control_requests(
+        &self,
+        now_ms: u64,
+    ) -> anyhow::Result<Vec<AgentControlRequest>> {
+        self.control_grants
+            .consume_requests(self.directory.as_deref(), &self.instance_id, now_ms)
+            .await
+    }
 }
 
 fn absolute_status_directory(directory: PathBuf, current_dir: Option<&Path>) -> Option<PathBuf> {
@@ -638,128 +846,6 @@ fn absolute_status_directory(directory: PathBuf, current_dir: Option<&Path>) -> 
     } else {
         current_dir.map(|current_dir| current_dir.join(directory))
     }
-}
-
-fn aggregate_activities(
-    presences: &[AgentPresence],
-    processes: &[ProcessRow],
-    local_instance_id: &str,
-    now_ms: u64,
-) -> Vec<SystemAgentActivity> {
-    let mut activities = Vec::new();
-    let mut exact_pids = HashSet::new();
-
-    for presence in presences
-        .iter()
-        .filter(|presence| presence.valid_at(now_ms))
-    {
-        exact_pids.insert(presence.pid);
-        let local = presence.instance_id == local_instance_id;
-        activities.extend(activities_for_presence(presence, local));
-    }
-
-    for process in root_agent_processes(processes) {
-        if exact_pids.contains(&process.pid) {
-            continue;
-        }
-        let Some(agent) = process.agent else {
-            continue;
-        };
-        activities.push(SystemAgentActivity {
-            id: format!("process:{}", process.pid),
-            parent_id: None,
-            agent: agent.label().to_string(),
-            workspace: process
-                .cwd
-                .as_deref()
-                .map(workspace_basename)
-                .filter(|workspace| !workspace.is_empty()),
-            // Never expose command arguments: non-interactive agents often
-            // carry the full user prompt on their command line.
-            task: Some("active process".to_string()),
-            state: AgentActivityState::Unknown,
-            confidence: AgentActivityConfidence::Process,
-            started_at_ms: None,
-            expires_at_ms: now_ms.saturating_add(PRESENCE_TTL_MS),
-            local: false,
-        });
-    }
-
-    sort_activities(&mut activities);
-    activities
-}
-
-pub(crate) fn activities_for_presence(
-    presence: &AgentPresence,
-    local: bool,
-) -> Vec<SystemAgentActivity> {
-    let mut activities = vec![SystemAgentActivity {
-        id: presence.instance_id.clone(),
-        parent_id: None,
-        agent: "a3s-code".to_string(),
-        workspace: nonempty(presence.workspace.clone()),
-        task: presence.task.clone(),
-        state: presence.state,
-        confidence: AgentActivityConfidence::Exact,
-        started_at_ms: Some(presence.started_at_ms),
-        expires_at_ms: presence.updated_at_ms.saturating_add(PRESENCE_TTL_MS),
-        local,
-    }];
-    activities.extend(presence.children.iter().map(|child| SystemAgentActivity {
-        id: format!("{}:{}", presence.instance_id, child.id),
-        parent_id: Some(presence.instance_id.clone()),
-        agent: child.agent.clone(),
-        workspace: nonempty(presence.workspace.clone()),
-        task: child.task.clone(),
-        state: child.state,
-        confidence: AgentActivityConfidence::Exact,
-        started_at_ms: child.started_at_ms,
-        expires_at_ms: presence.updated_at_ms.saturating_add(PRESENCE_TTL_MS),
-        local,
-    }));
-    activities
-}
-
-pub(crate) fn sort_activities(activities: &mut [SystemAgentActivity]) {
-    activities.sort_by(|left, right| {
-        left.state
-            .attention_rank()
-            .cmp(&right.state.attention_rank())
-            .then_with(|| right.local.cmp(&left.local))
-            .then_with(|| left.parent_id.is_some().cmp(&right.parent_id.is_some()))
-            .then_with(|| left.agent.cmp(&right.agent))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-}
-
-fn root_agent_processes(processes: &[ProcessRow]) -> Vec<&ProcessRow> {
-    let by_pid = processes
-        .iter()
-        .map(|process| (process.pid, process))
-        .collect::<HashMap<_, _>>();
-    processes
-        .iter()
-        .filter(|process| process.agent.is_some())
-        .filter(|process| {
-            let agent = process.agent;
-            let mut parent = process.ppid;
-            let mut visited = HashSet::new();
-            while parent != 0 && visited.insert(parent) {
-                let Some(candidate) = by_pid.get(&parent) else {
-                    break;
-                };
-                if candidate.agent == agent {
-                    return false;
-                }
-                parent = candidate.ppid;
-            }
-            true
-        })
-        .collect()
-}
-
-fn nonempty(value: String) -> Option<String> {
-    (!value.trim().is_empty()).then_some(value)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -829,131 +915,6 @@ async fn remove_stale_presence(
         return false;
     }
     tokio::fs::remove_file(path).await.is_ok()
-}
-
-fn workspace_basename(workspace: &str) -> String {
-    let basename = Path::new(workspace)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or("workspace");
-    sanitize_nonempty(basename, MAX_WORKSPACE_CHARS, "workspace")
-}
-
-fn sanitize_optional(value: Option<&str>, max_chars: usize) -> Option<String> {
-    value
-        .map(|value| sanitize_display_text(value, max_chars))
-        .filter(|value| !value.is_empty())
-}
-
-fn sanitize_nonempty(value: &str, max_chars: usize, fallback: &str) -> String {
-    let value = sanitize_display_text(value, max_chars);
-    if value.is_empty() {
-        fallback.to_string()
-    } else {
-        value
-    }
-}
-
-/// Convert untrusted terminal-facing text into a bounded, single-line label.
-///
-/// This strips complete ANSI/ECMA-48 control strings, C0/C1 controls, and
-/// bidirectional formatting controls while preserving ordinary Unicode text.
-pub(crate) fn sanitize_display_text(value: &str, max_chars: usize) -> String {
-    #[derive(Clone, Copy)]
-    enum State {
-        Text,
-        Escape,
-        EscapeIntermediate,
-        Csi,
-        ControlString,
-        ControlStringEscape,
-    }
-
-    let mut state = State::Text;
-    let mut output = String::new();
-    let mut output_chars = 0usize;
-    let mut pending_space = false;
-
-    for character in value.chars() {
-        match state {
-            State::Escape => {
-                state = match character {
-                    '[' => State::Csi,
-                    ']' | 'P' | 'X' | '^' | '_' => State::ControlString,
-                    '\u{20}'..='\u{2f}' => State::EscapeIntermediate,
-                    _ => State::Text,
-                };
-                continue;
-            }
-            State::EscapeIntermediate => {
-                if ('\u{30}'..='\u{7e}').contains(&character) {
-                    state = State::Text;
-                }
-                continue;
-            }
-            State::Csi => {
-                if ('\u{40}'..='\u{7e}').contains(&character) {
-                    state = State::Text;
-                }
-                continue;
-            }
-            State::ControlString => {
-                state = match character {
-                    '\u{7}' | '\u{9c}' => State::Text,
-                    '\u{1b}' => State::ControlStringEscape,
-                    _ => State::ControlString,
-                };
-                continue;
-            }
-            State::ControlStringEscape => {
-                state = if character == '\\' {
-                    State::Text
-                } else if character == '\u{1b}' {
-                    State::ControlStringEscape
-                } else {
-                    State::ControlString
-                };
-                continue;
-            }
-            State::Text => {}
-        }
-
-        state = match character {
-            '\u{1b}' => State::Escape,
-            '\u{9b}' => State::Csi,
-            '\u{90}' | '\u{98}' | '\u{9d}' | '\u{9e}' | '\u{9f}' => State::ControlString,
-            _ => State::Text,
-        };
-        if !matches!(state, State::Text) {
-            continue;
-        }
-
-        let bidi_control = matches!(
-            character,
-            '\u{061c}'
-                | '\u{200e}'
-                | '\u{200f}'
-                | '\u{202a}'..='\u{202e}'
-                | '\u{2066}'..='\u{206f}'
-        );
-        if character.is_control() || bidi_control || character.is_whitespace() {
-            pending_space |= !output.is_empty();
-            continue;
-        }
-        if output_chars >= max_chars {
-            break;
-        }
-        if pending_space && output_chars + 1 < max_chars {
-            output.push(' ');
-            output_chars += 1;
-        }
-        pending_space = false;
-        if output_chars < max_chars {
-            output.push(character);
-            output_chars += 1;
-        }
-    }
-    output
 }
 
 pub(crate) fn epoch_ms() -> u64 {

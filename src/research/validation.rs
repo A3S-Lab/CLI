@@ -149,11 +149,53 @@ pub(super) fn validate_queued_questions(
                 }
             }
         }
+        if state.obligations.is_empty() && !question.completion_criterion_indexes.is_empty() {
+            return Err(InquiryError::InvalidResearchPlan {
+                reason: format!(
+                    "question `{}` references completion criteria before a contract was committed",
+                    question.id
+                ),
+            });
+        }
+        if !question.completion_criterion_indexes.is_empty() {
+            let mut indexes = HashSet::new();
+            for criterion_index in &question.completion_criterion_indexes {
+                if !indexes.insert(*criterion_index) {
+                    return Err(InquiryError::InvalidResearchPlan {
+                        reason: format!(
+                            "question `{}` repeats completion criterion index `{criterion_index}`",
+                            question.id
+                        ),
+                    });
+                }
+                for obligation_id in &question.obligation_ids {
+                    let obligation = state
+                        .obligations
+                        .iter()
+                        .find(|obligation| obligation.id == *obligation_id)
+                        .ok_or_else(|| InquiryError::UnknownId {
+                            resource: "research obligation",
+                            id: obligation_id.clone(),
+                        })?;
+                    if *criterion_index >= obligation.completion_criteria.len() {
+                        return Err(InquiryError::InvalidResearchPlan {
+                            reason: format!(
+                                "question `{}` references completion criterion index `{criterion_index}` outside obligation `{obligation_id}`",
+                                question.id
+                            ),
+                        });
+                    }
+                }
+            }
+        }
         ensure_limit(
             "question round",
             question.round as usize,
             limits.max_question_round,
         )?;
+        // Parent questions and perspective bindings are accepted exclusively
+        // for strict replay of historical journals. Active planning queues one
+        // closed round-zero question set with neither field populated.
         if let Some(parent_id) = question.parent_question_id.as_deref() {
             ensure_string(parent_id, "parent question id", limits.max_identifier_chars)?;
             if !existing_question_ids.contains(parent_id) {
@@ -162,15 +204,31 @@ pub(super) fn validate_queued_questions(
                     id: parent_id.to_string(),
                 });
             }
+            let parent = state
+                .questions
+                .iter()
+                .find(|candidate| candidate.id == parent_id)
+                .ok_or_else(|| InquiryError::UnknownId {
+                    resource: "parent question",
+                    id: parent_id.to_string(),
+                })?;
+            if parent.status != QuestionStatus::Queued || parent.bound_reason.is_none() {
+                return Err(InquiryError::InvalidResearchPlan {
+                    reason: format!(
+                        "follow-up question `{}` may refine only a deferred bounded parent; parent `{parent_id}` is not unresolved after a bounded resolution",
+                        question.id
+                    ),
+                });
+            }
+            if question.material != parent.material {
+                return Err(InquiryError::InvalidResearchPlan {
+                    reason: format!(
+                        "follow-up question `{}` must inherit material={} from parent `{parent_id}`",
+                        question.id, parent.material
+                    ),
+                });
+            }
             if !obligation_ids.is_empty() {
-                let parent = state
-                    .questions
-                    .iter()
-                    .find(|candidate| candidate.id == parent_id)
-                    .ok_or_else(|| InquiryError::UnknownId {
-                        resource: "parent question",
-                        id: parent_id.to_string(),
-                    })?;
                 let parent_obligations = parent
                     .obligation_ids
                     .iter()

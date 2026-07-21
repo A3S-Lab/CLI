@@ -404,8 +404,132 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  managed-srt-support:
+    name: Prepare managed local sandbox support
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
+          cache: npm
+          cache-dependency-path: support/managed-srt/package-lock.json
+      - name: Build and verify the immutable support tree
+        working-directory: support/managed-srt
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+          npm_config_replace_registry_host: never
+          NPM_CONFIG_REPLACE_REGISTRY_HOST: never
+        run: |
+          set -euo pipefail
+          npm ci \
+            --ignore-scripts \
+            --omit=dev \
+            --no-audit \
+            --no-fund \
+            --engine-strict=true \
+            --registry=https://registry.npmjs.org/ \
+            --replace-registry-host=never
+          node -e '
+            const fs = require("node:fs");
+            for (const path of [
+              "node_modules/.bin",
+              "node_modules/.package-lock.json",
+              "node_modules/@pondwader/socks5-server/.github",
+            ]) {
+              fs.rmSync(path, { recursive: true, force: true });
+            }
+          '
+          node ../../.github/scripts/verify-managed-srt-tree.mjs \
+            . ../managed-srt.tree-sha256
+          for license in \
+            node_modules/@anthropic-ai/sandbox-runtime/LICENSE \
+            node_modules/@pondwader/socks5-server/LICENSE \
+            node_modules/commander/LICENSE \
+            node_modules/node-forge/LICENSE \
+            node_modules/zod/LICENSE; do
+            test -f "$license"
+          done
+      - name: Preserve verified managed sandbox support
+        uses: actions/upload-artifact@v4
+        with:
+          name: a3s-managed-srt-support
+          path: support/managed-srt
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 1
+
+  managed-srt-behavior:
+    name: Exercise managed local sandbox (${{ matrix.platform }})
+    needs: [managed-srt-support]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux, os: ubuntu-22.04 }
+          - { platform: macos, os: macos-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
+      - name: Use published A3S crates
+        shell: bash
+        run: bash .github/scripts/use-published-a3s-crates.sh
+      - name: Download verified managed sandbox support
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-managed-srt-support
+          path: support/managed-srt
+      - name: Verify the downloaded support tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 0755 \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js
+          node .github/scripts/verify-managed-srt-tree.mjs \
+            support/managed-srt support/managed-srt.tree-sha256
+      - name: Provision Linux sandbox test prerequisites
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            bubblewrap \
+            ripgrep \
+            socat
+      - name: Verify native sandbox prerequisites
+        shell: bash
+        env:
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          set -euo pipefail
+          command -v rg
+          if [[ "$RELEASE_PLATFORM" == "linux" ]]; then
+            command -v bwrap
+            command -v socat
+          else
+            test -x /usr/bin/sandbox-exec
+          fi
+      - name: Prove the complete packaged sandbox policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
+            -- --ignored --exact --nocapture
+
   binaries:
-    needs: [webview-helper-preflight, create-release, web-assets]
+    needs:
+      - webview-helper-preflight
+      - create-release
+      - web-assets
+      - managed-srt-support
+      - managed-srt-behavior
     strategy:
       fail-fast: false
       matrix:
@@ -421,6 +545,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
       - name: Use published A3S crates
         shell: bash
         run: bash .github/scripts/use-published-a3s-crates.sh
@@ -432,6 +559,19 @@ jobs:
       - name: Validate packaged Web workspace
         shell: bash
         run: test -f web/index.html
+      - name: Download verified managed sandbox support
+        uses: actions/download-artifact@v4
+        with:
+          name: a3s-managed-srt-support
+          path: support/managed-srt
+      - name: Validate packaged managed sandbox support
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 0755 \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js
+          node .github/scripts/verify-managed-srt-tree.mjs \
+            support/managed-srt support/managed-srt.tree-sha256
       - name: Download verified Agent Island helper
         uses: actions/download-artifact@v4
         with:
@@ -471,7 +611,7 @@ jobs:
           bin: a3s
           target: ${{ matrix.target }}
           archive: a3s-$tag-$target
-          include: web,${{ matrix.helper }}
+          include: web,support,${{ matrix.helper }}
           tar: all
           zip: windows
           checksum: sha256
@@ -517,6 +657,19 @@ jobs:
               exit 1
             fi
           done
+          if ! tar -tzf "${base}.tar.gz" \
+            | grep -E '(^|/)support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli\.js$' \
+              >/dev/null; then
+            echo "::error::Release archive does not contain the managed sandbox support payload"
+            exit 1
+          fi
+          if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]] \
+            && ! unzip -Z1 "${base}.zip" \
+              | grep -E '(^|/)support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli\.js$' \
+                >/dev/null; then
+            echo "::error::Windows release archive does not contain the managed sandbox support payload"
+            exit 1
+          fi
           gh release upload "$tag" "${assets[@]}" --clobber
 
   crate:
@@ -718,7 +871,9 @@ jobs:
             desc "A3S coding agent CLI — a3s code launches the interactive TUI"
             homepage "https://github.com/A3S-Lab/CLI"
             version "${v}"
-            license "MIT"
+            license all_of: ["MIT", "Apache-2.0", "BSD-3-Clause"]
+            depends_on "node"
+            depends_on "ripgrep"
             depends_on "a3s-lab/tap/a3s-webview"
 
             on_macos do
@@ -733,6 +888,8 @@ jobs:
             end
 
             on_linux do
+              depends_on "bubblewrap"
+              depends_on "socat"
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "${lin_arm}"
@@ -745,7 +902,7 @@ jobs:
 
             def install
               bin.install "a3s"
-              pkgshare.install "web"
+              pkgshare.install "web", "support"
             end
 
             test do

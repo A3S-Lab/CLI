@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::cli::args::{
     AuthArgs, AuthCommand, AuthLoginArgs, AuthProviderArgs, CodeArgs, CodeCommand,
     CodeResearchArgs, ConfigArgs, ConfigCommand, ConfigScope, ConfigScopeArgs, ConfigValidateArgs,
-    ModelArgs, ModelCommand, OutputMode, ResearchRuntime, SelfUpdateArgs,
+    ModelArgs, ModelCommand, OutputMode, SelfUpdateArgs,
 };
 use crate::cli::context::InvocationContext;
 use crate::cli::output::{render_value, usage_error, write_jsonl, CliError, ExitClass};
@@ -97,10 +97,15 @@ pub(crate) async fn run(args: CodeArgs, context: &InvocationContext) -> anyhow::
 async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> anyhow::Result<()> {
     let output = context.output_mode();
     let mut argv = Vec::new();
-    match args.runtime {
-        ResearchRuntime::Auto => {}
-        ResearchRuntime::Local => argv.push("--local".to_string()),
-        ResearchRuntime::Os => argv.push("--os".to_string()),
+    if context.network.offline && args.web {
+        return Err(usage_error(
+            "`a3s code research --web` conflicts with the global `--offline` policy",
+        ));
+    }
+    if context.network.offline || args.local_only {
+        argv.push("--local-only".to_string());
+    } else if args.web {
+        argv.push("--web".to_string());
     }
     argv.extend(args.query);
     let (_, code_config) = crate::commands::config::load_active_config(context)?;

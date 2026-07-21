@@ -1,6 +1,38 @@
 use super::*;
 
 #[test]
+fn task_and_plan_start_project_non_idle_parent_lifecycle() {
+    assert_eq!(
+        parent_presence_state(State::Streaming, false, None),
+        AgentActivityState::Working
+    );
+    assert_eq!(
+        parent_presence_state(State::Streaming, true, None),
+        AgentActivityState::Planning
+    );
+    assert_eq!(
+        parent_presence_state(State::Awaiting, false, None),
+        AgentActivityState::WaitingApproval
+    );
+    assert_eq!(
+        parent_presence_state(State::Rebuilding, false, None),
+        AgentActivityState::Working
+    );
+}
+
+#[test]
+fn idle_parent_uses_only_a_recent_terminal_lifecycle() {
+    assert_eq!(
+        parent_presence_state(State::Idle, false, None),
+        AgentActivityState::Idle
+    );
+    assert_eq!(
+        parent_presence_state(State::Idle, false, Some(AgentActivityState::Completed)),
+        AgentActivityState::Completed
+    );
+}
+
+#[test]
 fn parent_terminal_state_uses_the_same_eight_second_retention() {
     let now = Instant::now();
     let recent = RecentTerminalState {
@@ -8,6 +40,7 @@ fn parent_terminal_state_uses_the_same_eight_second_retention() {
         state: AgentActivityState::Completed,
         task: Some("task".to_string()),
         started_at_ms: Some(10),
+        finished_at_ms: 20,
         recorded_at: now.checked_sub(Duration::from_secs(7)).unwrap(),
     };
     assert!(recent.is_visible_at("session-a", now));
@@ -30,6 +63,7 @@ fn failed_parent_terminal_state_is_retained_for_export() {
         refreshing: false,
         terminal: None,
         island: AgentIslandSupervisor::default(),
+        cancel_requested: std::collections::HashSet::new(),
         last_warnings: Vec::new(),
     };
 
@@ -82,10 +116,17 @@ fn completed_child_presence_expires_after_terminal_retention() {
         recent_end,
     );
 
-    let expired = child_presence("child".to_string(), runtime.subagents()[0], now, epoch_ms());
+    let expired = child_presence(
+        "child".to_string(),
+        runtime.subagents()[0],
+        AgentVendor::Other,
+        now,
+        epoch_ms(),
+    );
     let recent = child_presence(
         "recent".to_string(),
         runtime.subagents()[1],
+        AgentVendor::Other,
         now,
         epoch_ms(),
     )
@@ -151,6 +192,97 @@ fn island_launch_gate_honors_explicit_disablement() {
 }
 
 #[test]
+fn island_preference_command_accepts_status_on_and_off_only() {
+    assert_eq!(
+        preference::parse_agent_island_preference_command(""),
+        Ok(preference::AgentIslandPreferenceCommand::Status)
+    );
+    assert_eq!(
+        preference::parse_agent_island_preference_command(" status "),
+        Ok(preference::AgentIslandPreferenceCommand::Status)
+    );
+    assert_eq!(
+        preference::parse_agent_island_preference_command("ON"),
+        Ok(preference::AgentIslandPreferenceCommand::Enable)
+    );
+    assert_eq!(
+        preference::parse_agent_island_preference_command("off"),
+        Ok(preference::AgentIslandPreferenceCommand::Disable)
+    );
+    assert!(preference::parse_agent_island_preference_command("toggle").is_err());
+}
+
+#[tokio::test]
+async fn disabling_supervisor_stops_a_running_helper_and_blocks_launches() {
+    let request = AgentIslandLaunchRequest {
+        snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
+        lock_path: PathBuf::from("/private/state/island.lock"),
+    };
+    let (_exit_tx, exit) = oneshot::channel();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    let mut supervisor = AgentIslandSupervisor {
+        enabled: true,
+        lifecycle: AgentIslandLifecycle::Running(AgentIslandMonitor {
+            exit,
+            started_at: Instant::now(),
+            shutdown: Some(shutdown),
+        }),
+        request: Some(request.clone()),
+        consecutive_failures: 0,
+    };
+
+    supervisor.set_enabled(false);
+    tokio::time::timeout(Duration::from_secs(1), shutdown_rx)
+        .await
+        .expect("helper stop signal timed out")
+        .expect("helper stop sender was dropped");
+    assert!(!supervisor.enabled);
+    assert!(supervisor.request.is_none());
+    assert!(matches!(
+        supervisor.lifecycle,
+        AgentIslandLifecycle::Stopped
+    ));
+    assert!(supervisor.observe_snapshot(request.clone(), true).is_none());
+
+    supervisor.set_enabled(true);
+    assert_eq!(
+        supervisor.observe_snapshot(request.clone(), true),
+        Some(request)
+    );
+}
+
+#[tokio::test]
+async fn helper_spawned_after_disable_is_stopped_as_a_stale_launch() {
+    let request = AgentIslandLaunchRequest {
+        snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
+        lock_path: PathBuf::from("/private/state/island.lock"),
+    };
+    let mut supervisor = AgentIslandSupervisor::default();
+    assert!(supervisor.observe_snapshot(request, true).is_some());
+    supervisor.set_enabled(false);
+
+    let (_exit_tx, exit) = oneshot::channel();
+    let (shutdown, shutdown_rx) = oneshot::channel();
+    supervisor.apply_launch_result(
+        Ok(AgentIslandLaunchOutcome::Spawned(AgentIslandMonitor {
+            exit,
+            started_at: Instant::now(),
+            shutdown: Some(shutdown),
+        })),
+        Instant::now(),
+    );
+
+    tokio::time::timeout(Duration::from_secs(1), shutdown_rx)
+        .await
+        .expect("stale helper stop signal timed out")
+        .expect("stale helper stop sender was dropped");
+    assert!(matches!(
+        supervisor.lifecycle,
+        AgentIslandLifecycle::Stopped
+    ));
+}
+
+#[test]
 fn island_helper_arguments_match_the_native_mode_contract() {
     let request = AgentIslandLaunchRequest {
         snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
@@ -190,11 +322,14 @@ fn successful_export_starts_one_launch_while_the_first_is_in_flight() {
         refreshing: true,
         terminal: None,
         island: AgentIslandSupervisor::default(),
+        cancel_requested: std::collections::HashSet::new(),
         last_warnings: Vec::new(),
     };
     let result = SystemAgentRefreshResult {
         snapshot_path: Some(temp.path().join("system-snapshot.json")),
         lock_path: Some(temp.path().join("island.lock")),
+        launch_requested: true,
+        control_requests: Vec::new(),
         warnings: Vec::new(),
     };
 
@@ -208,6 +343,35 @@ fn successful_export_starts_one_launch_while_the_first_is_in_flight() {
 }
 
 #[test]
+fn idle_export_does_not_start_the_native_island() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = AgentPresenceRuntime {
+        publisher: AgentPresencePublisher::for_directory(temp.path().to_path_buf()),
+        refreshing: true,
+        terminal: None,
+        island: AgentIslandSupervisor::default(),
+        cancel_requested: std::collections::HashSet::new(),
+        last_warnings: Vec::new(),
+    };
+
+    assert!(runtime
+        .apply_refresh(SystemAgentRefreshResult {
+            snapshot_path: Some(temp.path().join("system-snapshot.json")),
+            lock_path: Some(temp.path().join("island.lock")),
+            launch_requested: false,
+            control_requests: Vec::new(),
+            warnings: Vec::new(),
+        })
+        .is_none());
+    assert!(!runtime.refreshing);
+    assert!(matches!(
+        runtime.island.lifecycle,
+        AgentIslandLifecycle::AwaitingSnapshot
+    ));
+    assert!(runtime.island.request.is_none());
+}
+
+#[test]
 fn failed_export_leaves_the_island_waiting_for_a_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let mut runtime = AgentPresenceRuntime {
@@ -215,6 +379,7 @@ fn failed_export_leaves_the_island_waiting_for_a_snapshot() {
         refreshing: true,
         terminal: None,
         island: AgentIslandSupervisor::default(),
+        cancel_requested: std::collections::HashSet::new(),
         last_warnings: Vec::new(),
     };
 
@@ -238,7 +403,7 @@ fn retry_backoff_is_tick_driven_and_cools_down_after_four_consecutive_failures()
     };
     let mut supervisor = AgentIslandSupervisor::default();
     assert_eq!(
-        supervisor.observe_snapshot(request.clone()),
+        supervisor.observe_snapshot(request.clone(), true),
         Some(request.clone())
     );
 
@@ -275,7 +440,7 @@ fn obsolete_helper_rechecks_after_a_bounded_recovery_cooldown() {
         lock_path: PathBuf::from("/private/state/island.lock"),
     };
     let mut supervisor = AgentIslandSupervisor::default();
-    assert!(supervisor.observe_snapshot(request).is_some());
+    assert!(supervisor.observe_snapshot(request, true).is_some());
 
     let now = Instant::now();
     supervisor.apply_launch_result(
@@ -296,6 +461,32 @@ fn obsolete_helper_rechecks_after_a_bounded_recovery_cooldown() {
     assert!(supervisor
         .poll(now + AGENT_ISLAND_RECOVERY_RECHECK)
         .is_some());
+}
+
+#[test]
+fn idle_snapshot_cancels_a_pending_helper_retry() {
+    let request = AgentIslandLaunchRequest {
+        snapshot_path: PathBuf::from("/private/state/system-snapshot.json"),
+        lock_path: PathBuf::from("/private/state/island.lock"),
+    };
+    let mut supervisor = AgentIslandSupervisor::default();
+    assert!(supervisor.observe_snapshot(request.clone(), true).is_some());
+    let now = Instant::now();
+    supervisor.apply_launch_result(Err("launch failed".to_string()), now);
+    assert!(matches!(
+        supervisor.lifecycle,
+        AgentIslandLifecycle::Backoff { .. }
+    ));
+
+    assert!(supervisor.observe_snapshot(request, false).is_none());
+    assert!(supervisor.request.is_none());
+    assert!(matches!(
+        supervisor.lifecycle,
+        AgentIslandLifecycle::AwaitingSnapshot
+    ));
+    assert!(supervisor
+        .poll(now + AGENT_ISLAND_RECOVERY_RECHECK)
+        .is_none());
 }
 
 #[test]
@@ -365,6 +556,9 @@ fn watchdog_length_success_is_relaunched_with_bounded_backoff() {
 
 #[tokio::test]
 async fn helper_monitor_reaps_a_failed_child_and_reports_its_exit() {
+    let _process_probe_guard = crate::system_agents::agent_island_process_test_lock()
+        .lock()
+        .await;
     let child = tokio::process::Command::new(std::env::current_exe().unwrap())
         .arg("--definitely-not-a-valid-libtest-option")
         .stdin(Stdio::null())
@@ -387,6 +581,33 @@ async fn helper_monitor_reaps_a_failed_child_and_reports_its_exit() {
 
     assert!(!exit.success);
     assert!(!exit.status.is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn helper_monitor_stops_a_live_child_on_user_opt_out() {
+    let child = tokio::process::Command::new("sleep")
+        .arg("30")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut monitor = monitor_agent_island_child(child);
+    monitor.stop();
+
+    let exit = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(exit) = monitor.try_take_exit() {
+                return exit;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("disabled helper was not terminated");
+
+    assert!(!exit.success);
 }
 
 #[tokio::test]

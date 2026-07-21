@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
+/// Historical graph object type retained only when replaying an old Inquiry.
 pub(super) const PERSPECTIVE_OBJECT_TYPE: &str = "deep_research.perspective";
 pub(super) const QUESTION_OBJECT_TYPE: &str = "deep_research.question";
 pub(super) const OBLIGATION_OBJECT_TYPE: &str = "deep_research.obligation";
@@ -284,6 +285,8 @@ fn projection_operations(
             }),
         )?;
     }
+    // Preserve historical perspective objects during replay. Current Inquiry
+    // state always leaves this collection empty.
     for perspective in &state.perspectives {
         upsert_object(
             runtime,
@@ -347,6 +350,7 @@ fn projection_operations(
         )?;
     }
 
+    // Historical replay-only relation.
     for perspective in &state.perspectives {
         add_relation(
             runtime,
@@ -368,6 +372,7 @@ fn projection_operations(
             &question_id,
         )?;
         if let Some(perspective_id) = &question.perspective_id {
+            // Historical replay-only relation.
             add_relation(
                 runtime,
                 &mut operations,
@@ -378,6 +383,7 @@ fn projection_operations(
             )?;
         }
         if let Some(parent_id) = &question.parent_question_id {
+            // Historical replay-only relation.
             add_relation(
                 runtime,
                 &mut operations,
@@ -421,6 +427,7 @@ fn projection_operations(
                 &section_id,
             )?;
             for perspective_id in &section.perspective_ids {
+                // Historical replay-only relation.
                 add_relation(
                     runtime,
                     &mut operations,

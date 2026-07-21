@@ -150,6 +150,13 @@ impl Tool for RuntimeTool {
         })
     }
 
+    fn requires_confirmation(&self, _args: &Value) -> bool {
+        // This tool submits work to a remote runtime and can incur external
+        // side effects or cost. Default mode may authorize that exact call;
+        // non-interactive Auto mode converts the escalation into a denial.
+        true
+    }
+
     async fn execute(&self, args: &Value, ctx: &ToolContext) -> Result<ToolOutput> {
         let tasks: Vec<Value> = match args.get("tasks").and_then(Value::as_array) {
             Some(a) if !a.is_empty() => a.clone(),
@@ -701,6 +708,21 @@ mod tests {
         assert!(!looks_like_uuid("risk-reporter"));
         assert!(!looks_like_uuid("57989959-0b1d-41da-974c-31ad8101df3")); // 35 chars
         assert!(!looks_like_uuid("g7989959-0b1d-41da-974c-31ad8101df37")); // non-hex
+    }
+
+    #[test]
+    fn remote_runtime_calls_always_escalate_authorization() {
+        let tool = RuntimeTool {
+            origin: "https://runtime.example.invalid".to_string(),
+            token: "test-token".to_string(),
+            poll_start: Duration::from_millis(1),
+            poll_cap: Duration::from_millis(1),
+        };
+
+        assert!(tool.requires_confirmation(&json!({
+            "worker": "worker",
+            "tasks": ["task"]
+        })));
     }
 
     // ── mock A3S Runtime speaking the exact OS contract ─────────────────────

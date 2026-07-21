@@ -1,14 +1,14 @@
-//! Deterministic convergence policy for DeepResearch.
+//! Terminal assessment for the bounded coverage-driven DeepResearch inquiry.
 //!
-//! The model and workflow collect evidence; this policy alone decides whether
-//! another collection round is justified. Keeping the decision typed and pure
-//! makes every stop/continue result replayable and testable.
+//! Retrieval runs exactly once. The replayed Inquiry projection is the only
+//! authority that can finalize a report; every missing, invalid, exhausted, or
+//! otherwise non-publishable projection fails closed.
 
 use serde::{Deserialize, Serialize};
 
 use a3s::research::{
-    research_contract_outcome, InquiryEvent, InquiryPhase, InquiryState, QuestionStatus,
-    ResearchContractOutcome,
+    material_evidence_floor, research_contract_outcome, InquiryEvent, InquiryPhase, InquiryState,
+    QuestionStatus, ResearchContractOutcome,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,10 +21,10 @@ pub(crate) enum InquiryTerminalOutcome {
 
 /// The validated terminal authority carried by a workflow output.
 ///
-/// Old checked-loop outputs predate the Inquiry projection and remain eligible
-/// for their legacy checker gates. A host-managed collection wave must carry a
-/// replayable Inquiry projection; losing it is an error, never a signal to
-/// reinterpret the inner wave as a legacy completed run.
+/// Old checked-loop outputs predate the Inquiry projection and retain their
+/// historical publication gate. Every current host-managed retrieval output
+/// must carry a replayable Inquiry projection; losing it is an error, never a
+/// signal to reinterpret retrieval output as a completed run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ValidatedInquiryProjection {
     LegacyCheckedLoop,
@@ -43,8 +43,15 @@ fn workflow_uses_host_managed_inquiry(workflow: &serde_json::Value) -> bool {
             .pointer("/execution/mode")
             .and_then(serde_json::Value::as_str)
             == Some("collect_only")
-        || workflow.get("mode").and_then(serde_json::Value::as_str)
-            == Some("inquiry_collection_wave")
+        || workflow
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|mode| {
+                // `inquiry_collection_wave` is accepted only to classify
+                // historical persisted output. Current workflows emit
+                // `inquiry_collection`.
+                matches!(mode, "inquiry_collection" | "inquiry_collection_wave")
+            })
 }
 
 fn validate_host_managed_research_contract(
@@ -148,10 +155,8 @@ impl ValidatedInquiryProjection {
     }
 }
 
-/// Derive the only publishable terminal meaning from the replayed inquiry
-/// projection. Retrieval workflows and their legacy checkers are evidence
-/// producers; they do not own cross-wave convergence for a host-managed
-/// inquiry.
+/// Derive the only publishable terminal meaning from the replayed Inquiry.
+/// The retrieval adapter produces evidence and never owns completion.
 pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTerminalOutcome> {
     if state.phase == InquiryPhase::Exhausted {
         return Some(InquiryTerminalOutcome::Exhausted);
@@ -171,9 +176,7 @@ pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTe
         .filter(|question| question.material)
         .collect::<Vec<_>>();
     if material.is_empty()
-        || material
-            .iter()
-            .any(|question| question.status != QuestionStatus::Answered)
+        || !material_evidence_floor(state)
         || state
             .questions
             .iter()
@@ -190,11 +193,9 @@ pub(crate) fn inquiry_terminal_outcome(state: &InquiryState) -> Option<InquiryTe
             Some(ResearchContractOutcome::Unsatisfied) | None => return None,
         }
     };
-    if state
-        .questions
-        .iter()
-        .any(|question| question.status == QuestionStatus::Bounded)
-    {
+    if state.questions.iter().any(|question| {
+        question.status == QuestionStatus::Bounded || question.bound_reason.is_some()
+    }) {
         Some(InquiryTerminalOutcome::Qualified)
     } else {
         contract_outcome.or(Some(InquiryTerminalOutcome::Completed))
@@ -267,25 +268,9 @@ pub(crate) fn validated_inquiry_publication_outcome(
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ConvergenceInput {
-    pub(crate) accepted_evidence: usize,
-    pub(crate) traceable_sources: usize,
-    pub(crate) authoritative_sources: usize,
-    pub(crate) unresolved_contradictions: usize,
-    pub(crate) unresolved_gaps: usize,
-    pub(crate) completed_rounds: usize,
-    pub(crate) max_rounds: usize,
-    pub(crate) rounds_without_material_gain: usize,
-    pub(crate) remaining_ms: u64,
-    pub(crate) finalization_reserve_ms: u64,
-    pub(crate) evidence_package_complete: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConvergenceAction {
-    Continue,
     Finalize,
     Degrade,
 }
@@ -294,56 +279,11 @@ pub(crate) enum ConvergenceAction {
 pub(crate) struct ConvergenceDecision {
     pub(crate) action: ConvergenceAction,
     pub(crate) reason: String,
-    pub(crate) input: ConvergenceInput,
-}
-
-pub(crate) fn evaluate_convergence(input: ConvergenceInput) -> ConvergenceDecision {
-    let (action, reason) =
-        if input.evidence_package_complete && input.unresolved_contradictions == 0 {
-            (
-                ConvergenceAction::Finalize,
-                "validated evidence package satisfies the completion gate",
-            )
-        } else if input.remaining_ms <= input.finalization_reserve_ms {
-            (
-                ConvergenceAction::Degrade,
-                "finalization reserve reached; retrieval must stop",
-            )
-        } else if input.completed_rounds >= input.max_rounds.max(1) {
-            (
-                ConvergenceAction::Degrade,
-                "bounded research round limit reached",
-            )
-        } else if input.rounds_without_material_gain >= 2 {
-            (
-                ConvergenceAction::Degrade,
-                "two consecutive rounds produced no material evidence gain",
-            )
-        } else if input.accepted_evidence == 0 && input.completed_rounds > 0 {
-            (
-                ConvergenceAction::Degrade,
-                "completed retrieval produced no accepted evidence",
-            )
-        } else {
-            (
-                ConvergenceAction::Continue,
-                "material evidence gaps remain within the retrieval budget",
-            )
-        };
-    ConvergenceDecision {
-        action,
-        reason: reason.to_string(),
-        input,
-    }
 }
 
 /// Convert the replayed inquiry projection into the terminal workflow
-/// decision. Cross-wave continuation is executed inside the inquiry runtime;
-/// once that runtime returns, a `Continue` decision would be contradictory.
-pub(crate) fn evaluate_terminal_inquiry_convergence(
-    state: &InquiryState,
-    input: ConvergenceInput,
-) -> ConvergenceDecision {
+/// decision. Retrieval is already closed when this function runs.
+pub(crate) fn evaluate_terminal_inquiry_convergence(state: &InquiryState) -> ConvergenceDecision {
     let (action, reason) = match inquiry_terminal_outcome(state) {
         Some(InquiryTerminalOutcome::Completed) => (
             ConvergenceAction::Finalize,
@@ -369,11 +309,7 @@ pub(crate) fn evaluate_terminal_inquiry_convergence(
             ),
         ),
     };
-    ConvergenceDecision {
-        action,
-        reason,
-        input,
-    }
+    ConvergenceDecision { action, reason }
 }
 
 #[cfg(test)]
@@ -484,60 +420,6 @@ mod tests {
             });
         }
         workflow
-    }
-
-    fn input() -> ConvergenceInput {
-        ConvergenceInput {
-            accepted_evidence: 3,
-            traceable_sources: 2,
-            authoritative_sources: 1,
-            unresolved_contradictions: 0,
-            unresolved_gaps: 1,
-            completed_rounds: 1,
-            max_rounds: 3,
-            rounds_without_material_gain: 0,
-            remaining_ms: 60_000,
-            finalization_reserve_ms: 10_000,
-            evidence_package_complete: false,
-        }
-    }
-
-    #[test]
-    fn complete_package_finalizes_without_an_extra_round() {
-        let mut state = input();
-        state.evidence_package_complete = true;
-        assert_eq!(
-            evaluate_convergence(state).action,
-            ConvergenceAction::Finalize
-        );
-    }
-
-    #[test]
-    fn finalization_reserve_preempts_more_retrieval() {
-        let mut state = input();
-        state.remaining_ms = state.finalization_reserve_ms;
-        assert_eq!(
-            evaluate_convergence(state).action,
-            ConvergenceAction::Degrade
-        );
-    }
-
-    #[test]
-    fn repeated_no_gain_stops_deterministically() {
-        let mut state = input();
-        state.rounds_without_material_gain = 2;
-        assert_eq!(
-            evaluate_convergence(state).action,
-            ConvergenceAction::Degrade
-        );
-    }
-
-    #[test]
-    fn unresolved_material_gap_can_continue_within_budget() {
-        assert_eq!(
-            evaluate_convergence(input()).action,
-            ConvergenceAction::Continue
-        );
     }
 
     #[test]
@@ -654,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_inquiry_never_returns_continue() {
+    fn exhausted_terminal_inquiry_degrades_after_coverage_driven_retrieval() {
         let limits = a3s::research::InquiryLimits::default();
         let mut state = InquiryState::default();
         state
@@ -695,7 +577,7 @@ mod tests {
             )
             .expect("exhausted");
 
-        let decision = evaluate_terminal_inquiry_convergence(&state, input());
+        let decision = evaluate_terminal_inquiry_convergence(&state);
         assert_eq!(decision.action, ConvergenceAction::Degrade);
         assert_eq!(decision.reason, "material question remained bounded");
     }

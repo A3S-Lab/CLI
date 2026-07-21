@@ -269,12 +269,10 @@ pub(super) fn deep_research_compact_count_metadata(
         "host_count",
         "freshness_required",
         "dated_source_count",
-        "query_term_count",
-        "matched_query_term_count",
-        "query_term_coverage",
-        "fetched_query_term_count",
-        "fetched_query_term_coverage",
-        "query_terms_truncated",
+        "candidate_count",
+        "evidence_excerpt_count",
+        "evidence_excerpt_char_count",
+        "evidence_selection_mode",
         "fetch_count",
         "fetched_count",
         "fetched_host_count",
@@ -292,38 +290,6 @@ pub(super) fn deep_research_compact_count_metadata(
         copy_json_field(&mut counts, metadata, key);
     }
     serde_json::Value::Object(counts)
-}
-
-pub(super) fn deep_research_compact_rounds(
-    rounds: Option<&serde_json::Value>,
-) -> serde_json::Value {
-    let items = rounds
-        .and_then(serde_json::Value::as_array)
-        .map(|rounds| {
-            rounds
-                .iter()
-                .map(|round| {
-                    let mut compact = serde_json::Map::new();
-                    copy_json_field(&mut compact, round, "round");
-                    copy_json_field(&mut compact, round, "status");
-                    if let Some(metadata) = round.get("metadata") {
-                        compact.insert(
-                            "counts".to_string(),
-                            deep_research_compact_count_metadata(metadata),
-                        );
-                    }
-                    if let Some(warnings) = round.get("warnings") {
-                        compact.insert(
-                            "warnings".to_string(),
-                            deep_research_compact_warnings(warnings),
-                        );
-                    }
-                    serde_json::Value::Object(compact)
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    serde_json::Value::Array(items)
 }
 
 pub(super) fn deep_research_compact_warnings(warnings: &serde_json::Value) -> serde_json::Value {

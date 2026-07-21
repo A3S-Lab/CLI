@@ -5,8 +5,8 @@
 //! references to those streams into a replayable research-domain graph.
 
 use a3s_code_core::state_graph::{
-    graph_event_head, ExternalEvent, FileGraphEventStore, GraphEventRecord, GraphEventStore,
-    GraphPatch, GraphRuntime, GraphSaveOutcome, PatchOperation,
+    graph_event_head, ExternalEvent, FileGraphEventStore, GraphEvent, GraphEventRecord,
+    GraphEventStore, GraphPatch, GraphRuntime, GraphSaveOutcome, PatchOperation,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,8 @@ const SPEC_OBJECT_TYPE: &str = "deep_research.spec";
 const SOURCE_OBJECT_TYPE: &str = "deep_research.source";
 const EVIDENCE_OBJECT_TYPE: &str = "deep_research.evidence";
 const CLAIM_OBJECT_TYPE: &str = "deep_research.claim";
+const REPORT_EVENT_SOURCE: &str = "deep_research.report";
+const REPORT_STARTED_EVENT_NAME: &str = "research.report.started";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +56,10 @@ pub(crate) struct ResearchSpec {
     pub(crate) evidence_scope: String,
     pub(crate) required_claims: Vec<String>,
     pub(crate) total_budget_ms: u64,
+    #[serde(default)]
+    pub(crate) retrieval_stage_budget_ms: u64,
+    #[serde(default)]
+    pub(crate) question_review_stage_budget_ms: u64,
     pub(crate) finalization_reserve_ms: u64,
     #[serde(default)]
     pub(crate) host_pid: u32,
@@ -73,7 +79,8 @@ pub(crate) struct ResearchRunProjection {
     pub(crate) accepted_evidence_count: usize,
     pub(crate) source_count: usize,
     pub(crate) claim_count: usize,
-    pub(crate) report_claim_coverage_basis_points: Option<u16>,
+    #[serde(default)]
+    pub(crate) report_cited_source_count: Option<usize>,
 }
 
 impl ResearchRunProjection {
@@ -91,7 +98,7 @@ impl ResearchRunProjection {
             accepted_evidence_count: 0,
             source_count: 0,
             claim_count: 0,
-            report_claim_coverage_basis_points: None,
+            report_cited_source_count: None,
         }
     }
 
@@ -317,12 +324,19 @@ impl DeepResearchStateJournal {
                 }
                 let relation_id = format!("observed-in:{}:{}", item.id, source.id);
                 if self.runtime.graph().relation(&relation_id).is_none() {
+                    let source_coverage = item
+                        .source_coverage
+                        .iter()
+                        .filter(|binding| binding.source_id == source.id)
+                        .collect::<Vec<_>>();
                     operations.push(PatchOperation::AddRelation {
                         id: relation_id,
                         relation_type: "deep_research.observed_in".to_string(),
                         source: item.id.clone(),
                         target: source.id.clone(),
-                        data: serde_json::json!({}),
+                        data: serde_json::json!({
+                            "source_coverage": source_coverage,
+                        }),
                     });
                 }
             }
@@ -454,6 +468,88 @@ pub(crate) async fn load_inquiry_state(
     inquiry::load_inquiry_state(workspace, run_id).await
 }
 
+/// Return the wall-clock origin of the durable research run.
+///
+/// A restarted host must continue consuming the original shared deadline
+/// instead of granting the same run a fresh budget. The first graph record is
+/// the creation event and its timestamp is part of the tamper-evident journal.
+pub(crate) async fn load_research_run_started_at_ms(
+    workspace: &Path,
+    run_id: &str,
+) -> Result<Option<u64>> {
+    let Some(journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
+        return Ok(None);
+    };
+    Ok(journal
+        .runtime
+        .events()
+        .first()
+        .map(|record| record.timestamp_ms))
+}
+
+/// Record and return the immutable wall-clock origin of the completed-report
+/// transaction.
+///
+/// Report generation may resume the durable Inquiry journal, but every attempt
+/// uses this same timestamp and therefore the same bounded synthesis budget.
+pub(crate) async fn record_report_started_at_ms(workspace: &Path, run_id: &str) -> Result<u64> {
+    let event = ResearchDomainEvent {
+        source: REPORT_EVENT_SOURCE.to_string(),
+        source_sequence: 1,
+        source_event_id: format!("{run_id}:report-started"),
+        name: REPORT_STARTED_EVENT_NAME.to_string(),
+        payload: serde_json::json!({"transaction": "completed-report"}),
+    };
+    const MAX_ATTEMPTS: usize = 4;
+    let mut last_error = None;
+    for _ in 0..MAX_ATTEMPTS {
+        let Some(mut journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
+            anyhow::bail!("DeepResearch run `{run_id}` has no state journal");
+        };
+        if let Some(timestamp_ms) = report_started_at_ms(journal.runtime.events(), run_id) {
+            return Ok(timestamp_ms);
+        }
+        match journal.append(event.clone()).await {
+            Ok(_) => {
+                return report_started_at_ms(journal.runtime.events(), run_id).with_context(|| {
+                    format!(
+                        "DeepResearch run `{run_id}` persisted a report start without its timestamp"
+                    )
+                });
+            }
+            Err(error) => {
+                last_error = Some(error);
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+    let Some(last_error) = last_error else {
+        anyhow::bail!("append DeepResearch report start exhausted without a result");
+    };
+    Err(last_error.context("append DeepResearch report start after concurrent-head retries"))
+}
+
+fn report_started_at_ms(records: &[GraphEventRecord], run_id: &str) -> Option<u64> {
+    let event_id = format!("{run_id}:report-started");
+    records.iter().find_map(|record| match &record.event {
+        GraphEvent::ExternalEventObserved {
+            source,
+            stream_id,
+            sequence: 1,
+            event_id: observed_event_id,
+            name,
+            ..
+        } if source == REPORT_EVENT_SOURCE
+            && stream_id == run_id
+            && observed_event_id == &event_id
+            && name == REPORT_STARTED_EVENT_NAME =>
+        {
+            Some(record.timestamp_ms)
+        }
+        _ => None,
+    })
+}
+
 pub(crate) async fn record_workflow_started(
     workspace: &Path,
     run_id: &str,
@@ -499,6 +595,12 @@ fn validate_reopened_spec(
     }
     if persisted.total_budget_ms != requested.total_budget_ms {
         changed.push("total_budget_ms");
+    }
+    if persisted.retrieval_stage_budget_ms != requested.retrieval_stage_budget_ms {
+        changed.push("retrieval_stage_budget_ms");
+    }
+    if persisted.question_review_stage_budget_ms != requested.question_review_stage_budget_ms {
+        changed.push("question_review_stage_budget_ms");
     }
     if persisted.finalization_reserve_ms != requested.finalization_reserve_ms {
         changed.push("finalization_reserve_ms");
@@ -560,19 +662,6 @@ pub(crate) async fn record_run_terminal(
             let Some(journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
                 anyhow::bail!("DeepResearch run `{run_id}` has no state journal");
             };
-            let claims = journal
-                .runtime
-                .graph()
-                .objects()
-                .filter(|object| object.object_type == CLAIM_OBJECT_TYPE)
-                .filter_map(|object| {
-                    serde_json::from_value::<super::deep_research_evidence_ledger::AcceptedClaim>(
-                        object.data.clone(),
-                    )
-                    .ok()
-                    .map(|claim| claim.text)
-                })
-                .collect::<Vec<_>>();
             let sources = journal
                 .runtime
                 .graph()
@@ -583,14 +672,19 @@ pub(crate) async fn record_run_terminal(
                         object.data.clone(),
                     )
                     .ok()
-                    .map(|source| source.anchor)
+                    .map(|source| {
+                        super::deep_research_report_audit::ReportSourceReference {
+                            source_id: source.id,
+                            anchor: source.anchor,
+                        }
+                    })
                 })
                 .collect::<Vec<_>>();
             Some(super::deep_research_report_audit::audit_report(
                 &String::from_utf8_lossy(&markdown),
                 &String::from_utf8_lossy(&html),
-                &claims,
                 &sources,
+                super::deep_research_report_audit::CitationRequirement::AtLeastOne,
             ))
         } else {
             None
@@ -831,6 +925,10 @@ fn apply_domain_event(run: &mut ResearchRunProjection, event: &ResearchDomainEve
             }
         }
         "research.convergence.evaluated" => {
+            // Old records may also contain round counters, source tiers, and a
+            // `continue` action. They are inert compatibility data: terminal
+            // replay has always projected only the stable human-readable
+            // reason.
             run.convergence_reason = event
                 .payload
                 .get("reason")
@@ -850,11 +948,11 @@ fn apply_domain_event(run: &mut ResearchRunProjection, event: &ResearchDomainEve
                 .get("reason")
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
-            run.report_claim_coverage_basis_points = event
+            run.report_cited_source_count = event
                 .payload
-                .get("claim_coverage_basis_points")
+                .get("cited_sources")
                 .and_then(serde_json::Value::as_u64)
-                .and_then(|value| u16::try_from(value).ok());
+                .and_then(|value| usize::try_from(value).ok());
         }
         "research.evidence.accepted" => {
             run.accepted_evidence_count = event

@@ -108,13 +108,20 @@ pub(super) fn sections_from_drafts(
                 draft.section_id
             ));
         }
+        let planned_source_ids = planned.source_ids.iter().collect::<BTreeSet<_>>();
+        let cited_source_ids = draft
+            .citation_ids
+            .iter()
+            .filter(|citation_id| planned_source_ids.contains(citation_id))
+            .cloned()
+            .collect::<Vec<_>>();
         sections.insert(
             section_id.clone(),
             SectionGeneration {
                 section_id: section_id.clone(),
                 markdown: draft.content.clone(),
                 claim_ids: planned.claim_ids.clone(),
-                source_ids: planned.source_ids.clone(),
+                source_ids: cited_source_ids,
             },
         );
     }

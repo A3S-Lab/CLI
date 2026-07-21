@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use a3s_code_core::config::DocumentParserConfig;
 use a3s_code_core::mcp::{McpServerConfig, McpTransportConfig};
 use a3s_code_core::ProviderConfig;
 use serde::Serialize;
@@ -74,19 +73,6 @@ pub(super) fn preserve_mcp_secrets(servers: &mut [McpServerConfig], existing: &[
             );
         }
     }
-}
-
-pub(super) fn preserve_document_parser_secret(
-    parser: &mut DocumentParserConfig,
-    existing: Option<&DocumentParserConfig>,
-) {
-    let (Some(ocr), Some(previous_ocr)) = (
-        parser.ocr.as_mut(),
-        existing.and_then(|parser| parser.ocr.as_ref()),
-    ) else {
-        return;
-    };
-    preserve_secret(&mut ocr.api_key, previous_ocr.api_key.as_deref());
 }
 
 pub(super) fn preserve_secret(value: &mut Option<String>, previous: Option<&str>) {

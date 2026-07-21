@@ -1,13 +1,16 @@
 use super::*;
 use crate::top::Risk;
 
+#[path = "system_agents_tests/control.rs"]
+mod control;
+
 fn process(pid: u32, ppid: u32, agent: Option<AgentKind>) -> ProcessRow {
     ProcessRow {
         pid,
         ppid,
         cpu_pct: 0.0,
         mem_pct: 0.0,
-        elapsed: "1s".to_string(),
+        elapsed: "00:01".to_string(),
         cwd: Some(format!("/workspace/{pid}")),
         command: "agent --secret prompt".to_string(),
         agent,
@@ -62,12 +65,41 @@ fn exact_presence_replaces_same_process_and_keeps_inferred_agents() {
     assert_eq!(rows[0].expires_at_ms, now.saturating_add(1_000));
     assert_eq!(rows[1].confidence, AgentActivityConfidence::Process);
     assert_eq!(rows[1].expires_at_ms, now.saturating_add(PRESENCE_TTL_MS));
+    assert_eq!(rows[1].started_at_ms, Some(now.saturating_sub(1_000)));
     assert_eq!(rows[1].task.as_deref(), Some("active process"));
     assert!(!rows[1]
         .task
         .as_deref()
         .unwrap_or_default()
         .contains("secret"));
+}
+
+#[test]
+fn inferred_process_elapsed_time_projects_a_stable_start_time() {
+    let now = 200_000_000;
+    for (elapsed, seconds) in [
+        ("02:03", 123),
+        ("04:02:03", 14_523),
+        ("2-04:02:03", 187_323),
+    ] {
+        let mut detected = process(20, 1, Some(AgentKind::Codex));
+        detected.elapsed = elapsed.to_string();
+        let rows = aggregate_activities(&[], &[detected], "local", now);
+
+        assert_eq!(
+            rows[0].started_at_ms,
+            Some(now - seconds * 1_000),
+            "{elapsed}"
+        );
+    }
+
+    for elapsed in ["-", "01:60", "1-24:00:00"] {
+        let mut detected = process(20, 1, Some(AgentKind::Codex));
+        detected.elapsed = elapsed.to_string();
+        let rows = aggregate_activities(&[], &[detected], "local", now);
+
+        assert_eq!(rows[0].started_at_ms, None, "{elapsed}");
+    }
 }
 
 #[test]
@@ -107,6 +139,72 @@ fn activity_order_puts_attention_and_live_local_state_first() {
     assert_eq!(rows[1].state, AgentActivityState::Working);
     assert!(rows[1].local);
     assert_eq!(rows[2].state, AgentActivityState::Idle);
+}
+
+#[test]
+fn live_process_detection_outranks_a_retained_completed_lifecycle() {
+    let now = epoch_ms();
+    let completed = presence("local", 1, AgentActivityState::Completed);
+    let rows = aggregate_activities(
+        &[completed],
+        &[process(20, 1, Some(AgentKind::Codex))],
+        "local",
+        now,
+    );
+
+    assert_eq!(rows[0].confidence, AgentActivityConfidence::Process);
+    assert_eq!(rows[0].state, AgentActivityState::Unknown);
+    assert_eq!(rows[1].confidence, AgentActivityConfidence::Exact);
+    assert_eq!(rows[1].state, AgentActivityState::Completed);
+}
+
+#[test]
+fn island_launch_accepts_exact_lifecycle_or_a_detected_external_agent() {
+    let now = epoch_ms();
+    let process_rows = [process(20, 1, Some(AgentKind::Codex))];
+
+    let idle = SystemAgentSnapshot {
+        activities: aggregate_activities(
+            &[presence("local", 1, AgentActivityState::Idle)],
+            &[],
+            "local",
+            now,
+        ),
+        warnings: Vec::new(),
+    };
+    assert!(!snapshot_requests_island_launch(&idle));
+
+    for state in [
+        AgentActivityState::Planning,
+        AgentActivityState::Working,
+        AgentActivityState::WaitingApproval,
+        AgentActivityState::Completed,
+        AgentActivityState::Failed,
+        AgentActivityState::Cancelled,
+    ] {
+        let snapshot = SystemAgentSnapshot {
+            activities: aggregate_activities(
+                &[presence("local", 1, state)],
+                &process_rows,
+                "local",
+                now,
+            ),
+            warnings: Vec::new(),
+        };
+        assert!(
+            snapshot_requests_island_launch(&snapshot),
+            "state {state:?} should request the island"
+        );
+    }
+
+    let process_only = SystemAgentSnapshot {
+        activities: aggregate_activities(&[], &process_rows, "local", now),
+        warnings: Vec::new(),
+    };
+    assert!(
+        snapshot_requests_island_launch(&process_only),
+        "a detected Codex process should be enough to open the shared island"
+    );
 }
 
 #[tokio::test]
@@ -528,7 +626,10 @@ async fn inbound_protocol_strings_are_sanitized_and_bounded() {
         agent: "codex\u{9b}31mred".to_string(),
         task: Some("child\r\nsecret\u{2067}".to_string()),
         state: AgentActivityState::Working,
+        vendor: AgentVendor::OpenAi,
         started_at_ms: None,
+        finished_at_ms: None,
+        actions: Vec::new(),
     }];
     write_raw_presence(temp.path(), &hostile).await;
     let reader = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
@@ -568,7 +669,10 @@ async fn heartbeat_redacts_tasks_by_default_and_shares_only_with_opt_in() {
             agent: "codex".to_string(),
             task: Some("child-private description".to_string()),
             state: AgentActivityState::Working,
+            vendor: AgentVendor::OpenAi,
             started_at_ms: None,
+            finished_at_ms: None,
+            actions: Vec::new(),
         }],
         epoch_ms(),
     );
@@ -623,14 +727,21 @@ async fn exported_snapshot_redacts_the_local_process_and_is_fresh_and_private() 
             agent: "codex".to_string(),
             task: Some("raw child secret".to_string()),
             state: AgentActivityState::WaitingInput,
+            vendor: AgentVendor::OpenAi,
             started_at_ms: Some(epoch_ms().saturating_sub(100)),
+            finished_at_ms: None,
+            actions: Vec::new(),
         }],
         epoch_ms().saturating_sub(500),
-    );
+    )
+    .with_attention_reason(Some(
+        "Permission required\nbefore running Bash(cargo test).\u{1b}[2J".to_string(),
+    ));
     let before = epoch_ms();
 
     let result = publisher.publish_collect_and_export(local).await;
     let after = epoch_ms();
+    assert!(result.launch_requested);
     let path = result
         .snapshot_path
         .expect("snapshot export should succeed");
@@ -648,6 +759,10 @@ async fn exported_snapshot_redacts_the_local_process_and_is_fresh_and_private() 
         .expect("local parent should be exported through the privacy protocol");
     assert_eq!(parent.workspace.as_deref(), Some("repository"));
     assert!(parent.task.is_none());
+    assert_eq!(
+        parent.reason.as_deref(),
+        Some("Permission required before running Bash(cargo test).")
+    );
     assert_eq!(parent.state, AgentActivityState::Working);
     assert_eq!(parent.confidence, AgentActivityConfidence::Exact);
     let child = snapshot
@@ -675,6 +790,36 @@ async fn exported_snapshot_redacts_the_local_process_and_is_fresh_and_private() 
 }
 
 #[tokio::test]
+async fn multiple_tuis_publish_one_shared_snapshot_and_singleton_lock_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let second = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let first_presence = presence(
+        first.instance_id(),
+        std::process::id(),
+        AgentActivityState::Working,
+    );
+    let second_presence = presence(
+        second.instance_id(),
+        std::process::id(),
+        AgentActivityState::Working,
+    );
+
+    let first_result = first.publish_collect_and_export(first_presence).await;
+    let second_result = second.publish_collect_and_export(second_presence).await;
+
+    assert_eq!(first_result.snapshot_path, second_result.snapshot_path);
+    assert_eq!(first_result.lock_path, second_result.lock_path);
+    assert_eq!(
+        first_result.lock_path.as_deref(),
+        Some(temp.path().join(ISLAND_LOCK_FILE).as_path())
+    );
+
+    first.remove().await;
+    second.remove().await;
+}
+
+#[tokio::test]
 async fn exported_local_tasks_require_opt_in_and_are_sanitized() {
     let temp = tempfile::tempdir().unwrap();
     let publisher =
@@ -690,7 +835,10 @@ async fn exported_local_tasks_require_opt_in_and_are_sanitized() {
             agent: "codex".to_string(),
             task: Some("child\r\nlabel".to_string()),
             state: AgentActivityState::Working,
+            vendor: AgentVendor::OpenAi,
             started_at_ms: None,
+            finished_at_ms: None,
+            actions: Vec::new(),
         }],
         epoch_ms(),
     );
@@ -730,10 +878,14 @@ async fn exported_snapshot_is_bounded_degraded_and_atomically_replaced() {
                 "界".repeat(MAX_WORKSPACE_CHARS)
             )),
             task: Some(format!("task\n{}", "界".repeat(MAX_TASK_CHARS + 20))),
+            reason: None,
             state: AgentActivityState::Unknown,
             confidence: AgentActivityConfidence::Process,
+            vendor: AgentVendor::Other,
             started_at_ms: None,
+            finished_at_ms: None,
             expires_at_ms: epoch_ms().saturating_add(PRESENCE_TTL_MS),
+            actions: Vec::new(),
             local: false,
         })
         .collect();
@@ -814,6 +966,56 @@ async fn close_cannot_race_a_waiting_write_into_recreating_the_heartbeat() {
     assert!(writer.await.unwrap().is_err());
     remover.await.unwrap();
     assert!(!publisher.path.as_ref().unwrap().exists());
+}
+
+#[test]
+fn agent_island_preference_defaults_on_and_round_trips() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp.path().join("agent-presence");
+
+    assert!(preference::is_enabled(Some(&directory)));
+    preference::set_enabled(Some(&directory), false).unwrap();
+    assert!(!preference::is_enabled(Some(&directory)));
+    assert!(directory
+        .join(preference::AGENT_ISLAND_DISABLED_FILE)
+        .is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let marker = std::fs::metadata(directory.join(preference::AGENT_ISLAND_DISABLED_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(marker, 0o600);
+        let directory_mode = std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777;
+        assert_eq!(directory_mode, 0o700);
+    }
+
+    let disabled_publisher = AgentPresencePublisher::for_directory(directory.clone());
+    assert!(!disabled_publisher.island_preference_enabled());
+
+    preference::set_enabled(Some(&directory), true).unwrap();
+    assert!(preference::is_enabled(Some(&directory)));
+    let enabled_publisher = AgentPresencePublisher::for_directory(directory);
+    assert!(enabled_publisher.island_preference_enabled());
+}
+
+#[tokio::test]
+async fn island_opt_out_does_not_disable_the_shared_presence_protocol() {
+    let temp = tempfile::tempdir().unwrap();
+    preference::set_enabled(Some(temp.path()), false).unwrap();
+    let publisher = AgentPresencePublisher::for_directory(temp.path().to_path_buf());
+    let local = presence(
+        publisher.instance_id(),
+        std::process::id(),
+        AgentActivityState::Working,
+    );
+
+    publisher.write_presence(&local).await.unwrap();
+    assert!(publisher.path.as_ref().unwrap().is_file());
+    assert!(!publisher.island_preference_enabled());
 }
 
 #[test]

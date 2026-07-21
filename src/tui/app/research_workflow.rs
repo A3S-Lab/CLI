@@ -6,13 +6,11 @@ impl App {
     pub(super) fn start_deep_research_workflow(
         &mut self,
         query: String,
-        _os_runtime: bool,
         evidence_scope: DeepResearchEvidenceScope,
         runtime_expectation: Option<RuntimeExpectation>,
     ) -> Option<Cmd<Msg>> {
         self.auto_review.on_user_turn();
         self.last_activity = Instant::now();
-        let os_runtime = false;
         self.streaming.clear();
         self.got_delta = false;
         self.turn_text.clear();
@@ -27,30 +25,21 @@ impl App {
         let run_started_at = Instant::now();
         self.deep_research_loop = Some(DeepResearchLoop {
             query: query.clone(),
-            total_layers: 1,
-            os_runtime,
             evidence_scope,
             started_at: run_started_at,
-            phase_started_at: None,
         });
-        self.deep_research_report_repair_used = false;
-        self.deep_research_workflow
-            .reset_for_run(snapshot_deep_research_report_artifacts(
-                Path::new(&self.cwd),
-                &query,
-            ));
+        self.deep_research_report_resume_used = false;
+        self.deep_research_workflow.reset_for_run();
         self.deep_research_outcome = DeepResearchRunOutcome::Active;
         self.deep_research_subagent_settlement_inflight = false;
         self.deep_research_journal_finalization_inflight = false;
         self.deep_research_terminal_artifacts = None;
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
-        self.pending_deep_research_report_repair_prompt = None;
-        self.pending_deep_research_synthesis = None;
+        self.pending_deep_research_report_resume = false;
         self.pending_deep_research_report_view = None;
-        self.deep_research_report_tools.clear();
         self.deep_research_report_tool_gate
-            .set_report_target(Path::new(&self.cwd), &query);
+            .set_workspace(Path::new(&self.cwd));
         self.deep_research_report_tool_gate
             .set_evidence_scope(evidence_scope);
         if let Some(expectation) = runtime_expectation {
@@ -72,13 +61,12 @@ impl App {
         self.push_line(
             &Style::new()
                 .fg(TN_GRAY)
-                .render("  ⇉ gathering evidence with bounded recursive DynamicWorkflowRuntime…"),
+                .render("  ⇉ running one planned evidence retrieval pass…"),
         );
         self.rebuild_viewport();
 
         let budget = deep_research_budget_for_effort_index(self.effort, self.context_limit);
-        let mut args =
-            deep_research_workflow_args_for_budget(&query, os_runtime, evidence_scope, budget);
+        let mut args = deep_research_workflow_args_for_budget(&query, evidence_scope, budget);
         ensure_deep_research_workflow_run_id(&mut args);
         self.deep_research_workflow.args = Some(args.clone());
         let (progress_rx, workflow_join) =
@@ -110,10 +98,12 @@ impl App {
             evidence_scope: evidence_scope.label().to_string(),
             required_claims: Vec::new(),
             total_budget_ms: timeout_ms,
-            finalization_reserve_ms: timeout_ms.saturating_mul(15) / 100,
+            retrieval_stage_budget_ms: DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS.min(timeout_ms),
+            question_review_stage_budget_ms: DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
+                .min(timeout_ms),
+            finalization_reserve_ms: DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS.min(timeout_ms),
             host_pid: std::process::id(),
         };
-        let finalization_reserve_ms = journal_spec.finalization_reserve_ms;
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 if let Some(run_id) = journal_run_id.as_deref() {
@@ -162,38 +152,21 @@ impl App {
                     Ok(result) => (result.output.as_str(), result.metadata.as_ref()),
                     Err(error) => (error.as_str(), None),
                 };
-                let convergence_input =
-                    deep_research_convergence_input(DeepResearchConvergenceContext {
-                        query: &query,
-                        evidence_scope,
-                        workflow_output,
-                        workflow_metadata,
-                        args: &args,
-                        elapsed: run_started_at.elapsed(),
-                        total_budget_ms: timeout_ms,
-                        finalization_reserve_ms,
-                    });
                 let inquiry_projection =
                     inquiry_projection_from_workflow(workflow_output, workflow_metadata);
                 let convergence = match inquiry_projection.as_ref() {
-                    Ok(Some((_, state))) => {
-                        evaluate_terminal_inquiry_convergence(state, convergence_input.clone())
-                    }
-                    Ok(None) if deep_research_host_managed_inquiry(&args) => {
-                        ConvergenceDecision {
-                            action: ConvergenceAction::Degrade,
-                            reason: "the host-managed DeepResearch run returned without its Inquiry projection"
+                    Ok(Some((_, state))) => evaluate_terminal_inquiry_convergence(state),
+                    Ok(None) => ConvergenceDecision {
+                        action: ConvergenceAction::Degrade,
+                        reason:
+                            "the DeepResearch run returned without its required Inquiry projection"
                                 .to_string(),
-                            input: convergence_input.clone(),
-                        }
-                    }
-                    Ok(None) => evaluate_convergence(convergence_input.clone()),
+                    },
                     Err(error) => ConvergenceDecision {
                         action: ConvergenceAction::Degrade,
                         reason: format!(
                             "the DeepResearch inquiry projection failed strict replay: {error}"
                         ),
-                        input: convergence_input.clone(),
                     },
                 };
                 let accepted_evidence =
@@ -239,7 +212,6 @@ impl App {
                 }
                 Msg::DeepResearchWorkflowCompleted {
                     query,
-                    os_runtime,
                     args,
                     result,
                     convergence,
@@ -255,7 +227,6 @@ impl App {
     pub(super) fn on_deep_research_workflow_completed(
         &mut self,
         query: String,
-        os_runtime: bool,
         args: serde_json::Value,
         result: Result<ToolCallResult, String>,
         convergence: ConvergenceDecision,
@@ -317,19 +288,6 @@ impl App {
         );
         self.rebuild_viewport();
         self.record_runtime_tool_evidence("dynamic_workflow");
-        if metadata
-            .as_ref()
-            .is_some_and(|value| json_contains_tool_evidence(value, "runtime"))
-        {
-            self.record_runtime_tool_evidence("runtime");
-        }
-        if metadata
-            .as_ref()
-            .is_some_and(|value| json_contains_tool_evidence(value, "parallel_task"))
-        {
-            self.record_runtime_parallel_evidence();
-        }
-        self.backfill_parallel_subagents_from_workflow_metadata(metadata.as_ref());
         if completed.first_terminal {
             self.capture_workflow("dynamic_workflow", completed.args.as_ref());
         }
@@ -347,17 +305,8 @@ impl App {
             &output,
             metadata.as_ref(),
         );
-        let inquiry_projection = inquiry_projection_from_workflow(&output, metadata.as_ref());
-        let inquiry_exhausted = inquiry_projection
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .is_some_and(|(_, state)| state.phase == a3s::research::InquiryPhase::Exhausted);
-        let missing_host_inquiry =
-            deep_research_host_managed_inquiry(&args) && !matches!(inquiry_projection, Ok(Some(_)));
         if accepted_evidence.is_empty()
-            || inquiry_exhausted
-            || missing_host_inquiry
+            || convergence.action == ConvergenceAction::Degrade
             || matches!(report_outcome, DeepResearchRunOutcome::Degraded)
         {
             self.loop_remaining = 0;
@@ -366,7 +315,7 @@ impl App {
                 Path::new(&self.cwd),
                 &query,
                 &format!(
-                    "Evidence collection ended without a validated evidence package. Convergence decision: {}.",
+                    "Evidence collection ended without a validated evidence package. Terminal contract assessment: {}.",
                     convergence.reason
                 ),
                 &output,
@@ -397,46 +346,13 @@ impl App {
             return self.complete_turn();
         }
 
-        let synthesis_evidence = accepted_evidence_synthesis_payload(&accepted_evidence, &output);
-        let prompt = if exit_code == 0 {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_GRAY)
-                    .render("  ⇉ evidence gathered · synthesizing source-backed report…"),
-            );
-            deep_research_synthesis_prompt_with_scope(
-                &query,
-                os_runtime,
-                &synthesis_evidence,
-                None,
-                evidence_scope,
-            )
-        } else {
-            self.push_line(
-                &Style::new()
-                    .fg(TN_YELLOW)
-                    .render("  ⚠ dynamic workflow failed; starting recovery synthesis…"),
-            );
-            deep_research_recovery_prompt_with_scope(
-                &query,
-                os_runtime,
-                &synthesis_evidence,
-                None,
-                evidence_scope,
-            )
-        };
+        self.push_line(
+            &Style::new()
+                .fg(TN_GRAY)
+                .render("  ⇉ evidence gathered · synthesizing source-backed report…"),
+        );
         self.deep_research_report_tool_gate.set_synthesis_only();
-        if !self.queue.is_empty() {
-            // Treat messages submitted during evidence collection as user
-            // follow-ups. Run them before report synthesis, then resume this
-            // exact synthesis once the user queue is empty.
-            let display = format!("✦\u{200A}synthesize {query}");
-            self.pending_deep_research_synthesis = Some((prompt, display));
-            self.finish();
-            return self.drain_queue();
-        }
         self.start_deep_research_report_generation(
-            prompt,
             format!("✦\u{200A}synthesize {query}"),
             DeepResearchReportGenerationPhase::Synthesis,
         )

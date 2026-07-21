@@ -33,6 +33,9 @@ pub struct OutlineSection {
     pub id: String,
     pub heading: String,
     pub purpose: String,
+    /// Historical replay metadata. Active outline generation no longer emits
+    /// or consumes perspective IDs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub perspective_ids: Vec<String>,
     pub question_ids: Vec<String>,
     pub claim_ids: Vec<String>,
@@ -44,6 +47,8 @@ pub struct OutlineSection {
 /// Host-owned catalogs and material-coverage requirements for an outline.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OutlineValidationContext {
+    /// Historical perspective-outline replay catalog. Active contexts leave it
+    /// empty and the active generation schema omits perspective references.
     pub allowed_perspective_ids: BTreeSet<String>,
     pub allowed_question_ids: BTreeSet<String>,
     pub allowed_claim_ids: BTreeSet<String>,
@@ -53,7 +58,13 @@ pub struct OutlineValidationContext {
     pub evidence_catalog: BTreeMap<String, EvidenceRef>,
     /// Evidence IDs declared by the accepted answer to each question.
     pub question_evidence_ids: BTreeMap<String, BTreeSet<String>>,
+    /// Historical perspective-outline replay requirement. Active contexts
+    /// leave it empty.
     pub material_perspective_ids: BTreeSet<String>,
+    /// Answered material questions whose accepted evidence must be covered by
+    /// the outline. Bounded material questions remain in
+    /// `required_question_ids` so the report must disclose them without
+    /// pretending they have answer evidence.
     pub material_question_ids: BTreeSet<String>,
     /// Every inquiry path the final report must address, including bounded
     /// supporting paths that make an otherwise complete report qualified.
@@ -63,6 +74,7 @@ pub struct OutlineValidationContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutlineIdKind {
     Section,
+    /// Historical perspective-outline replay only.
     Perspective,
     Question,
     Evidence,
@@ -152,7 +164,6 @@ pub fn research_outline_json_schema() -> serde_json::Value {
                             "minLength": 1,
                             "maxLength": MAX_PURPOSE_CHARS
                         },
-                        "perspective_ids": id_array(0),
                         "question_ids": id_array(0),
                         "claim_ids": id_array(1),
                         "source_ids": id_array(1),
@@ -166,7 +177,6 @@ pub fn research_outline_json_schema() -> serde_json::Value {
                         "id",
                         "heading",
                         "purpose",
-                        "perspective_ids",
                         "question_ids",
                         "claim_ids",
                         "source_ids",
@@ -665,13 +675,35 @@ mod tests {
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["sections"]["maxItems"], 16);
         assert_eq!(section["additionalProperties"], false);
-        assert_eq!(section["required"].as_array().map(Vec::len), Some(8));
+        assert_eq!(section["required"].as_array().map(Vec::len), Some(7));
+        assert!(section["properties"].get("perspective_ids").is_none());
         assert_eq!(section["properties"]["claim_ids"]["minItems"], 1);
         assert_eq!(section["properties"]["source_ids"]["minItems"], 1);
-        for field in ["perspective_ids", "question_ids", "claim_ids", "source_ids"] {
+        for field in ["question_ids", "claim_ids", "source_ids"] {
             assert_eq!(section["properties"][field]["uniqueItems"], true);
             assert_eq!(section["properties"][field]["maxItems"], 32);
         }
+    }
+
+    #[test]
+    fn active_outline_omits_legacy_perspective_ids() {
+        let outline: ResearchOutline = serde_json::from_value(serde_json::json!({
+            "sections": [{
+                "id": "section:answer",
+                "heading": "Answer",
+                "purpose": "Answer the research question",
+                "question_ids": ["question:answer"],
+                "claim_ids": ["claim:answer"],
+                "source_ids": ["source:answer"],
+                "composition_hint": "Lead with the evidence-backed answer"
+            }]
+        }))
+        .expect("active outline without perspective IDs");
+
+        assert!(outline.sections[0].perspective_ids.is_empty());
+        assert!(serde_json::to_value(outline).unwrap()["sections"][0]
+            .get("perspective_ids")
+            .is_none());
     }
 
     #[test]
