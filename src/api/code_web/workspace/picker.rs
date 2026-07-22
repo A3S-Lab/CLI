@@ -71,8 +71,8 @@ fn cancelled_selection() -> serde_json::Value {
 
 fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return Path::new(&home).join(rest);
+        if let Some(home) = crate::user_paths::user_home_dir() {
+            return home.join(rest);
         }
     }
     PathBuf::from(path)

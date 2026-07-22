@@ -501,9 +501,9 @@ fn unique_path(p: &Path) -> PathBuf {
 
 fn resolve_path(cwd: &str, arg: &str) -> PathBuf {
     if arg == "~" || arg.starts_with("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = crate::user_paths::user_home_dir() {
             let rest = arg.strip_prefix("~/").unwrap_or("");
-            return Path::new(&home).join(rest);
+            return home.join(rest);
         }
     }
     let p = Path::new(arg);

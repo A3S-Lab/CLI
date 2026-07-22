@@ -454,7 +454,7 @@ pub(crate) async fn run_in(
     {
         let path = context
             .user_config_path()
-            .ok_or_else(|| anyhow::anyhow!("no HOME directory found for ~/.a3s/config.acl"))?;
+            .ok_or_else(|| anyhow::anyhow!("no user home found for ~/.a3s/config.acl"))?;
         write_template_config(&path)
             .map_err(|error| anyhow::anyhow!("failed to write starter config {path:?}: {error}"))?;
         true

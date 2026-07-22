@@ -4,7 +4,7 @@ use super::{
     model_metadata, now_unix_seconds, valid_model_id, KimiCredentials, KimiModelMetadata,
     DEFAULT_DESKTOP_BASE_URL, DEFAULT_MODEL_CONTEXT, MAX_CREDENTIAL_BYTES, MAX_MODELS_BYTES,
 };
-use crate::account_providers::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;

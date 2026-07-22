@@ -26,7 +26,7 @@ impl From<ModelRoute> for ModelSelection {
 }
 
 pub(crate) fn selection_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| Path::new(&home).join(".a3s/tui/model-selection.json"))
+    crate::user_paths::user_home_dir().map(|home| home.join(".a3s/tui/model-selection.json"))
 }
 
 pub(crate) fn load() -> Option<ModelSelection> {
@@ -42,8 +42,12 @@ pub(crate) fn load() -> Option<ModelSelection> {
 }
 
 pub(crate) fn save(selection: &ModelSelection) -> std::io::Result<()> {
-    let path = selection_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let path = selection_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "user home directory is unavailable",
+        )
+    })?;
     save_at(&path, selection)
 }
 

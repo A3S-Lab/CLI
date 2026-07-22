@@ -275,8 +275,8 @@ fn code_web_store_root() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("A3S_CODE_WEB_STATE_DIR").filter(|path| !path.is_empty()) {
         return Ok(PathBuf::from(path));
     }
-    let home = std::env::var_os("HOME").context("HOME is not set")?;
-    Ok(Path::new(&home).join(".a3s").join("code-web"))
+    let home = crate::user_paths::user_home_dir().context("user home is unavailable")?;
+    Ok(home.join(".a3s").join("code-web"))
 }
 
 fn encoded_storage_key(id: &str) -> String {

@@ -11,7 +11,6 @@ mod codebuddy;
 pub(crate) mod codex;
 mod host_tools;
 mod kimi;
-mod paths;
 mod protocol;
 
 use a3s_code_core::llm::LlmClient;

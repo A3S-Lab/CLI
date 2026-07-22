@@ -7,13 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-22
+
 ### Fixed
 
+- Resolved user-scoped configuration and component paths through native Windows
+  profile variables when `HOME` is absent, so commands such as
+  `a3s install webview` work in PowerShell and clean Windows CI environments.
 - Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
   fall back to the native Windows user profile when `HOME` is unset. WorkBuddy
   now locates its bundled CodeBuddy CLI through standard Windows installation
   directories and registered uninstall metadata, including custom install
   locations.
+- Made official installers accept both legacy archives and complete 0.10
+  bundles. Web assets, the WebView companion, and managed sandbox support now
+  activate as one rollback-safe installation, while transient Windows download
+  failures receive bounded retries.
 
 ## [0.9.9] - 2026-07-22
 

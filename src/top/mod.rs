@@ -5821,11 +5821,8 @@ fn top_config_path() -> PathBuf {
     if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(config_home).join("a3s").join("top.json");
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("a3s")
-            .join("top.json");
+    if let Some(home) = crate::user_paths::user_home_dir() {
+        return home.join(".config").join("a3s").join("top.json");
     }
     PathBuf::from(".a3s-top.json")
 }
@@ -7753,7 +7750,7 @@ fn observer_auto_enabled() -> bool {
 }
 
 fn observer_paths_from_auto() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+    let Some(home) = crate::user_paths::user_home_dir() else {
         return Vec::new();
     };
 

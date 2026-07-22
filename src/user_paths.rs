@@ -1,14 +1,16 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-/// Resolve the current user's home directory from native process environment
-/// conventions. `HOME` remains authoritative when callers set it explicitly;
+/// Resolve the current user's home directory from native environment
+/// conventions. `HOME` remains authoritative when explicitly configured;
 /// native Windows shells normally expose `USERPROFILE` instead.
 pub(crate) fn user_home_dir() -> Option<PathBuf> {
     user_home_dir_from(|name| std::env::var_os(name))
 }
 
-fn user_home_dir_from(mut read_env: impl FnMut(&str) -> Option<OsString>) -> Option<PathBuf> {
+pub(crate) fn user_home_dir_from(
+    mut read_env: impl FnMut(&str) -> Option<OsString>,
+) -> Option<PathBuf> {
     if let Some(home) = read_non_empty(&mut read_env, "HOME") {
         return Some(PathBuf::from(home));
     }

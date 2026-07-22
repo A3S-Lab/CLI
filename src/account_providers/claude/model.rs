@@ -1,4 +1,4 @@
-use crate::account_providers::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 
 pub(crate) fn canonical_model_name(model: &str) -> String {
     let trimmed = model.trim();

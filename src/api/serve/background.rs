@@ -419,8 +419,8 @@ fn state_root() -> anyhow::Result<PathBuf> {
     if let Some(path) = std::env::var_os("XDG_STATE_HOME").filter(|value| !value.is_empty()) {
         return Ok(absolute(PathBuf::from(path)).join("a3s"));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return Ok(PathBuf::from(home).join(".local/state/a3s"));
+    if let Some(home) = crate::user_paths::user_home_dir() {
+        return Ok(home.join(".local/state/a3s"));
     }
     #[cfg(windows)]
     if let Some(path) = std::env::var_os("LOCALAPPDATA") {

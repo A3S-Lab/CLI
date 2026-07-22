@@ -27,7 +27,7 @@ fn parse_skill_meta(path: &std::path::Path) -> Option<(String, String)> {
 
 /// `~/.a3s/disabled_skills` — names the user has turned off via `/plugin`.
 fn disabled_skills_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/disabled_skills"))
+    crate::user_paths::user_home_dir().map(|home| home.join(".a3s/disabled_skills"))
 }
 
 pub(crate) fn load_disabled_skills() -> std::collections::HashSet<String> {
@@ -117,7 +117,7 @@ const REPORT_MASTER_SYSTEM: &str =
 /// session can add it to its skill dirs. Best-effort — returns `None` on any I/O
 /// error.
 pub(crate) fn ensure_builtin_skills_dir() -> Option<std::path::PathBuf> {
-    let a3s_root = std::path::PathBuf::from(std::env::var_os("HOME")?).join(".a3s");
+    let a3s_root = crate::user_paths::user_home_dir()?.join(".a3s");
     let root = a3s_root.join("cli").join("skills");
     ensure_builtin_skills_dir_at(&root).ok()?;
     // `~/.a3s/cli-skills` was an early flat layout and was always CLI-owned.
@@ -202,8 +202,7 @@ pub(crate) fn agent_skill_dirs_with_configured(
             dirs.push(project);
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::PathBuf::from(home);
+    if let Some(home) = crate::user_paths::user_home_dir() {
         for root in [".agents", ".claude", ".codex"] {
             let personal = home.join(root).join("skills");
             if personal.is_dir() {

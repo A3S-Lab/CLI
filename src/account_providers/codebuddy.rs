@@ -5,7 +5,7 @@
 //! directory and consumes its documented `stream-json` output.
 
 use super::cli_transport::{account_cli_system_prompt, complete_streaming, CliInvocation};
-use super::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 use a3s_code_core::llm::{LlmClient, LlmResponse, Message, StreamEvent, ToolDefinition};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
