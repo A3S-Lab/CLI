@@ -16,6 +16,18 @@ jobs:
       - run: cargo test --all-targets
       - run: cargo build --release
 
+  release-macos-sandbox:
+    name: Verify release macOS sandbox host
+    runs-on: macos-15-intel
+    steps:
+      - name: Exercise the native Seatbelt entrypoint
+        run: |
+          set -euo pipefail
+          test -x /usr/bin/sandbox-exec
+          /usr/bin/sandbox-exec \
+            -p '(version 1) (allow default)' \
+            /usr/bin/true
+
   # Validate the TUI compiles for Windows + macOS so all three desktop
   # platforms can run `a3s code` (Linux is covered by `check` above).
   cross:

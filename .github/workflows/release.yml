@@ -538,7 +538,7 @@ jobs:
       matrix:
         include:
           - { platform: linux, os: ubuntu-22.04 }
-          - { platform: macos, os: macos-15 }
+          - { platform: macos, os: macos-15-intel }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

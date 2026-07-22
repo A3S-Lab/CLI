@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resolved user-scoped configuration and component paths through native Windows
   profile variables when `HOME` is absent, so commands such as
   `a3s install webview` work in PowerShell and clean Windows CI environments.
+- Pinned managed sandbox release verification to the x64 macOS 15 runner that
+  still provides Seatbelt, with a pull-request guard against runner drift.
 - Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
   fall back to the native Windows user profile when `HOME` is unset. WorkBuddy
   now locates its bundled CodeBuddy CLI through standard Windows installation
