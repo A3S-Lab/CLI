@@ -292,12 +292,16 @@ async fn real_managed_first_use_installs_once_and_runs_without_host_fallback() {
         .expect("managed SRT receipt");
     assert_eq!(receipt.version, MANAGED_SRT_VERSION);
 
-    let sandbox = first.build_sandbox(&workspace).unwrap();
+    let sandbox = first.build_and_probe_sandbox(&workspace).await.unwrap();
     let output = sandbox
         .exec_command("printf managed-srt", "/workspace")
         .await
         .unwrap();
-    assert_eq!(output.exit_code, 0);
+    assert_eq!(
+        output.exit_code, 0,
+        "first-use sandbox command failed: {}{}",
+        output.stdout, output.stderr
+    );
     assert_eq!(output.stdout, "managed-srt");
 
     let second = resolve_managed_srt(&paths, &workspace, false, true, false).await;
