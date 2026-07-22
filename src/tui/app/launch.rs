@@ -1004,7 +1004,6 @@ pub(crate) async fn run_in(
         llm_override: launch_llm_override,
         code_config: Arc::new(code_config),
         asset_directories,
-        component_paths: context.component_paths.clone(),
         config_path: config_path.clone(),
         memory_dir,
         auto_compact_threshold,

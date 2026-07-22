@@ -1,33 +1,26 @@
-//! Typed, read-only host inspection for `/checkup`.
+//! Typed, read-only context hygiene inspection for `/checkup`.
 //!
-//! Potentially blocking filesystem and component probes run outside Tokio's
-//! async workers. Only bounded, secret-free summaries cross into the planning
-//! prompt; raw ACL contents, component paths, MCP errors, and credentials do
-//! not.
+//! Potentially blocking filesystem probes run outside Tokio's async workers.
+//! Only bounded, secret-free summaries cross into the planning prompt; raw
+//! Skill contents, MCP errors, and credentials do not.
 
 use super::*;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ffi::OsString;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
-use a3s::components::{ComponentHealthReport, ComponentHealthStatus, ComponentPaths};
 use a3s_code_core::mcp::McpServerStatus;
-use a3s_code_core::CodeConfig;
 
-const MAX_ACL_BYTES: u64 = 1024 * 1024;
+use super::usage::{inspect_skill_history, SkillUsageAudit, SkillUsageSubject};
+
 const LARGE_SKILL_BYTES: u64 = 128 * 1024;
 const LARGE_INSTRUCTION_BYTES: u64 = 256 * 1024;
-const MAX_REPORTED_COMPONENTS: usize = 24;
-const MAX_REPORTED_CONFIG_ISSUES: usize = 12;
 const MCP_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(in crate::tui) struct CheckupPreflight {
-    components: ComponentAudit,
-    path: PathAudit,
-    config: ConfigAudit,
     skills: SkillAudit,
+    skill_usage: SkillUsageAudit,
     instructions: InstructionAudit,
     mcp: McpAudit,
 }
@@ -35,10 +28,8 @@ pub(in crate::tui) struct CheckupPreflight {
 impl CheckupPreflight {
     pub(super) fn render(&self) -> String {
         [
-            self.components.render(),
-            self.path.render(),
-            self.config.render(),
             self.skills.render(),
+            self.skill_usage.render(),
             self.instructions.render(),
             self.mcp.render(),
         ]
@@ -47,20 +38,16 @@ impl CheckupPreflight {
 }
 
 struct CheckupPreflightInput {
-    component_paths: ComponentPaths,
-    config_path: PathBuf,
-    code_config: Arc<CodeConfig>,
     workspace: PathBuf,
     configured_skill_dir: PathBuf,
     indexed_instruction_files: Vec<String>,
+    disabled_skills: HashSet<String>,
+    configured_mcp: usize,
 }
 
 impl CheckupPreflightInput {
     fn from_app(app: &App) -> Self {
         Self {
-            component_paths: app.component_paths.clone(),
-            config_path: app.config_path.clone(),
-            code_config: Arc::clone(&app.code_config),
             workspace: PathBuf::from(&app.cwd),
             configured_skill_dir: app.asset_directories.skill.clone(),
             indexed_instruction_files: app
@@ -73,43 +60,28 @@ impl CheckupPreflightInput {
                 })
                 .cloned()
                 .collect(),
+            disabled_skills: app.disabled_skills.clone(),
+            configured_mcp: app.code_config.mcp_servers.len(),
         }
     }
 
     fn inspect(self) -> HostPreflight {
-        let components = ComponentAudit::inspect(&self.component_paths);
-        let path = PathAudit::inspect(
-            &self.component_paths.current_exe,
-            self.component_paths.path_env.as_ref(),
-        );
-        let config = ConfigAudit::inspect(
-            &self.config_path,
-            &self.workspace,
-            self.component_paths.home.as_deref(),
-            self.code_config.as_ref(),
-        );
         let skill_dirs = agent_skill_dirs_with_configured(
             &self.workspace.to_string_lossy(),
             &self.configured_skill_dir,
         );
-        let skills = SkillAudit::inspect(&skill_dirs);
+        let skills = SkillAudit::inspect(&skill_dirs, &self.disabled_skills);
         let instructions =
             InstructionAudit::inspect(&self.workspace, &self.indexed_instruction_files);
         HostPreflight {
-            components,
-            path,
-            config,
             skills,
             instructions,
-            configured_mcp: self.code_config.mcp_servers.len(),
+            configured_mcp: self.configured_mcp,
         }
     }
 }
 
 struct HostPreflight {
-    components: ComponentAudit,
-    path: PathAudit,
-    config: ConfigAudit,
     skills: SkillAudit,
     instructions: InstructionAudit,
     configured_mcp: usize,
@@ -118,16 +90,21 @@ struct HostPreflight {
 pub(super) fn command(app: &App, status_entry: TranscriptEntryId) -> Cmd<Msg> {
     let input = CheckupPreflightInput::from_app(app);
     let session = Arc::clone(&app.session);
+    let store = Arc::clone(&app.store);
+    let current_session_id = app.session_id.clone();
     cmd::cmd(move || async move {
         let host = tokio::task::spawn_blocking(move || input.inspect());
         let mcp = tokio::time::timeout(MCP_STATUS_TIMEOUT, session.mcp_status());
-        let (host, mcp) = tokio::join!(host, mcp);
+        let usage = inspect_skill_history(store, current_session_id);
+        let (host, mcp, usage) = tokio::join!(host, mcp, usage);
         let result = host
             .map_err(|error| format!("host inspection task failed: {error}"))
             .map(|host| CheckupPreflight {
-                components: host.components,
-                path: host.path,
-                config: host.config,
+                skill_usage: SkillUsageAudit::classify(
+                    &host.skills.subjects,
+                    usage,
+                    chrono::Utc::now().timestamp(),
+                ),
                 skills: host.skills,
                 instructions: host.instructions,
                 mcp: match mcp {
@@ -143,320 +120,6 @@ pub(super) fn command(app: &App, status_entry: TranscriptEntryId) -> Cmd<Msg> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ComponentAudit {
-    available: bool,
-    total: usize,
-    ready: usize,
-    broken: usize,
-    missing: usize,
-    unknown: usize,
-    affected: Vec<String>,
-}
-
-impl ComponentAudit {
-    fn inspect(paths: &ComponentPaths) -> Self {
-        match a3s::components::component_health_report(paths) {
-            Ok(report) => Self::from_report(report),
-            Err(_) => {
-                tracing::warn!("checkup component health inspection failed");
-                Self {
-                    available: false,
-                    total: 0,
-                    ready: 0,
-                    broken: 0,
-                    missing: 0,
-                    unknown: 0,
-                    affected: Vec::new(),
-                }
-            }
-        }
-    }
-
-    fn from_report(report: ComponentHealthReport) -> Self {
-        let mut audit = Self {
-            available: true,
-            total: report.checks.len(),
-            ready: 0,
-            broken: 0,
-            missing: 0,
-            unknown: 0,
-            affected: Vec::new(),
-        };
-        for check in report.checks {
-            let label = match check.status {
-                ComponentHealthStatus::Ready => {
-                    audit.ready += 1;
-                    continue;
-                }
-                ComponentHealthStatus::Broken => {
-                    audit.broken += 1;
-                    "broken"
-                }
-                ComponentHealthStatus::Missing => {
-                    audit.missing += 1;
-                    "missing"
-                }
-                ComponentHealthStatus::Unknown => {
-                    audit.unknown += 1;
-                    "unknown"
-                }
-            };
-            if audit.affected.len() < MAX_REPORTED_COMPONENTS {
-                audit.affected.push(format!("{}={label}", check.component));
-            }
-        }
-        audit
-    }
-
-    fn render(&self) -> String {
-        if !self.available {
-            return "- component health: inspection unavailable (no probe output exposed)"
-                .to_string();
-        }
-        let mut text = format!(
-            "- component health: {} checked; {} ready, {} broken, {} missing, {} unknown",
-            self.total, self.ready, self.broken, self.missing, self.unknown
-        );
-        if !self.affected.is_empty() {
-            text.push_str("; affected ");
-            text.push_str(&self.affected.join(", "));
-        }
-        text
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActivePathPosition {
-    First,
-    Shadowed { earlier_distinct: usize },
-    NotRepresented,
-    PathUnavailable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PathAudit {
-    candidate_locations: usize,
-    distinct_binaries: usize,
-    active: ActivePathPosition,
-}
-
-impl PathAudit {
-    fn inspect(current_exe: &Path, path_env: Option<&OsString>) -> Self {
-        let Some(path_env) = path_env else {
-            return Self {
-                candidate_locations: 0,
-                distinct_binaries: 0,
-                active: ActivePathPosition::PathUnavailable,
-            };
-        };
-        let binary = format!("a3s{}", std::env::consts::EXE_SUFFIX);
-        let candidates = std::env::split_paths(path_env)
-            .map(|directory| directory.join(&binary))
-            .filter(|candidate| is_executable_file(candidate))
-            .collect::<Vec<_>>();
-        let distinct = candidates
-            .iter()
-            .map(|candidate| canonical_key(candidate))
-            .collect::<BTreeSet<_>>();
-        let active_index = candidates
-            .iter()
-            .position(|candidate| same_file_or_path(candidate, current_exe));
-        let active = match active_index {
-            Some(0) => ActivePathPosition::First,
-            Some(index) => {
-                let active_key = canonical_key(current_exe);
-                let earlier_distinct = candidates[..index]
-                    .iter()
-                    .map(|candidate| canonical_key(candidate))
-                    .filter(|candidate| candidate != &active_key)
-                    .collect::<BTreeSet<_>>()
-                    .len();
-                if earlier_distinct == 0 {
-                    ActivePathPosition::First
-                } else {
-                    ActivePathPosition::Shadowed { earlier_distinct }
-                }
-            }
-            None => ActivePathPosition::NotRepresented,
-        };
-        Self {
-            candidate_locations: candidates.len(),
-            distinct_binaries: distinct.len(),
-            active,
-        }
-    }
-
-    fn render(&self) -> String {
-        let relation = match self.active {
-            ActivePathPosition::First => "active executable is the first resolved PATH binary"
-                .to_string(),
-            ActivePathPosition::Shadowed { earlier_distinct } => format!(
-                "active executable is shadowed by {earlier_distinct} earlier distinct PATH binary/binaries"
-            ),
-            ActivePathPosition::NotRepresented => {
-                "active executable is not represented on PATH".to_string()
-            }
-            ActivePathPosition::PathUnavailable => "PATH is unavailable".to_string(),
-        };
-        format!(
-            "- executable/PATH: {} candidate location(s), {} distinct binary/binaries; {relation}",
-            self.candidate_locations, self.distinct_binaries
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConfigFileStatus {
-    Valid,
-    InvalidSyntax,
-    InvalidStructure,
-    Unreadable,
-    Oversized,
-}
-
-impl ConfigFileStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Valid => "valid",
-            Self::InvalidSyntax => "invalid ACL syntax",
-            Self::InvalidStructure => "invalid A3S configuration structure",
-            Self::Unreadable => "unreadable",
-            Self::Oversized => "larger than the 1 MiB audit bound",
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ConfigFileAudit {
-    labels: Vec<&'static str>,
-    path: PathBuf,
-    status: ConfigFileStatus,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ConfigAudit {
-    files: Vec<ConfigFileAudit>,
-    effective_issues: Vec<String>,
-}
-
-impl ConfigAudit {
-    fn inspect(
-        effective_path: &Path,
-        workspace: &Path,
-        home: Option<&Path>,
-        effective: &CodeConfig,
-    ) -> Self {
-        let user = home.map(|home| home.join(".a3s/config.acl"));
-        let workspace_config = crate::commands::config_resolver::workspace_config_path(workspace);
-        let layered = user
-            .as_deref()
-            .is_some_and(|path| same_file_or_path(path, effective_path))
-            || workspace_config
-                .as_deref()
-                .is_some_and(|path| same_file_or_path(path, effective_path));
-        let mut candidates = Vec::<ConfigFileAudit>::new();
-        if layered {
-            if let Some(path) = user.filter(|path| path.is_file()) {
-                push_config_candidate(&mut candidates, "user", path);
-            }
-            if let Some(path) = workspace_config {
-                push_config_candidate(&mut candidates, "workspace", path);
-            }
-        }
-        push_config_candidate(&mut candidates, "effective", effective_path.to_path_buf());
-        for candidate in &mut candidates {
-            candidate.status = audit_acl_file(&candidate.path);
-        }
-        let effective_issues = crate::api::code_web::config::validation::validate_config(effective)
-            .into_iter()
-            .take(MAX_REPORTED_CONFIG_ISSUES)
-            .map(|issue| safe_data(&issue, MAX_HOST_FACT_CHARS))
-            .collect();
-        Self {
-            files: candidates,
-            effective_issues,
-        }
-    }
-
-    fn render(&self) -> String {
-        let layers = self
-            .files
-            .iter()
-            .map(|file| {
-                format!(
-                    "{}={} ({})",
-                    file.labels.join("+"),
-                    safe_data(&file.path.display().to_string(), MAX_HOST_FACT_CHARS),
-                    file.status.label()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        let semantics = if self.effective_issues.is_empty() {
-            "effective semantic validation passed".to_string()
-        } else {
-            format!(
-                "{} effective semantic issue(s): {}",
-                self.effective_issues.len(),
-                self.effective_issues.join("; ")
-            )
-        };
-        format!(
-            "- ACL configuration: {} inspected layer(s): {layers}; {semantics}",
-            self.files.len()
-        )
-    }
-}
-
-fn push_config_candidate(
-    candidates: &mut Vec<ConfigFileAudit>,
-    label: &'static str,
-    path: PathBuf,
-) {
-    if let Some(existing) = candidates
-        .iter_mut()
-        .find(|candidate| same_file_or_path(&candidate.path, &path))
-    {
-        if !existing.labels.contains(&label) {
-            existing.labels.push(label);
-        }
-        return;
-    }
-    candidates.push(ConfigFileAudit {
-        labels: vec![label],
-        path,
-        status: ConfigFileStatus::Unreadable,
-    });
-}
-
-fn audit_acl_file(path: &Path) -> ConfigFileStatus {
-    let Ok(file) = File::open(path) else {
-        return ConfigFileStatus::Unreadable;
-    };
-    let mut bytes = Vec::new();
-    if file
-        .take(MAX_ACL_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return ConfigFileStatus::Unreadable;
-    }
-    if bytes.len() as u64 > MAX_ACL_BYTES {
-        return ConfigFileStatus::Oversized;
-    }
-    let Ok(source) = String::from_utf8(bytes) else {
-        return ConfigFileStatus::InvalidSyntax;
-    };
-    if a3s_acl::parse_acl(&source).is_err() {
-        return ConfigFileStatus::InvalidSyntax;
-    }
-    if CodeConfig::from_acl(&source).is_err() {
-        return ConfigFileStatus::InvalidStructure;
-    }
-    ConfigFileStatus::Valid
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct SkillAudit {
     directories: usize,
     files: usize,
@@ -464,10 +127,11 @@ struct SkillAudit {
     duplicate_names: usize,
     large_files: usize,
     metadata_failures: usize,
+    subjects: Vec<SkillUsageSubject>,
 }
 
 impl SkillAudit {
-    fn inspect(directories: &[PathBuf]) -> Self {
+    fn inspect(directories: &[PathBuf], disabled_skills: &HashSet<String>) -> Self {
         let mut audit = Self {
             directories: directories.len(),
             files: 0,
@@ -475,8 +139,10 @@ impl SkillAudit {
             duplicate_names: 0,
             large_files: 0,
             metadata_failures: 0,
+            subjects: Vec::new(),
         };
         let mut names = BTreeMap::<String, usize>::new();
+        let mut subjects = BTreeMap::<String, SkillUsageSubject>::new();
         for directory in directories {
             let Ok(entries) = std::fs::read_dir(directory) else {
                 audit.metadata_failures += 1;
@@ -501,13 +167,32 @@ impl SkillAudit {
                 if !skill_file.is_file() {
                     continue;
                 }
+                let canonical_name = bounded_skill_name(&skill_file).unwrap_or(name);
                 audit.files += 1;
-                *names.entry(name).or_default() += 1;
+                *names.entry(canonical_name.clone()).or_default() += 1;
                 match skill_file.metadata() {
                     Ok(metadata) => {
                         audit.total_bytes = audit.total_bytes.saturating_add(metadata.len());
                         if metadata.len() > LARGE_SKILL_BYTES {
                             audit.large_files += 1;
+                        }
+                        let modified_at = metadata
+                            .modified()
+                            .ok()
+                            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                            .and_then(|value| i64::try_from(value.as_secs()).ok());
+                        match subjects.entry(canonical_name.clone()) {
+                            std::collections::btree_map::Entry::Vacant(entry) => {
+                                entry.insert(SkillUsageSubject::new(
+                                    canonical_name.clone(),
+                                    metadata.len(),
+                                    modified_at,
+                                    !disabled_skills.contains(&canonical_name),
+                                ));
+                            }
+                            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                                entry.get_mut().merge_copy(metadata.len(), modified_at);
+                            }
                         }
                     }
                     Err(_) => audit.metadata_failures += 1,
@@ -515,6 +200,7 @@ impl SkillAudit {
             }
         }
         audit.duplicate_names = names.values().map(|count| count.saturating_sub(1)).sum();
+        audit.subjects = subjects.into_values().collect();
         audit
     }
 
@@ -529,6 +215,26 @@ impl SkillAudit {
             self.metadata_failures
         )
     }
+}
+
+fn bounded_skill_name(path: &Path) -> Option<String> {
+    const MAX_FRONTMATTER_BYTES: u64 = 16 * 1024;
+    let mut source = String::new();
+    File::open(path)
+        .ok()?
+        .take(MAX_FRONTMATTER_BYTES)
+        .read_to_string(&mut source)
+        .ok()?;
+    let rest = source.trim_start().strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    rest[..end].lines().find_map(|line| {
+        let value = line.strip_prefix("name:")?.trim().trim_matches(['"', '\'']);
+        if value.is_empty() || value.chars().count() > 120 || value.chars().any(char::is_control) {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -647,57 +353,6 @@ impl McpAudit {
     }
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn same_file_or_path(left: &Path, right: &Path) -> bool {
-    left == right || canonical_key(left) == canonical_key(right)
-}
-
-fn canonical_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
-}
-
-fn safe_data(value: &str, max_chars: usize) -> String {
-    let normalized = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    if normalized.chars().count() <= max_chars {
-        return normalized;
-    }
-    let mut truncated = normalized
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    truncated
-}
-
 fn human_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes} B");
@@ -712,50 +367,6 @@ fn human_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn write_executable(path: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn path_audit_detects_a_shadowed_active_executable() {
-        let temp = tempfile::tempdir().unwrap();
-        let shadow = temp.path().join("shadow/a3s");
-        let active = temp.path().join("active/a3s");
-        write_executable(&shadow);
-        write_executable(&active);
-        let path =
-            std::env::join_paths([shadow.parent().unwrap(), active.parent().unwrap()]).unwrap();
-
-        let audit = PathAudit::inspect(&active, Some(&path));
-
-        assert_eq!(audit.candidate_locations, 2);
-        assert_eq!(audit.distinct_binaries, 2);
-        assert_eq!(
-            audit.active,
-            ActivePathPosition::Shadowed {
-                earlier_distinct: 1
-            }
-        );
-    }
-
-    #[test]
-    fn acl_audit_is_bounded_and_never_needs_secret_values() {
-        let temp = tempfile::tempdir().unwrap();
-        let valid = temp.path().join("valid.acl");
-        std::fs::write(&valid, crate::config::config_template()).unwrap();
-        assert_eq!(audit_acl_file(&valid), ConfigFileStatus::Valid);
-
-        let oversized = temp.path().join("oversized.acl");
-        std::fs::write(&oversized, vec![b'x'; MAX_ACL_BYTES as usize + 1]).unwrap();
-        assert_eq!(audit_acl_file(&oversized), ConfigFileStatus::Oversized);
-    }
-
     #[test]
     fn skill_audit_counts_duplicate_names_and_context_bytes() {
         let temp = tempfile::tempdir().unwrap();
@@ -767,7 +378,7 @@ mod tests {
             std::fs::write(skill, "---\nname: shared\n---\nbody\n").unwrap();
         }
 
-        let audit = SkillAudit::inspect(&[first, second]);
+        let audit = SkillAudit::inspect(&[first, second], &HashSet::new());
 
         assert_eq!(audit.files, 2);
         assert_eq!(audit.duplicate_names, 1);

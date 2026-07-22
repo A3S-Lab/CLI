@@ -636,10 +636,6 @@ struct App {
     code_config: Arc<CodeConfig>,
     /// Paths resolved once from the immutable CLI invocation and effective ACL.
     asset_directories: crate::commands::config::CodeAssetDirectories,
-    /// Component storage and process PATH snapshot resolved at CLI admission.
-    /// `/checkup` reuses this immutable view instead of rediscovering process
-    /// state from a shell command.
-    component_paths: a3s::components::ComponentPaths,
     config_path: PathBuf,
     memory_dir: PathBuf,
     auto_compact_threshold: f64,
