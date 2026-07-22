@@ -559,8 +559,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod 0755 \
-            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js
+          bash .github/scripts/restore-managed-srt-executables.sh \
+            support/managed-srt
           node .github/scripts/verify-managed-srt-tree.mjs \
             support/managed-srt support/managed-srt.tree-sha256
       - name: Provision Linux sandbox test prerequisites
@@ -573,6 +573,11 @@ jobs:
             bubblewrap \
             ripgrep \
             socat
+      - name: Provision macOS sandbox test prerequisites
+        if: matrix.platform == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ripgrep
       - name: Verify native sandbox prerequisites
         shell: bash
         env:
@@ -642,8 +647,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod 0755 \
-            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js
+          bash .github/scripts/restore-managed-srt-executables.sh \
+            support/managed-srt
           node .github/scripts/verify-managed-srt-tree.mjs \
             support/managed-srt support/managed-srt.tree-sha256
       - name: Download verified Agent Island helper
@@ -736,6 +741,25 @@ jobs:
               >/dev/null; then
             echo "::error::Release archive does not contain the managed sandbox support payload"
             exit 1
+          fi
+          if [[ "$RELEASE_TARGET" != "x86_64-pc-windows-msvc" ]]; then
+            archive_root="$(mktemp -d)"
+            trap 'rm -rf "$archive_root"' EXIT
+            tar -xzf "${base}.tar.gz" -C "$archive_root"
+            for executable in \
+              dist/cli.js \
+              vendor/seccomp/arm64/apply-seccomp \
+              vendor/seccomp/x64/apply-seccomp; do
+              executable_path="$(find "$archive_root" -type f \
+                -path "*/support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/${executable}" \
+                -print -quit)"
+              if [[ -z "$executable_path" || ! -x "$executable_path" ]]; then
+                echo "::error::Release archive contains a non-executable managed sandbox file: ${executable}"
+                exit 1
+              fi
+            done
+            rm -rf "$archive_root"
+            trap - EXIT
           fi
           if [[ "$RELEASE_TARGET" == "x86_64-pc-windows-msvc" ]] \
             && ! unzip -Z1 "${base}.zip" \
