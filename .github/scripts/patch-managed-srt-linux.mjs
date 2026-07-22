@@ -61,14 +61,19 @@ const missingAncestorPatched = `                    const firstNonExistent = fin
                     // missing component. The first read-only mount already protects the
                     // entire subtree; emitting another can conflict on file-vs-directory
                     // destination type and make bwrap refuse to start.
-                    if (seenDenyWrite.has(firstNonExistent)) {
+                    if (seenDenyWriteMounts.has(firstNonExistent)) {
                         continue;
                     }
-                    seenDenyWrite.add(firstNonExistent);
+                    seenDenyWriteMounts.add(firstNonExistent);
                     // Fix 2: If firstNonExistent is an intermediate component (not the
                     // leaf deny path itself), mount a read-only empty directory instead
                     // of /dev/null. This prevents the component from appearing as a file
                     // which breaks tools that expect to traverse it as a directory.`;
+
+const mountSetUpstream = `        const seenDenyWrite = new Set();`;
+
+const mountSetPatched = `        const seenDenyWrite = new Set();
+        const seenDenyWriteMounts = new Set();`;
 
 const replacements = [
   {
@@ -85,6 +90,11 @@ const replacements = [
     name: "missing ancestor mount deduplication",
     upstream: missingAncestorUpstream,
     patched: missingAncestorPatched,
+  },
+  {
+    name: "missing ancestor mount tracking",
+    upstream: mountSetUpstream,
+    patched: mountSetPatched,
   },
 ];
 
