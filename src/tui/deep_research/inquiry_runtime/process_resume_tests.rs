@@ -942,16 +942,21 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
     match scenario {
         Scenario::Planner => {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
+            let bootstrap_journal = workspace
+                .path()
+                .join(".a3s/workflow")
+                .join(format!("{run_id}-bootstrap.jsonl"));
             wait_for_condition(
-                "completed durable generation before Inquiry acknowledgement",
+                "completed durable planner and concurrent bootstrap before Inquiry acknowledgement",
                 Duration::from_secs(60),
-                || marker.is_file(),
+                || marker.is_file() && event_count(&bootstrap_journal, "run_completed", None) == 1,
             )
             .await;
             let journal =
                 flow_journal_with_prefix(workspace.path(), &format!("{run_id}-planner-outline-"))
                     .expect("durable planner-outline Flow journal");
             assert_eq!(event_count(&journal, "run_completed", None), 1);
+            assert_eq!(event_count(&bootstrap_journal, "run_completed", None), 1);
         }
         Scenario::Resolution => {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
