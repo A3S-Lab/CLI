@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pinned managed sandbox release verification to the x64 macOS 15 runner that
   still provides Seatbelt, explicitly provisioned its ripgrep dependency, and
   added pull-request coverage for both packaged and first-use behavior.
+- Restored executable permissions for the managed sandbox CLI and native
+  seccomp helpers after GitHub artifact transport, and now reject release
+  archives that contain non-executable Unix sandbox components.
 - Ordered mandatory Linux sandbox child mounts before A3S's stricter parent
   denies and collapsed mounts that converge on the same missing ancestor,
   preventing bubblewrap startup failures in both bundled and first-use managed

@@ -62,6 +62,15 @@ jobs:
           '
           node ../../.github/scripts/verify-managed-srt-tree.mjs \
             . ../managed-srt.tree-sha256
+      - name: Simulate release artifact permission restoration
+        run: |
+          set -euo pipefail
+          chmod 0644 \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/arm64/apply-seccomp \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/x64/apply-seccomp
+          bash .github/scripts/restore-managed-srt-executables.sh \
+            support/managed-srt
       - name: Provision native sandbox prerequisites
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
@@ -128,6 +137,15 @@ jobs:
           '
           node ../../.github/scripts/verify-managed-srt-tree.mjs \
             . ../managed-srt.tree-sha256
+      - name: Simulate release artifact permission restoration
+        run: |
+          set -euo pipefail
+          chmod 0644 \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/dist/cli.js \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/arm64/apply-seccomp \
+            support/managed-srt/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/x64/apply-seccomp
+          bash .github/scripts/restore-managed-srt-executables.sh \
+            support/managed-srt
       - name: Provision native sandbox prerequisites
         run: |
           set -euo pipefail
