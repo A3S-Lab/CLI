@@ -45,7 +45,9 @@ pub(crate) fn deterministic_deep_research_outcome_report_at(
                 if deterministic_outcome_span_is_unsafe(&text) {
                     continue;
                 }
-                if deterministic_span_asserts_outcome(&text) {
+                if deterministic_span_asserts_outcome(&text)
+                    && report_summary_answers_query_intent(query, &text)
+                {
                     direct_answers.push(DeterministicOutcomeCandidate {
                         score: deterministic_outcome_span_score(
                             query,
@@ -563,12 +565,24 @@ fn deterministic_outcome_score_pairs(value: &str) -> HashSet<String> {
     SCORE
         .get_or_init(|| {
             regex::Regex::new(
-                r"(?:^|[^0-9])((?:0|[1-9][0-9]?))\s*(?:-|:|：)\s*((?:0|[1-9][0-9]?))(?:$|[^0-9])",
+                r"((?:0|[1-9][0-9]?))\s*(?:-|:|：)\s*((?:0|[1-9][0-9]?))",
             )
             .expect("static deterministic outcome score-pair regex")
         })
         .captures_iter(value)
         .filter_map(|captures| {
+            let whole = captures.get(0)?;
+            if value[..whole.start()]
+                .chars()
+                .next_back()
+                .is_some_and(|character| character.is_ascii_digit())
+                || value[whole.end()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_digit())
+            {
+                return None;
+            }
             Some(format!(
                 "{}:{}",
                 captures.get(1)?.as_str(),

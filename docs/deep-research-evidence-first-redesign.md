@@ -188,14 +188,18 @@ date and a fixed outcome-and-news phrase localized for Han queries, with an
 English fallback for other scripts. Search never waits for semantic planning, and no
 model may add, rewrite, or retry another query. Search-engine selection and
 generic fallback follow `config.acl`; the default avoids AnySearch unless the
-user opts in. The complete bounded provider catalog is then passed to one
-closed semantic candidate-admission attempt before any web fetch. Its active
-generation is capped at 60 seconds inside a 150-second acquisition stage. A
-valid non-empty semantic selection keeps its selected candidates and fills
-unused fetch capacity only with distinct-host verified institutions or
-accountable publishers. This deterministic resilience floor cannot add
-unknown, social, or protected-publisher lookalike hosts. A real step failure or
-timeout degrades acquisition only to at most six deterministic candidates.
+user opts in. For explicit competition-result intent, the Host first checks
+whether the complete catalog already contains at least two accountable,
+cross-host candidates with outcome-bearing retrieval metadata. If so, it
+fetches at most four of those candidates and skips model URL admission. Other
+catalogs are passed to one closed semantic candidate-admission attempt before
+any web fetch. Its active generation is capped at 60 seconds inside a
+150-second acquisition stage. A valid non-empty semantic selection keeps its
+selected candidates and fills unused fetch capacity only with distinct-host
+verified institutions or accountable publishers. This deterministic resilience
+floor cannot add unknown, social, or protected-publisher lookalike hosts. A real
+step failure or timeout degrades acquisition only to at most six deterministic
+candidates.
 Explicit seeds remain first; candidates unique to each query are then reserved,
 while verified institutions and accountable publishers rank ahead of unknown,
 social, or lookalike hosts before the distinct-host fill. Within the same trust
@@ -278,10 +282,11 @@ requires distinct claim-like Findings. It rejects questions, prospective or
 schedule prose, generic result indexes, navigation piles, title lists, and a
 bare `champion` token without an outcome predicate. Betting odds, predictions,
 historical roundups, and time-only score widgets are also ineligible. Findings
-must come from the selected direct-answer source because an exact-span compiler
-cannot prove cross-source event identity; broader corroboration remains the
-semantic proposal's responsibility. A title that only repeats the selected
-outcome does not qualify as a distinct Finding. Direct-answer ranking
+remain on the selected direct-answer source unless another accountable source
+contains exactly one matching score and at least two matching non-generic event
+identity features. This admits bounded independent detail while preventing an
+equal score from joining unrelated events. A title that only repeats the
+selected outcome does not qualify as a distinct Finding. Direct-answer ranking
 prefers complete scores and win/loss assertions; Findings ranking prefers
 concrete numeric and aftermath facts. Candidate spans still pass the ordinary
 current-date, query-language, numeric-literal, direct-answer, citation, and
@@ -395,7 +400,7 @@ path adds these architectural ceilings:
 | Outcome companion search | 1 | Uses the run date plus one fixed localized outcome-and-news phrase. |
 | Fetched sources | 8 | Shared deterministic acquisition budget. |
 | Bootstrap acquisition stage | 150 seconds | Covers discovery, one source-admission attempt, and actual fetches. |
-| Web source-admission active time | 60 seconds | The Flow step is not retried; failure degrades acquisition only and leaves room for bounded HTML range fetches. |
+| Web source-admission active time | 60 seconds | Explicit competition outcomes skip this model step when discovery already contains at least two accountable cross-host outcome candidates; otherwise the Flow step is not retried, and failure degrades acquisition only while leaving room for bounded HTML range fetches. |
 | Report-model active time | 90 seconds per attempt | The two-attempt stage and whole Host run remain independently bounded. |
 
 Model admission wait, active generation, search, fetch, first-source

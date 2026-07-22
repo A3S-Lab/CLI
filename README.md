@@ -867,7 +867,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
-| Deep research | Prefix a prompt with `?` to run the evidence-first Host path: the exact query plus one deterministic date- and script-aware outcome companion search → semantic candidate admission with accountable-publisher resilience, or accountable Host-ranked acquisition fallback → safe fetch and source sanitization → deterministic source-backed staging → strict outcome extraction when applicable, otherwise one closed report proposal with at most one transient retry → Host admission → atomic Markdown and HTML publication. Search inherits the active `config.acl` engine policy; without an override it uses DuckDuckGo and Wikipedia, while AnySearch remains opt-in. Provider metadata is never report evidence. A synthesized success must contain a semantic direct answer, a distinct Findings block, at least two admitted cited claims, and exact catalog citations. Final citations are numbered densely in first-citation order from the sources actually used, and the Host rebuilds one matching deduplicated source ledger. Each core atomic claim additionally requires one complete verified institutional record or one explicitly accountable publisher that establishes the whole claim; independent corroboration is preferred when available but unrelated citations are never added merely to increase source count. If synthesis does not pass, fetched evidence remains visible in an explicitly degraded source snapshot; if no safe evidence exists, the Host publishes an honest no-evidence boundary report. |
+| Deep research | Prefix a prompt with `?` to run the evidence-first Host path: the exact query plus one deterministic date- and script-aware outcome companion search → bounded candidate admission → safe fetch and source sanitization → deterministic source-backed staging → strict outcome extraction when applicable, otherwise one closed report proposal with at most one transient retry → Host admission → atomic Markdown and HTML publication. Explicit competition-result queries with at least two accountable cross-host outcome candidates use a deterministic four-source maximum and skip model URL admission; other queries use semantic candidate admission with accountable-publisher resilience or its Host-ranked failure fallback. Search inherits the active `config.acl` engine policy; without an override it uses DuckDuckGo and Wikipedia, while AnySearch remains opt-in. Provider metadata is never report evidence. A synthesized success must contain a semantic direct answer, a distinct Findings block, at least two admitted cited claims, and exact catalog citations. Final citations are numbered densely in first-citation order from the sources actually used, and the Host rebuilds one matching deduplicated source ledger. Each core atomic claim additionally requires one complete verified institutional record or one explicitly accountable publisher that establishes the whole claim; independent corroboration is preferred when available but unrelated citations are never added merely to increase source count. If synthesis does not pass, fetched evidence remains visible in an explicitly degraded source snapshot; if no safe evidence exists, the Host publishes an honest no-evidence boundary report. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle so long sessions continue through repeated compactions. `/history` or `Ctrl+R` fuzzy-searches prompts in the current session without changing the draft; `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -882,20 +882,23 @@ companion query containing the run date and a fixed outcome-and-news phrase.
 Han queries use `<query> <YYYY年M月D日> 最新进展 最终结果 新闻`; other queries use
 `<query> <YYYY-MM-DD> latest development final outcome news`. This improves
 current accountable-publisher recall without opening a query-generation
-fan-out. Web discovery results first enter one closed semantic-admission attempt
-with a 60-second active cap inside the 150-second acquisition stage. A valid
-non-empty selection is supplemented, within the existing fetch cap, by
-distinct-host institutional or accountable-publisher candidates so an
-under-selected model result cannot starve the evidence set. If admission fails
-or times out, acquisition alone falls back to at most six deterministic
-candidates spread across query provenance and distinct hosts; an explicit empty
-semantic selection remains empty. Within each trust tier, candidates whose
-discovery metadata offers a result, score, outcome, or latest-state retrieval
-opportunity rank ahead of background-only pages, but that metadata never
-becomes evidence. Fallback text has to pass deterministic query-relevance,
-publisher-accountability, protected-domain, and publication gates before it can
-support a conclusion. There is no unrecorded post-fetch semantic-selector stage
-on this evidence-first path.
+fan-out. For an explicit competition-result query, discovery first looks for at
+least two cross-host institutional or accountable-publisher candidates whose
+metadata offers a result, score, outcome, or standings retrieval opportunity.
+When that closed condition is met, the Host fetches at most four ranked
+candidates and does not spend a model call selecting URLs. All other discovery
+results enter one closed semantic-admission attempt with a 60-second active cap
+inside the 150-second acquisition stage. A valid non-empty semantic selection is
+supplemented, within the existing fetch cap, by distinct-host institutional or
+accountable-publisher candidates so an under-selected model result cannot
+starve the evidence set. If admission fails or times out, acquisition alone
+falls back to at most six deterministic candidates spread across query
+provenance and distinct hosts; an explicit empty semantic selection remains
+empty. Discovery metadata only chooses retrieval opportunities and never
+becomes evidence. Deterministically selected and fallback text must pass query
+relevance, publisher accountability, protected-domain, and publication gates
+before it can support a conclusion. There is no unrecorded post-fetch
+semantic-selector stage on this evidence-first path.
 Search-engine and admission fallback notices remain visible in run metadata.
 Only safely fetched, canonicalized, query-relevant source text enters the report
 catalog; script, style, navigation, escaped hydration data, serialized

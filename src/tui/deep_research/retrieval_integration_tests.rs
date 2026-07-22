@@ -1043,6 +1043,26 @@ async fn explicit_outcome_bootstrap_uses_accountable_cross_host_candidates_witho
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::clone(&queries),
         results: serde_json::json!([{
+            "title": "世界杯八强战况、比分、结果与晋级汇总",
+            "url": "https://cj.sina.com.cn/articles/world-cup-quarter-finals",
+            "content": "1/8决赛战况、比分、赛果、结果、晋级与最终八强名单。",
+            "engines": ["fixture"]
+        }, {
+            "title": "World Cup schedule, results and scores",
+            "url": "https://www.olympics.com/world-cup/schedule-results",
+            "content": "Who will be crowned champion? View the complete schedule and upcoming matches.",
+            "engines": ["fixture"]
+        }, {
+            "title": "BBC World Cup semi-final result",
+            "url": "https://www.bbc.com/sport/football/world-cup-semifinal",
+            "content": "Argentina beat England in the World Cup semi-final.",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯数据中心：比赛结果与比分",
+            "url": "https://sports.163.com/world-cup/data",
+            "content": "赛程、比赛结果、比分、积分榜和球队数据。",
+            "engines": ["fixture"]
+        }, {
             "title": "世界杯决赛：西班牙战胜阿根廷夺冠",
             "url": "https://www.news.cn/sports/world-cup-final",
             "content": "西班牙1:0战胜阿根廷，夺得世界杯冠军。",
@@ -1064,8 +1084,7 @@ async fn explicit_outcome_bootstrap_uses_accountable_cross_host_candidates_witho
         bodies: BTreeMap::from([
             (
                 "https://www.news.cn/sports/world-cup-final".to_string(),
-                "新华社报道，西班牙在世界杯决赛中1:0战胜阿根廷并夺得冠军。"
-                    .to_string(),
+                "新华社报道，西班牙在世界杯决赛中1:0战胜阿根廷并夺得冠军。".to_string(),
             ),
             (
                 "https://www.xinmin.cn/2026WorldCup/".to_string(),
@@ -1124,6 +1143,81 @@ async fn explicit_outcome_bootstrap_uses_accountable_cross_host_candidates_witho
     assert!(history.lines().all(|line| {
         let event: serde_json::Value = serde_json::from_str(line).unwrap();
         event["event"]["step_id"] != "select_web_sources"
+    }));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_keeps_model_admission_when_no_terminal_candidate_exists() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "世界杯八强战况、比分与晋级汇总",
+            "url": "https://cj.sina.com.cn/articles/world-cup-quarter-finals",
+            "content": "1/8决赛战况、比分、赛果、结果与最终八强名单。",
+            "engines": ["fixture"]
+        }, {
+            "title": "BBC World Cup semi-final result",
+            "url": "https://www.bbc.com/sport/football/world-cup-semifinal",
+            "content": "Argentina beat England in the World Cup semi-final.",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://cj.sina.com.cn/articles/world-cup-quarter-finals".to_string(),
+                "新浪体育回顾世界杯八强阶段的比赛结果与晋级情况。".to_string(),
+            ),
+            (
+                "https://www.bbc.com/sport/football/world-cup-semifinal".to_string(),
+                "BBC reported that Argentina beat England in the World Cup semi-final.".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["BBC World Cup semi-final result".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-semantic-admission-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(urls.lock().unwrap().len(), 2);
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "semantic_candidate_ids"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-outcome-bootstrap-semantic-admission-test.jsonl"),
+    )
+    .expect("durable semantic-admission history");
+    assert!(history.lines().any(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["step_id"] == "select_web_sources"
     }));
 }
 
@@ -1188,7 +1282,7 @@ async fn bootstrap_fallback_prioritizes_accountable_hosts_over_lookalikes_and_so
             invalid_selection: false,
         },
     }));
-    let query = "World Cup result";
+    let query = "Acquire accountable evidence after source admission failure";
     let mut plan = minimal_plan(
         serde_json::json!([track("request.primary", "Original request", query)]),
         serde_json::json!([query]),

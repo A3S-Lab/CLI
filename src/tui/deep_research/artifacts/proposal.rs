@@ -422,7 +422,7 @@ fn report_summary_answers_query_intent(query: &str, text: &str) -> bool {
     if !report_query_asks_for_competition_outcome(query) {
         return true;
     }
-    [
+    let asserts_requested_outcome = [
         "战况",
         "赛况",
         "赛果",
@@ -450,7 +450,142 @@ fn report_summary_answers_query_intent(query: &str, text: &str) -> bool {
     ]
     .iter()
     .any(|marker| text.contains(marker))
-        || report_score_literal_observed(&text)
+        || report_score_literal_observed(&text);
+    asserts_requested_outcome
+        && (!report_query_requires_terminal_competition_answer(query)
+            || report_score_literal_observed(&text)
+            || report_terminal_competition_outcome_observed(&text))
+}
+
+fn report_query_requires_terminal_competition_answer(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    if [" vs ", " v. ", " versus ", " against ", "对阵"]
+        .iter()
+        .any(|marker| query.contains(marker))
+        || ["积分榜", "排名", "standings", "ranking"]
+            .iter()
+            .any(|marker| query.contains(marker))
+    {
+        return false;
+    }
+    let broad_status = [
+        "战况",
+        "赛况",
+        "赛事结果",
+        "赛事赛果",
+        "赛事比分",
+        "competition result",
+        "competition score",
+        "tournament result",
+        "tournament score",
+        "championship result",
+        "championship score",
+        "world cup result",
+        "world cup score",
+    ]
+    .iter()
+    .any(|marker| query.contains(marker));
+    let broad_scope = [
+        "世界杯",
+        "锦标赛",
+        "联赛",
+        "杯赛",
+        "赛事",
+        "奥运",
+        "competition",
+        "tournament",
+        "championship",
+        "world cup",
+        "league",
+        "season",
+        "playoffs",
+    ]
+    .iter()
+    .any(|marker| query.contains(marker));
+    let outcome_intent = [
+        "战况", "赛况", "赛果", "比分", "结果", "冠军", "谁赢", "score", "result",
+        "winner", "champion", "who won",
+    ]
+    .iter()
+    .any(|marker| query.contains(marker));
+    broad_status || (broad_scope && outcome_intent)
+}
+
+fn report_terminal_competition_outcome_observed(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    if [
+        "谁将",
+        "将夺冠",
+        "有望夺冠",
+        "争夺冠军",
+        "预测",
+        "前瞻",
+        "will win",
+        "will be the champion",
+        "will be crowned",
+        "prediction",
+        "preview",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return false;
+    }
+    if [
+        "夺冠",
+        "捧杯",
+        "加冕",
+        "夺得世界杯冠军",
+        "获得世界杯冠军",
+        "成为世界杯冠军",
+        "世界杯冠军",
+        "is the winner",
+        "became the winner",
+        "crowned champion",
+        "became champion",
+        "is the champion",
+        "won the championship",
+        "won the tournament",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return true;
+    }
+    if [
+        "半决赛",
+        "准决赛",
+        "八强",
+        "四分之一决赛",
+        "1/4决赛",
+        "semi-final",
+        "semifinal",
+        "quarter-final",
+        "quarterfinal",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        return false;
+    }
+    let final_stage = text.contains("决赛")
+        || regex::Regex::new(r"\bfinal\b")
+            .expect("static final-stage regex")
+            .is_match(&text);
+    final_stage
+        && [
+            "战胜",
+            "击败",
+            "获胜",
+            "胜出",
+            "赢得",
+            "won",
+            "beat",
+            "defeated",
+            "winner",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 fn report_query_asks_for_competition_outcome(query: &str) -> bool {
@@ -478,7 +613,9 @@ fn report_score_literal_observed(value: &str) -> bool {
     static SCORE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     SCORE
         .get_or_init(|| {
-            regex::Regex::new(r"(?:^|[^0-9-])[0-9]{1,2}\s*-\s*[0-9]{1,2}(?:$|[^0-9-])")
+            regex::Regex::new(
+                r"(?:^|[^0-9])(?:0|[1-9][0-9]?)\s*(?:-|:|：)\s*(?:0|[1-9][0-9]?)(?:$|[^0-9])",
+            )
                 .expect("static score regex")
         })
         .is_match(value)

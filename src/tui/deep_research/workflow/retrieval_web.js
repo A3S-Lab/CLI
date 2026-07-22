@@ -387,6 +387,96 @@
     );
   };
 
+  const candidateTerminalOutcomeSignal = (candidate) => {
+    const text = `${String(candidate && candidate.title || "")} ${String(
+      candidate && candidate.content || ""
+    )}`.toLowerCase();
+    if ([
+      "who will",
+      "will be crowned",
+      "will take place",
+      "odds",
+      "prediction",
+      "preview",
+      "schedule",
+      "谁将",
+      "将于",
+      "将在",
+      "争夺",
+      "赔率",
+      "预测",
+      "前瞻",
+      "赛程",
+    ].some((marker) => text.includes(marker))) return 0;
+    const strongMarkers = [
+      "crowned",
+      "became champion",
+      "won the championship",
+      "won the tournament",
+      "夺冠",
+      "闭幕",
+      "捧杯",
+      "加冕",
+    ];
+    const weakMarkers = [
+      "champion",
+      "final result",
+      "final score",
+      "winner",
+      "冠军",
+      "决赛结果",
+      "决赛比分",
+      "决赛赛果",
+      "最终结果",
+      "最终赛果",
+    ];
+    const strongSignal = strongMarkers.reduce(
+      (score, marker) => score + (text.includes(marker) ? 1 : 0),
+      0
+    );
+    if (candidateEarlierStagePenalty(candidate) > 0) return strongSignal;
+    return strongSignal + weakMarkers.reduce(
+      (score, marker) => score + (text.includes(marker) ? 1 : 0),
+      0
+    );
+  };
+
+  const candidateEarlierStagePenalty = (candidate) => {
+    const text = `${String(candidate && candidate.title || "")} ${String(
+      candidate && candidate.content || ""
+    )}`.toLowerCase();
+    const markers = [
+      "group stage",
+      "ongoing",
+      "prediction",
+      "preview",
+      "quarter-final",
+      "quarterfinal",
+      "round of 16",
+      "round of 32",
+      "schedule",
+      "semi-final",
+      "semifinal",
+      "upcoming",
+      "小组赛",
+      "八强",
+      "16强",
+      "32强",
+      "1/8",
+      "1/4",
+      "半决赛",
+      "准决赛",
+      "正在进行",
+      "赛程",
+      "预测",
+      "前瞻",
+    ];
+    return markers.reduce(
+      (penalty, marker) => penalty + (text.includes(marker) ? 1 : 0),
+      0
+    );
+  };
+
   const queryRequestsCompetitionOutcome = (query) => {
     const text = String(query || "").toLowerCase();
     if (
@@ -437,13 +527,18 @@
         index,
         priority: fallbackCandidatePriority(candidate),
         outcome: candidateOutcomeOpportunity(candidate),
+        terminal: candidateTerminalOutcomeSignal(candidate),
+        earlierStage: candidateEarlierStagePenalty(candidate),
       }))
       .filter((entry) => entry.priority >= 2 && entry.outcome > 0)
       .sort((left, right) =>
+        right.terminal - left.terminal ||
+        left.earlierStage - right.earlierStage ||
         right.outcome - left.outcome ||
         right.priority - left.priority ||
         left.index - right.index
       );
+    if (!ranked.some((entry) => entry.terminal > 0)) return null;
     const selected = [];
     const selectedHosts = new Set();
     for (const entry of ranked) {

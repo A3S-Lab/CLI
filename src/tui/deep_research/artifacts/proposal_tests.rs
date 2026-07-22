@@ -433,6 +433,75 @@ fn competition_status_rejects_schedule_background_as_a_direct_answer() {
 }
 
 #[test]
+fn broad_competition_status_rejects_a_scoreless_semifinal_caption_but_a_specific_match_keeps_it() {
+    let broad_query = "World Cup result";
+    let specific_query = "Argentina vs England match result";
+    let semifinal = "Argentina beat England in the World Cup semi-final.";
+    assert!(!report_summary_answers_query_intent(broad_query, semifinal));
+    assert!(report_summary_answers_query_intent(
+        specific_query,
+        semifinal
+    ));
+
+    let catalog = DeepResearchSourceCatalog {
+        sources: vec![DeepResearchCatalogSource {
+            alias: "source-1".to_string(),
+            title: "BBC World Cup semi-final photo caption".to_string(),
+            anchor: "https://www.bbc.com/sport/football/world-cup-semifinal".to_string(),
+            chunks: vec![
+                "Argentina beat England in the World Cup semi-final. Lionel Messi won the player award after the match."
+                    .to_string(),
+            ],
+            claim_eligible: true,
+        }],
+        omitted_source_count: 0,
+        omitted_chunk_count: 0,
+    };
+    let proposal = serde_json::json!({
+        "summary": [{
+            "text": semifinal,
+            "source_aliases": ["source-1"]
+        }],
+        "findings": [{
+            "text": "Lionel Messi won the player award after the match.",
+            "source_aliases": ["source-1"]
+        }],
+        "recommendations": [],
+        "limitations": []
+    });
+
+    assert!(
+        admit_deep_research_report_proposal_at(
+            broad_query,
+            "2026-07-22",
+            &catalog,
+            proposal.clone(),
+        )
+        .expect("admit broad scoreless-semifinal proposal")
+        .is_none(),
+        "an earlier-stage photo caption must not answer a tournament-wide result query"
+    );
+    assert!(
+        admit_deep_research_report_proposal_at(specific_query, "2026-07-22", &catalog, proposal,)
+            .expect("admit specific scoreless-match proposal")
+            .is_some(),
+        "a named match query may be answered by an accountable scoreless win statement"
+    );
+    assert!(
+        deterministic_deep_research_outcome_report_at(broad_query, "2026-07-22", &catalog)
+            .expect("evaluate broad deterministic outcome")
+            .is_none(),
+        "the deterministic path must enforce the same tournament-wide publication gate"
+    );
+    assert!(
+        deterministic_deep_research_outcome_report_at(specific_query, "2026-07-22", &catalog)
+            .expect("evaluate specific deterministic outcome")
+            .is_some(),
+        "the deterministic path must preserve named match-result queries"
+    );
+}
+
+#[test]
 fn an_atomic_institutional_report_passes_the_strong_support_gate() {
     let catalog = DeepResearchSourceCatalog {
         sources: vec![DeepResearchCatalogSource {
@@ -766,10 +835,7 @@ fn deterministic_outcome_report_does_not_join_a_same_score_from_another_event() 
                 alias: "source-2".to_string(),
                 title: "另一场比赛报道".to_string(),
                 anchor: "https://www.cctv.com/sports/another-final".to_string(),
-                chunks: vec![
-                    "德国队加时赛1:0战胜法国队，穆西亚拉第106分钟打入制胜球。"
-                        .to_string(),
-                ],
+                chunks: vec!["德国队加时赛1:0战胜法国队，穆西亚拉第106分钟打入制胜球。".to_string()],
                 claim_eligible: true,
             },
         ],

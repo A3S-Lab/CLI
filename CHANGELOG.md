@@ -206,21 +206,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per eligible source and one per ineligible source, and report-model packets
   exclude ineligible excerpts entirely.
   Explicit result, winner, champion, score, and standings queries now get a
-  strict deterministic fast path before report generation. It publishes only
-  exact atomic spans from a verified institution or accountable publisher,
-  rejects questions, schedules, generic indexes, navigation piles, and
-  headline lists, betting odds, predictions, historical roundups, and
-  time-only widgets, and uses separate ranking for the direct outcome and
-  concrete Findings. Findings remain local to the selected result source so
-  deterministic extraction cannot silently join unrelated events across
-  publishers, and pure outcome-restatement headlines are removed instead of
-  padding the Findings count. A successful extractive result passes the normal
-  Host admission gates, records `deterministic_outcome_extract`, and skips
-  report-model generation; otherwise the closed proposal and honest degraded
-  fallback remain unchanged. Final reports now number only sources that are
-  actually cited, in first-citation order, render inline references as visible
-  `[n]` links, and avoid duplicated ordered-list/source identifiers such as
-  `2. [2]`.
+  strict deterministic acquisition and publication fast path. When discovery
+  contains at least two cross-host accountable candidates with explicit result
+  retrieval opportunities, the Host fetches at most four of them without
+  spending a 60-second model call on URL admission. Extractive publication uses
+  only exact atomic spans from a verified institution or accountable publisher,
+  rejects questions, schedules, generic indexes, navigation piles, headline
+  lists, betting odds, predictions, historical roundups, and time-only widgets,
+  and ranks the direct outcome separately from concrete Findings. Findings stay
+  source-local unless an independent source has one identical score and at
+  least two matching non-generic event-identity features; an equal score alone
+  cannot join unrelated events across publishers. Pure outcome-restatement
+  headlines are removed instead of padding the Findings count. A successful
+  extractive result passes the normal Host admission gates, records
+  `deterministic_outcome_extract`, and skips report-model generation; otherwise
+  the closed proposal and honest degraded fallback remain unchanged. Final
+  reports number only sources that are actually cited, in first-citation order,
+  render inline references as visible `[n]` links, and avoid duplicated
+  ordered-list/source identifiers such as `2. [2]`.
 - Made foreground `a3s web` Ctrl+C shutdown cancel in-flight requests and
   long-lived HTTP streams before draining connections, with bounded server and
   application cleanup plus a second-interrupt emergency exit. Raw terminals
