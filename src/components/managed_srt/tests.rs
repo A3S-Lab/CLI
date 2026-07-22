@@ -396,20 +396,34 @@ async fn real_packaged_payload_enforces_complete_local_command_policy() {
         offline_toolchain.stdout, offline_toolchain.stderr
     );
 
-    assert_sandbox_denies(
-        &sandbox,
-        "printf forbidden > ../outside.txt",
-        "outside write",
-    )
-    .await;
-    assert!(!root.path().join("outside.txt").exists());
-    assert_sandbox_denies(
-        &sandbox,
-        "printf forbidden > outside-link/symlink-escaped.txt",
-        "symlink write escape",
-    )
-    .await;
-    assert!(!outside.join("symlink-escaped.txt").exists());
+    // A read-denied ancestor can be replaced by tmpfs, so a write may succeed
+    // against an ephemeral path. The security invariant is that no host path
+    // outside the allowed workspace changes.
+    let outside_write = sandbox
+        .exec_command("printf forbidden > ../outside.txt", "/workspace")
+        .await
+        .unwrap();
+    assert!(
+        !root.path().join("outside.txt").exists(),
+        "outside write reached the host (exit {}): {}{}",
+        outside_write.exit_code,
+        outside_write.stdout,
+        outside_write.stderr
+    );
+    let symlink_write = sandbox
+        .exec_command(
+            "printf forbidden > outside-link/symlink-escaped.txt",
+            "/workspace",
+        )
+        .await
+        .unwrap();
+    assert!(
+        !outside.join("symlink-escaped.txt").exists(),
+        "symlink write reached the host (exit {}): {}{}",
+        symlink_write.exit_code,
+        symlink_write.stdout,
+        symlink_write.stderr
+    );
 
     for (command, path, original) in [
         (
@@ -450,6 +464,9 @@ async fn real_packaged_payload_enforces_complete_local_command_policy() {
     .await;
     assert!(!workspace.join(".mcp.json").exists());
 
+    // File masks can make `cat` succeed against an empty replacement. Assert
+    // the protected bytes never cross the boundary instead of requiring one
+    // particular exit status from the wrapped command.
     for (command, secret) in [
         ("cat .env", "WORKSPACE_SECRET=hidden"),
         ("cat services/api/.env", "NESTED_WORKSPACE_SECRET=hidden"),
@@ -457,10 +474,13 @@ async fn real_packaged_payload_enforces_complete_local_command_policy() {
         ("cat outside-hardlink", "outside-hidden"),
         ("cat ../outside/secret.txt", "outside-hidden"),
     ] {
-        let denied = assert_sandbox_denies(&sandbox, command, "credential read").await;
+        let denied = sandbox.exec_command(command, "/workspace").await.unwrap();
         assert!(
-            !denied.stdout.contains(secret),
-            "{command} exposed protected content"
+            !denied.stdout.contains(secret) && !denied.stderr.contains(secret),
+            "{command} exposed protected content (exit {}): {}{}",
+            denied.exit_code,
+            denied.stdout,
+            denied.stderr
         );
     }
 
