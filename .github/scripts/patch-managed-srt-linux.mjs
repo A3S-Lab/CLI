@@ -70,10 +70,12 @@ const missingAncestorPatched = `                    const firstNonExistent = fin
                     // of /dev/null. This prevents the component from appearing as a file
                     // which breaks tools that expect to traverse it as a directory.`;
 
-const mountSetUpstream = `        const seenDenyWrite = new Set();`;
+const mountSetUpstream = `        const seenDenyWrite = new Set();
+        for (const pathPattern of denyPaths) {`;
 
 const mountSetPatched = `        const seenDenyWrite = new Set();
-        const seenDenyWriteMounts = new Set();`;
+        const seenDenyWriteMounts = new Set();
+        for (const pathPattern of denyPaths) {`;
 
 const replacements = [
   {
