@@ -18,7 +18,7 @@ env:
   A3S_WEB_SOURCE_REF: 4ba68fde4c2a80afb84cc09636f3408a5d457699
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
-  A3S_CODE_CORE_VERSION: 6.3.0
+  A3S_CODE_CORE_VERSION: 6.3.1
   A3S_SEARCH_VERSION: 2.0.0
   A3S_TUI_VERSION: 0.1.13
 jobs:
@@ -538,7 +538,7 @@ jobs:
       matrix:
         include:
           - { platform: linux, os: ubuntu-22.04 }
-          - { platform: macos, os: macos-latest }
+          - { platform: macos, os: macos-15 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
