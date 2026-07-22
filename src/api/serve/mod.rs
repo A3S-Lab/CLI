@@ -1,11 +1,20 @@
+use std::future::IntoFuture;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use a3s_boot::{BootApplication, BootError};
 use a3s_code_core::{Agent, CodeConfig};
 use anyhow::Context;
+use axum::body::{Body, HttpBody};
+use axum::extract::{Request, State};
+use axum::http::{header::CONTENT_LENGTH, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
+use futures::StreamExt;
+use http_body_util::{BodyStream, StreamBody};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -30,6 +39,8 @@ const API_PREFIX: &str = "/api";
 // Work accepts Office source files up to 50 MiB. Keep enough headroom for
 // request metadata while retaining one explicit limit for every API route.
 const BODY_LIMIT_BYTES: usize = 52 * 1024 * 1024;
+const SERVER_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) enum ServeOutcome {
     Help,
@@ -230,6 +241,16 @@ async fn run_foreground(
         router
     };
 
+    // Axum's graceful shutdown waits for every response body to finish. That
+    // never happens naturally for SSE and other long-lived responses, so all
+    // requests and response bodies share one server-lifetime cancellation
+    // boundary. This keeps shutdown behavior independent of individual routes.
+    let connection_shutdown = CancellationToken::new();
+    let router = router.layer(middleware::from_fn_with_state(
+        connection_shutdown.clone(),
+        cancel_request_on_shutdown,
+    ));
+
     background::notify_ready(actual_addr)?;
     println!("A3S Code API:  http://{actual_addr}/api/health");
     if options.api_only {
@@ -250,16 +271,49 @@ async fn run_foreground(
 
     let shutdown_signal = Arc::clone(&shutdown);
     let cancellation = cancellation.clone();
-    let serve_result = axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            tokio::select! {
-                _ = cancellation.cancelled() => {}
-                _ = shutdown_signal.notified() => {}
+    let drain_started = CancellationToken::new();
+    let drain_started_signal = drain_started.clone();
+    let connection_shutdown_signal = connection_shutdown.clone();
+    let mut server = Box::pin(
+        axum::serve(listener, router)
+            .with_graceful_shutdown(async move {
+                tokio::select! {
+                    _ = cancellation.cancelled() => {}
+                    _ = shutdown_signal.notified() => {}
+                }
+                connection_shutdown_signal.cancel();
+                drain_started_signal.cancel();
+            })
+            .into_future(),
+    );
+    let serve_result = tokio::select! {
+        result = &mut server => result.map_err(|error| anyhow::anyhow!("server failed: {error}")),
+        _ = drain_started.cancelled() => {
+            match tokio::time::timeout(SERVER_DRAIN_TIMEOUT, &mut server).await {
+                Ok(result) => result.map_err(|error| anyhow::anyhow!("server failed: {error}")),
+                Err(_) => {
+                    eprintln!(
+                        "warning: A3S Web forced the remaining connections closed after {} seconds",
+                        SERVER_DRAIN_TIMEOUT.as_secs()
+                    );
+                    Ok(())
+                }
             }
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("server failed: {e}"));
-    let shutdown_result = app.shutdown().await.map_err(boot_to_anyhow);
+        }
+    };
+    drop(server);
+    connection_shutdown.cancel();
+    let shutdown_result =
+        match tokio::time::timeout(APPLICATION_SHUTDOWN_TIMEOUT, app.shutdown()).await {
+            Ok(result) => result.map_err(boot_to_anyhow),
+            Err(_) => {
+                eprintln!(
+                    "warning: A3S Web stopped waiting for application cleanup after {} seconds",
+                    APPLICATION_SHUTDOWN_TIMEOUT.as_secs()
+                );
+                Ok(())
+            }
+        };
     if let (Some(path), Some(nonce)) = (
         std::env::var_os(background::INSTANCE_FILE_ENV),
         instance_nonce.as_deref(),
@@ -272,6 +326,27 @@ async fn run_foreground(
         (Ok(()), Err(error)) => Err(error),
         (Ok(()), Ok(())) => Ok(None),
     }
+}
+
+async fn cancel_request_on_shutdown(
+    State(shutdown): State<CancellationToken>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let response = tokio::select! {
+        biased;
+        _ = shutdown.cancelled() => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        response = next.run(request) => response,
+    };
+    let (mut parts, body) = response.into_parts();
+    if let Some(length) = body.size_hint().exact().filter(|length| *length > 0) {
+        parts
+            .headers
+            .entry(CONTENT_LENGTH)
+            .or_insert_with(|| HeaderValue::from(length));
+    }
+    let frames = BodyStream::new(body).take_until(shutdown.cancelled_owned());
+    Response::from_parts(parts, Body::new(StreamBody::new(frames)))
 }
 
 async fn resolve_web_root(options: &ServeOptions) -> anyhow::Result<Option<Arc<PathBuf>>> {

@@ -166,9 +166,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Restored Ctrl+C shutdown for foreground `a3s web` when launched from a raw
-  terminal with signal generation disabled, while preserving and restoring the
-  caller's original terminal mode.
+- Made foreground `a3s web` Ctrl+C shutdown cancel in-flight requests and
+  long-lived HTTP streams before draining connections, with bounded server and
+  application cleanup plus a second-interrupt emergency exit. Raw terminals
+  with signal generation disabled remain supported while preserving and
+  restoring the caller's original terminal mode.
 - Made DeepResearch generation capacity session-scoped across independent
   host-direct Flow calls, preventing parallel obligation reviews from bypassing
   a provider's typed single-flight contract. Replaced the ineffective use of a

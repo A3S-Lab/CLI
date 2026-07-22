@@ -52,7 +52,14 @@ pub(crate) async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 
     let cancellation = context.cancellation.clone();
     let signal_task = tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
+        loop {
+            if tokio::signal::ctrl_c().await.is_err() {
+                break;
+            }
+            if cancellation.is_cancelled() {
+                eprintln!("Second Ctrl+C received; forcing shutdown.");
+                std::process::exit(130);
+            }
             cancellation.cancel();
         }
     });
