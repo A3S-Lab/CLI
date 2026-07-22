@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 898f6a55554cf566e81903847c17651250d9c444
+  A3S_WEB_SOURCE_REF: 4ba68fde4c2a80afb84cc09636f3408a5d457699
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
-  A3S_WEBVIEW_VERSION: 0.1.2
-  A3S_CODE_CORE_VERSION: 6.1.0
+  A3S_WEBVIEW_VERSION: 0.1.5
+  A3S_CODE_CORE_VERSION: 6.3.0
   A3S_SEARCH_VERSION: 2.0.0
   A3S_TUI_VERSION: 0.1.13
 jobs:
@@ -126,7 +126,7 @@ jobs:
             "a3s-search $A3S_SEARCH_VERSION"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
-            "a3s-use-extension 0.1.2"
+            "a3s-use-extension 0.1.3"
           )
           for requirement in "${required_crates[@]}"; do
             read -r crate dependency_version <<<"$requirement"
@@ -624,8 +624,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp .release-manifest/Cargo.toml Cargo.toml
-          cp .release-manifest/Cargo.lock Cargo.lock
+          bash .github/scripts/use-published-a3s-crates.sh
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Download Web workspace
         uses: actions/download-artifact@v4
@@ -839,18 +838,24 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          for target in \
-            aarch64-apple-darwin \
-            x86_64-apple-darwin \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            x86_64-pc-windows-msvc; do
-            base="a3s-${tag}-${target}"
-            printf '%s\n' "${base}.tar.gz" "${base}.sha256"
-            if [[ "$target" == x86_64-pc-windows-msvc ]]; then
-              printf '%s\n' "${base}.zip"
-            fi
-          done | sort > expected-assets.txt
+          version="${tag#v}"
+          {
+            for target in \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin \
+              x86_64-unknown-linux-gnu \
+              aarch64-unknown-linux-gnu \
+              x86_64-pc-windows-msvc; do
+              base="a3s-${tag}-${target}"
+              printf '%s\n' "${base}.tar.gz" "${base}.sha256"
+              if [[ "$target" == x86_64-pc-windows-msvc ]]; then
+                printf '%s\n' "${base}.zip"
+              fi
+            done
+            printf '%s\n' \
+              "a3s-web-v${version}.tar.gz" \
+              "a3s-web-v${version}.tar.gz.sha256"
+          } | sort > expected-assets.txt
           gh release view "$tag" --json assets \
             --jq '.assets[].name' | sort > actual-assets.txt
           if ! diff -u expected-assets.txt actual-assets.txt; then
@@ -896,6 +901,29 @@ jobs:
               fi
             done
           done
+
+          web_archive="a3s-web-v${version}.tar.gz"
+          web_checksum="release-assets/${web_archive}.sha256"
+          web_checksum_lines="$(awk 'END { print NR }' "$web_checksum")"
+          web_checksum_entries="$(awk 'NF == 2 { count += 1 } END { print count + 0 }' "$web_checksum")"
+          if [[ "$web_checksum_lines" -ne 1 || "$web_checksum_entries" -ne 1 ]]; then
+            echo "::error::${web_archive}.sha256 must contain exactly one checksum entry"
+            exit 1
+          fi
+          expected_web_digest="$(awk -v asset="$web_archive" \
+            '($2 == asset || $2 == "*" asset) \
+             && length($1) == 64 && $1 !~ /[^0-9a-f]/ \
+             { digest = $1; count += 1 } \
+             END { if (count == 1) print digest }' "$web_checksum")"
+          actual_web_digest="$(sha256sum "release-assets/${web_archive}" | awk '{ print $1 }')"
+          if [[ -z "$expected_web_digest" || "$actual_web_digest" != "$expected_web_digest" ]]; then
+            echo "::error::SHA-256 mismatch for ${web_archive}"
+            exit 1
+          fi
+          if ! tar -tzf "release-assets/${web_archive}" | grep -Fx 'web/index.html' >/dev/null; then
+            echo "::error::${web_archive} does not contain web/index.html"
+            exit 1
+          fi
 
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
