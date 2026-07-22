@@ -501,6 +501,7 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
+          node ../../.github/scripts/patch-managed-srt-linux.mjs .
           node -e '
             const fs = require("node:fs");
             for (const path of [
@@ -538,7 +539,7 @@ jobs:
       matrix:
         include:
           - { platform: linux, os: ubuntu-22.04 }
-          - { platform: macos, os: macos-15 }
+          - { platform: macos, os: macos-15-intel }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

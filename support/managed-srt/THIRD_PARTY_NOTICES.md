@@ -13,3 +13,10 @@ local command-sandbox support:
 
 The complete license text for each package is preserved in that package's
 directory under `node_modules`.
+
+A3S applies a narrow Linux compatibility patch to sandbox-runtime 0.0.66. The
+patch orders the runtime's mandatory child-path mounts before A3S's stricter
+parent-directory denies, collapses mounts that share a missing ancestor, and
+preserves read-only access to the runtime's own seccomp helper when the
+surrounding user home is hidden. This prevents Linux sandbox startup failures
+without weakening either boundary. The modified file remains under Apache-2.0.
