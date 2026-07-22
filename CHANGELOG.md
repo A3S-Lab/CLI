@@ -16,7 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a3s install webview` work in PowerShell and clean Windows CI environments.
 - Pinned managed sandbox release verification to the x64 macOS 15 runner that
   still provides Seatbelt, explicitly provisioned its ripgrep dependency, and
-  added pull-request coverage for both packaged and first-use behavior.
+  added pull-request coverage for both packaged and first-use behavior. The
+  first-use compatibility patcher now also recognizes macOS's symlinked
+  temporary-directory paths.
 - Restored executable permissions for the managed sandbox CLI and native
   seccomp helpers after GitHub artifact transport, and now reject release
   archives that contain non-executable Unix sandbox components.

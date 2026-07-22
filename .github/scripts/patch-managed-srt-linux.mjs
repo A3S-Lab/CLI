@@ -3,12 +3,14 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const relativeRuntime = join(
   "node_modules",
@@ -104,6 +106,19 @@ function occurrenceCount(source, needle) {
   return source.split(needle).length - 1;
 }
 
+function isDirectInvocation(argvPath, moduleUrl) {
+  if (!argvPath) {
+    return false;
+  }
+  try {
+    return (
+      realpathSync(argvPath) === realpathSync(fileURLToPath(moduleUrl))
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function patchManagedSrtLinux(installRoot) {
   const runtime = join(resolve(installRoot), relativeRuntime);
   let source = readFileSync(runtime, "utf8");
@@ -155,14 +170,25 @@ function selfTest() {
       () => patchManagedSrtLinux(root),
       /expected one .* upstream block/,
     );
+
+    const invocationTarget = join(root, "invocation-target.mjs");
+    const invocationLink = join(root, "invocation-link.mjs");
+    writeFileSync(invocationTarget, "export {};\n", "utf8");
+    symlinkSync(invocationTarget, invocationLink);
+    assert.equal(
+      isDirectInvocation(invocationLink, pathToFileURL(invocationTarget).href),
+      true,
+    );
+    assert.equal(
+      isDirectInvocation(join(root, "missing.mjs"), import.meta.url),
+      false,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-const invokedDirectly =
-  process.argv[1] &&
-  pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+const invokedDirectly = isDirectInvocation(process.argv[1], import.meta.url);
 
 if (invokedDirectly) {
   if (process.argv[2] === "--self-test" && process.argv.length === 3) {
