@@ -1,6 +1,6 @@
 use super::*;
 use crate::evolution::model::{EvolutionCatalog, EvolutionEvidence};
-use crate::evolution::store::reject_candidate;
+use crate::evolution::store::{read_catalog, reject_candidate};
 
 fn ready_candidate(id: &str, kind: EvolutionKind) -> EvolutionCandidate {
     let now = Utc::now();
@@ -124,6 +124,52 @@ fn rollback_preserves_pre_rollback_recovery_copy() {
     assert_eq!(result.candidate.current_version, Some(1));
     assert!(result.recovery_path.is_some());
     assert!(temp.path().join(result.recovery_path.unwrap()).exists());
+}
+
+#[test]
+fn failed_snapshot_verification_restores_the_pre_rollback_asset() {
+    let temp = tempfile::tempdir().unwrap();
+    let paths = EvolutionPaths::new(temp.path());
+    seed(
+        &paths,
+        ready_candidate("evo-skill-corrupt-snapshot", EvolutionKind::Skill),
+    );
+    materialize_candidate(&paths, "evo-skill-corrupt-snapshot", false, false).unwrap();
+    mutate_catalog(&paths, |catalog| {
+        let candidate = candidate_mut(catalog, "evo-skill-corrupt-snapshot")?;
+        candidate
+            .instructions
+            .push("Run the broader verification after focused checks.".to_string());
+        candidate.update_available = true;
+        Ok(())
+    })
+    .unwrap();
+    let current =
+        materialize_candidate(&paths, "evo-skill-corrupt-snapshot", false, false).unwrap();
+    let asset = temp
+        .path()
+        .join(current.candidate.asset_path.as_deref().unwrap());
+    let current_hash = hash_path(&asset).unwrap();
+    let first_snapshot = temp
+        .path()
+        .join(&current.candidate.versions[0].snapshot_path)
+        .join("SKILL.md");
+    fs::write(&first_snapshot, "corrupted immutable snapshot").unwrap();
+
+    let error = rollback_candidate(&paths, "evo-skill-corrupt-snapshot", Some(1))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("immutable v1 snapshot"), "{error}");
+    assert_eq!(hash_path(&asset).unwrap(), current_hash);
+    let catalog = read_catalog(&paths).unwrap();
+    let candidate = catalog
+        .candidates
+        .iter()
+        .find(|candidate| candidate.id == "evo-skill-corrupt-snapshot")
+        .unwrap();
+    assert_eq!(candidate.state, EvolutionState::Materialized);
+    assert_eq!(candidate.current_version, Some(2));
 }
 
 #[test]

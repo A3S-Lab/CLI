@@ -182,19 +182,27 @@ pub(super) fn rollback_candidate(
 
         let recovery = recovery_asset_path(paths, candidate, current);
         let preserved = preserve_active_asset(candidate, &asset, &recovery)?;
-        if let Err(error) = copy_path(&snapshot, &asset) {
-            if preserved && !asset.exists() {
-                restore_recovery_asset(candidate, &recovery, &asset);
+        let restore_result = (|| -> anyhow::Result<()> {
+            copy_path(&snapshot, &asset).context("could not restore evolution snapshot")?;
+            write_marker(candidate, &asset, target)
+                .context("could not mark the restored evolution snapshot")?;
+            let restored_hash = hash_path(&asset)?;
+            if restored_hash != version.content_hash {
+                return Err(anyhow!(
+                    "restored asset hash does not match the immutable v{target} snapshot"
+                ));
             }
-            return Err(error).context("could not restore evolution snapshot");
-        }
-        write_marker(candidate, &asset, target)?;
-
-        let restored_hash = hash_path(&asset)?;
-        if restored_hash != version.content_hash {
-            return Err(anyhow!(
-                "restored asset hash does not match the immutable v{target} snapshot"
-            ));
+            Ok(())
+        })();
+        if let Err(error) = restore_result {
+            if let Err(recovery_error) =
+                recover_failed_rollback(candidate, &asset, &recovery, preserved)
+            {
+                return Err(anyhow!(
+                    "{error:#}; could not restore the pre-rollback asset: {recovery_error:#}"
+                ));
+            }
+            return Err(error);
         }
         let now = Utc::now();
         candidate.current_version = Some(target);
@@ -332,15 +340,78 @@ fn preserve_active_asset(
     Ok(true)
 }
 
-fn restore_recovery_asset(candidate: &EvolutionCandidate, recovery: &Path, asset: &Path) {
-    let _ = fs::rename(recovery, asset);
+fn recover_failed_rollback(
+    candidate: &EvolutionCandidate,
+    asset: &Path,
+    recovery: &Path,
+    preserved: bool,
+) -> anyhow::Result<()> {
+    remove_path_if_exists(asset)?;
+    if candidate.kind == EvolutionKind::Preference {
+        let marker = marker_path(asset, candidate.kind);
+        remove_path_if_exists(&marker)?;
+    }
+    if preserved {
+        restore_recovery_asset(candidate, recovery, asset)?;
+    }
+    Ok(())
+}
+
+fn restore_recovery_asset(
+    candidate: &EvolutionCandidate,
+    recovery: &Path,
+    asset: &Path,
+) -> anyhow::Result<()> {
+    fs::rename(recovery, asset).with_context(|| {
+        format!(
+            "could not move recovery asset {} back to {}",
+            recovery.display(),
+            asset.display()
+        )
+    })?;
     if candidate.kind == EvolutionKind::Preference {
         let recovery_marker = marker_path(recovery, candidate.kind);
         let marker = marker_path(asset, candidate.kind);
         if recovery_marker.exists() {
-            let _ = fs::rename(recovery_marker, marker);
+            if let Err(error) = fs::rename(&recovery_marker, &marker) {
+                let _ = fs::rename(asset, recovery);
+                return Err(error).with_context(|| {
+                    format!(
+                        "could not move recovery marker {} back to {}",
+                        recovery_marker.display(),
+                        marker.display()
+                    )
+                });
+            }
         }
     }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> anyhow::Result<()> {
+    let metadata = match path.symlink_metadata() {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not inspect {}", path.display()))
+        }
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(anyhow!("refusing to remove symlink {}", path.display()));
+    }
+    if metadata.is_file() {
+        fs::remove_file(path)
+            .with_context(|| format!("could not remove partial asset {}", path.display()))?;
+    } else if metadata.is_dir() {
+        fs::remove_dir_all(path)
+            .with_context(|| format!("could not remove partial asset {}", path.display()))?;
+    } else {
+        return Err(anyhow!(
+            "unsupported partial asset entry {}",
+            path.display()
+        ));
+    }
+    Ok(())
 }
 
 fn resolve_asset_path(
