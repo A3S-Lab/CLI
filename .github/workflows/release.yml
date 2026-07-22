@@ -490,9 +490,7 @@ jobs:
         working-directory: support/managed-srt
         env:
           npm_config_registry: https://registry.npmjs.org/
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
           npm_config_replace_registry_host: never
-          NPM_CONFIG_REPLACE_REGISTRY_HOST: never
         run: |
           set -euo pipefail
           npm ci \
