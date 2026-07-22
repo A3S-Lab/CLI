@@ -15,10 +15,10 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 898f6a55554cf566e81903847c17651250d9c444
+  A3S_WEB_SOURCE_REF: 4ba68fde4c2a80afb84cc09636f3408a5d457699
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
-  A3S_WEBVIEW_VERSION: 0.1.2
-  A3S_CODE_CORE_VERSION: 6.1.0
+  A3S_WEBVIEW_VERSION: 0.1.5
+  A3S_CODE_CORE_VERSION: 6.3.0
   A3S_SEARCH_VERSION: 2.0.0
   A3S_TUI_VERSION: 0.1.13
 jobs:
@@ -126,7 +126,7 @@ jobs:
             "a3s-search $A3S_SEARCH_VERSION"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
-            "a3s-use-extension 0.1.2"
+            "a3s-use-extension 0.1.3"
           )
           for requirement in "${required_crates[@]}"; do
             read -r crate dependency_version <<<"$requirement"
@@ -624,8 +624,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp .release-manifest/Cargo.toml Cargo.toml
-          cp .release-manifest/Cargo.lock Cargo.lock
+          bash .github/scripts/use-published-a3s-crates.sh
           cargo metadata --locked --no-deps --format-version 1 >/dev/null
       - name: Download Web workspace
         uses: actions/download-artifact@v4

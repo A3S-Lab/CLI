@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.9] - 2026-07-21
+## [0.9.9] - 2026-07-22
 
 ### Added
 
@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Preserved streamed file response bodies in the Web API gateway instead of
   interpreting PDF and other ordinary binary streams as server-sent events.
+- Bundled A3S WebView 0.1.5 so Agent Island keeps notch-safe placement, native
+  dragging, and the user's chosen position through expand and collapse.
+- Made release archives resolve their standalone dependency graph directly
+  from published A3S crates instead of reading a missing transient manifest.
 
 ## [0.9.8] - 2026-07-21
 
