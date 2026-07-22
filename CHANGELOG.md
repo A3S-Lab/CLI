@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-07-22
+
 ### Fixed
 
 - Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
@@ -14,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now locates its bundled CodeBuddy CLI through standard Windows installation
   directories and registered uninstall metadata, including custom install
   locations.
+- Made official installers accept both legacy archives and complete 0.10
+  bundles. Web assets, the WebView companion, and managed sandbox support now
+  activate as one rollback-safe installation, while transient Windows download
+  failures receive bounded retries.
 
 ## [0.9.9] - 2026-07-22
 
