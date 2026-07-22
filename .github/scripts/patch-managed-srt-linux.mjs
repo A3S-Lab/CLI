@@ -50,6 +50,26 @@ const seccompReadPatched = `        // The outer sandbox can hide the user home 
             : readConfig;
         const fsArgs = await generateFilesystemArgs(effectiveReadConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal);`;
 
+const missingAncestorUpstream = `                    const firstNonExistent = findFirstNonExistentComponent(normalizedPath);
+                    // Fix 2: If firstNonExistent is an intermediate component (not the
+                    // leaf deny path itself), mount a read-only empty directory instead
+                    // of /dev/null. This prevents the component from appearing as a file
+                    // which breaks tools that expect to traverse it as a directory.`;
+
+const missingAncestorPatched = `                    const firstNonExistent = findFirstNonExistentComponent(normalizedPath);
+                    // Multiple child and parent denies can converge on the same first
+                    // missing component. The first read-only mount already protects the
+                    // entire subtree; emitting another can conflict on file-vs-directory
+                    // destination type and make bwrap refuse to start.
+                    if (seenDenyWrite.has(firstNonExistent)) {
+                        continue;
+                    }
+                    seenDenyWrite.add(firstNonExistent);
+                    // Fix 2: If firstNonExistent is an intermediate component (not the
+                    // leaf deny path itself), mount a read-only empty directory instead
+                    // of /dev/null. This prevents the component from appearing as a file
+                    // which breaks tools that expect to traverse it as a directory.`;
+
 const replacements = [
   {
     name: "nested deny mount order",
@@ -60,6 +80,11 @@ const replacements = [
     name: "seccomp helper read access",
     upstream: seccompReadUpstream,
     patched: seccompReadPatched,
+  },
+  {
+    name: "missing ancestor mount deduplication",
+    upstream: missingAncestorUpstream,
+    patched: missingAncestorPatched,
   },
 ];
 
