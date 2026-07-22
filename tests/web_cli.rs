@@ -1485,6 +1485,7 @@ impl DaemonGuard {
             return;
         }
         stop_process(self.pid);
+        wait_until_process_stopped(self.pid);
         self.active = false;
     }
 
@@ -1506,12 +1507,31 @@ fn stop_process(pid: u32) {
         .status();
 }
 
+#[cfg(unix)]
+fn wait_until_process_stopped(pid: u32) {
+    for _ in 0..200 {
+        let running = Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !running {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[cfg(windows)]
 fn stop_process(pid: u32) {
     let _ = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
 }
+
+#[cfg(windows)]
+fn wait_until_process_stopped(_pid: u32) {}
 
 fn temp_directory(name: &str) -> PathBuf {
     let stamp = SystemTime::now()
