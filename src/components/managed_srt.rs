@@ -62,6 +62,8 @@ pub const MANAGED_SRT_PAYLOAD_RELATIVE_ROOT: &str = "support/managed-srt";
 const PACKAGED_SRT_TREE_SHA256: &str = include_str!("../../support/managed-srt.tree-sha256");
 const MANAGED_PACKAGE_JSON: &[u8] = include_bytes!("../../support/managed-srt/package.json");
 const MANAGED_PACKAGE_LOCK: &[u8] = include_bytes!("../../support/managed-srt/package-lock.json");
+const MANAGED_SRT_LINUX_PATCHER: &str =
+    include_str!("../../.github/scripts/patch-managed-srt-linux.mjs");
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const INSTALL_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -511,7 +513,7 @@ async fn install_managed_srt(
             "--replace-registry-host=never",
         ])
         .current_dir(&staged_runtime)
-        .env("PATH", trusted_path)
+        .env("PATH", &trusted_path)
         .env("npm_config_ignore_scripts", "true")
         .env("NPM_CONFIG_IGNORE_SCRIPTS", "true")
         .env("npm_config_registry", NPM_REGISTRY)
@@ -542,6 +544,7 @@ async fn install_managed_srt(
     }
 
     validate_npm_install(&staged_runtime)?;
+    apply_managed_srt_compat_patches(&node, &staged_runtime, &trusted_path).await?;
     let staged_executable = managed_srt_executable(&staged_runtime);
     SrtBashSandbox::from_verified_npm_with_node(&staged_executable, &node, &canonical_workspace)
         .context("staged SRT failed its Core capability handshake")?;
@@ -571,6 +574,82 @@ async fn install_managed_srt(
     activation.commit()?;
 
     Ok(ManagedSrtRuntime { executable, node })
+}
+
+async fn apply_managed_srt_compat_patches(
+    node: &Path,
+    root: &Path,
+    trusted_path: &OsStr,
+) -> anyhow::Result<()> {
+    let patcher = root.join(".a3s-managed-srt-compat.mjs");
+    tokio::fs::write(&patcher, MANAGED_SRT_LINUX_PATCHER)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to stage managed SRT patcher at {}",
+                patcher.display()
+            )
+        })?;
+
+    let mut command = Command::new(node);
+    command
+        .arg(&patcher)
+        .arg(root)
+        .current_dir(root)
+        .env("PATH", trusted_path)
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .env_remove("BASH_ENV")
+        .env_remove("ENV")
+        .env_remove("LD_PRELOAD")
+        .env_remove("DYLD_INSERT_LIBRARIES")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_managed_command(&mut command);
+    let child = command.spawn().with_context(|| {
+        format!(
+            "failed to start managed SRT patcher with {}",
+            node.display()
+        )
+    })?;
+    let mut process_group = ManagedCommandProcessGroup::attach(&child);
+    let output = match tokio::time::timeout(NODE_PROBE_TIMEOUT, child.wait_with_output()).await {
+        Ok(output) => {
+            process_group.terminate();
+            output.context("failed to wait for managed SRT patcher")?
+        }
+        Err(_) => {
+            process_group.terminate();
+            bail!("managed SRT compatibility patch timed out");
+        }
+    };
+
+    tokio::fs::remove_file(&patcher)
+        .await
+        .with_context(|| format!("failed to remove managed SRT patcher {}", patcher.display()))?;
+    if !output.status.success() {
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "managed SRT compatibility patch failed with {}{}",
+            output.status,
+            if diagnostic.trim().is_empty() {
+                String::new()
+            } else {
+                format!(": {}", diagnostic.trim())
+            }
+        );
+    }
+    let result = String::from_utf8(output.stdout)
+        .context("managed SRT compatibility patch output was not UTF-8")?;
+    if result.trim() != "patched" {
+        bail!(
+            "managed SRT compatibility patch returned unexpected output: {}",
+            result.trim()
+        );
+    }
+    Ok(())
 }
 
 fn validate_managed_receipt(

@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `a3s install webview` work in PowerShell and clean Windows CI environments.
 - Pinned managed sandbox release verification to the x64 macOS 15 runner that
   still provides Seatbelt, with a pull-request guard against runner drift.
+- Ordered mandatory Linux sandbox child mounts before A3S's stricter parent
+  denies, preventing bubblewrap startup failures in both bundled and first-use
+  managed sandbox installations without weakening the policy boundary.
 - Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
   fall back to the native Windows user profile when `HOME` is unset. WorkBuddy
   now locates its bundled CodeBuddy CLI through standard Windows installation
