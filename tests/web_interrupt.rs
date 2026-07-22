@@ -38,6 +38,15 @@ impl Drop for TestDirectory {
 
 #[test]
 fn foreground_web_exits_on_ctrl_c_from_raw_terminal() {
+    run_foreground_web_probe(false);
+}
+
+#[test]
+fn foreground_web_exits_when_terminal_disables_signals_after_startup() {
+    run_foreground_web_probe(true);
+}
+
+fn run_foreground_web_probe(disable_signals_after_startup: bool) {
     let directory = TestDirectory::new();
     let config_path = directory.join("config.acl");
     fs::write(&config_path, test_config()).expect("write Web interrupt test config");
@@ -61,6 +70,14 @@ expect {
     }
 }
 
+if {$env(A3S_WEB_INTERRUPT_DISABLE_SIGNALS) == "1"} {
+    if {[catch {stty -isig < $spawn_out(slave,name)} error]} {
+        catch {exec kill -TERM [exp_pid]}
+        catch {wait}
+        puts "failed to disable terminal signals after startup: $error"
+        exit 124
+    }
+}
 send -- "\003"
 set timeout 12
 expect {
@@ -90,12 +107,21 @@ expect {
         .env("A3S_WEB_INTERRUPT_BIN", env!("CARGO_BIN_EXE_a3s"))
         .env("A3S_WEB_INTERRUPT_ROOT", directory.path())
         .env("A3S_WEB_INTERRUPT_CONFIG", &config_path)
+        .env(
+            "A3S_WEB_INTERRUPT_DISABLE_SIGNALS",
+            if disable_signals_after_startup {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .output()
         .expect("run foreground Web PTY probe");
 
     assert!(
         output.status.success(),
-        "foreground Web PTY probe failed:\nstdout: {}\nstderr: {}",
+        "foreground Web PTY probe (disable signals after startup: \
+         {disable_signals_after_startup}) failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

@@ -95,7 +95,7 @@ async fn run_foreground(
     options: ServeOptions,
     cancellation: &CancellationToken,
 ) -> anyhow::Result<Option<WebEndpoint>> {
-    let _interrupt_mode = foreground_interrupt::InterruptSignalGuard::enable()
+    let _interrupt_mode = foreground_interrupt::InterruptSignalGuard::enable(cancellation.clone())
         .context("failed to enable Ctrl+C for foreground A3S Web")?;
     if options.replace {
         background::replace_managed(&options.workspace).await?;
