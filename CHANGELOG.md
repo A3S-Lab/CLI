@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   profile variables when `HOME` is absent, so commands such as
   `a3s install webview` work in PowerShell and clean Windows CI environments.
 - Pinned managed sandbox release verification to the x64 macOS 15 runner that
-  still provides Seatbelt, with a pull-request guard against runner drift.
+  still provides Seatbelt, explicitly provisioned its ripgrep dependency, and
+  added pull-request coverage for both packaged and first-use behavior.
 - Ordered mandatory Linux sandbox child mounts before A3S's stricter parent
   denies and collapsed mounts that converge on the same missing ancestor,
   preventing bubblewrap startup failures in both bundled and first-use managed

@@ -573,6 +573,11 @@ jobs:
             bubblewrap \
             ripgrep \
             socat
+      - name: Provision macOS sandbox test prerequisites
+        if: matrix.platform == 'macos'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ripgrep
       - name: Verify native sandbox prerequisites
         shell: bash
         env:

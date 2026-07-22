@@ -22,16 +22,70 @@ jobs:
       - run: cargo build --release
 
   release-macos-sandbox:
-    name: Verify release macOS sandbox host
+    name: Exercise release managed sandbox on macOS
     runs-on: macos-15-intel
     steps:
-      - name: Exercise the native Seatbelt entrypoint
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.1
+          cache: npm
+          cache-dependency-path: support/managed-srt/package-lock.json
+      - name: Use published A3S crates
+        run: bash .github/scripts/use-published-a3s-crates.sh
+      - name: Prepare the exact managed sandbox release tree
+        working-directory: support/managed-srt
+        env:
+          npm_config_registry: https://registry.npmjs.org/
+          npm_config_replace_registry_host: never
+        run: |
+          set -euo pipefail
+          npm ci \
+            --ignore-scripts \
+            --omit=dev \
+            --no-audit \
+            --no-fund \
+            --engine-strict=true \
+            --registry=https://registry.npmjs.org/ \
+            --replace-registry-host=never
+          node ../../.github/scripts/patch-managed-srt-linux.mjs .
+          node -e '
+            const fs = require("node:fs");
+            for (const path of [
+              "node_modules/.bin",
+              "node_modules/.package-lock.json",
+              "node_modules/@pondwader/socks5-server/.github",
+            ]) {
+              fs.rmSync(path, { recursive: true, force: true });
+            }
+          '
+          node ../../.github/scripts/verify-managed-srt-tree.mjs \
+            . ../managed-srt.tree-sha256
+      - name: Provision native sandbox prerequisites
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install ripgrep
+      - name: Verify native sandbox prerequisites
         run: |
           set -euo pipefail
           test -x /usr/bin/sandbox-exec
+          command -v rg
           /usr/bin/sandbox-exec \
             -p '(version 1) (allow default)' \
             /usr/bin/true
+      - name: Prove the complete packaged sandbox policy
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
+            -- --ignored --exact --nocapture
+      - name: Prove managed sandbox first-use installation
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_managed_first_use_installs_once_and_runs_without_host_fallback \
+            -- --ignored --exact --nocapture
 
   managed-srt-linux:
     name: Exercise release managed sandbox on Linux
