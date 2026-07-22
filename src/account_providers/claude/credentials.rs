@@ -1,4 +1,4 @@
-use crate::account_providers::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};

@@ -472,7 +472,7 @@ fn validate(path: Option<&Path>, context: &InvocationContext) -> anyhow::Result<
 fn user_config_path(context: &InvocationContext) -> anyhow::Result<PathBuf> {
     context
         .user_config_path()
-        .ok_or_else(|| anyhow::anyhow!("HOME is not set; pass `--config <path>`"))
+        .ok_or_else(|| anyhow::anyhow!("user home is unavailable; pass `--config <path>`"))
 }
 
 fn configured_asset_directory(

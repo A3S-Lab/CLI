@@ -1,4 +1,4 @@
-use crate::account_providers::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use windows_sys::Win32::Foundation::{ERROR_NO_MORE_ITEMS, ERROR_SUCCESS};

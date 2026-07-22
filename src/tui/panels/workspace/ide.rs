@@ -233,8 +233,8 @@ impl App {
     fn ide_crumb(&self, path: &std::path::Path) -> String {
         let rel: std::path::PathBuf = if let Ok(p) = path.strip_prefix(&self.cwd) {
             p.to_path_buf()
-        } else if let Some(p) = std::env::var_os("HOME")
-            .and_then(|h| path.strip_prefix(&h).ok().map(|p| p.to_path_buf()))
+        } else if let Some(p) = crate::user_paths::user_home_dir()
+            .and_then(|home| path.strip_prefix(home).ok().map(|p| p.to_path_buf()))
         {
             std::path::Path::new("~").join(p)
         } else {

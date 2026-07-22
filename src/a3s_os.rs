@@ -182,8 +182,7 @@ fn is_loopback_origin(origin: &str) -> bool {
 /// Read the first available local SSH public key, preferring modern key types.
 /// Returns the trimmed one-line contents (`ssh-ed25519 AAAA… comment`).
 fn read_local_pubkey() -> Option<String> {
-    let home = std::env::var_os("HOME")?;
-    let ssh = Path::new(&home).join(".ssh");
+    let ssh = crate::user_paths::user_home_dir()?.join(".ssh");
     for name in ["id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"] {
         if let Ok(s) = std::fs::read_to_string(ssh.join(name)) {
             let line = s.trim();
@@ -399,9 +398,9 @@ fn current_session_at(path: &Path, address: &str) -> Option<StoredOsSession> {
 }
 
 fn os_skills_root() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow!("HOME is not set; cannot install the OS skill"))?;
-    Ok(Path::new(&home).join(".a3s").join("os-skills"))
+    let home = crate::user_paths::user_home_dir()
+        .ok_or_else(|| anyhow!("user home is unavailable; cannot install the OS skill"))?;
+    Ok(home.join(".a3s").join("os-skills"))
 }
 
 /// Materialize the built-in `a3s-os-capabilities` skill (templated with the OS
@@ -898,9 +897,9 @@ fn write_store(path: &Path, store: &OsAuthStore) -> Result<()> {
 }
 
 fn auth_store_path() -> Result<PathBuf> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| anyhow!("HOME is not set; cannot store OS login"))?;
-    Ok(Path::new(&home).join(".a3s").join(STORE_FILE))
+    let home = crate::user_paths::user_home_dir()
+        .ok_or_else(|| anyhow!("user home is unavailable; cannot store OS login"))?;
+    Ok(home.join(".a3s").join(STORE_FILE))
 }
 
 fn validate_address(address: &str) -> Result<()> {

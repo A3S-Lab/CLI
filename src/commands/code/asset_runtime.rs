@@ -82,7 +82,7 @@ impl AssetCommandContext {
         let workspace_text = workspace.to_string_lossy();
         Ok(Self {
             workspace: workspace.clone(),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: crate::user_paths::user_home_dir(),
             directories: crate::commands::config::CodeAssetDirectories {
                 agent: crate::config::agent_dir(),
                 mcp: crate::config::mcp_dir(),

@@ -280,7 +280,7 @@ fn expand_home(path: &str) -> PathBuf {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    crate::user_paths::user_home_dir()
 }
 
 fn fs_error(error: std::io::Error) -> BootError {

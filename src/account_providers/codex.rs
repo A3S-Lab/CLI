@@ -10,7 +10,7 @@ mod stream;
 mod tls;
 mod transport;
 
-use super::paths::user_home_dir;
+use crate::user_paths::user_home_dir;
 use a3s_code_core::llm::{
     structured::{NativeStructuredSupport, StructuredDirective},
     ContentBlock, LlmClient, LlmResponse, Message, ModelGenerationConcurrency,
