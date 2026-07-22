@@ -1,22 +1,20 @@
 const DEEP_RESEARCH_LOOP_STAGES: [&str; 8] = [
-    "semantic_plan",
-    "initial_retrieval",
-    "semantic_chunk_selection",
-    "typed_coverage_evaluation",
-    "optional_supplemental_retrieval",
-    "final_closed_question_review",
-    "host_contract_reduction",
-    "sectioned_report_transaction",
+    "bootstrap_acquisition",
+    "optional_outline",
+    "batched_evidence_extraction",
+    "host_coverage_reduction",
+    "optional_gap_acquisition",
+    "optional_gap_extraction",
+    "report_document_generation",
+    "deterministic_publication",
 ];
 
-const DEEP_RESEARCH_LOOP_CARDINALITY: [&str; 7] = [
-    "semantic_iterations",
-    "retrieval_passes",
-    "semantic_selections",
-    "question_reviews",
-    "contract_assessments",
-    "report_transactions",
-    "section_revision_rounds",
+const DEEP_RESEARCH_LOOP_CARDINALITY: [&str; 5] = [
+    "outline_generations",
+    "initial_extractions",
+    "gap_extractions",
+    "report_generations",
+    "report_repairs",
 ];
 
 const GENERATED_SEMANTIC_OUTLINE_FIELDS: [&str; 4] = [
@@ -46,8 +44,8 @@ pub(super) async fn generate_plan(
         .cloned()
         .ok_or_else(|| "DeepResearch planner contract has no output schema".to_string())?;
     let outline_prompt = required_planner_text(planner, "prompt")?;
-    let outline_timeout_ms = required_planner_timeout(planner, "timeout_ms")?
-        .min(PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS);
+    let outline_timeout_ms =
+        required_planner_timeout(planner, "timeout_ms")?.min(PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS);
 
     let outline_fragment = generate_planner_fragment(
         session,
@@ -133,7 +131,8 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         "Loop Engineering contract",
     )?;
     if contract.get("version").and_then(Value::as_u64) != Some(1)
-        || contract.get("pattern").and_then(Value::as_str) != Some("minimal-deep-research")
+        || contract.get("pattern").and_then(Value::as_str)
+            != Some("evidence-first-deep-research")
         || contract.get("controller").and_then(Value::as_str) != Some("host_inquiry_reducer")
     {
         return Err(
@@ -155,8 +154,8 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         .and_then(Value::as_object)
         .ok_or_else(|| "DeepResearch Loop Engineering contract omitted quota".to_string())?;
     reject_unknown_fields(quota, &["mode"], "Loop Engineering quota")?;
-    if quota.get("mode").and_then(Value::as_str) != Some("unlimited") {
-        return Err("DeepResearch Loop Engineering quota must be `unlimited`".to_string());
+    if quota.get("mode").and_then(Value::as_str) != Some("bounded") {
+        return Err("DeepResearch Loop Engineering quota must be `bounded`".to_string());
     }
 
     let execution = contract
@@ -164,9 +163,10 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         .and_then(Value::as_object)
         .ok_or_else(|| "DeepResearch Loop Engineering contract omitted execution".to_string())?;
     reject_unknown_fields(execution, &["mode", "stages"], "Loop Engineering execution")?;
-    if execution.get("mode").and_then(Value::as_str) != Some("coverage_driven") {
+    if execution.get("mode").and_then(Value::as_str) != Some("progressively_publishable") {
         return Err(
-            "DeepResearch Loop Engineering execution must be `coverage_driven`".to_string(),
+            "DeepResearch Loop Engineering execution must be `progressively_publishable`"
+                .to_string(),
         );
     }
     let stages = execution
@@ -201,13 +201,11 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         "Loop Engineering cardinality",
     )?;
     for (field, expected) in [
-        ("semantic_iterations", 2),
-        ("retrieval_passes", 2),
-        ("semantic_selections", 2),
-        ("question_reviews", 1),
-        ("contract_assessments", 1),
-        ("report_transactions", 1),
-        ("section_revision_rounds", 2),
+        ("outline_generations", 1),
+        ("initial_extractions", 1),
+        ("gap_extractions", 1),
+        ("report_generations", 1),
+        ("report_repairs", 1),
     ] {
         if cardinality.get(field).and_then(Value::as_u64) != Some(expected) {
             return Err(format!(
@@ -226,12 +224,8 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             "agent",
             "description",
             "max_steps",
-            "outline_timeout_ms",
-            "track_timeout_ms",
-            "retrieval_timeout_ms",
-            "outline_prompt",
-            "track_prompt",
-            "retrieval_prompt",
+            "timeout_ms",
+            "prompt",
             "output_schema",
         ],
         "Loop Engineering planner",
@@ -241,12 +235,7 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             "DeepResearch Loop Engineering planner has an unsupported agent identity".to_string(),
         );
     }
-    for field in [
-        "description",
-        "outline_prompt",
-        "track_prompt",
-        "retrieval_prompt",
-    ] {
+    for field in ["description", "prompt"] {
         if planner
             .get(field)
             .and_then(Value::as_str)
@@ -257,13 +246,13 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
             ));
         }
     }
-    for field in [
-        "outline_timeout_ms",
-        "track_timeout_ms",
-        "retrieval_timeout_ms",
-    ] {
-        required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")?;
-    }
+    required_integer_in_range(
+        planner,
+        "timeout_ms",
+        1_000,
+        PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS,
+        "Loop Engineering planner",
+    )?;
     if !planner.get("output_schema").is_some_and(Value::is_object) {
         return Err(
             "DeepResearch Loop Engineering planner omitted its object output schema".to_string(),
@@ -277,11 +266,10 @@ pub(super) fn validated_loop_planner(workflow_args: &Value) -> Result<&Map<Strin
         .ok_or_else(|| {
             "DeepResearch planner output schema omitted a bounded track maximum".to_string()
         })?;
-    let planner_max_steps =
-        required_integer_in_range(planner, "max_steps", 3, 6, "Loop Engineering planner")?;
-    if planner_max_steps != schema_max_tracks + 2 {
+    if planner.get("max_steps").and_then(Value::as_u64) != Some(1) {
         return Err(
-            "DeepResearch Loop Engineering planner must reserve one outline, one effect per possible track, and one retrieval effect".to_string(),
+            "DeepResearch Loop Engineering planner must contain exactly one optional outline effect"
+                .to_string(),
         );
     }
 
@@ -345,60 +333,6 @@ fn required_planner_timeout(planner: &Map<String, Value>, field: &str) -> Result
     required_integer_in_range(planner, field, 1_000, 600_000, "Loop Engineering planner")
 }
 
-pub(super) fn planner_fragment_schema(
-    full_schema: &Value,
-    fields: &[&str],
-) -> Result<Value, String> {
-    if fields.is_empty() {
-        return Err("DeepResearch planner fragment requires at least one field".to_string());
-    }
-    let mut schema = full_schema.clone();
-    let object = schema
-        .as_object_mut()
-        .ok_or_else(|| "DeepResearch full planner schema is not an object".to_string())?;
-    let properties = object
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "DeepResearch full planner schema omitted object properties".to_string())?;
-    let missing = fields
-        .iter()
-        .filter(|field| !properties.contains_key(**field))
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!(
-            "DeepResearch planner fragment requested unknown schema fields: {}",
-            missing.join(", ")
-        ));
-    }
-    properties.retain(|field, _| fields.contains(&field.as_str()));
-    object.insert(
-        "required".to_string(),
-        Value::Array(
-            fields
-                .iter()
-                .map(|field| Value::String((*field).to_string()))
-                .collect(),
-        ),
-    );
-    Ok(schema)
-}
-
-pub(super) fn planner_semantic_outline_schema(full_schema: &Value) -> Result<Value, String> {
-    let mut schema = planner_fragment_schema(full_schema, &GENERATED_SEMANTIC_OUTLINE_FIELDS)?;
-    let track_schema = schema
-        .pointer_mut("/properties/tracks/items")
-        .ok_or_else(|| {
-            "DeepResearch full planner schema omitted its track item schema".to_string()
-        })?;
-    retain_object_schema_fields(
-        track_schema,
-        &TRACK_IDENTITY_FIELDS,
-        "planner track identity",
-    )?;
-    Ok(schema)
-}
-
 pub(super) fn close_semantic_outline(mut outline: Value) -> Result<Value, String> {
     let object = outline
         .as_object_mut()
@@ -416,42 +350,6 @@ pub(super) fn close_semantic_outline(mut outline: Value) -> Result<Value, String
         ]),
     );
     Ok(outline)
-}
-
-fn retain_object_schema_fields(
-    schema: &mut Value,
-    fields: &[&str],
-    resource: &str,
-) -> Result<(), String> {
-    let object = schema
-        .as_object_mut()
-        .ok_or_else(|| format!("DeepResearch {resource} schema is not an object"))?;
-    let properties = object
-        .get_mut("properties")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| format!("DeepResearch {resource} schema omitted object properties"))?;
-    let missing = fields
-        .iter()
-        .filter(|field| !properties.contains_key(**field))
-        .copied()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(format!(
-            "DeepResearch {resource} schema omitted fields: {}",
-            missing.join(", ")
-        ));
-    }
-    properties.retain(|field, _| fields.contains(&field.as_str()));
-    object.insert(
-        "required".to_string(),
-        Value::Array(
-            fields
-                .iter()
-                .map(|field| Value::String((*field).to_string()))
-                .collect(),
-        ),
-    );
-    Ok(())
 }
 
 fn semantic_outline_track_targets(outline: &Value) -> Result<Vec<Value>, String> {

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.9.7"
+version = "0.10.0"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -30,6 +30,7 @@ dependencies = [
  "httpdate",
  "image",
  "libc",
+ "notify",
  "olpc-cjson",
  "rand 0.8.7",
  "regex",
@@ -52,8 +53,10 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "url",
  "webpki-roots 1.0.9",
  "windows-sys 0.61.2",
+ "zeroize",
  "zip 2.4.2",
 ]
 
@@ -103,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "6.1.0"
+version = "6.4.0"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -153,6 +156,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-sys 0.61.2",
  "zip 0.6.6",
 ]
 
@@ -174,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-flow"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -223,7 +227,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-search"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-updater 0.2.0",
@@ -300,7 +304,7 @@ version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2a2402bdf7821c201de3d01a3f3155f3097563afeb3d6c9195a03978872e5f76"
 dependencies = [
- "a3s-use-core 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "a3s-use-core 0.1.2",
  "async-trait",
  "chromiumoxide",
  "fs2",
@@ -319,6 +323,17 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26b023e7ac799aafe5eba517f08c7419b2990aa4acb099ecf14e73a8de7bab17"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "a3s-use-core"
+version = "0.2.0"
 dependencies = [
  "olpc-cjson",
  "semver",
@@ -330,22 +345,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "a3s-use-core"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26b023e7ac799aafe5eba517f08c7419b2990aa4acb099ecf14e73a8de7bab17"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.19",
-]
-
-[[package]]
 name = "a3s-use-extension"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "a3s-acl 0.2.2",
- "a3s-use-core 0.1.2",
+ "a3s-use-core 0.2.0",
  "flate2",
  "fs2",
  "reqwest 0.12.28",
@@ -1755,7 +1759,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3189,7 +3193,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3815,7 +3819,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4237,7 +4241,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4326,7 +4330,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4777,7 +4781,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -5048,7 +5052,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5938,7 +5942,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -6462,6 +6466,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"

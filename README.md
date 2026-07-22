@@ -70,6 +70,32 @@ If a source or Cargo installation does not have that helper, RemoteUI falls
 back immediately to the browser and agent-island startup is skipped with a
 diagnostic; neither condition prevents the TUI from starting.
 
+### Weixin channel activation
+
+A3S Web contains a native Rust iLink adapter. An official build enables its
+real QR flow only when an A3S-specific app ID and permitted bot type are
+injected at build time. Approved local development can instead set
+`A3S_WEIXIN_ILINK_APP_ID` and `A3S_WEIXIN_ILINK_BOT_TYPE`, or reference them in
+`config.acl`:
+
+```acl
+channels {
+  weixin {
+    enabled = true
+    app_id = env("A3S_WEIXIN_ILINK_APP_ID")
+    bot_type = env("A3S_WEIXIN_ILINK_BOT_TYPE")
+    allowed_hosts = ["ilinkai.weixin.qq.com"]
+  }
+}
+```
+
+Restart `a3s web` after changing this boot-time configuration. When valid,
+**Settings → Channels → Weixin** exposes QR binding and starts the supervised
+read-only monitor after binding. Missing identity, the OpenClaw-only `bot`
+identity, unsafe local storage, or an invalid hostname policy keeps the channel
+unavailable and sends no upstream request. Tokens, owner IDs, cursors, and
+authenticated iLink URLs never enter the browser.
+
 ### Components and delayed installation
 
 The built-in catalog registers `code`, `box`, `bench`, `search`, and `use`.
@@ -557,11 +583,17 @@ loopback-only.
 Durable memory extraction may attach a validated, LLM-authored
 `a3s.evolution.signal.v1` description for a reusable preference, Skill, or OKF
 knowledge package. Code never promotes ordinary memory through keyword
-matching. The local `/api/v1/evolution` API lists evidence-backed candidates,
-rescans the durable store, materializes reviewed workspace assets, records
-rejection/reopen decisions, and rolls back immutable versions while preserving
-a recovery copy. Nothing is published automatically. Preference and Skill
-changes rebuild affected sessions before they are reported as active.
+matching. It aggregates matching evidence across sessions and can automatically
+materialize a conflict-free local asset only after the stricter recurrence,
+session, confidence, importance, and explicit-signal thresholds are all met.
+Nothing is published automatically. The local `/api/v1/evolution` API lists
+evidence-backed candidates, rescans the durable store, supports explicit save,
+reject, and reconsider decisions, and rolls back immutable versions while
+preserving a recovery copy. Rolling back to the baseline removes the active
+asset without deleting its versions, so it can be restored later. Active
+preferences are injected into bounded system-prompt context and active Skills
+are loaded from the workspace Skill directory. TUI and Web keep an activation
+barrier until every affected live session has refreshed successfully.
 
 Code Web also exposes a VS Code-style package contribution boundary under
 `/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
@@ -835,7 +867,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
-| Deep research | Prefix a prompt with `?` to run the coverage-driven event-sourced pipeline: semantic plan → initial retrieval → closed semantic chunk selection with typed source-relevance and full-coverage edges → Host gap evaluation → an optional supplemental fetch from the existing provider candidate catalog → obligation-level closed-evidence review → Host contract assessment → deterministic outline, durable sections, and report audit. The planner defines up to four stable tracks with atomic completion criteria, four provider queries, eight initial web-fetch slots (zero in local-only mode), optional seed URLs, evidence requirements, and observable stopping conditions. Seed URLs enter the same semantic candidate catalog and never reserve a fetch slot. Provider queries are forwarded byte-for-byte exactly once to the fixed AnySearch, Tavily, and DuckDuckGo ensemble and remain plan-level inputs; provider rank, title, snippet, engine, and date stay discovery metadata and never become report evidence. Initial semantic admission fills the available fetch slots with materially distinct authoritative opportunities when enough candidates exist. One supplemental pass may fetch at most two additional previously unselected candidates when typed coverage or an operational fetch/source-selection gap remains; it cannot add, rewrite, translate, or retry a provider query, and it avoids repeating a fetch-failed transport surface when a distinct candidate remains. Web and Host-restored local text enter closed multilingual catalogs. Catalogs of at most 10 chunks use one selector; larger catalogs use one complete source-local selector per canonical source, retaining at most four excerpts and never splitting one source into positional windows or running a final source reducer. Each source-local selector gets one 270-second active attempt; a failure drops only that source and preserves completed siblings. The Host validates every selected chunk ID and source/obligation relevance/criterion/role edge before restoring exact text, then materializes exactly one accepted evidence item per canonical source so claims cannot borrow another source's citation. Primary-source satisfaction requires a typed `primary` edge, while independent corroboration requires typed `independent` edges from at least two distinct answer-path source IDs. Questions linked to the same obligation share one durable review call over relevance-linked evidence plus unscoped legacy evidence; models return short Host-owned evidence references such as `E1`, which the Host maps to exact evidence IDs per question. Up to three obligation groups or report sections run concurrently. Contract assessment and outline construction are Host-owned. The Host derives cited source IDs from exact Markdown anchors, requires every committed claim to cite a source from its own accepted evidence binding, publishes only cited sources, demotes nested H1/H2 syntax, and builds qualified cautions from typed limitations. Closed section packets include bounded accepted-claim excerpts; ISO, English, and Chinese full dates must normalize to those committed claims before publication. There are no scout, perspective, maker/checker, query-generating follow-up wave, adaptive route, or hidden continuation. One durable `research.report.started` origin, one shared targeted-revision allowance, and one re-audit bound the report transaction across resume. |
+| Deep research | Prefix a prompt with `?` to run the evidence-first Host path: the exact query plus one deterministic date- and script-aware outcome companion search → semantic candidate admission with accountable-publisher resilience, or accountable Host-ranked acquisition fallback → safe fetch and source sanitization → deterministic source-backed staging → strict outcome extraction when applicable, otherwise one closed report proposal with at most one transient retry → Host admission → atomic Markdown and HTML publication. Search inherits the active `config.acl` engine policy; without an override it uses DuckDuckGo and Wikipedia, while AnySearch remains opt-in. Provider metadata is never report evidence. A synthesized success must contain a semantic direct answer, a distinct Findings block, at least two admitted cited claims, and exact catalog citations. Final citations are numbered densely in first-citation order from the sources actually used, and the Host rebuilds one matching deduplicated source ledger. Each core atomic claim additionally requires one complete verified institutional record or one explicitly accountable publisher that establishes the whole claim; independent corroboration is preferred when available but unrelated citations are never added merely to increase source count. If synthesis does not pass, fetched evidence remains visible in an explicitly degraded source snapshot; if no safe evidence exists, the Host publishes an honest no-evidence boundary report. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle so long sessions continue through repeated compactions. `/history` or `Ctrl+R` fuzzy-searches prompts in the current session without changing the draft; `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -844,103 +876,89 @@ input prefixes:
 | OS and RemoteUI | `/login` enables OS capabilities. Shaped OS progressive responses (`.view` or `viewUrl`) surface an inline `Open view` action, using the native `a3s-webview` helper when available and browser fallback otherwise. |
 | Operations | `/help` shows the full command guide, `/terminal` reports negotiated terminal capabilities and fallbacks, and `/checkup` audits installation/configuration/context health in enforced read-only Plan mode before presenting proposed fixes at an Approve / Revise / Abandon boundary. `/theme` cycles syntax themes, `/plugin` and `/reload` manage skills/plugins, `/update` upgrades and restarts, `/compact` summarizes context, `/fork worktree` creates an isolated workspace branch, and `/rewind` safely undoes the last completed turn. |
 
-Every DeepResearch run automatically creates a transient coverage-driven Loop
-Engineering contract as durable workflow input. Its quota mode is `unlimited`
-and its immutable stage graph permits at most two semantic iterations, two
-retrieval passes, and two semantic selections, followed by exactly one
-closed obligation-review stage, Host assessment, report transaction, and optional
-targeted section revision round. Rust Inquiry validates those limits before
-model or retrieval work and remains the execution and terminal authority. The
-second retrieval pass is conditional: Host-validated typed coverage gaps or
-operational fetch/source-selection gaps may select previously unselected
-candidates from the original provider catalog, with no new or rewritten query
-and at most two supplemental fetches beyond the eight initial web-fetch slots.
-This automatic contract does not create a user-managed
-`.a3s/loops/` directory and does not restore maker/checker or adaptive semantic
-loops. Unlimited quota is separate from per-call timeouts, output-size limits,
-concurrency limits, and other safety fuses required to terminate a failed run
-safely.
+Every new DeepResearch run starts acquisition from the exact user query; it
+does not wait for a semantic planner. Web scope adds exactly one deterministic
+companion query containing the run date and a fixed outcome-and-news phrase.
+Han queries use `<query> <YYYY年M月D日> 最新进展 最终结果 新闻`; other queries use
+`<query> <YYYY-MM-DD> latest development final outcome news`. This improves
+current accountable-publisher recall without opening a query-generation
+fan-out. Web discovery results first enter one closed semantic-admission attempt
+with a 60-second active cap inside the 150-second acquisition stage. A valid
+non-empty selection is supplemented, within the existing fetch cap, by
+distinct-host institutional or accountable-publisher candidates so an
+under-selected model result cannot starve the evidence set. If admission fails
+or times out, acquisition alone falls back to at most six deterministic
+candidates spread across query provenance and distinct hosts; an explicit empty
+semantic selection remains empty. Within each trust tier, candidates whose
+discovery metadata offers a result, score, outcome, or latest-state retrieval
+opportunity rank ahead of background-only pages, but that metadata never
+becomes evidence. Fallback text has to pass deterministic query-relevance,
+publisher-accountability, protected-domain, and publication gates before it can
+support a conclusion. There is no unrecorded post-fetch semantic-selector stage
+on this evidence-first path.
+Search-engine and admission fallback notices remain visible in run metadata.
+Only safely fetched, canonicalized, query-relevant source text enters the report
+catalog; script, style, navigation, escaped hydration data, serialized
+application state, JavaScript-placeholder content, template expressions, and
+inline transport URLs are discarded while visible source-link labels are
+retained. Community and streaming hosts, and self-publishing pages
+whose own disclaimer says that views belong to the author or the platform only
+provides storage, cannot support report claims and are visibly marked
+`not eligible for conclusions` in a degraded source view. A failed or
+irrelevant source cannot erase valid siblings.
 
-Stage cardinality counts logical semantic passes, not model request count:
-complete source-local selectors, obligation-level reviews, and per-section
-generation remain independently durable execution units inside their declared
-stage. They cannot create a third research iteration, regenerate a provider
-query, or reopen a completed review or report transaction.
+Once at least one source survives, the Host atomically stages `report.md` and
+`index.html` before report synthesis becomes terminal. That source-backed
+artifact is intentionally classified as `degraded`: it reports zero synthesized
+claims and makes the evidence limitation explicit instead of presenting source
+excerpts as a finished answer. With no safely publishable source, the same Host
+path writes a localized no-evidence boundary artifact.
 
-The complete initial evidence portfolio is durably checkpointed before any
-optional supplemental work. If the shared retrieval deadline interrupts that
-optional pass, the Host validates and restores only the exact same-run,
-same-query checkpoint with traceable evidence and Host terminal authority. A
-slow supplement therefore cannot erase already completed material evidence.
+For an explicit result, winner, champion, score, or standings query, the Host
+first attempts a narrow deterministic outcome report. It splits fetched topic
+pages at sentence and navigation boundaries, extracts only exact source spans,
+and rejects questions, future schedules, generic index headings, navigation
+piles, and title lists that merely contain words such as `champion`. A direct
+answer must assert an actual outcome, while Findings must be distinct,
+claim-like facts from that same source; cross-source event linking remains the
+semantic proposal's responsibility. A headline that only restates the direct
+outcome is not retained merely to fill the Findings count. Betting odds,
+predictions, historical roundups, and time-only score widgets are never outcome
+evidence. The same current-date, language, numeric-literal, direct-answer, and
+strong-source gates still apply. If those gates admit one
+direct answer and at least one Finding from a verified institution or
+accountable publisher, the Host publishes `synthesized` with
+`synthesis_mode = deterministic_outcome_extract` and makes no report-model
+call. Otherwise it leaves the staged source view intact and continues to the
+closed proposal path.
 
-Each obligation review uses short Host-owned evidence references and a strict
-shared envelope, then decodes every expected question independently. One
-malformed entry or invalid reference therefore bounds only that question. If a
-provider marks an entry `answered` while also returning an explicit limitation,
-the Host safely demotes it to `partial` instead of overstating or discarding the
-traceable result.
+The optional report proposal is a closed structured generation over source
+aliases and bounded excerpts. A transient generation failure may retry once;
+there is no reviewer, repair wave, section fan-out, or hidden continuation. The
+Host independently rejects unknown citations, unsupported numbers or dates,
+wrong-language prose, source instructions, malformed blocks, and schedule or
+background prose mislabeled as the answer to a requested result while keeping
+valid siblings. Summary and Findings are admitted as atomic claims: every
+cited source must contain every date and number in that block, so separate
+sources cannot be stitched into one apparent fact. Each core block needs one
+complete verified institutional source or one explicitly accountable publisher
+that supports the entire block. Independent corroboration is preferred when
+available, but an unrelated citation is never added merely to increase source
+count. For current-result and status queries, an
+explicit stage snapshot more than seven days behind the freshest retained
+evidence cannot support the current answer. Publication is `synthesized` only
+when the admitted result has a direct answer, a distinct Findings section, at
+least two cited claim blocks, and at least one cited eligible source. Untrusted
+audit sources do not poison an otherwise valid proposal, but they cannot be
+cited to strengthen a conclusion. Website metrics are derived from admitted
+Findings and citations, never from source headings or provider metadata.
 
-Closed question review, section generation/revision, and editorial framing
-share one semantic-granularity contract. Source fields keep their original
-meaning; raw observations cannot become invented intervals, dependency
-requirements cannot become incompatibility, discontinuation cannot become a
-promise of no future fixes, recommended replacements gain no unsupported
-properties, and a few reviewed examples cannot become an ecosystem-wide claim.
-Internal fetch/review diagnostics remain available to assessment but stay out
-of the reader-facing source ledger. Reader-facing review, section/revision, and
-frame prose stays in the query language, and a question-local evidence gap
-cannot be presented as a report-wide absence.
-Every replacement receives the exact source alternatives for all of its
-evidence bindings so repairing one omission cannot drop a valid sibling
-citation. A model-authored strict child path is canonicalized to the longest
-same-origin committed parent; a merely similar or wider URL still fails closed.
-
-Structured-generation fan-out uses the provider's typed finite concurrency
-contract. One gate is owned by the `AgentSession` and survives the rebuilt
-host-direct runtimes used by independent durable review and report units. An
-exact `generate_object` Flow step acquires capacity before its Program VM
-starts, passes a one-shot identity-checked permit into the nested call, and
-records queue wait separately from the bounded active-generation fuse. A
-complete source-local selector gets one 270-second attempt and drops only that
-source on failure; admission and small-catalog selection use the same retryable
-210-second fuse. Admission delay therefore consumes neither the
-Program deadline nor the generation deadline, and parallel nested or
-host-direct calls cannot create or reuse another reservation. Selector role
-schemas require the complete object
-`{supporting: true, primary: bool, independent: bool}`; Host validation then
-canonicalizes it into durable role enums, so schema acceptance and coverage
-validation cannot disagree.
-
-A terminal DeepResearch report view opens only after every child task observed
-for that research run has reached a terminal state. Unused live branches are
-cancelled before auto mode is restored, so the bottom subagent tracker cannot
-outlive a completed parent report. Esc interruption follows the same scoped
-settlement path without opening an incomplete report, and stale tracker
-snapshots cannot restore already-settled rows. `/exit` and confirmed Ctrl+C
-close the session and settle the active stream before the process exits.
-
-`a3s code research` (with `deepresearch` and `deep-research` aliases) and the
-TUI `?` path use the same semantic planner,
-automatic Loop contract, coverage-driven retrieval adapter, closed typed
-selector, obligation-level review, contract assessment, timeout policy, and report
-pipeline; there is no second CLI implementation. The planner has a 360-second
-active-generation deadline. The durable Inquiry budget is 45 minutes:
-after the planner, retrieval has one real 25-minute whole-stage deadline,
-closed-evidence review has a protected 15-minute stage budget with at most two
-300-second active attempts per durable obligation group, and two minutes
-remain reserved for deterministic finalization. Per-step Program limits remain
-active-work fuses and are not treated as the retrieval-stage clock. The
-completed-report transaction has one separate durable deadline recorded by
-`research.report.started`; outline, section generation, the optional targeted
-revision, re-audit, and frame do not receive independent clocks. No effort
-profile can add a third research iteration,
-automatic delegation, fan-out, or a parent continuation. Terminal publication
-waits for every observed effect to settle. The CLI emits `completed`,
-`qualified`, or `degraded` explicitly. Host code validates obligation coverage,
-typed source roles, accepted citations, and quantitative grounding, then
-atomically materializes `report.md` and `index.html`. Insufficient or
-untraceable evidence produces an explicit degraded Recovery report and a
-nonzero result.
+`a3s code research` (including its aliases) and the TUI `?` path call this same
+evidence-first runtime; there is no second CLI implementation. Durable search,
+fetch, generation, and publication identities are reused after restart, and
+bootstrap workflow metadata cannot replace the Host-owned terminal result. A
+report view opens only after the scoped run has settled and the Markdown/HTML
+pair passes path, content, and quality validation.
 
 ### Everyday Capability Paths
 
@@ -955,7 +973,7 @@ permissions, tools, panels, and follow-up evidence are needed.
 | Debugging and verification | Let the model inspect logs, grep call sites, run shell or test commands, and keep the exact tool evidence visible in the semantic transcript. | `grep`, `read`, `bash`, `git`, `Ctrl+T`, `a3s top` |
 | Context carry-over | Search previous sessions, attach relevant transcript windows, save durable facts, and compact when the context meter gets high. | `/ctx <query>`, `/ctx <n>`, `/ctx save <n>`, `/memory`, `/sleep`, `/compact` |
 | Deep work | Raise `/effort`, use `ultracode` for complex turns, and let the host decide whether planning, goal tracking, dynamic workflow execution, or parallel fan-out is justified. | `/effort`, `/goal`, `dynamic_workflow`, `task`, `parallel_task` |
-| Research | Prefix with `?` so the host runs one semantic plan, one evidence pass, closed review, contract assessment, and a cited report. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
+| Research | Prefix with `?` so the Host acquires relevant sources first, stages a durable evidence view, and publishes a cited report only after deterministic quality admission. | `? <question>`, `web_search`, `web_fetch`, `batch`, `generate_object`, `DynamicWorkflowRuntime` |
 | Local asset development | Enter an asset mode, iterate on the selected local definition, review it, then publish or deploy only when the OS side is available and appropriate. | `/agent`, `/mcp`, `/skill`, `/okf`, `/flow`, `/loop` |
 | Operations and recovery | Resume saved sessions, inspect local or OS activity, hot-reload plugins, and update the CLI without losing the session. | `a3s code resume`, `Open view`, `a3s top`, asset `activity`, `/plugin`, `/reload`, `/update` |
 
@@ -1588,7 +1606,7 @@ These commands are available outside the asset-specific flows:
 | `/init` | Analyze the workspace and generate an `AGENTS.md` instruction file. |
 | `/config` | Edit the active ACL config in the built-in editor. |
 | `/terminal` | Inspect the detected emulator and multiplexer, terminal I/O, canvas size, render fallback, color depth, alternate-screen/mouse/paste support, enhanced keys, OSC 8 links, OSC 52 copy, and actionable passthrough warnings. |
-| `/checkup` | Run an audit-first setup checkup. A typed host preflight checks the installed-component set, active-executable/PATH shadowing, bounded ACL syntax and semantic validity, skill/plugin context cost and duplicates, indexed `AGENTS.md` size, and in-memory MCP counts without starting servers or exposing raw paths, errors, configuration contents, or secrets. A strict read-only Plan turn then audits applicable `AGENTS.md`, integrations, update state, and runtime policy. Optional Auto-mode and exact read-only grant offers stay separate from health findings. Findings and confirmation-sized remediations stop at Approve / Revise / Abandon; only an approved follow-up may change state, under normal HITL. |
+| `/checkup` | Review local context hygiene from real `Skill` usage. A typed preflight scans at most 128 persisted sessions and reports invocation/session counts plus context bytes. Cleanup suggestions require at least three sessions, twelve completed turns, and a Skill older than 14 days. Recently changed, duplicate-name, disabled, managed, and unknown-age Skills are excluded. Instruction and MCP counts are footprint signals only and never treated as usage telemetry. A strict read-only Plan turn offers each eligible Skill as a separate reversible `/plugin` disable choice; it never deletes files or changes anything before Approve / Revise / Abandon and normal HITL. |
 | `/queue` | Inspect pending follow-ups with their submission-time modes; Send now, remove one row, or explicitly confirm clearing all pending rows. |
 | `/history` | Fuzzy-search up to 100 matching prompts from the current session and restore the selected text without disturbing the current draft on cancel. |
 | `/copy` / `/copy transcript` | Copy the latest assistant source Markdown or the complete semantic session. Native clipboard delivery is reported only when verified; otherwise the TUI identifies the OSC 52 request and its 64,000-byte UTF-8 payload limit. |
@@ -1599,7 +1617,7 @@ These commands are available outside the asset-specific flows:
 | `/login` / `/logout` | Sign in or out of the configured OS account; login registers OS capabilities and the `runtime` tool. |
 | `/ide` | Open the workspace file browser and editor. |
 | `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
-| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence and versions; materialize, reject, reopen, or roll back local assets. |
+| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence, activation state, audit history, and immutable versions; save, reject, reconsider, restore a version, or return to the unmaterialized baseline. Mature conflict-free candidates may save locally automatically, but are never published. |
 | `/ctx <query>` | Search past ctx-indexed sessions. |
 | `/ctx <n>` | Attach a previous search result to the next message. |
 | `/ctx save <n>` | Promote a previous session hit into durable memory. |
@@ -1686,7 +1704,7 @@ the skill matcher for the current request.
 | `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
 | `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
 | `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
-| `? <question>` | Starts the coverage-driven DeepResearch pipeline described above. Planner queries reach providers unchanged and exactly once; a second retrieval pass can only fetch at most two remaining candidates from that original catalog when typed coverage or operational fetch/source-selection gaps remain. Source-local selector, obligation-review, and section effects are independently durable, and active execution contains no lexical relevance gate, scout, perspective, maker/checker, query-generating follow-up wave, adaptive route, or hidden continuation. Selector, typed source-coverage, source-local claim binding, heading, replay, and artifact violations fail closed. Resume reuses completed effects, cannot reset the one report revision allowance, exceed the two-pass coverage contract, or reopen a completed report pipeline. |
+| `? <question>` | Starts the evidence-first DeepResearch path described above. The exact query reaches search unchanged beside one fixed outcome-and-news companion query. A non-empty semantic selection receives bounded institutional and accountable-publisher resilience before fetch; after an actual admission failure, the acquisition-only fallback ranks verified institutions and accountable publishers before unknown, social, or lookalike hosts. Fetched text then passes deterministic query, publisher, protected-domain, and publication gates; the active path does not claim a post-fetch semantic selector that it never runs. The Host stages a degraded source snapshot before attempting a closed report proposal, retries a transient proposal failure at most once, and publishes normal success only after semantic direct-answer, Findings, cited-claim, citation, language, atomic-fact, and strong-source gates pass. Resume reuses completed durable effects and cannot promote a source snapshot into synthesized success. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |

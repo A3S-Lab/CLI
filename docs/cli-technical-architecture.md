@@ -378,58 +378,53 @@ pair. The TUI imports that module as a presentation adapter; the application
 runtime never imports TUI internals and must not regain a string-based CLI
 router.
 
-DeepResearch automatically materializes a transient Loop Engineering contract
-for each TUI or headless run. The contract has `quota.mode = unlimited` and an
-immutable `coverage_driven` stage graph. Its maximum logical cardinality is two
-semantic iterations, retrieval passes, and semantic selections, followed by one
-obligation-review stage, Host contract assessment, report transaction, and
-targeted section revision allowance. It travels with durable workflow input but
-never creates a user-facing `.a3s/loops/` asset. Rust Inquiry validates the
-contract, owns legal state transitions and terminal authority, and delegates
-only durable effects to Flow.
+Every new TUI or headless run records a transient evidence-first contract with
+`quota.mode = bounded` and `execution.mode = progressively_publishable`. The
+contract travels with durable runtime input but never creates a user-facing
+`.a3s/loops/` asset. One Host-owned wall-clock origin bounds acquisition,
+optional report proposal, and finalization across process restarts; a resumed
+process consumes the remaining budget instead of receiving a fresh one.
 
-The first pass creates the complete provider candidate catalog and has eight
-initial web-fetch slots. Source-local selectors emit obligation-relevance edges
-for partial routing and separate criterion/role edges for full coverage. A
-second pass is legal only when Host-validated coverage edges expose a typed gap
-or the Host counts evidence lost to an initial fetch/source-selection failure;
-it may fetch at most two additional previously unselected candidates and avoids
-a fetch-failed transport surface when a distinct candidate remains. It cannot
-call search again or create, rewrite, normalize, or translate a provider query. Per-call
-deadlines, output bounds, concurrency ceilings, and catalog limits are safety
-fuses rather than quota accounting; none can authorize a third pass or reopen a
-terminal stage.
+`spawn_deep_research_evidence_first` is the new-run entry point. It initializes
+the journal, runs one durable bootstrap acquisition, converts the canonical
+workflow result into a Host-owned source catalog, stages a deterministic report,
+optionally upgrades it with an admitted proposal, and returns one publication
+projection. The TUI and `commands/code` use this same application runtime; no
+string-based CLI router or second report implementation is allowed.
 
-The initial materialized evidence result is an explicit durable Flow checkpoint
-before the optional second pass. When the shared retrieval deadline interrupts
-that optional work, Rust validates and restores the checkpoint by exact run ID,
-query, evidence ledger, and Host terminal-authority marker, then continues into
-closed review. An unfinished supplement cannot replace the initial result with
-an empty collection.
+Web bootstrap searches the exact query and one deterministic date-aware
+outcome-and-news companion. Candidate discovery metadata enters one closed
+semantic admission call before fetch. A non-empty selection can receive only a
+bounded institutional or accountable-publisher resilience fill; a failed call
+uses the deterministic acquisition fallback, while an explicit empty selection
+remains empty. Only safely fetched, canonicalized, sanitized, and
+query-relevant content enters the source catalog. Provider rank, snippet, date,
+engine, and title remain discovery metadata.
 
-Obligation review generation uses short Host-owned evidence references rather
-than model-copied evidence hashes. Rust maps those references through the exact
-per-question catalog before committing any answer event. The shared envelope is
-validated once, then each question entry is decoded independently: a malformed
-sibling fails closed on its own, while `answered` plus a non-empty limitation is
-monotonically demoted to `partial`. Section generation
-receives bounded claim excerpts for each committed evidence binding; the Host
-normalizes ISO, English, and Chinese full dates and rejects a section whose date
-does not resolve to one of its committed claims. Citation and date failures
-share the single durable targeted-revision allowance.
-Closed question review, section generation/revision, and frame generation also
-carry one semantic-granularity contract. It forbids unstated interval math,
-metadata reclassification, dependency-to-incompatibility inference,
-discontinuation-to-no-future-fix inference, unsupported replacement properties,
-and ecosystem-wide conclusions from a few examples. Source discovery/review
-metadata remains internal when the final source ledger is assembled.
-Reader-facing structured output uses the query language, and scoped evidence
-absence cannot become a report-global assertion. Editorial-frame generation
-uses two 270-second active attempts inside the one durable report budget.
-Revision packets carry exact citation alternatives for the complete binding
-set. Citation normalization accepts only a strict same-origin path descendant
-of a non-root committed source and selects the longest matching parent; lexical
-prefixes, broader roots, and code spans are not normalized.
+Search, fetch, and structured-generation effects use stable A3S Flow identities.
+Completed effects replay from their journals. A running effect whose completion
+was not durably acknowledged is redelivered with the same attempt identity and
+therefore has explicit at-least-once semantics. The local Flow JSONL store
+preserves a complete final envelope missing only its delimiter and discards only
+an unterminated torn tail before the next append; terminated or interior
+corruption still fails closed.
+
+The Host builds a source-backed Markdown/HTML pair before report generation can
+become a terminal risk. An empty catalog instead produces the no-evidence pair.
+When claim-eligible sources exist, one closed report proposal may run with at
+most one transient retry. The proposal receives bounded source aliases and text,
+no tools, and no publication authority. Rust admits blocks independently,
+resolves citations to the exact catalog, applies language and structural quality
+gates, rebuilds the source ledger, and atomically replaces both artifacts only
+when the synthesized result passes.
+
+The returned status distinguishes `synthesized`, `source_backed`, and
+`no_evidence`; it never equates artifact availability with semantic truth.
+Bootstrap metadata is deliberately withheld from the Host-owned terminal tool
+result so legacy workflow canonicalization cannot replace publication output
+with acquisition output. The older typed Inquiry and sectioned-report pipeline
+remains only for existing-journal compatibility and focused migration tests; it
+is not a selectable runtime for new CLI or TUI requests.
 
 ## 11. Component Application Layer
 

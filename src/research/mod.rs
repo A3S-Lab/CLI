@@ -12,6 +12,8 @@ mod reducer;
 mod state;
 mod validation;
 
+pub mod compiler;
+
 pub use error::{InquiryError, InquiryReplayError};
 pub use event::InquiryEvent;
 pub use evidence::{

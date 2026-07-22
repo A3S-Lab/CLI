@@ -136,6 +136,7 @@ fn discover_dynamic_use_extensions(parent_binary: &Path) -> anyhow::Result<Vec<C
             update: UpdateState::Unknown,
             trust: match component.get("trust").and_then(serde_json::Value::as_str) {
                 Some("local-explicit") => Trust::LocalExplicit,
+                Some("release-bundle") => Trust::ReleaseBundle,
                 Some("registry-tuf") => Trust::RegistryTuf,
                 _ => Trust::Untrusted,
             },
@@ -158,45 +159,10 @@ pub(crate) fn extension_registry_provenance(
     id: &ComponentId,
     paths: &ComponentPaths,
 ) -> anyhow::Result<Option<ResolvedRemotePackage>> {
-    let use_id = ComponentId::parse("use")?;
-    let package_id = id
-        .relative_to(&use_id)
-        .filter(|value| value.split('/').count() == 2)
-        .with_context(|| format!("component '{}' is not an external Use extension", id))?;
-    let parent = find_state(&use_id, paths)?;
-    let parent_binary = parent
-        .is_ready()
-        .then_some(parent.path.as_deref())
-        .flatten()
-        .with_context(|| "parent component 'use' is not ready")?;
-    let output = run_bounded(
-        parent_binary.as_os_str(),
-        &[
-            OsString::from("component"),
-            OsString::from("status"),
-            OsString::from(package_id),
-            OsString::from("--json"),
-        ],
-    )?;
-    if !output.success {
-        bail!("Use component status exited unsuccessfully");
-    }
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("invalid Use component status JSON")?;
-    let component = value
-        .get("component")
-        .or_else(|| value.get("data").and_then(|data| data.get("component")))
-        .context("Use component status has no component object")?;
-    let returned_id = component
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .context("Use component status has no component ID")?;
-    if returned_id != package_id && returned_id != id.as_str() {
-        bail!("Use component status returned mismatched ID '{returned_id}'");
-    }
-
+    let (package_id, component) = external_extension_status(id, paths)?;
+    let package_id = package_id.as_str();
     match component.get("trust").and_then(serde_json::Value::as_str) {
-        Some("local-explicit") => Ok(None),
+        Some("local-explicit" | "release-bundle") => Ok(None),
         Some("registry-tuf") => {
             let registry = component
                 .get("registry")
@@ -223,6 +189,86 @@ pub(crate) fn extension_registry_provenance(
         Some(trust) => bail!("unsupported installed extension trust source '{trust}'"),
         None => bail!("installed extension status has no trust source"),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstalledReleaseBundle {
+    pub(crate) version: String,
+    pub(crate) package_sha256: String,
+}
+
+pub(crate) fn extension_release_bundle_provenance(
+    id: &ComponentId,
+    paths: &ComponentPaths,
+) -> anyhow::Result<Option<InstalledReleaseBundle>> {
+    let (_, component) = external_extension_status(id, paths)?;
+    if component.get("trust").and_then(serde_json::Value::as_str) != Some("release-bundle") {
+        return Ok(None);
+    }
+    let version = component
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .context("release-bundled extension status has no version")?
+        .to_string();
+    let package_sha256 = component
+        .get("packageSha256")
+        .and_then(serde_json::Value::as_str)
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        .context("release-bundled extension status has no valid package digest")?
+        .to_string();
+    Ok(Some(InstalledReleaseBundle {
+        version,
+        package_sha256,
+    }))
+}
+
+fn external_extension_status(
+    id: &ComponentId,
+    paths: &ComponentPaths,
+) -> anyhow::Result<(String, serde_json::Value)> {
+    let use_id = ComponentId::parse("use")?;
+    let package_id = id
+        .relative_to(&use_id)
+        .filter(|value| value.split('/').count() == 2)
+        .with_context(|| format!("component '{}' is not an external Use extension", id))?
+        .to_string();
+    let parent = find_state(&use_id, paths)?;
+    let parent_binary = parent
+        .is_ready()
+        .then_some(parent.path.as_deref())
+        .flatten()
+        .with_context(|| "parent component 'use' is not ready")?;
+    let output = run_bounded(
+        parent_binary.as_os_str(),
+        &[
+            OsString::from("component"),
+            OsString::from("status"),
+            OsString::from(&package_id),
+            OsString::from("--json"),
+        ],
+    )?;
+    if !output.success {
+        bail!("Use component status exited unsuccessfully");
+    }
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("invalid Use component status JSON")?;
+    let component = value
+        .get("component")
+        .or_else(|| value.get("data").and_then(|data| data.get("component")))
+        .context("Use component status has no component object")?;
+    let returned_id = component
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .context("Use component status has no component ID")?;
+    if returned_id != package_id && returned_id != id.as_str() {
+        bail!("Use component status returned mismatched ID '{returned_id}'");
+    }
+    Ok((package_id, component.clone()))
 }
 
 pub fn find_state(id: &ComponentId, paths: &ComponentPaths) -> anyhow::Result<ComponentState> {

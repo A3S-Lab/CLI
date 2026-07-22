@@ -19,6 +19,9 @@ mod tuf_test_support;
 
 use tuf_test_support::{extension_archive, TestRepository, TestServer, FUTURE, PACKAGE_VERSION};
 
+#[path = "web_plugin_marketplace/real_e2e.rs"]
+mod real_e2e;
+
 #[test]
 fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
     let temp = TempWorkspace::new("web-plugin-marketplace");
@@ -41,13 +44,20 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
 
     let activity_html =
         "<!doctype html><title>Science</title><main>Installed Marketplace Activity</main>";
+    let activity_css = "main { color: rebeccapurple; }";
+    let activity_js =
+        "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');";
     let skill = "---\nname: science\ndescription: Use the installed Science extension.\n---\n# Science\n\nUse the verified Science capability.\n";
     let activity_path = package_root.join("web/activity.html");
+    let activity_style_path = package_root.join("web/activity.css");
+    let activity_script_path = package_root.join("web/activity.js");
     let skill_path = package_root.join("skills/science/SKILL.md");
     fs::create_dir_all(activity_path.parent().expect("activity parent"))
         .expect("create activity directory");
     fs::create_dir_all(skill_path.parent().expect("skill parent")).expect("create skill directory");
     fs::write(&activity_path, activity_html).expect("write activity asset");
+    fs::write(&activity_style_path, activity_css).expect("write activity style");
+    fs::write(&activity_script_path, activity_js).expect("write activity script");
     fs::write(&skill_path, skill).expect("write Skill asset");
 
     let empty_snapshot = snapshot_envelope(1, "1", Vec::new());
@@ -74,6 +84,16 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
                 "sha256": sha256(activity_html.as_bytes()),
                 "mediaType": "text/html",
             },
+            "styles": [{
+                "path": activity_style_path,
+                "sha256": sha256(activity_css.as_bytes()),
+                "mediaType": "text/css",
+            }],
+            "scripts": [{
+                "path": activity_script_path,
+                "sha256": sha256(activity_js.as_bytes()),
+                "mediaType": "text/javascript",
+            }],
             "skill": "science",
             "order": 80,
         }],
@@ -83,6 +103,7 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
     let installed_snapshot_path = temp.path("installed-snapshot.json");
     let changed_snapshot_path = temp.path("changed-snapshot.json");
     let unchanged_snapshot_path = temp.path("unchanged-snapshot.json");
+    let removed_snapshot_path = temp.path("removed-snapshot.json");
     fs::write(
         &empty_snapshot_path,
         serde_json::to_vec(&empty_snapshot).unwrap(),
@@ -108,13 +129,30 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
         br#"{"schemaVersion":1,"ok":true,"data":{"changed":false}}"#,
     )
     .expect("write unchanged snapshot");
+    fs::write(
+        &removed_snapshot_path,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "changed": true,
+                "registry": snapshot_envelope(3, "3", Vec::new())["data"]["registry"],
+            },
+        }))
+        .unwrap(),
+    )
+    .expect("write removed snapshot");
     make_use_fixture(
         &use_bin,
         &installed_marker,
-        &empty_snapshot_path,
-        &installed_snapshot_path,
-        &changed_snapshot_path,
-        &unchanged_snapshot_path,
+        &package_root,
+        UseFixtureSnapshots {
+            empty: &empty_snapshot_path,
+            installed: &installed_snapshot_path,
+            changed: &changed_snapshot_path,
+            removed: &removed_snapshot_path,
+            unchanged: &unchanged_snapshot_path,
+        },
     );
 
     let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
@@ -152,6 +190,7 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
         })
         .unwrap_or_else(|| panic!("signed Marketplace package: {marketplace:#}"));
     assert_eq!(item["installed"], false);
+    assert_eq!(item["displayName"], "科研");
     assert_eq!(item["sha256"], repository.target_sha256);
 
     let plan = http_json(
@@ -202,6 +241,9 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
     assert_eq!(activity["packageId"], "use/a3s/science");
     assert_eq!(activity["skill"], "science");
     assert_eq!(activity["enabled"], true);
+    let installed_generation = activities["generation"]
+        .as_u64()
+        .expect("installed registry generation");
 
     let content = http_json(
         &address,
@@ -210,6 +252,8 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
         None,
     );
     assert_eq!(content["html"], activity_html);
+    assert_eq!(content["styles"], json!([activity_css]));
+    assert_eq!(content["scripts"], json!([activity_js]));
     assert_eq!(content["sha256"], sha256(activity_html.as_bytes()));
     assert_eq!(content["skill"], "science");
 
@@ -222,6 +266,45 @@ fn marketplace_install_hot_plugs_a_verified_activity_and_skill() {
                 .find(|item| item["componentId"] == "use/a3s/science")
         })
         .is_some_and(|item| item["installed"] == true && item["enabled"] == true));
+
+    let uninstall_plan = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/operations/plan",
+        Some(&json!({
+            "action": "uninstall",
+            "componentId": "use/a3s/science",
+        })),
+    );
+    assert_eq!(uninstall_plan["dryRun"], true);
+    let uninstall_digest = uninstall_plan["planDigest"]
+        .as_str()
+        .expect("reviewed uninstall digest");
+    let uninstalled = http_json(
+        &address,
+        "POST",
+        "/api/v1/plugins/operations/apply",
+        Some(&json!({
+            "action": "uninstall",
+            "componentId": "use/a3s/science",
+            "planDigest": uninstall_digest,
+        })),
+    );
+    assert!(uninstalled["operations"]
+        .as_array()
+        .is_some_and(|operations| operations
+            .iter()
+            .any(|operation| operation["changed"] == true)));
+    wait_for_activity_absent(&address, "science:research", installed_generation);
+    let removed_marketplace = http_json(&address, "GET", "/api/v1/plugins/marketplace", None);
+    assert!(removed_marketplace["items"]
+        .as_array()
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["componentId"] == "use/a3s/science")
+        })
+        .is_some_and(|item| item["installed"] == false && item["enabled"] == false));
 
     daemon.stop();
     wait_until_stopped(&address);
@@ -242,33 +325,67 @@ fn snapshot_envelope(generation: u64, revision_digit: &str, capabilities: Vec<Va
     })
 }
 
+struct UseFixtureSnapshots<'a> {
+    empty: &'a Path,
+    installed: &'a Path,
+    changed: &'a Path,
+    removed: &'a Path,
+    unchanged: &'a Path,
+}
+
 fn make_use_fixture(
     directory: &Path,
     installed_marker: &Path,
-    empty_snapshot: &Path,
-    installed_snapshot: &Path,
-    changed_snapshot: &Path,
-    unchanged_snapshot: &Path,
+    package_root: &Path,
+    snapshots: UseFixtureSnapshots<'_>,
 ) {
+    let installed_components = directory.join("installed-components.json");
+    fs::create_dir_all(directory).expect("create A3S Use fixture directory");
+    fs::write(
+        &installed_components,
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "components": [{
+                    "id": "a3s/science",
+                    "description": "Installed signed Science extension",
+                    "presence": "managed",
+                    "health": "ready",
+                    "version": PACKAGE_VERSION,
+                    "path": package_root,
+                    "trust": "registry-tuf",
+                }],
+            },
+        }))
+        .expect("serialize installed component list"),
+    )
+    .expect("write installed component list");
     make_executable(
         &directory.join("a3s-use"),
         &format!(
             r#"#!/bin/sh
 if [ "$1" = "--version" ]; then printf 'a3s-use 0.1.2\n'; exit 0; fi
 if [ "$1" = "capability" ] && [ "$2" = "snapshot" ]; then
-  if [ -f {marker} ]; then /bin/cat {installed}; else /bin/cat {empty}; fi
+  state=$(/bin/cat {marker} 2>/dev/null || true)
+  if [ "$state" = "installed" ]; then /bin/cat {installed}; elif [ "$state" = "removed" ]; then /bin/cat {removed}; else /bin/cat {empty}; fi
   exit 0
 fi
 if [ "$1" = "capability" ] && [ "$2" = "watch" ]; then
-  if [ -f {marker} ] && [ "$4" = "1" ]; then /bin/cat {changed}; else /bin/sleep 0.05; /bin/cat {unchanged}; fi
+  state=$(/bin/cat {marker} 2>/dev/null || true)
+  if [ "$state" = "installed" ] && [ "$4" = "1" ]; then /bin/cat {changed}; elif [ "$state" = "removed" ] && [ "$4" = "2" ]; then /bin/cat {removed}; else /bin/sleep 0.05; /bin/cat {unchanged}; fi
   exit 0
 fi
 if [ "$1" = "component" ] && [ "$2" = "list" ]; then
-  printf '{{"schemaVersion":1,"ok":true,"data":{{"components":[]}}}}\n'
+  if [ "$(/bin/cat {marker} 2>/dev/null || true)" = "installed" ]; then
+    /bin/cat {installed_components}
+  else
+    printf '{{"schemaVersion":1,"ok":true,"data":{{"components":[]}}}}\n'
+  fi
   exit 0
 fi
 if [ "$1" = "component" ] && [ "$2" = "status" ]; then
-  if [ -f {marker} ]; then
+  if [ "$(/bin/cat {marker} 2>/dev/null || true)" = "installed" ]; then
     printf '{{"schemaVersion":1,"ok":true,"data":{{"component":{{"id":"%s","presence":"managed","health":"ready","version":"{version}","trust":"registry-tuf"}}}}}}\n' "$3"
   else
     printf '{{"schemaVersion":1,"ok":true,"data":{{"component":{{"id":"%s","presence":"missing","health":"unknown"}}}}}}\n' "$3"
@@ -280,13 +397,20 @@ if [ "$1" = "component" ] && [ "$2" = "install" ]; then
   printf '{{"schemaVersion":1,"ok":true,"data":{{"changed":true,"component":{{"id":"%s","version":"{version}","trust":"registry-tuf"}}}}}}\n' "$3"
   exit 0
 fi
+if [ "$1" = "component" ] && [ "$2" = "uninstall" ]; then
+  printf 'removed\n' > {marker}
+  printf '{{"schemaVersion":1,"ok":true,"data":{{"changed":true,"component":"%s"}}}}\n' "$3"
+  exit 0
+fi
 exit 2
 "#,
             marker = sh_quote(installed_marker),
-            installed = sh_quote(installed_snapshot),
-            empty = sh_quote(empty_snapshot),
-            changed = sh_quote(changed_snapshot),
-            unchanged = sh_quote(unchanged_snapshot),
+            installed_components = sh_quote(&installed_components),
+            installed = sh_quote(snapshots.installed),
+            empty = sh_quote(snapshots.empty),
+            changed = sh_quote(snapshots.changed),
+            removed = sh_quote(snapshots.removed),
+            unchanged = sh_quote(snapshots.unchanged),
             version = PACKAGE_VERSION,
         ),
     );
@@ -315,6 +439,7 @@ fn enroll_registry(
             "--yes",
         ])
         .env("A3S_USE_INSTALL_DIR", use_bin)
+        .env_remove("A3S_USE_HOME")
         .output()
         .expect("enroll signed registry");
     assert!(
@@ -352,6 +477,7 @@ fn start_web(
         .arg(web_dir)
         .env("A3S_USE_INSTALL_DIR", use_bin)
         .env("A3S_CODE_WEB_STATE_DIR", session_state)
+        .env_remove("A3S_USE_HOME")
         .current_dir(workspace)
         .output()
         .expect("start detached Web");
@@ -386,11 +512,28 @@ fn wait_for_activity(address: &str, key: &str) -> Value {
     panic!("Activity Bar contribution '{key}' did not hot-plug");
 }
 
+fn wait_for_activity_absent(address: &str, key: &str, after_generation: u64) {
+    for _ in 0..200 {
+        let catalog = http_json(address, "GET", "/api/v1/plugins/activities", None);
+        if catalog["items"]
+            .as_array()
+            .is_some_and(|items| items.iter().all(|item| item["key"] != key))
+            && catalog["generation"]
+                .as_u64()
+                .is_some_and(|generation| generation > after_generation)
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("Activity Bar contribution '{key}' did not disappear after uninstall");
+}
+
 fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> Value {
     let body = body.map(Value::to_string).unwrap_or_default();
     let mut stream = TcpStream::connect(address).expect("connect to Web API");
     stream
-        .set_read_timeout(Some(Duration::from_secs(10)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .expect("set response timeout");
     write!(
         stream,
@@ -402,7 +545,10 @@ fn http_json(address: &str, method: &str, path: &str, body: Option<&Value>) -> V
     stream
         .read_to_string(&mut response)
         .expect("read Web API response");
-    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "{method} {path} returned an unexpected response:\n{response}"
+    );
     let (_, body) = response
         .split_once("\r\n\r\n")
         .unwrap_or_else(|| panic!("HTTP response has no body: {response}"));

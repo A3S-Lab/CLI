@@ -41,7 +41,7 @@ default_model = "openai/my-model"
 # }
 
 # Optional: a3s-search configuration. HTTP engines need no browser. Enable the
-# headless block only for google, baidu, or bing_cn; manage browser runtimes
+# headless block only for google or baidu; manage browser runtimes
 # with `a3s search browser ...` and verify them with `a3s search doctor`.
 # search {
 #   timeout = 20
@@ -49,6 +49,7 @@ default_model = "openai/my-model"
 #     ddg   { enabled = true  weight = 1.0 }
 #     brave { enabled = true  weight = 1.0 }
 #     wiki  { enabled = true  weight = 0.8 }
+#     # anysearch { enabled = true weight = 1.0 } # opt-in provider
 #     # baidu  { enabled = true weight = 1.0 }
 #     # bing_cn { enabled = true weight = 1.0 }
 #   }

@@ -11,6 +11,7 @@ mod managed_srt;
 mod paths;
 mod plan;
 mod probe;
+mod release_bundle;
 mod release_install;
 mod state;
 
@@ -31,6 +32,7 @@ pub use managed_srt::{
 pub use paths::ComponentPaths;
 pub use plan::ComponentPlanMismatch;
 pub use probe::{webview_binary_supports_agent_island, webview_supports_agent_island_output};
+pub use release_bundle::list_release_bundles_with;
 
 fn progress(enabled: bool, message: impl std::fmt::Display) {
     if enabled {

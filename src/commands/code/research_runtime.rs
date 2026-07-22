@@ -103,17 +103,53 @@ pub(crate) async fn execute_deepresearch_in(
         Err(error) => (error, 1, None),
     };
 
-    let mut synthesis = synthesize_deepresearch_report(
-        &session,
+    let mut synthesis = match crate::tui::deep_research_evidence_first_published_report(
         workspace,
         &opts.query,
         &workflow_output,
-        exit_code,
-        metadata.as_ref(),
-        &run_id,
-        &report_tool_gate,
     )
-    .await?;
+    .map_err(anyhow::Error::msg)?
+    {
+        Some(published) => {
+            let text = crate::tui::clean_deep_research_final_text_from_artifacts(
+                &published.artifacts,
+                workspace,
+            )
+            .unwrap_or_else(|| "DeepResearch report published without a text preview.".to_string());
+            let status = match published.publication {
+                crate::tui::DeepResearchEvidenceFirstPublication::Synthesized => {
+                    DeepResearchReportStatus::Completed
+                }
+                crate::tui::DeepResearchEvidenceFirstPublication::SourceBacked => {
+                    DeepResearchReportStatus::Degraded
+                }
+                crate::tui::DeepResearchEvidenceFirstPublication::NoEvidence => {
+                    DeepResearchReportStatus::Degraded
+                }
+            };
+            DeepResearchReportSynthesis {
+                text,
+                artifacts: ResearchReportArtifacts {
+                    markdown: published.artifacts.markdown,
+                    html: published.artifacts.html,
+                },
+                status,
+            }
+        }
+        None => {
+            synthesize_deepresearch_report(
+                &session,
+                workspace,
+                &opts.query,
+                &workflow_output,
+                exit_code,
+                metadata.as_ref(),
+                &run_id,
+                &report_tool_gate,
+            )
+            .await?
+        }
+    };
     let requested_outcome = match synthesis.status {
         DeepResearchReportStatus::Completed => crate::tui::ResearchOutcome::Completed,
         DeepResearchReportStatus::Qualified => crate::tui::ResearchOutcome::Qualified,
@@ -123,17 +159,19 @@ pub(crate) async fn execute_deepresearch_in(
         markdown: synthesis.artifacts.markdown.clone(),
         html: synthesis.artifacts.html.clone(),
     };
-    let settled_outcome = crate::tui::settle_deep_research_cli_run(
-        workspace,
-        &run_id,
-        workflow_succeeded,
-        &workflow_output,
-        metadata.as_ref(),
-        requested_outcome,
-        &journal_artifacts,
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    let settled_outcome =
+        crate::tui::settle_deep_research_cli_run(crate::tui::DeepResearchCliSettlement {
+            workspace,
+            run_id: &run_id,
+            query: &opts.query,
+            workflow_succeeded,
+            workflow_output: &workflow_output,
+            workflow_metadata: metadata.as_ref(),
+            requested_outcome,
+            artifacts: &journal_artifacts,
+        })
+        .await
+        .map_err(anyhow::Error::msg)?;
     synthesis.status = match settled_outcome {
         crate::tui::ResearchOutcome::Completed => DeepResearchReportStatus::Completed,
         crate::tui::ResearchOutcome::Qualified => DeepResearchReportStatus::Qualified,
@@ -438,8 +476,9 @@ async fn run_deepresearch_inquiry(
     session: Arc<AgentSession>,
     args: serde_json::Value,
 ) -> Result<ToolCallResult, String> {
-    let timeout_ms = crate::tui::DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
-    let (mut progress_rx, workflow_join) = crate::tui::spawn_deep_research_inquiry(session, args);
+    let timeout_ms = crate::tui::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
+    let (mut progress_rx, workflow_join) =
+        crate::tui::spawn_deep_research_evidence_first(session, args);
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
     let result = match tokio::time::timeout(
@@ -453,7 +492,7 @@ async fn run_deepresearch_inquiry(
         Err(_) => {
             workflow_abort.abort();
             Err(format!(
-                "DeepResearch inquiry timed out after {timeout_ms} ms while gathering and reviewing evidence"
+                "DeepResearch timed out after {timeout_ms} ms while acquiring sources and publishing its Host-owned report"
             ))
         }
     };
@@ -470,6 +509,9 @@ async fn run_deepresearch_inquiry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Frozen replay tests stay isolated from production control flow.
+    #[path = "baseline.rs"]
+    mod baseline;
     #[path = "cli.rs"]
     mod cli;
     #[path = "workflow.rs"]

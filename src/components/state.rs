@@ -37,6 +37,7 @@ pub enum UpdateState {
 pub enum Trust {
     FirstParty,
     LocalExplicit,
+    ReleaseBundle,
     RegistryTuf,
     Untrusted,
     NotApplicable,

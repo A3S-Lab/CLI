@@ -53,6 +53,14 @@ impl WorkspaceController {
         self.service.init_prompt(request).await
     }
 
+    #[post("/actions/pick-directory")]
+    async fn pick_workspace_directory(
+        &self,
+        #[body] _request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.pick_directory().await
+    }
+
     #[post("/mkdir")]
     async fn create_workspace_dir(
         &self,
@@ -124,6 +132,14 @@ impl WorkspaceController {
         #[query("path")] path: String,
     ) -> BootResult<Vec<serde_json::Value>> {
         self.service.read_dir(path).await
+    }
+
+    #[get("/watch", raw)]
+    async fn watch_workspace(
+        &self,
+        #[query("rootPath")] root_path: String,
+    ) -> BootResult<BootResponse> {
+        self.service.watch(root_path).await
     }
 
     #[post("/rename")]

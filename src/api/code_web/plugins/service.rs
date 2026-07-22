@@ -141,11 +141,69 @@ impl PluginsService {
 
         let mut registries = Vec::new();
         let mut items = Vec::new();
+        let mut bundled_identities = HashSet::new();
+        match a3s::components::list_release_bundles_with(&component_paths).await {
+            Ok(packages) if !packages.is_empty() => {
+                let package_count = packages.len();
+                for package in packages {
+                    let component_id = package.component_id;
+                    let package_id = package.package_id;
+                    let version = package.version;
+                    let package_sha256 = package.package_sha256;
+                    let installed_enabled = installed.get(&component_id).copied();
+                    bundled_identities.insert((
+                        package_id.clone(),
+                        version.clone(),
+                        "stable".to_string(),
+                    ));
+                    items.push(json!({
+                        "componentId": component_id,
+                        "packageId": package_id.clone(),
+                        "displayName": package_display_name(&package_id),
+                        "registryName": "A3S 发行包",
+                        "registryUrl": "a3s-use://release-bundles",
+                        "sourceKind": "release-bundle",
+                        "version": version.clone(),
+                        "channel": "stable",
+                        "target": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                        "archiveName": format!("release-bundle/{package_id}"),
+                        "length": package.byte_count,
+                        "sha256": package_sha256.clone(),
+                        "integrityDigest": package_sha256,
+                        "installed": installed_enabled.is_some(),
+                        "enabled": installed_enabled.unwrap_or(false),
+                    }));
+                }
+                registries.push(json!({
+                    "name": "A3S 发行包",
+                    "url": "a3s-use://release-bundles",
+                    "sourceKind": "release-bundle",
+                    "configured": true,
+                    "verified": true,
+                    "hostTarget": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                    "metadata": {
+                        "packageTargets": package_count,
+                    },
+                }));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                registries.push(json!({
+                    "name": "A3S 发行包",
+                    "url": "a3s-use://release-bundles",
+                    "sourceKind": "release-bundle",
+                    "configured": true,
+                    "verified": false,
+                    "error": concise_error(&error.to_string()),
+                }));
+            }
+        }
         for record in records {
             if !record.configured {
                 registries.push(json!({
                     "name": record.name,
                     "url": record.url,
+                    "sourceKind": "registry",
                     "configured": false,
                     "verified": false,
                 }));
@@ -157,6 +215,7 @@ impl PluginsService {
                     registries.push(json!({
                         "name": record.name,
                         "url": record.url,
+                        "sourceKind": "registry",
                         "configured": true,
                         "verified": false,
                         "error": concise_error(&error.to_string()),
@@ -175,6 +234,7 @@ impl PluginsService {
                     registries.push(json!({
                         "name": record.name,
                         "url": record.url,
+                        "sourceKind": "registry",
                         "configured": true,
                         "verified": false,
                         "error": concise_error(&error.to_string()),
@@ -185,6 +245,7 @@ impl PluginsService {
                     registries.push(json!({
                         "name": record.name,
                         "url": record.url,
+                        "sourceKind": "registry",
                         "configured": true,
                         "verified": false,
                         "error": format!("registry verification timed out after {} seconds", MARKETPLACE_REFRESH_TIMEOUT.as_secs()),
@@ -193,6 +254,13 @@ impl PluginsService {
                 }
             };
             for package in latest_signed_packages(catalog.packages) {
+                if bundled_identities.contains(&(
+                    package.package_id.clone(),
+                    package.version.clone(),
+                    package.channel.clone(),
+                )) {
+                    continue;
+                }
                 let component_id = format!("use/{}", package.package_id);
                 let signed_plan_digest = package
                     .plan_digest()
@@ -204,6 +272,7 @@ impl PluginsService {
                     "displayName": package_display_name(&package.package_id),
                     "registryName": package.registry_name,
                     "registryUrl": package.registry_url,
+                    "sourceKind": "registry",
                     "version": package.version,
                     "channel": package.channel,
                     "target": package.target,
@@ -218,6 +287,7 @@ impl PluginsService {
             registries.push(json!({
                 "name": record.name,
                 "url": record.url,
+                "sourceKind": "registry",
                 "configured": true,
                 "verified": true,
                 "metadata": catalog.metadata,
@@ -476,6 +546,9 @@ fn latest_signed_packages(
 }
 
 fn package_display_name(package_id: &str) -> String {
+    if package_id == "a3s/science" {
+        return "科研".to_string();
+    }
     package_id
         .rsplit('/')
         .next()
@@ -721,5 +794,11 @@ mod tests {
         assert!(!invocation
             .windows(2)
             .any(|arguments| arguments == ["--output", "json"]));
+    }
+
+    #[test]
+    fn marketplace_uses_the_research_product_name_for_the_science_package() {
+        assert_eq!(package_display_name("a3s/science"), "科研");
+        assert_eq!(package_display_name("acme/data-tools"), "Data Tools");
     }
 }

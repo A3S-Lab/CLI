@@ -199,7 +199,7 @@
       mode: "auto",
       max_repair_attempts: 1,
       include_raw_text: false,
-      timeout_ms: MODEL_GENERATION_ACTIVE_TIMEOUT_MS,
+      timeout_ms: WEB_SOURCE_SELECTION_ACTIVE_TIMEOUT_MS,
     };
   };
 
@@ -443,7 +443,7 @@
             operationalGapCount,
             initialAttempts
           ),
-          retry: settings.semantic_selection_retry,
+          retry: settings.semantic_web_selection_retry,
         },
         selection: null,
         coverage_gaps: coverageGaps,

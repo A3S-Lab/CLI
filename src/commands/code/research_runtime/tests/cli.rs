@@ -564,17 +564,19 @@ async fn deepresearch_cli_completed_path_uses_terminal_shared_report_pipeline() 
         markdown: synthesis.artifacts.markdown.clone(),
         html: synthesis.artifacts.html.clone(),
     };
-    let journal_outcome = crate::tui::settle_deep_research_cli_run(
-        workspace.path(),
-        "cli-completed-report",
-        true,
-        &fixture.workflow_output,
-        None,
-        crate::tui::ResearchOutcome::Completed,
-        &journal_artifacts,
-    )
-    .await
-    .expect("settle completed CLI journal");
+    let journal_outcome =
+        crate::tui::settle_deep_research_cli_run(crate::tui::DeepResearchCliSettlement {
+            workspace: workspace.path(),
+            run_id: "cli-completed-report",
+            query: "Explain the accepted CLI finding.",
+            workflow_succeeded: true,
+            workflow_output: &fixture.workflow_output,
+            workflow_metadata: None,
+            requested_outcome: crate::tui::ResearchOutcome::Completed,
+            artifacts: &journal_artifacts,
+        })
+        .await
+        .expect("settle completed CLI journal");
     assert_eq!(journal_outcome, crate::tui::ResearchOutcome::Completed);
     let run_status =
         crate::tui::deep_research_test_run_status(workspace.path(), "cli-completed-report")

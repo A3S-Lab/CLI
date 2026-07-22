@@ -7,6 +7,18 @@ const ACTIVE_SECTION_REVISION_LIMIT: usize = 2;
 
 pub(super) type RevisionTargets = BTreeMap<String, Vec<Value>>;
 
+pub(super) struct SectionRevisionContext<'a> {
+    pub(super) session: &'a AgentSession,
+    pub(super) query: &'a str,
+    pub(super) run_id: &'a str,
+    pub(super) outline: &'a ResearchOutline,
+    pub(super) events: &'a mut Vec<InquiryEvent>,
+    pub(super) state: &'a mut InquiryState,
+    pub(super) evidence: &'a [AcceptedEvidence],
+    pub(super) sections: &'a mut BTreeMap<String, SectionGeneration>,
+    pub(super) deadline: &'a ReportDeadline,
+}
+
 pub(super) fn validate_section_candidate(
     section: &mut SectionGeneration,
     planned: &OutlineSection,
@@ -24,36 +36,20 @@ pub(super) fn validate_section_candidate(
 }
 
 pub(super) async fn revise_invalid_sections_once(
-    session: &AgentSession,
-    query: &str,
-    run_id: &str,
-    outline: &ResearchOutline,
-    events: &mut Vec<InquiryEvent>,
-    state: &mut InquiryState,
-    evidence: &[AcceptedEvidence],
-    sections: &mut BTreeMap<String, SectionGeneration>,
-    deadline: &ReportDeadline,
+    mut context: SectionRevisionContext<'_>,
 ) -> Result<(), String> {
-    let targets = section_validation_targets(sections, outline, evidence)?;
+    let targets = section_validation_targets(context.sections, context.outline, context.evidence)?;
     if targets.is_empty() {
         return Ok(());
     }
     let failed_ids = targets.keys().cloned().collect::<Vec<_>>().join(", ");
     revise_targets(
-        session,
-        query,
-        run_id,
-        outline,
-        events,
-        state,
-        evidence,
-        sections,
+        &mut context,
         targets,
         &format!("host section validation failed for {failed_ids}"),
-        deadline,
     )
     .await?;
-    ensure_sections_valid_after_revision(sections, outline, evidence)
+    ensure_sections_valid_after_revision(context.sections, context.outline, context.evidence)
 }
 
 pub(super) fn ensure_sections_valid_after_revision(
@@ -72,29 +68,22 @@ pub(super) fn ensure_sections_valid_after_revision(
 }
 
 pub(super) async fn revise_targets(
-    session: &AgentSession,
-    query: &str,
-    run_id: &str,
-    outline: &ResearchOutline,
-    events: &mut Vec<InquiryEvent>,
-    state: &mut InquiryState,
-    evidence: &[AcceptedEvidence],
-    sections: &mut BTreeMap<String, SectionGeneration>,
+    context: &mut SectionRevisionContext<'_>,
     targets: RevisionTargets,
     failure_reason: &str,
-    deadline: &ReportDeadline,
 ) -> Result<Vec<String>, String> {
     if targets.is_empty() {
         return Err("section revision requires at least one failed section".to_string());
     }
-    let revision_round = pending_revision_round(state);
+    let revision_round = pending_revision_round(context.state);
     let mut inputs = Vec::with_capacity(targets.len());
     let mut target_ids = Vec::with_capacity(targets.len());
-    for (outline_index, planned) in outline.sections.iter().enumerate() {
+    for (outline_index, planned) in context.outline.sections.iter().enumerate() {
         let Some(issues) = targets.get(&planned.id) else {
             continue;
         };
-        let current = sections
+        let current = context
+            .sections
             .get(&planned.id)
             .ok_or_else(|| format!("cannot revise missing section `{}`", planned.id))?;
         inputs.push(serde_json::json!({
@@ -103,11 +92,11 @@ pub(super) async fn revise_targets(
             "claim_ids": planned.claim_ids,
             "source_ids": planned.source_ids,
             "generation_args": section_revision_args(
-                query,
+                context.query,
                 planned,
                 current,
-                state,
-                evidence,
+                context.state,
+                context.evidence,
                 issues,
                 revision_round,
             )?,
@@ -135,18 +124,28 @@ pub(super) async fn revise_targets(
     let mut digest = Sha256::new();
     digest.update(&encoded);
     let digest = format!("{:x}", digest.finalize());
-    if let Some(start) =
-        revision_start_event(state, revision_round, &target_ids, &digest, failure_reason)?
-    {
-        apply_event(state, events, start)?;
-        recovery::persist_projection(session, run_id, events, state).await?;
+    if let Some(start) = revision_start_event(
+        context.state,
+        revision_round,
+        &target_ids,
+        &digest,
+        failure_reason,
+    )? {
+        apply_event(context.state, context.events, start)?;
+        recovery::persist_projection(
+            context.session,
+            context.run_id,
+            context.events,
+            context.state,
+        )
+        .await?;
     }
     let replacements = run_section_workflow(
-        session,
+        context.session,
         inputs,
-        &format!("{run_id}-section-revision-{}", &digest[..16]),
+        &format!("{}-section-revision-{}", context.run_id, &digest[..16]),
         target_ids.len(),
-        deadline,
+        context.deadline,
         "section revision workflow",
     )
     .await?;
@@ -160,25 +159,27 @@ pub(super) async fn revise_targets(
         ));
     }
     for (section_id, mut replacement) in replacements {
-        let planned = outline
+        let planned = context
+            .outline
             .sections
             .iter()
             .find(|section| section.id == section_id)
             .ok_or_else(|| {
                 format!("section revision returned unknown outline section `{section_id}`")
             })?;
-        validate_section_candidate(&mut replacement, planned, evidence).map_err(|error| {
-            format!("revised section `{section_id}` failed Host validation: {error}")
-        })?;
-        sections.insert(section_id, replacement);
+        validate_section_candidate(&mut replacement, planned, context.evidence).map_err(
+            |error| format!("revised section `{section_id}` failed Host validation: {error}"),
+        )?;
+        context.sections.insert(section_id, replacement);
     }
     for section_id in &target_ids {
-        let section = sections
+        let section = context
+            .sections
             .get(section_id)
             .ok_or_else(|| format!("cannot commit missing revised section `{section_id}`"))?;
         apply_event(
-            state,
-            events,
+            context.state,
+            context.events,
             InquiryEvent::SectionDrafted {
                 section_id: section.section_id.clone(),
                 content: section.markdown.clone(),
@@ -187,8 +188,8 @@ pub(super) async fn revise_targets(
         )?;
     }
     apply_event(
-        state,
-        events,
+        context.state,
+        context.events,
         InquiryEvent::SectionRevisionCommitted {
             round: revision_round,
             input_digest: digest,
@@ -197,7 +198,13 @@ pub(super) async fn revise_targets(
     // Replacement drafts and the matching commit marker form one durable
     // prefix. A crash before this save resumes the already-started Flow input;
     // a crash after it observes a fully committed revision round.
-    recovery::persist_projection(session, run_id, events, state).await?;
+    recovery::persist_projection(
+        context.session,
+        context.run_id,
+        context.events,
+        context.state,
+    )
+    .await?;
     Ok(target_ids)
 }
 

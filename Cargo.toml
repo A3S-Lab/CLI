@@ -1,6 +1,6 @@
 [package]
 name = "a3s"
-version = "0.9.7"
+version = "0.10.0"
 edition = "2021"
 description = "a3s — A3S coding agent CLI; `a3s code` launches the interactive TUI"
 license = "MIT"
@@ -14,17 +14,17 @@ name = "a3s"
 path = "src/main.rs"
 
 [dependencies]
-a3s-code-core = "=6.1.0"
+a3s-code-core = "=6.4.0"
 a3s-boot = "=0.1.2"
 a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
 # fusion writes ctx findings into it as durable MemoryItems.
 a3s-memory = "0.1.2"
 a3s-tui = "=0.1.12"
-a3s-search = { version = "2.0.0", features = ["lightpanda"] }
+a3s-search = { version = "2.1.0", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use-extension = "=0.1.2"
+a3s-use-extension = "=0.2.0"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"
@@ -59,6 +59,9 @@ axum = "0.8"
 comrak = { version = "0.36", default-features = false }
 tempfile = "3"
 tracing = "0.1"
+notify = "8.2"
+url = "2"
+zeroize = { version = "1", features = ["derive"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

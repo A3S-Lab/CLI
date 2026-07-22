@@ -14,11 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Core memory extraction; it does not infer reusable preferences, Skills, or
   OKF packages from keyword overlap. Candidates retain evidence and maturity,
   materialize as workspace-local versioned assets, preserve recovery copies
-  during rollback, and never publish automatically. `/evolution` provides TUI
-  review, while `/api/v1/evolution` exposes the same scan, review,
-  materialize, reject, reopen, and rollback lifecycle to Code Web. Active
-  preferences and Skills enter both TUI and Web sessions only after the
-  required session refresh completes.
+  during rollback, and never publish automatically. Conflict-free candidates
+  that reach the stricter recurrence, session, confidence, importance, and
+  explicit-signal thresholds materialize locally without another prompt.
+  `/evolution` provides TUI review, while `/api/v1/evolution` exposes the same
+  scan, review, materialize, reject, reopen, and rollback lifecycle to Code
+  Web. Baseline rollback removes the active asset while preserving immutable
+  versions and a recovery copy. Active Preference instructions enter bounded
+  TUI and Web prompt context, active Skills enter the session registry, and an
+  activation barrier remains pending until every affected live session
+  refreshes successfully.
 - Added the Core local workspace credential boundary to every Code TUI
   manifest backend. Built-in reads, range reads, writes, edits, patches, and
   grep now enforce the same sensitive-file and source-hardlink rules as
@@ -35,21 +40,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixed, official-registry npm bootstrap with lifecycle scripts disabled.
   Setup failure is non-fatal, Default can request one exact host command, and
   Auto denies Bash without opening HITL.
-- Added `/checkup` as an audit-first A3S Code setup workflow. A typed,
-  host-owned preflight first checks the same installed-component set as
-  `a3s doctor`, active-executable/PATH shadowing, bounded ACL syntax and
-  semantic validity, skill/plugin context size and duplicates, indexed
-  `AGENTS.md` size, and in-memory MCP counts. The composer is locked while the
-  snapshot is collected, raw component paths, MCP errors, ACL contents, and
-  credentials never enter the prompt, and no MCP server is started by the
-  check. A host-enforced read-only Plan turn then audits `AGENTS.md`,
-  integrations, update state, and runtime policy before stopping at the
-  existing Approve / Revise / Abandon boundary. Auto mode is offered only as
-  an optional saved-session preference, and a read-only permission grant is
-  offered only when the transcript proves repeated denial of the same exact
-  tool and arguments. Only an explicitly approved follow-up may apply
-  confirmation-sized remediation tasks, and normal HITL remains authoritative
-  for every boundary crossing.
+- Added `/checkup` as a host-owned, read-only context-hygiene review. It scans
+  at most 128 persisted local sessions for actual `Skill` tool invocations and
+  reports bounded invocation/session counts and context bytes. Cleanup
+  suggestions require at least three sampled sessions, twelve completed turns,
+  and a Skill older than 14 days. Recently changed, disabled, managed,
+  duplicate-name, and unknown-age Skills are excluded. Instruction and MCP
+  counts remain footprint signals rather than invented usage telemetry. The
+  composer stays locked during collection, raw session contents and MCP errors
+  do not enter the prompt, and a host-enforced Plan turn offers each eligible
+  Skill as a separate reversible `/plugin` disable choice. No file is deleted
+  and no state changes before the existing Approve / Revise / Abandon boundary
+  and normal HITL.
 - Added `/permissions` as a searchable exact-grant inspector. Session and
   project grants remain visibly distinct, Enter opens their canonical
   arguments, and `X` or Delete requires a second matching confirmation before
@@ -115,19 +117,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assessment gates the report.
   Active execution has no scout, perspective, maker/checker, query-generating
   follow-up wave, or adaptive-route branch.
-- Added native AnySearch and Tavily discovery to DeepResearch's fixed web
-  ensemble alongside DuckDuckGo. Ordinary `web_search` callers retain their
-  existing default engines; the research pipeline uses the broader ensemble
-  to improve official-source and release-record recall.
+- DeepResearch now inherits the active `web_search` engine selection from
+  `config.acl`. The built-in default is DuckDuckGo plus Wikipedia; AnySearch
+  and Tavily are opt-in. Structured provider failures and empty-result cases
+  use the same generic fallback policy, while quota and other degradation
+  notices remain visible in partial research metadata.
 - Added automatic per-run Loop Engineering contracts to DeepResearch. The
-  transient durable input declares `quota.mode = unlimited`, an immutable
-  `coverage_driven` stage graph, and maximum cardinality two for semantic
-  iteration, retrieval, and selection, followed by cardinality one for question
-  review, Host assessment, report transaction, and targeted revision. Rust
-  Inquiry validates it and remains terminal authority. It does not create
-  `.a3s/loops/` assets or restore maker/checker loops, while per-call deadlines,
-  output limits, concurrency ceilings, and closed-catalog bounds remain safety
-  fuses rather than quota accounting.
+  transient durable input declares `quota.mode = bounded`, an immutable
+  `evidence-first-deep-research` stage graph, and fixed cardinality for outline,
+  retrieval, extraction, reduction, report generation, and deterministic
+  publication. Rust Inquiry validates it and remains terminal authority. It
+  does not create `.a3s/loops/` assets or restore maker/checker loops, while
+  per-call deadlines, output limits, concurrency ceilings, and closed-catalog
+  bounds remain independent safety fuses.
 - Added typed DeepResearch contract assessment and report-stage Inquiry
   events. Obligations, questions, accepted evidence, outline sections, drafts,
   audit results, and their graph relations are strictly replayable through the
@@ -166,6 +168,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prevented weak or stale web evidence from being presented as a successful
+  DeepResearch answer. Web acquisition now keeps the exact query and adds only
+  one deterministic, current-date outcome-and-news companion query, using
+  localized Han terms and an English fallback otherwise. A valid non-empty
+  semantic selection is now supplemented, within the existing fetch cap, by
+  distinct-host verified institutions and accountable publishers so a narrow
+  model selection cannot starve the evidence set. The
+  source-admission model gets one 60-second attempt inside a 150-second
+  discovery-and-fetch stage. A failed or timed-out admission now degrades only
+  acquisition to a six-source, cross-query and distinct-host fallback. That
+  fallback ranks verified institutions and accountable publishers before
+  unknown, social, or protected-publisher lookalike hosts, records its
+  provenance, prefers outcome-bearing retrieval opportunities within the same
+  trust tier, and requires deterministic query, publisher-accountability, and
+  publication gates; it no longer claims a post-fetch semantic selector that
+  the active evidence-first path does not run. Protected publisher names on an
+  unrelated registrable domain cannot support conclusions even if semantic
+  admission succeeded.
+  Escaped hydration payloads, serialized application state, dense JavaScript,
+  template expressions, image syntax, and inline transport URLs are removed
+  before chunking and again at publication while visible link labels survive,
+  and
+  self-published or otherwise ineligible sources are visibly marked as unusable
+  for conclusions.
+  Self-publishing disclaimers, community and streaming hosts, and earlier-stage
+  snapshots cannot qualify a current core claim. A schedule, format, or
+  participant list can no longer qualify as the direct answer to a requested
+  competition result. Summary and Findings blocks
+  are atomic: every cited source must contain every date and number, and a core
+  block requires one complete verified institutional record or one explicitly
+  accountable publisher that establishes the whole claim. Independent
+  corroboration remains preferred when available, but unrelated citations are
+  never added merely to increase source count. Reports that
+  cannot meet these gates remain explicitly degraded instead of claiming
+  traceability. Degraded reports show at most two readability-ranked excerpts
+  per eligible source and one per ineligible source, and report-model packets
+  exclude ineligible excerpts entirely.
+  Explicit result, winner, champion, score, and standings queries now get a
+  strict deterministic fast path before report generation. It publishes only
+  exact atomic spans from a verified institution or accountable publisher,
+  rejects questions, schedules, generic indexes, navigation piles, and
+  headline lists, betting odds, predictions, historical roundups, and
+  time-only widgets, and uses separate ranking for the direct outcome and
+  concrete Findings. Findings remain local to the selected result source so
+  deterministic extraction cannot silently join unrelated events across
+  publishers, and pure outcome-restatement headlines are removed instead of
+  padding the Findings count. A successful extractive result passes the normal
+  Host admission gates, records `deterministic_outcome_extract`, and skips
+  report-model generation; otherwise the closed proposal and honest degraded
+  fallback remain unchanged. Final reports now number only sources that are
+  actually cited, in first-citation order, render inline references as visible
+  `[n]` links, and avoid duplicated ordered-list/source identifiers such as
+  `2. [2]`.
 - Made foreground `a3s web` Ctrl+C shutdown cancel in-flight requests and
   long-lived HTTP streams before draining connections, with bounded server and
   application cleanup plus a second-interrupt emergency exit. Raw terminals
@@ -196,9 +251,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Flow now acquires capacity before starting the selector's Program VM and
   passes a one-shot identity-checked permit into the nested generation, so
   neither deadline includes queue wait and concurrent nested calls cannot
-  reuse a reservation. Candidate admission and small-catalog selection retain a
-  bounded 210-second active fuse, while one-shot source-local selectors receive
-  270 seconds after admission.
+  reuse a reservation. Pre-fetch web candidate admission now has one 60-second
+  Flow attempt plus an acquisition-only deterministic failure fallback;
+  fetched-text catalog selection retains its 300-second active
+  fuse, while one-shot source-local selectors receive 270 seconds after
+  admission.
 - Replaced the semantic selector's contradictory source-role contract with a
   complete typed role object. Its schema requires `supporting=true` and
   explicit `primary` and `independent` booleans; the Host validates every flag

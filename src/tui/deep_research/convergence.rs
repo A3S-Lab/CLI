@@ -30,7 +30,7 @@ pub(crate) enum ValidatedInquiryProjection {
     LegacyCheckedLoop,
     Inquiry {
         events: Vec<InquiryEvent>,
-        state: InquiryState,
+        state: Box<InquiryState>,
     },
 }
 
@@ -237,7 +237,10 @@ pub(crate) fn validated_inquiry_projection(
     if replayed != state {
         return Err("DeepResearch inquiry state differs from its event replay".to_string());
     }
-    Ok(ValidatedInquiryProjection::Inquiry { events, state })
+    Ok(ValidatedInquiryProjection::Inquiry {
+        events,
+        state: Box::new(state),
+    })
 }
 
 /// Require report-authored Inquiry runs to have completed their draft audit.

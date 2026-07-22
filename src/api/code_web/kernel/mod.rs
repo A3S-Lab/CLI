@@ -16,3 +16,9 @@ mod turn_queue_controller;
 
 pub(super) use module::KernelModule;
 pub(in crate::api) use service::KernelService;
+pub(in crate::api::code_web) use service::{
+    ManagedChildEvidence, ManagedChildStatus, ManagedGoalStatus, ManagedSessionEvidence,
+    ManagedSessionReadPort,
+};
+#[cfg(test)]
+pub(in crate::api::code_web) use service::{ManagedGoalEvidence, ManagedQueueEvidence};

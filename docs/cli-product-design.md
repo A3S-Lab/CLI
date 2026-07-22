@@ -221,47 +221,42 @@ The command replaces `deepresearch` and `deep-research`. It always reports the
 Markdown and HTML artifacts it created. DeepResearch has one host-managed
 runtime; callers choose only the evidence scope.
 
-Every run receives an automatic `quota.mode = unlimited`,
-`execution.mode = coverage_driven` Loop Engineering contract. Search-provider
-queries are immutable plan inputs and are sent byte-for-byte exactly once.
-After the fixed eight-slot initial web retrieval and closed semantic selection,
-the Host validates typed source-to-obligation coverage and counts operational
-loss from fetch or source-selection failure. Either kind of gap can authorize
-one supplemental pass over at most two previously unselected candidates from
-the already returned provider catalog. The supplemental allowance is separate
-from the eight initial slots and cannot generate or rewrite a query. It records
-the initial outcome for every candidate and avoids a fetch-failed transport
-surface when a distinct remaining candidate is available. The initial closed
-evidence portfolio is durably checkpointed first, so a shared-stage timeout in
-optional supplemental work recovers that same-run result instead of erasing
-completed material evidence.
+New runs use an evidence-first `quota.mode = bounded`,
+`execution.mode = progressively_publishable` contract. Web acquisition starts
+from the exact user query and one Host-owned, date-aware outcome-and-news
+companion query. No model may expand, rewrite, or retry another provider query.
+One closed semantic candidate-admission decision runs before fetch; a valid
+non-empty selection may be filled only with bounded distinct-host institutional
+or accountable-publisher candidates. A failed admission selects a bounded
+deterministic acquisition fallback, while an explicit empty selection remains
+empty. Provider titles, snippets, ranks, dates, and engine metadata are never
+report evidence.
 
-Research quality is not inferred from prompt compliance, wording overlap, URL
-shape, title terms, language detection, or language-specific routing. Closed
-IDs, typed graph edges, durable replay, deterministic Host assessment, citation
-audit, and atomic report publication are the product boundary. Primary-source
-requirements need one typed primary edge; independent corroboration needs two
-distinct answer-path source identities with typed independent edges.
-Source-local relevance edges route partial and complete evidence into one
-closed review per obligation without wording-based filtering. Models cite
-short Host-owned evidence references; the Host maps them to exact evidence IDs
-per question so one malformed entry or invalid reference does not discard a
-valid sibling resolution. An `answered` entry with an explicit limitation is
-deterministically downgraded to `partial`. Report sections receive bounded
-accepted-claim excerpts, and
-full-date literals must normalize back to those committed claims before
-publication.
-Question review, section writing/revision, and editorial framing share explicit
-semantic guardrails: source metadata keeps its original meaning, raw dates do
-not become invented intervals, and narrow dependency or lifecycle evidence
-cannot become incompatibility, future-fix, replacement-performance, governance,
-or ecosystem-wide claims. Internal fetch/review diagnostics do not appear in
-the reader-facing source ledger. Reader-facing review, section/revision, and
-frame text uses the query language, and a local evidence gap cannot be widened
-into a report-wide absence.
-Complete replacement packets repeat exact source alternatives for every
-binding, while the Host reduces only strict same-origin child paths to the
-longest committed parent. Similar or wider URLs remain invalid.
+The Host canonicalizes and sanitizes fetched content into a closed source
+catalog. Safe siblings survive search or fetch failures. As soon as a non-empty
+catalog exists, the Host materializes a source-backed Markdown and HTML pair
+that preserves bounded excerpts, exact links, provenance, and an explicit
+evidence limitation. With no safe source, it materializes an honest no-evidence
+pair. A later model call is therefore never the sole authority for artifact
+availability.
+
+When at least one source is eligible to support a conclusion, one optional
+closed report proposal may run with one transient retry. It receives source
+aliases and bounded excerpts, no tools, and no authority to introduce a URL.
+The Host admits report blocks independently, resolves every citation against
+the catalog, enforces query-language, date, number, direct-answer, Findings,
+atomic-claim, and strong-source gates, and rebuilds the source ledger from the
+accepted blocks. An invalid block cannot erase a valid sibling, and an invalid
+or unavailable proposal leaves the source-backed report in place.
+
+Publication status is operational: `synthesized` passed the Host admission
+gates, `source_backed` preserves fetched evidence without claiming a completed
+synthesis, and `no_evidence` records the acquisition boundary. The Host renders
+and atomically replaces both artifacts from the admitted report document.
+The TUI `?` path and `a3s code research` call this same runtime. Stable Flow
+identities reuse completed search, fetch, and generation effects after restart;
+an ambiguous running effect may be redelivered once, but bootstrap workflow
+metadata can never replace the Host-owned terminal publication result.
 
 ### 6.3 Asset Families
 

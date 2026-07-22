@@ -4,18 +4,21 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
-use a3s_use_extension::ResolvedRemotePackage;
+use a3s_use_extension::{ReleaseBundlePackage, ResolvedRemotePackage};
 use anyhow::{bail, Context};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::catalog::{self, Distribution};
-use super::discovery::{discover, extension_registry_provenance};
+use super::discovery::{
+    discover, extension_registry_provenance, extension_release_bundle_provenance,
+};
 use super::id::ComponentId;
 use super::lifecycle::{resolve_install_source, InstallRequest, InstallSource};
 use super::paths::ComponentPaths;
+use super::release_bundle::resolve_release_bundle;
 use super::release_install::{resolve_release, ResolvedRelease};
-use super::state::{ComponentState, Health, Presence};
+use super::state::{ComponentState, Health, Presence, Trust};
 use crate::registry::{RegistryStore, ResolvedRegistryPackage};
 
 const PLAN_SCHEMA_VERSION: u32 = 1;
@@ -56,6 +59,7 @@ pub(super) struct PreparedOperationPlan {
     pub(super) plan: OperationPlan,
     pub(super) resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub(super) resolved_sources: BTreeMap<String, InstallSource>,
+    pub(super) resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub(super) resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
     pub(super) apply_force: bool,
 }
@@ -165,6 +169,8 @@ pub(super) struct OperationPlan {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_releases: BTreeMap<String, ResolvedRelease>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_registry_packages: BTreeMap<String, ResolvedRemotePackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prerequisites: BTreeMap<String, PlannedCurrentState>,
@@ -231,6 +237,12 @@ impl OperationPlanSet {
                 println!(
                     "resolved release: {component} {} {} {}",
                     release.version, release.archive_name, release.sha256
+                );
+            }
+            for (component, bundle) in &plan.resolved_release_bundles {
+                println!(
+                    "resolved release bundle: {component} {} {} {}",
+                    bundle.version, bundle.route, bundle.package_sha256
                 );
             }
             for (component, package) in &plan.resolved_registry_packages {
@@ -389,6 +401,7 @@ pub(super) async fn install_plan(
     let mut resolved_releases = BTreeMap::new();
     let mut resolved_sources = BTreeMap::new();
     let mut prerequisites = BTreeMap::new();
+    let mut resolved_release_bundles = BTreeMap::new();
     let mut resolved_registry_packages = BTreeMap::new();
     let (source, ownership) = if external {
         prepare_parent_release(
@@ -402,23 +415,49 @@ pub(super) async fn install_plan(
         if request.package.is_some() {
             ("local-package".to_string(), "parent:use".to_string())
         } else {
-            let registry_store = registries.context(
-                "signed extension installation requires the umbrella registry configuration",
-            )?;
             let package_id = id
                 .relative_to(&ComponentId::parse("use")?)
                 .context("external extension is outside the Use namespace")?;
-            let resolved = registry_store
-                .resolve_package(
-                    &paths.state_root,
-                    package_id,
-                    request.version.as_deref(),
-                    channel,
-                )
-                .await?;
-            let source = format!("registry:{}", resolved.registry.name);
-            resolved_registry_packages.insert(id.to_string(), resolved);
-            (source, "parent:use".to_string())
+            let bundle =
+                resolve_release_bundle(paths, package_id, request.version.as_deref(), channel)
+                    .await;
+            match bundle {
+                Ok(Some(bundle)) => {
+                    resolved_release_bundles.insert(id.to_string(), bundle);
+                    (
+                        "release-bundle:a3s-use".to_string(),
+                        "parent:use".to_string(),
+                    )
+                }
+                bundle => {
+                    let registry_store = registries.context(
+                        "extension installation requires an A3S Use release bundle or the umbrella registry configuration",
+                    )?;
+                    let resolved = registry_store
+                        .resolve_package(
+                            &paths.state_root,
+                            package_id,
+                            request.version.as_deref(),
+                            channel,
+                        )
+                        .await
+                        .with_context(|| match bundle {
+                            Ok(None) => {
+                                format!("A3S Use has no matching release bundle for '{package_id}'")
+                            }
+                            Err(error) => {
+                                format!("A3S Use release-bundle discovery also failed: {error:#}")
+                            }
+                            Ok(Some(package)) => format!(
+                                "A3S Use release bundle '{}' could not be selected",
+                                package.package_id
+                            ),
+                        })?;
+                    let source = format!("registry:{}", resolved.registry.name);
+                    resolved_registry_packages.insert(id.to_string(), resolved);
+                    (source, "parent:use".to_string())
+                }
+            }
         }
     } else {
         match spec.map(|spec| spec.distribution) {
@@ -495,6 +534,7 @@ pub(super) async fn install_plan(
         local_package,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
+        resolved_release_bundles: resolved_release_bundles.clone(),
         resolved_registry_packages: resolved_registry_packages
             .iter()
             .map(|(component, resolved)| (component.clone(), resolved.package.clone()))
@@ -516,6 +556,7 @@ pub(super) async fn install_plan(
         plan,
         resolved_releases,
         resolved_sources,
+        resolved_release_bundles,
         resolved_registry_packages,
         apply_force: request.force,
     })
@@ -572,6 +613,7 @@ pub(super) fn uninstall_plan(
         local_package: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         prerequisites,
         force: None,
@@ -600,6 +642,9 @@ pub(super) async fn upgrade_plan(
     let Some(spec) = catalog::find(id) else {
         if !is_external_use_extension(id) {
             bail!("component '{}' is not registered", id);
+        }
+        if state.trust == Trust::ReleaseBundle {
+            return release_bundle_extension_upgrade_plan(id, state, paths).await;
         }
         return registry_extension_upgrade_plan(id, state, paths, registries).await;
     };
@@ -646,6 +691,7 @@ pub(super) async fn upgrade_plan(
         local_package: None,
         resolved_sources: planned_sources(&resolved_sources)?,
         resolved_releases: resolved_releases.clone(),
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
@@ -660,8 +706,92 @@ pub(super) async fn upgrade_plan(
         plan,
         resolved_releases,
         resolved_sources,
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         apply_force: true,
+    })
+}
+
+async fn release_bundle_extension_upgrade_plan(
+    id: &ComponentId,
+    state: ComponentState,
+    paths: &ComponentPaths,
+) -> anyhow::Result<PreparedOperationPlan> {
+    let installed = extension_release_bundle_provenance(id, paths)?.with_context(|| {
+        format!(
+            "extension '{}' is marked as release-bundled but has no bundle provenance",
+            id
+        )
+    })?;
+    let package_id = id
+        .relative_to(&ComponentId::parse("use")?)
+        .context("release-bundled extension is outside the Use namespace")?;
+    let resolved = resolve_release_bundle(paths, package_id, None, "stable")
+        .await?
+        .with_context(|| {
+            format!(
+                "the installed A3S Use release does not carry bundle '{}'",
+                package_id
+            )
+        })?;
+    let installed_version = parse_version(&installed.version).with_context(|| {
+        format!(
+            "installed release bundle '{}' has an invalid version",
+            package_id
+        )
+    })?;
+    let resolved_version = parse_version(&resolved.version)
+        .with_context(|| format!("release bundle '{}' has an invalid version", package_id))?;
+    if resolved_version < installed_version {
+        bail!(
+            "A3S Use attempted to downgrade release bundle '{}' from {} to {}",
+            package_id,
+            installed.version,
+            resolved.version
+        );
+    }
+    let mutates = installed.version != resolved.version
+        || installed.package_sha256 != resolved.package_sha256;
+    let resolved_release_bundles = BTreeMap::from([(id.to_string(), resolved.clone())]);
+    let plan = OperationPlan {
+        schema_version: PLAN_SCHEMA_VERSION,
+        component: id.clone(),
+        action: "upgrade",
+        source: "release-bundle:a3s-use".to_string(),
+        requested_source: None,
+        channel: Some("stable".to_string()),
+        scope: None,
+        migration: None,
+        target: host_target(),
+        ownership: "parent:use".to_string(),
+        mutates,
+        requested_version: None,
+        local_package: None,
+        resolved_sources: BTreeMap::new(),
+        resolved_releases: BTreeMap::new(),
+        resolved_release_bundles: resolved_release_bundles.clone(),
+        resolved_registry_packages: BTreeMap::new(),
+        prerequisites: BTreeMap::new(),
+        force: Some(mutates),
+        allow_unsigned: Some(false),
+        cascade: None,
+        purge: None,
+        current: Some(PlannedCurrentState::with_receipt(&state, paths)?),
+        message: if mutates {
+            "Apply would install the exact package carried by the current A3S Use release."
+                .to_string()
+        } else {
+            "The installed package matches the current A3S Use release bundle; apply would be a no-op."
+                .to_string()
+        },
+    };
+    Ok(PreparedOperationPlan {
+        plan,
+        resolved_releases: BTreeMap::new(),
+        resolved_sources: BTreeMap::new(),
+        resolved_release_bundles,
+        resolved_registry_packages: BTreeMap::new(),
+        apply_force: mutates,
     })
 }
 
@@ -722,6 +852,7 @@ async fn registry_extension_upgrade_plan(
         local_package: None,
         resolved_sources: BTreeMap::new(),
         resolved_releases: BTreeMap::new(),
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
         prerequisites: BTreeMap::new(),
         force: Some(apply_force),
@@ -741,6 +872,7 @@ async fn registry_extension_upgrade_plan(
         plan,
         resolved_releases: BTreeMap::new(),
         resolved_sources: BTreeMap::new(),
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages,
         apply_force,
     })
@@ -1065,6 +1197,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         local_package: &'a Option<PlannedLocalPackage>,
         resolved_sources: &'a BTreeMap<String, String>,
         resolved_releases: &'a BTreeMap<String, ResolvedRelease>,
+        resolved_release_bundles: &'a BTreeMap<String, ReleaseBundlePackage>,
         resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
@@ -1095,6 +1228,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 local_package: &plan.local_package,
                 resolved_sources: &plan.resolved_sources,
                 resolved_releases: &plan.resolved_releases,
+                resolved_release_bundles: &plan.resolved_release_bundles,
                 resolved_registry_packages: &plan.resolved_registry_packages,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
@@ -1136,6 +1270,7 @@ mod tests {
             local_package: None,
             resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
             resolved_releases: BTreeMap::new(),
+            resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),

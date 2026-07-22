@@ -469,7 +469,7 @@ pub fn reduce(
             }
             if !material_evidence_floor(state) {
                 return Err(InquiryError::InvalidOutline {
-                    reason: "every material research obligation requires a traceable answered material question before outlining"
+                    reason: "at least one material research obligation requires a traceable answered material question before outlining"
                         .to_string(),
                 });
             }
@@ -816,20 +816,12 @@ fn validate_obligation_coverage(state: &InquiryState) -> Result<(), InquiryError
                     ),
                 });
             }
-            let answered = material
-                .iter()
-                .filter(|question| {
-                    question.status == QuestionStatus::Answered && !question.evidence_ids.is_empty()
-                })
-                .count();
-            if answered == 0 {
-                return Err(InquiryError::InvalidOutline {
-                    reason: format!(
-                        "material research obligation `{}` has no traceable answered material question",
-                        obligation.id
-                    ),
-                });
-            }
+            // A material target must remain structurally represented, but it
+            // may be explicitly bounded when a sibling material target meets
+            // the global traceable-evidence floor. Requiring an answer here
+            // would turn one missing dimension into an all-or-nothing failure
+            // after `material_evidence_floor` has already proven that the run
+            // contains publishable evidence.
         }
     }
     Ok(())

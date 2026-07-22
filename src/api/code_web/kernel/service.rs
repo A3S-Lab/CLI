@@ -41,11 +41,19 @@ mod goal_runtime;
 mod maintenance;
 mod messages;
 mod persistence;
+mod remote_read;
 mod sessions;
 mod shell_output;
 mod streaming;
 mod text;
 mod turn_queue;
+
+pub(in crate::api::code_web) use remote_read::{
+    ManagedChildEvidence, ManagedChildStatus, ManagedGoalStatus, ManagedSessionEvidence,
+    ManagedSessionReadPort,
+};
+#[cfg(test)]
+pub(in crate::api::code_web) use remote_read::{ManagedGoalEvidence, ManagedQueueEvidence};
 
 pub(in crate::api) struct KernelService {
     state: Arc<CodeWebState>,

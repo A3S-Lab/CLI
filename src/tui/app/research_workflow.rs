@@ -61,7 +61,7 @@ impl App {
         self.push_line(
             &Style::new()
                 .fg(TN_GRAY)
-                .render("  ⇉ running one planned evidence retrieval pass…"),
+                .render("  ⇉ retrieving and preserving source evidence…"),
         );
         self.rebuild_viewport();
 
@@ -70,7 +70,7 @@ impl App {
         ensure_deep_research_workflow_run_id(&mut args);
         self.deep_research_workflow.args = Some(args.clone());
         let (progress_rx, workflow_join) =
-            spawn_deep_research_inquiry(Arc::clone(&self.session), args.clone());
+            spawn_deep_research_evidence_first(Arc::clone(&self.session), args.clone());
         let progress_rx = Arc::new(Mutex::new(progress_rx));
         self.rx = Some(progress_rx.clone());
         self.stream_join = None;
@@ -79,7 +79,7 @@ impl App {
         self.host_tool_call_id = None;
         self.interrupting = false;
         let workflow_abort = workflow_join.abort_handle();
-        let configured_timeout_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
+        let configured_timeout_ms = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
         let timeout = Duration::from_millis(configured_timeout_ms).min(
             Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
                 .saturating_sub(run_started_at.elapsed()),
@@ -92,18 +92,7 @@ impl App {
             .get("run_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string);
-        let journal_spec = ResearchSpec {
-            query: query.clone(),
-            current_date: chrono::Local::now().date_naive().to_string(),
-            evidence_scope: evidence_scope.label().to_string(),
-            required_claims: Vec::new(),
-            total_budget_ms: timeout_ms,
-            retrieval_stage_budget_ms: DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS.min(timeout_ms),
-            question_review_stage_budget_ms: DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
-                .min(timeout_ms),
-            finalization_reserve_ms: DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS.min(timeout_ms),
-            host_pid: std::process::id(),
-        };
+        let journal_spec = deep_research_evidence_first_research_spec(&args);
         Some(cmd::batch(vec![
             cmd::cmd(move || async move {
                 if let Some(run_id) = journal_run_id.as_deref() {
@@ -152,21 +141,41 @@ impl App {
                     Ok(result) => (result.output.as_str(), result.metadata.as_ref()),
                     Err(error) => (error.as_str(), None),
                 };
+                let published = result.as_ref().ok().map(|_| {
+                    deep_research_evidence_first_published_report(
+                        &workflow_workspace,
+                        &query,
+                        workflow_output,
+                    )
+                });
                 let inquiry_projection =
                     inquiry_projection_from_workflow(workflow_output, workflow_metadata);
-                let convergence = match inquiry_projection.as_ref() {
-                    Ok(Some((_, state))) => evaluate_terminal_inquiry_convergence(state),
-                    Ok(None) => ConvergenceDecision {
-                        action: ConvergenceAction::Degrade,
-                        reason:
-                            "the DeepResearch run returned without its required Inquiry projection"
-                                .to_string(),
+                let convergence = match published {
+                    Some(Ok(Some(_))) => ConvergenceDecision {
+                        action: ConvergenceAction::Finalize,
+                        reason: "the Host published the evidence-first report artifacts"
+                            .to_string(),
                     },
-                    Err(error) => ConvergenceDecision {
+                    Some(Err(error)) => ConvergenceDecision {
                         action: ConvergenceAction::Degrade,
                         reason: format!(
-                            "the DeepResearch inquiry projection failed strict replay: {error}"
+                            "the evidence-first publication failed validation: {error}"
                         ),
+                    },
+                    Some(Ok(None)) | None => match inquiry_projection.as_ref() {
+                        Ok(Some((_, state))) => evaluate_terminal_inquiry_convergence(state),
+                        Ok(None) => ConvergenceDecision {
+                            action: ConvergenceAction::Degrade,
+                            reason:
+                                "the DeepResearch run returned without a publishable Host report"
+                                    .to_string(),
+                        },
+                        Err(error) => ConvergenceDecision {
+                            action: ConvergenceAction::Degrade,
+                            reason: format!(
+                                "the DeepResearch inquiry projection failed strict replay: {error}"
+                            ),
+                        },
                     },
                 };
                 let accepted_evidence =
@@ -297,6 +306,65 @@ impl App {
         let evidence_scope = deep_research_evidence_scope_from_args(&args, &query);
         if let Some(status) = deep_research_plan_status(&output) {
             self.push_line(&Style::new().fg(TN_GRAY).render(&status));
+        }
+
+        match deep_research_evidence_first_published_report(Path::new(&self.cwd), &query, &output) {
+            Ok(Some(published)) => {
+                let outcome = match published.publication {
+                    DeepResearchEvidenceFirstPublication::Synthesized => {
+                        DeepResearchRunOutcome::Completed
+                    }
+                    DeepResearchEvidenceFirstPublication::SourceBacked => {
+                        DeepResearchRunOutcome::Degraded
+                    }
+                    DeepResearchEvidenceFirstPublication::NoEvidence => {
+                        DeepResearchRunOutcome::Degraded
+                    }
+                };
+                let final_text = clean_deep_research_final_text_from_artifacts(
+                    &published.artifacts,
+                    Path::new(&self.cwd),
+                )
+                .unwrap_or_else(|| {
+                    "DeepResearch published a report, but its Markdown preview was unavailable."
+                        .to_string()
+                });
+                self.loop_remaining = 0;
+                self.stage_deep_research_report(&published.artifacts, outcome);
+                self.mark_assistant_text(&final_text);
+                self.turn_text.clear();
+                self.turn_text.push_str(&final_text);
+                self.messages
+                    .push(TranscriptEntry::assistant_markdown(final_text));
+                match published.publication {
+                    DeepResearchEvidenceFirstPublication::Synthesized => {
+                        self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
+                            "  ✓ DeepResearch published a quality-gated report at {}",
+                            published.artifacts.html.display()
+                        )));
+                    }
+                    DeepResearchEvidenceFirstPublication::SourceBacked => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                            "  ⚠ Report synthesis did not pass the quality gate; a degraded source snapshot was written at {}",
+                            published.artifacts.html.display()
+                        )));
+                    }
+                    DeepResearchEvidenceFirstPublication::NoEvidence => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                            "  ⚠ Retrieval produced no safely publishable evidence; a degraded boundary report was written at {}",
+                            published.artifacts.html.display()
+                        )));
+                    }
+                }
+                self.rebuild_viewport();
+                return self.complete_turn();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                    "  ⚠ evidence-first report validation failed: {error}"
+                )));
+            }
         }
 
         let report_outcome = deep_research_report_outcome_for_workflow(

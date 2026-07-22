@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: d7a3ee72e660c88802cff5e653e93ecfe512220a
+  A3S_WEB_SOURCE_REF: 5f5c00070fa54dea0e0e13582a4a0144600791f0
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.2
 jobs:
@@ -79,15 +79,15 @@ jobs:
               "https://crates.io/api/v1/crates/$1/$2" >/dev/null
           }
           required_crates=(
-            "a3s-code-core 5.3.2"
+            "a3s-code-core 6.4.0"
             "a3s-boot 0.1.2"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
             "a3s-tui 0.1.12"
-            "a3s-search 1.4.3"
+            "a3s-search 2.1.0"
             "a3s-acl 0.2.2"
             "a3s-updater 0.3.0"
-            "a3s-use-extension 0.1.1"
+            "a3s-use-extension 0.2.0"
           )
           for requirement in "${required_crates[@]}"; do
             read -r crate dependency_version <<<"$requirement"

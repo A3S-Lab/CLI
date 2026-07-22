@@ -147,8 +147,9 @@ pub(super) fn workflow_args_with_plan(
 
 /// Build the minimum Host-owned contract that keeps acquisition and qualified
 /// reporting available when semantic planning is slow, invalid, or absent.
-/// The original query remains the provider query; bounded display fields are
-/// only an adapter for the legacy Inquiry contract consumed downstream.
+/// The original query remains the first provider query. One deterministic
+/// outcome-oriented companion query broadens accountable publisher recall without
+/// reopening semantic planning or creating an unbounded query fan-out.
 pub(super) fn host_fallback_plan(workflow_args: &Value) -> Result<PlannedInquiry, String> {
     let query = workflow_args
         .pointer("/input/query")
@@ -179,11 +180,11 @@ pub(super) fn host_fallback_plan(workflow_args: &Value) -> Result<PlannedInquiry
                 "independent_corroboration_required": false
             }
         }],
-        "search_queries": if local_only { Vec::<String>::new() } else { vec![query.to_string()] },
+        "search_queries": host_web_search_queries(workflow_args, query, local_only),
         "seed_urls": [],
         "budget": {
-            "retrieval_timeout_ms": 90_000,
-            "direct_searches": if local_only { 0 } else { 1 },
+            "retrieval_timeout_ms": 150_000,
+            "direct_searches": if local_only { 0 } else { 2 },
             "direct_fetches": if local_only { 0 } else { 8 }
         },
         "stop_conditions": [
@@ -249,18 +250,15 @@ pub(super) fn host_plan_from_outline(
     }
     object.insert(
         "search_queries".to_string(),
-        if local_only {
-            Value::Array(Vec::new())
-        } else {
-            Value::Array(vec![Value::String(query.to_string())])
-        },
+        serde_json::to_value(host_web_search_queries(workflow_args, query, local_only))
+            .map_err(|error| format!("encode Host search queries: {error}"))?,
     );
     object.insert("seed_urls".to_string(), Value::Array(Vec::new()));
     object.insert(
         "budget".to_string(),
         serde_json::json!({
-            "retrieval_timeout_ms": 90_000,
-            "direct_searches": if local_only { 0 } else { 1 },
+            "retrieval_timeout_ms": 150_000,
+            "direct_searches": if local_only { 0 } else { 2 },
             "direct_fetches": if local_only { 0 } else { 8 }
         }),
     );
@@ -276,6 +274,7 @@ pub(super) fn bootstrap_workflow_args(args: Value, run_id: &str) -> Result<Value
     Ok(args)
 }
 
+#[cfg(test)]
 pub(super) fn attach_bootstrap_acquisition(
     workflow_args: &mut Value,
     acquisition: Value,
@@ -304,6 +303,41 @@ fn bounded_fallback_text(value: &str, maximum_chars: usize) -> String {
     value.chars().take(maximum_chars).collect()
 }
 
+fn host_web_search_queries(workflow_args: &Value, query: &str, local_only: bool) -> Vec<String> {
+    if local_only {
+        return Vec::new();
+    }
+    let current_date = workflow_args
+        .pointer("/input/current_date")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|date| !date.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| chrono::Local::now().date_naive().to_string());
+    vec![
+        query.to_string(),
+        host_authority_companion_query(query, &current_date),
+    ]
+}
+
+fn host_authority_companion_query(query: &str, current_date: &str) -> String {
+    if query.chars().any(host_query_han_character) {
+        let localized_date = chrono::NaiveDate::parse_from_str(current_date, "%Y-%m-%d")
+            .map(|date| date.format("%Y年%-m月%-d日").to_string())
+            .unwrap_or_else(|_| current_date.to_string());
+        format!("{query} {localized_date} 最新进展 最终结果 新闻")
+    } else {
+        format!("{query} {current_date} latest development final outcome news")
+    }
+}
+
+fn host_query_han_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F
+    )
+}
+
 fn normalize_planner_budget(mut plan: Value) -> Result<Value, String> {
     // The provider-facing planner schema uses seconds, while the workflow
     // runtime contract uses milliseconds. Injected host plans bypass the
@@ -329,14 +363,6 @@ fn normalize_planner_budget(mut plan: Value) -> Result<Value, String> {
         Value::from(milliseconds),
     );
     Ok(plan)
-}
-
-pub(super) fn bound_workflow_timeout(args: &mut Value, timeout_ms: u64) -> Result<(), String> {
-    args.get_mut("limits")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| "DeepResearch workflow args have no limits object".to_string())?
-        .insert("timeoutMs".to_string(), Value::from(timeout_ms));
-    Ok(())
 }
 
 fn string_array(

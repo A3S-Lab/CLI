@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 #[path = "web_cli/web_turn_queue.rs"]
@@ -249,6 +249,155 @@ fn plugin_api_exposes_catalog_and_fails_closed_without_trust_roots() {
     daemon.stop();
     wait_until_stopped(&address);
     fs::remove_dir_all(root).expect("clean plugin API fixture");
+}
+
+#[test]
+fn knowledge_marketplace_creates_and_installs_real_personal_bases() {
+    let root = temp_directory("web-knowledge-marketplace");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S knowledge marketplace test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+
+    let marketplace = http_json(
+        &address,
+        "GET",
+        "/api/v1/knowledge/marketplace",
+        None,
+        "200",
+    );
+    let marketplace = api_data(&marketplace);
+    assert_eq!(marketplace["schemaVersion"], 1);
+    assert_eq!(marketplace["format"], "okf");
+    assert_eq!(marketplace["source"]["verified"], true);
+    let market_id = marketplace["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["id"].as_str())
+        .expect("curated OKF marketplace item")
+        .to_string();
+    assert_eq!(marketplace["items"][0]["installed"], false);
+
+    let created = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/bases",
+        Some(r#"{"name":"Project Notes","description":"Local project knowledge"}"#),
+        "200",
+    );
+    let created = api_data(&created);
+    let created_id = created["knowledgeBase"]["id"]
+        .as_str()
+        .expect("created knowledge base id");
+    assert_eq!(created["changed"], true);
+    assert_eq!(created["knowledgeBase"]["origin"], "created");
+    assert!(root
+        .join(".a3s/kb/bases")
+        .join(created_id)
+        .join(".a3s/knowledge-base.acl")
+        .is_file());
+
+    let vault = root.join("Research Vault");
+    fs::create_dir_all(vault.join("topics")).expect("create Obsidian vault fixture");
+    fs::write(vault.join("Home.md"), "# Home\n\n[[topics/Methods]]\n")
+        .expect("write Obsidian home note");
+    fs::write(vault.join("topics/Methods.md"), "# Methods\n").expect("write Obsidian nested note");
+    let import_request = serde_json::json!({ "path": vault, "name": "Research Vault" });
+    let imported = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/bases/import",
+        Some(&import_request.to_string()),
+        "200",
+    );
+    let imported = api_data(&imported);
+    let imported_id = imported["knowledgeBase"]["id"]
+        .as_str()
+        .expect("imported knowledge base id");
+    assert_eq!(imported["knowledgeBase"]["origin"], "imported");
+    assert!(root
+        .join(".a3s/kb/bases")
+        .join(imported_id)
+        .join("sources/Home.md")
+        .is_file());
+
+    let installed = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/marketplace/{market_id}/install"),
+        Some("{}"),
+        "200",
+    );
+    let installed = api_data(&installed);
+    assert_eq!(installed["changed"], true);
+    assert_eq!(installed["knowledgeBase"]["marketplaceId"], market_id);
+    assert_eq!(installed["knowledgeBase"]["origin"], "marketplace");
+    assert!(root
+        .join(".a3s/kb/bases")
+        .join(&market_id)
+        .join("README.md")
+        .is_file());
+    assert!(root
+        .join(".a3s/kb/bases")
+        .join(&market_id)
+        .join(".a3s/asset.acl")
+        .is_file());
+
+    let repeated = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/marketplace/{market_id}/install"),
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(api_data(&repeated)["changed"], false);
+
+    let bases = http_json(&address, "GET", "/api/v1/knowledge/bases", None, "200");
+    let bases = api_data(&bases);
+    assert_eq!(bases["total"], 3);
+    assert!(bases["items"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item["id"] == created_id && item["origin"] == "created")
+            && items.iter().any(|item| {
+                item["id"] == market_id
+                    && item["origin"] == "marketplace"
+                    && item["marketplaceId"] == market_id
+            })
+    }));
+
+    let pinned = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/bases/{created_id}/pinned"),
+        Some(r#"{"pinned":false}"#),
+        "200",
+    );
+    assert_eq!(api_data(&pinned)["knowledgeBase"]["pinned"], false);
+
+    let refreshed_marketplace = http_json(
+        &address,
+        "GET",
+        "/api/v1/knowledge/marketplace",
+        None,
+        "200",
+    );
+    assert!(api_data(&refreshed_marketplace)["items"]
+        .as_array()
+        .is_some_and(|items| items
+            .iter()
+            .any(|item| { item["id"] == market_id && item["installed"] == true })));
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean knowledge marketplace fixture");
 }
 
 #[test]
@@ -1485,6 +1634,7 @@ impl DaemonGuard {
             return;
         }
         stop_process(self.pid);
+        wait_until_process_exited(self.pid);
         self.active = false;
     }
 
@@ -1512,6 +1662,38 @@ fn stop_process(pid: u32) {
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .status();
 }
+
+#[cfg(unix)]
+fn wait_until_process_exited(pid: u32) {
+    let pid = pid.to_string();
+    let is_running = || {
+        Command::new("/bin/kill")
+            .args(["-0", &pid])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while is_running() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    if !is_running() {
+        return;
+    }
+    let _ = Command::new("/bin/kill")
+        .args(["-KILL", &pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let forced_deadline = Instant::now() + Duration::from_secs(1);
+    while is_running() && Instant::now() < forced_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(windows)]
+fn wait_until_process_exited(_pid: u32) {}
 
 fn temp_directory(name: &str) -> PathBuf {
     let stamp = SystemTime::now()

@@ -21,6 +21,7 @@ fn fixture(message: &str) -> OperationPlan {
         local_package: None,
         resolved_sources: BTreeMap::from([("box".to_string(), "github-release".to_string())]),
         resolved_releases: BTreeMap::new(),
+        resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(false),

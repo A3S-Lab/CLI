@@ -1,3 +1,4 @@
+#[cfg(test)]
 fn accepted_evidence_ids(evidence: &[AcceptedEvidence]) -> BTreeSet<String> {
     evidence.iter().map(|item| item.id.clone()).collect()
 }
@@ -89,14 +90,6 @@ fn apply_pending_evidence(
         )?;
     }
     Ok(())
-}
-
-fn canonical_query(workflow_output: &str) -> Option<String> {
-    serde_json::from_str::<Value>(workflow_output)
-        .ok()?
-        .get("query")?
-        .as_str()
-        .map(str::to_string)
 }
 
 pub(super) fn attach_inquiry_projection(

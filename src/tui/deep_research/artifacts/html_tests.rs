@@ -96,7 +96,7 @@ fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
         "# 简洁研究标题\n\n## 核心发现\n\n结论正文。\n\n## Sources\n\n- [来源](https://example.com)",
     );
 
-    assert!(html.contains("<html lang=\"und\">"), "{html}");
+    assert!(html.contains("<html lang=\"zh-CN\">"), "{html}");
     assert!(html.contains("class=\"hero\""), "{html}");
     assert!(html.contains("class=\"report-shell\""), "{html}");
     assert!(html.contains("@media(max-width:820px)"), "{html}");
@@ -105,7 +105,15 @@ fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
     assert!(html.contains("prefers-reduced-motion"), "{html}");
     assert!(html.contains(":focus-visible"), "{html}");
     assert!(
-        html.contains("<strong>01</strong><span>Cited sources</span>"),
+        html.contains("<strong>01</strong><span>引用来源</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<strong>01</strong><span>报告章节</span>"),
+        "{html}"
+    );
+    assert!(
+        html.contains("<strong>01</strong><span>分钟阅读</span>"),
         "{html}"
     );
     assert!(html.contains("class=\"toc\""), "{html}");
@@ -123,7 +131,9 @@ fn editorial_report_html_has_responsive_print_and_accessibility_contract() {
         !html.contains("class=\"report-section section--sources"),
         "{html}"
     );
-    assert!(html.contains("aria-label=\"Report metadata\""), "{html}");
+    assert!(html.contains("aria-label=\"报告元数据\""), "{html}");
+    assert!(!html.contains("Evidence profile"), "{html}");
+    assert!(!html.contains("Min read"), "{html}");
     assert_eq!(html.matches("<h1>").count(), 1, "{html}");
     assert!(!html.contains("<script"), "{html}");
 }
@@ -390,6 +400,10 @@ fn mobile_rail_keeps_navigation_without_decorative_section_counts() {
 
     assert!(html.contains("class=\"toc\""), "{html}");
     assert!(html.contains("href=\"#section-2\""), "{html}");
+    assert!(
+        html.contains("grid-template-columns:repeat(2,minmax(0,1fr))"),
+        "{html}"
+    );
     assert!(!html.contains("rail-stat"), "{html}");
 }
 

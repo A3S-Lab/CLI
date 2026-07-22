@@ -6,6 +6,7 @@ use a3s_updater::{
     parse_version, uninstall_owned_files, ComponentReceipt, InstallProvenance,
     RECEIPT_SCHEMA_VERSION,
 };
+use a3s_use_extension::ReleaseBundlePackage;
 use anyhow::{bail, Context};
 use serde::Serialize;
 
@@ -54,6 +55,7 @@ pub struct InstallRequest {
     pub progress: bool,
     pub resolved_releases: BTreeMap<String, ResolvedRelease>,
     pub resolved_sources: BTreeMap<String, InstallSource>,
+    pub resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     pub resolved_registry_packages: BTreeMap<String, ResolvedRegistryPackage>,
 }
 
@@ -69,6 +71,7 @@ impl Default for InstallRequest {
             progress: true,
             resolved_releases: BTreeMap::new(),
             resolved_sources: BTreeMap::new(),
+            resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
         }
     }
@@ -173,16 +176,21 @@ pub(super) async fn install_component_locked(
         if request.allow_unsigned {
             bail!("--allow-unsigned is valid only with an explicit local --from package");
         }
-        let resolved = request
-            .resolved_registry_packages
-            .get(id.as_str())
-            .with_context(|| {
-                format!(
-                    "external component '{}' has no reviewed signed-registry resolution",
-                    id
-                )
-            })?;
-        validate_registry_resolution(id, resolved)?;
+        match (
+            request.resolved_release_bundles.get(id.as_str()),
+            request.resolved_registry_packages.get(id.as_str()),
+        ) {
+            (Some(bundle), None) => validate_release_bundle_resolution(id, bundle)?,
+            (None, Some(registry)) => validate_registry_resolution(id, registry)?,
+            (None, None) => bail!(
+                "external component '{}' has no reviewed release-bundle or signed-registry resolution",
+                id
+            ),
+            (Some(_), Some(_)) => bail!(
+                "external component '{}' resolved more than one package source",
+                id
+            ),
+        }
     }
     let parent_path = ensure_parent(&use_id, paths, request).await?;
     delegate_install(id, &use_id, &parent_path, request)
@@ -532,6 +540,12 @@ fn delegate_install(
             command.arg("--trusted-root").arg(path);
         }
     }
+    if let Some(bundle) = request.resolved_release_bundles.get(id.as_str()) {
+        validate_release_bundle_resolution(id, bundle)?;
+        command
+            .arg("--release-bundle-sha256")
+            .arg(&bundle.package_sha256);
+    }
     let output = command.output().with_context(|| {
         format!(
             "failed to delegate install to parent component '{}'",
@@ -588,6 +602,25 @@ fn validate_registry_resolution(
             != resolved.registry.trust_root.trim_start_matches("sha256:")
     {
         bail!("reviewed registry package provenance is internally inconsistent");
+    }
+    Ok(())
+}
+
+fn validate_release_bundle_resolution(
+    id: &ComponentId,
+    bundle: &ReleaseBundlePackage,
+) -> anyhow::Result<()> {
+    bundle.validate().map_err(anyhow::Error::new)?;
+    let parent = ComponentId::parse("use")?;
+    let package_id = id
+        .relative_to(&parent)
+        .context("release-bundled extension is outside the Use namespace")?;
+    if bundle.package_id != package_id || bundle.component_id != id.as_str() {
+        bail!(
+            "reviewed release bundle '{}' does not match component '{}'",
+            bundle.package_id,
+            id
+        );
     }
     Ok(())
 }
