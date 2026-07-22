@@ -15,7 +15,13 @@ jobs:
       - name: Use published A3S crates
         run: bash .github/scripts/use-published-a3s-crates.sh
       - name: Test managed sandbox compatibility patch
-        run: node .github/scripts/patch-managed-srt-linux.mjs --self-test
+        run: node src/components/managed_srt/patch-managed-srt-linux.mjs --self-test
+      - name: Verify crate package contents
+        run: |
+          set -euo pipefail
+          cargo package --locked --allow-dirty --list \
+            | grep -Fx \
+              'src/components/managed_srt/patch-managed-srt-linux.mjs'
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
@@ -49,7 +55,7 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
-          node ../../.github/scripts/patch-managed-srt-linux.mjs .
+          node ../../src/components/managed_srt/patch-managed-srt-linux.mjs .
           node -e '
             const fs = require("node:fs");
             for (const path of [
@@ -124,7 +130,7 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
-          node ../../.github/scripts/patch-managed-srt-linux.mjs .
+          node ../../src/components/managed_srt/patch-managed-srt-linux.mjs .
           node -e '
             const fs = require("node:fs");
             for (const path of [

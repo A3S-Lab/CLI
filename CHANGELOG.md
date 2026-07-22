@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still provides Seatbelt, explicitly provisioned its ripgrep dependency, and
   added pull-request coverage for both packaged and first-use behavior. The
   first-use compatibility patcher now also recognizes macOS's symlinked
-  temporary-directory paths.
+  temporary-directory paths and ships inside the crates.io package.
 - Restored executable permissions for the managed sandbox CLI and native
   seccomp helpers after GitHub artifact transport, and now reject release
   archives that contain non-executable Unix sandbox components.

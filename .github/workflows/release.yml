@@ -501,7 +501,7 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
-          node ../../.github/scripts/patch-managed-srt-linux.mjs .
+          node ../../src/components/managed_srt/patch-managed-srt-linux.mjs .
           node -e '
             const fs = require("node:fs");
             for (const path of [
