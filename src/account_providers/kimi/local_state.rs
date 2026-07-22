@@ -4,6 +4,7 @@ use super::{
     model_metadata, now_unix_seconds, valid_model_id, KimiCredentials, KimiModelMetadata,
     DEFAULT_DESKTOP_BASE_URL, DEFAULT_MODEL_CONTEXT, MAX_CREDENTIAL_BYTES, MAX_MODELS_BYTES,
 };
+use crate::account_providers::paths::user_home_dir;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -258,9 +259,9 @@ fn kimi_home_candidates() -> Vec<PathBuf> {
             push_unique(&mut homes, PathBuf::from(home));
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        push_unique(&mut homes, Path::new(&home).join(".kimi-code"));
-        push_unique(&mut homes, Path::new(&home).join(".kimi"));
+    if let Some(home) = user_home_dir() {
+        push_unique(&mut homes, home.join(".kimi-code"));
+        push_unique(&mut homes, home.join(".kimi"));
     }
     homes
 }
@@ -273,8 +274,7 @@ fn kimi_desktop_home_candidates() -> Vec<PathBuf> {
     if let Some(home) = non_empty_env("KIMI_DESKTOP_HOME") {
         push_unique(&mut homes, PathBuf::from(home));
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = Path::new(&home);
+    if let Some(home) = user_home_dir() {
         #[cfg(target_os = "macos")]
         push_unique(
             &mut homes,

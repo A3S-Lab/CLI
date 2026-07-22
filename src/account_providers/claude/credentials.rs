@@ -1,3 +1,4 @@
+use crate::account_providers::paths::user_home_dir;
 use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -121,7 +122,7 @@ pub(crate) fn claude_config_dir() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".claude")))
+        .or_else(|| user_home_dir().map(|home| home.join(".claude")))
 }
 
 pub(crate) fn claude_credentials_paths() -> Vec<PathBuf> {
@@ -130,8 +131,8 @@ pub(crate) fn claude_credentials_paths() -> Vec<PathBuf> {
         .map(|dir| dir.join(".credentials.json"))
         .into_iter()
         .for_each(|path| paths.push(path));
-    if let Some(home) = std::env::var_os("HOME") {
-        paths.push(Path::new(&home).join(".claude.json"));
+    if let Some(home) = user_home_dir() {
+        paths.push(home.join(".claude.json"));
     }
     paths
 }

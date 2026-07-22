@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
+  fall back to the native Windows user profile when `HOME` is unset. WorkBuddy
+  now locates its bundled CodeBuddy CLI through standard Windows installation
+  directories and registered uninstall metadata, including custom install
+  locations.
+
 ## [0.9.9] - 2026-07-22
 
 ### Added

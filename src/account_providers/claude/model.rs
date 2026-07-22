@@ -1,3 +1,5 @@
+use crate::account_providers::paths::user_home_dir;
+
 pub(crate) fn canonical_model_name(model: &str) -> String {
     let trimmed = model.trim();
     if !trimmed.starts_with("claude") {
@@ -19,8 +21,7 @@ pub(crate) fn canonical_model_name(model: &str) -> String {
 /// cache. Project selections are kept ahead of historical usage entries.
 pub(crate) fn models() -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::Path::new(&home);
+    if let Some(home) = user_home_dir() {
         for path in [
             home.join(".claude.json"),
             home.join(".claude").join("stats-cache.json"),
