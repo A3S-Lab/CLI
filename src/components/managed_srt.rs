@@ -62,8 +62,7 @@ pub const MANAGED_SRT_PAYLOAD_RELATIVE_ROOT: &str = "support/managed-srt";
 const PACKAGED_SRT_TREE_SHA256: &str = include_str!("../../support/managed-srt.tree-sha256");
 const MANAGED_PACKAGE_JSON: &[u8] = include_bytes!("../../support/managed-srt/package.json");
 const MANAGED_PACKAGE_LOCK: &[u8] = include_bytes!("../../support/managed-srt/package-lock.json");
-const MANAGED_SRT_LINUX_PATCHER: &str =
-    include_str!("../../.github/scripts/patch-managed-srt-linux.mjs");
+const MANAGED_SRT_LINUX_PATCHER: &str = include_str!("managed_srt/patch-managed-srt-linux.mjs");
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const INSTALL_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
