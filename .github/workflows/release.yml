@@ -838,18 +838,24 @@ jobs:
         run: |
           set -euo pipefail
           tag="$GITHUB_REF_NAME"
-          for target in \
-            aarch64-apple-darwin \
-            x86_64-apple-darwin \
-            x86_64-unknown-linux-gnu \
-            aarch64-unknown-linux-gnu \
-            x86_64-pc-windows-msvc; do
-            base="a3s-${tag}-${target}"
-            printf '%s\n' "${base}.tar.gz" "${base}.sha256"
-            if [[ "$target" == x86_64-pc-windows-msvc ]]; then
-              printf '%s\n' "${base}.zip"
-            fi
-          done | sort > expected-assets.txt
+          version="${tag#v}"
+          {
+            for target in \
+              aarch64-apple-darwin \
+              x86_64-apple-darwin \
+              x86_64-unknown-linux-gnu \
+              aarch64-unknown-linux-gnu \
+              x86_64-pc-windows-msvc; do
+              base="a3s-${tag}-${target}"
+              printf '%s\n' "${base}.tar.gz" "${base}.sha256"
+              if [[ "$target" == x86_64-pc-windows-msvc ]]; then
+                printf '%s\n' "${base}.zip"
+              fi
+            done
+            printf '%s\n' \
+              "a3s-web-v${version}.tar.gz" \
+              "a3s-web-v${version}.tar.gz.sha256"
+          } | sort > expected-assets.txt
           gh release view "$tag" --json assets \
             --jq '.assets[].name' | sort > actual-assets.txt
           if ! diff -u expected-assets.txt actual-assets.txt; then
@@ -895,6 +901,29 @@ jobs:
               fi
             done
           done
+
+          web_archive="a3s-web-v${version}.tar.gz"
+          web_checksum="release-assets/${web_archive}.sha256"
+          web_checksum_lines="$(awk 'END { print NR }' "$web_checksum")"
+          web_checksum_entries="$(awk 'NF == 2 { count += 1 } END { print count + 0 }' "$web_checksum")"
+          if [[ "$web_checksum_lines" -ne 1 || "$web_checksum_entries" -ne 1 ]]; then
+            echo "::error::${web_archive}.sha256 must contain exactly one checksum entry"
+            exit 1
+          fi
+          expected_web_digest="$(awk -v asset="$web_archive" \
+            '($2 == asset || $2 == "*" asset) \
+             && length($1) == 64 && $1 !~ /[^0-9a-f]/ \
+             { digest = $1; count += 1 } \
+             END { if (count == 1) print digest }' "$web_checksum")"
+          actual_web_digest="$(sha256sum "release-assets/${web_archive}" | awk '{ print $1 }')"
+          if [[ -z "$expected_web_digest" || "$actual_web_digest" != "$expected_web_digest" ]]; then
+            echo "::error::SHA-256 mismatch for ${web_archive}"
+            exit 1
+          fi
+          if ! tar -tzf "release-assets/${web_archive}" | grep -Fx 'web/index.html' >/dev/null; then
+            echo "::error::${web_archive} does not contain web/index.html"
+            exit 1
+          fi
 
           git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
           current_tag_sha="$(git rev-list -n 1 "refs/tags/${tag}")"
