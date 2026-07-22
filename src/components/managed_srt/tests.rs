@@ -495,16 +495,27 @@ async fn real_packaged_payload_enforces_complete_local_command_policy() {
         "network egress",
     )
     .await;
-    assert_sandbox_denies(
-        &sandbox,
-        "node -e 'const net=require(\"net\");\
+    const LOCAL_LISTENER: &str = "node -e 'const net=require(\"net\");\
          const server=net.createServer();\
          server.once(\"error\",()=>process.exit(7));\
          server.listen(0,\"127.0.0.1\",()=>server.close(()=>process.exit(0)));\
-         setTimeout(()=>process.exit(8),2000)'",
-        "local listener",
-    )
-    .await;
+         setTimeout(()=>process.exit(8),2000)'";
+    #[cfg(target_os = "linux")]
+    {
+        // Linux isolates the entire network namespace, so an in-namespace
+        // loopback listener is harmless and cannot bind a host port.
+        let isolated_listener = sandbox
+            .exec_command(LOCAL_LISTENER, "/workspace")
+            .await
+            .unwrap();
+        assert_eq!(
+            isolated_listener.exit_code, 0,
+            "isolated loopback listener failed: {}{}",
+            isolated_listener.stdout, isolated_listener.stderr
+        );
+    }
+    #[cfg(target_os = "macos")]
+    assert_sandbox_denies(&sandbox, LOCAL_LISTENER, "local listener").await;
     assert_sandbox_denies(
         &sandbox,
         "node -e 'const net=require(\"net\");\
