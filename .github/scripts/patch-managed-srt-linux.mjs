@@ -19,12 +19,12 @@ const relativeRuntime = join(
   "linux-sandbox-utils.js",
 );
 
-const upstreamBlock = `        const denyPaths = [
+const denyOrderUpstream = `        const denyPaths = [
             ...(writeConfig.denyWithinAllow || []),
             ...(await linuxGetMandatoryDenyPaths(ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal)),
         ];`;
 
-const patchedBlock = `        const denyPaths = [
+const denyOrderPatched = `        const denyPaths = [
             // Mandatory child paths must be mounted before caller-supplied parent
             // denies. Otherwise a read-only parent prevents bwrap from creating
             // a mount point for a non-existent mandatory child.
@@ -32,28 +32,68 @@ const patchedBlock = `        const denyPaths = [
             ...(writeConfig.denyWithinAllow || []),
         ];`;
 
+const seccompReadUpstream = `        const fsArgs = await generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal);`;
+
+const seccompReadPatched = `        // The outer sandbox can hide the user home before its inner seccomp
+        // helper starts. Re-expose only the helper selected by this verified
+        // runtime so Unix-socket filtering remains active inside that boundary.
+        const seccompReadPath = !allowAllUnixSockets
+            ? seccompConfig?.argv0
+                ? seccompConfig.applyPath
+                : getApplySeccompBinaryPath(seccompConfig?.applyPath)
+            : undefined;
+        const effectiveReadConfig = readConfig && seccompReadPath
+            ? {
+                ...readConfig,
+                allowWithinDeny: [...(readConfig.allowWithinDeny || []), seccompReadPath],
+            }
+            : readConfig;
+        const fsArgs = await generateFilesystemArgs(effectiveReadConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal);`;
+
+const replacements = [
+  {
+    name: "nested deny mount order",
+    upstream: denyOrderUpstream,
+    patched: denyOrderPatched,
+  },
+  {
+    name: "seccomp helper read access",
+    upstream: seccompReadUpstream,
+    patched: seccompReadPatched,
+  },
+];
+
 function occurrenceCount(source, needle) {
   return source.split(needle).length - 1;
 }
 
 export function patchManagedSrtLinux(installRoot) {
   const runtime = join(resolve(installRoot), relativeRuntime);
-  const source = readFileSync(runtime, "utf8");
-  const upstreamCount = occurrenceCount(source, upstreamBlock);
-  const patchedCount = occurrenceCount(source, patchedBlock);
+  let source = readFileSync(runtime, "utf8");
+  let changed = false;
 
-  if (upstreamCount === 0 && patchedCount === 1) {
-    return "already-patched";
-  }
-  if (upstreamCount !== 1 || patchedCount !== 0) {
-    throw new Error(
-      `managed SRT Linux compatibility patch expected one upstream block in ${runtime}; ` +
-        `found upstream=${upstreamCount}, patched=${patchedCount}`,
-    );
+  for (const replacement of replacements) {
+    const upstreamCount = occurrenceCount(source, replacement.upstream);
+    const patchedCount = occurrenceCount(source, replacement.patched);
+    if (upstreamCount === 0 && patchedCount === 1) {
+      continue;
+    }
+    if (upstreamCount !== 1 || patchedCount !== 0) {
+      throw new Error(
+        `managed SRT Linux compatibility patch expected one ${replacement.name} ` +
+          `upstream block in ${runtime}; found upstream=${upstreamCount}, ` +
+          `patched=${patchedCount}`,
+      );
+    }
+    source = source.replace(replacement.upstream, replacement.patched);
+    changed = true;
   }
 
-  writeFileSync(runtime, source.replace(upstreamBlock, patchedBlock), "utf8");
-  return "patched";
+  if (changed) {
+    writeFileSync(runtime, source, "utf8");
+    return "patched";
+  }
+  return "already-patched";
 }
 
 function selfTest() {
@@ -61,17 +101,22 @@ function selfTest() {
   const runtime = join(root, relativeRuntime);
   try {
     mkdirSync(dirname(runtime), { recursive: true });
-    writeFileSync(runtime, `prefix\n${upstreamBlock}\nsuffix\n`, "utf8");
+    const fixture = replacements
+      .map((replacement) => replacement.upstream)
+      .join("\n");
+    writeFileSync(runtime, `prefix\n${fixture}\nsuffix\n`, "utf8");
     assert.equal(patchManagedSrtLinux(root), "patched");
     const patched = readFileSync(runtime, "utf8");
-    assert.equal(occurrenceCount(patched, upstreamBlock), 0);
-    assert.equal(occurrenceCount(patched, patchedBlock), 1);
+    for (const replacement of replacements) {
+      assert.equal(occurrenceCount(patched, replacement.upstream), 0);
+      assert.equal(occurrenceCount(patched, replacement.patched), 1);
+    }
     assert.equal(patchManagedSrtLinux(root), "already-patched");
 
     writeFileSync(runtime, "unexpected upstream source\n", "utf8");
     assert.throws(
       () => patchManagedSrtLinux(root),
-      /expected one upstream block/,
+      /expected one .* upstream block/,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

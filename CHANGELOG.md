@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still provides Seatbelt, with a pull-request guard against runner drift.
 - Ordered mandatory Linux sandbox child mounts before A3S's stricter parent
   denies, preventing bubblewrap startup failures in both bundled and first-use
-  managed sandbox installations without weakening the policy boundary.
+  managed sandbox installations. The runtime's immutable seccomp helper also
+  remains readable when the surrounding user home is hidden, without weakening
+  either policy boundary.
 - Made local Claude Code, Codex, Kimi Code, and WorkBuddy account discovery
   fall back to the native Windows user profile when `HOME` is unset. WorkBuddy
   now locates its bundled CodeBuddy CLI through standard Windows installation
