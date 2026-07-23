@@ -1273,7 +1273,10 @@ requires `/usr/bin/sandbox-exec` and `ripgrep`; Linux requires `bubblewrap`,
 formula declares those dependencies. Direct-archive users must provide them.
 Windows requires its one-time elevated machine sandbox setup. Before the TUI
 attaches the sandbox, it runs a bounded command through the real OS boundary;
-package presence alone is never treated as readiness.
+package presence alone is never treated as readiness. On macOS, A3S writes the
+generated Seatbelt policy to a private mode-0600 file and invokes
+`sandbox-exec -f`, so large credential and hard-link rule sets cannot exceed
+the operating system argument-size limit.
 
 Source and Cargo installations may not carry the release support tree. If no
 verified runtime is ready and first-use setup is allowed, the CLI uses npm as a

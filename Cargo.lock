@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.10.3"
+version = "0.10.4"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "6.4.1"
+version = "6.4.2"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
