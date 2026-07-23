@@ -1317,12 +1317,15 @@ promoted from the local sandbox.
 The release payload shares the CLI archive's release provenance and is
 reverified before every use. Homebrew installs it under the formula share
 directory, direct archives keep it beside the CLI resources, and standalone
-self-update replaces it transactionally with the binary. The npm path remains
-a development fallback rather than the production release supply path. A
-release cannot publish until the exact generated payload passes real macOS and
-Linux behavior tests for ordinary workspace and offline-toolchain access,
-outside and symlink write denial, protected metadata, credential reads,
-network egress, local listeners, and Unix sockets.
+self-update replaces it transactionally with the binary. The Homebrew formula
+restores canonical Node shebangs after keg cleanup, and its test compares the
+complete installed tree digest; the release workflow exercises both install
+and same-version reinstall paths. The npm path remains a development fallback
+rather than the production release supply path. A release cannot publish until
+the exact generated payload passes real macOS and Linux behavior tests for
+ordinary workspace and offline-toolchain access, outside and symlink write
+denial, protected metadata, credential reads, network egress, local listeners,
+and Unix sockets.
 
 | Tool family | TUI behavior |
 | --- | --- |

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored Homebrew-rewritten Node shebangs after formula cleanup, verified the
+  complete managed SRT tree in `brew test`, and added release smoke coverage
+  for both a fresh install and a same-version reinstall.
+
 ## [0.10.1] - 2026-07-23
 
 ### Added

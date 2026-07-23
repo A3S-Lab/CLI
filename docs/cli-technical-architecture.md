@@ -487,9 +487,12 @@ The production supply path is release-owned:
 
 The TUI does not select an arbitrary `srt` from `PATH`. Release packaging,
 Homebrew installation, and standalone self-update all preserve the same
-verified support tree. Runtime and Box remain the owners of durable placement
-and stronger isolation; this payload does not become a public component
-catalog or stack-wide execution contract.
+verified support tree. The Homebrew formula restores Cleaner-rewritten Node
+shebangs in its post-install phase, verifies the complete tree digest in its
+formula test, and exercises both fresh-install and same-version reinstall
+paths in the release workflow. Runtime and Box remain the owners of durable
+placement and stronger isolation; this payload does not become a public
+component catalog or stack-wide execution contract.
 
 Executable discovery and version probes use bounded output files and an
 explicit portable timeout. They must not install process-global signal
