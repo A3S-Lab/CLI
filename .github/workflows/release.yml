@@ -120,7 +120,7 @@ jobs:
           }
           required_crates=(
             "a3s-code-core $A3S_CODE_CORE_VERSION"
-            "a3s-boot 0.1.2"
+            "a3s-boot 0.1.3"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
             "a3s-tui $A3S_TUI_VERSION"
