@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Trusted the official A3S tap before release smoke installation so current
+  Homebrew versions can resolve the tap-owned `a3s-webview` dependency.
+
 ## [0.10.2] - 2026-07-23
 
 ### Fixed
