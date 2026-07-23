@@ -22,18 +22,29 @@ struct ReportPresentationFrame {
     presentation: ReportPresentation,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(super) struct FrameGenerationContext<'a> {
+    pub(super) session: &'a AgentSession,
+    pub(super) query: &'a str,
+    pub(super) run_id: &'a str,
+    pub(super) outline: &'a ResearchOutline,
+    pub(super) state: &'a InquiryState,
+    pub(super) evidence: &'a [AcceptedEvidence],
+    pub(super) deadline: &'a ReportDeadline,
+}
+
 pub(super) async fn generate_frame(
-    session: &AgentSession,
-    query: &str,
-    run_id: &str,
-    _workflow_output: &str,
-    outline: &ResearchOutline,
-    state: &InquiryState,
-    evidence: &[AcceptedEvidence],
+    context: FrameGenerationContext<'_>,
     revision_context: Option<&Value>,
-    deadline: &ReportDeadline,
 ) -> Result<ReportFrame, String> {
+    let FrameGenerationContext {
+        session,
+        query,
+        run_id,
+        outline,
+        state,
+        evidence,
+        deadline,
+    } = context;
     let packet = report_frame_packet(query, outline, state, evidence, revision_context);
     let content_packet = report_content_frame_packet(&packet);
     let editorial_prompt = report_editorial_frame_prompt(&content_packet);

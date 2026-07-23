@@ -13,6 +13,14 @@ pub(in crate::api::code_web) enum CodeWebQueuedTurnKind {
     GoalContinuation,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(in crate::api::code_web) enum CodeWebQueuedTurnMode {
+    #[default]
+    Standard,
+    DeepResearch,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(in crate::api::code_web) struct CodeWebQueuedTurn {
@@ -23,6 +31,8 @@ pub(in crate::api::code_web) struct CodeWebQueuedTurn {
     pub(in crate::api::code_web) context_files: Vec<String>,
     #[serde(default)]
     pub(in crate::api::code_web) skill_names: Vec<String>,
+    #[serde(default)]
+    pub(in crate::api::code_web) mode: CodeWebQueuedTurnMode,
     pub(in crate::api::code_web) priority: Priority,
     pub(in crate::api::code_web) enqueued_at: i64,
 }
@@ -251,6 +261,7 @@ mod tests {
             content: id.to_string(),
             context_files: Vec::new(),
             skill_names: Vec::new(),
+            mode: CodeWebQueuedTurnMode::Standard,
             priority,
             enqueued_at: 1,
         }
@@ -284,6 +295,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["user-1", "user-2", "goal"]
         );
+    }
+
+    #[test]
+    fn deep_research_mode_survives_queue_snapshot_and_restore() {
+        let mut research = turn("research", CodeWebQueuedTurnKind::User, USER_TURN_PRIORITY);
+        research.mode = CodeWebQueuedTurnMode::DeepResearch;
+        let mut queue = CodeWebSessionTurnQueue::default();
+        queue.enqueue(research);
+
+        let restored = CodeWebSessionTurnQueue::restore(queue.snapshot()).snapshot();
+
+        assert_eq!(restored.items[0].mode, CodeWebQueuedTurnMode::DeepResearch);
     }
 
     #[test]

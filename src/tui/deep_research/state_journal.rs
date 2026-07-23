@@ -643,6 +643,83 @@ pub(crate) async fn record_run_terminal(
     outcome: ResearchOutcome,
     artifacts: Option<&super::ResearchReportArtifacts>,
 ) -> Result<ResearchRunProjection> {
+    record_run_terminal_with_artifact_authority(
+        workspace,
+        run_id,
+        outcome,
+        artifacts,
+        TerminalArtifactAuthority::JournalEvidence,
+        None,
+    )
+    .await
+}
+
+/// Record a terminal artifact pair after the Host publication validator has
+/// already established its path, content shape, and outcome. Evidence-first
+/// reports do not create the legacy accepted-evidence graph and must not be
+/// reclassified by an audit whose inputs belong to that older representation.
+pub(crate) async fn record_validated_publication_terminal(
+    workspace: &Path,
+    run_id: &str,
+    outcome: ResearchOutcome,
+    artifacts: &super::ResearchReportArtifacts,
+    quality: &super::deep_research_artifacts::DeepResearchPublicationQuality,
+) -> Result<ResearchRunProjection> {
+    if matches!(
+        outcome,
+        ResearchOutcome::Completed | ResearchOutcome::Qualified
+    ) && (quality.accepted_claim_count == 0
+        || quality.cited_source_count == 0
+        || quality.direct_answer_count == 0
+        || quality.finding_count == 0)
+    {
+        anyhow::bail!(
+            "a successful validated publication must contain cited claims and a direct answer"
+        );
+    }
+    if quality.accepted_claim_count > 0 {
+        append_event_with_retry(
+            workspace,
+            run_id,
+            ResearchDomainEvent {
+                source: "evidence".to_string(),
+                source_sequence: 1,
+                source_event_id: format!("{run_id}:evidence:publication-quality"),
+                name: "research.evidence.accepted".to_string(),
+                payload: serde_json::json!({
+                    "accepted_evidence": quality.cited_source_count,
+                    "sources": quality.source_count,
+                    "claims": quality.accepted_claim_count,
+                }),
+            },
+        )
+        .await?;
+    }
+    record_run_terminal_with_artifact_authority(
+        workspace,
+        run_id,
+        outcome,
+        Some(artifacts),
+        TerminalArtifactAuthority::ValidatedHostPublication,
+        Some(quality),
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalArtifactAuthority {
+    JournalEvidence,
+    ValidatedHostPublication,
+}
+
+async fn record_run_terminal_with_artifact_authority(
+    workspace: &Path,
+    run_id: &str,
+    outcome: ResearchOutcome,
+    artifacts: Option<&super::ResearchReportArtifacts>,
+    artifact_authority: TerminalArtifactAuthority,
+    validated_quality: Option<&super::deep_research_artifacts::DeepResearchPublicationQuality>,
+) -> Result<ResearchRunProjection> {
     if outcome == ResearchOutcome::Active {
         anyhow::bail!("cannot record an active DeepResearch run as terminal");
     }
@@ -655,10 +732,11 @@ pub(crate) async fn record_run_terminal(
         let html = tokio::fs::read(&artifacts.html)
             .await
             .with_context(|| format!("read `{}`", artifacts.html.display()))?;
-        let audit = if matches!(
-            outcome,
-            ResearchOutcome::Completed | ResearchOutcome::Qualified
-        ) {
+        let audit = if artifact_authority == TerminalArtifactAuthority::JournalEvidence
+            && matches!(
+                outcome,
+                ResearchOutcome::Completed | ResearchOutcome::Qualified
+            ) {
             let Some(journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
                 anyhow::bail!("DeepResearch run `{run_id}` has no state journal");
             };
@@ -687,7 +765,16 @@ pub(crate) async fn record_run_terminal(
                 super::deep_research_report_audit::CitationRequirement::AtLeastOne,
             ))
         } else {
-            None
+            validated_quality
+                .filter(|quality| quality.accepted_claim_count > 0)
+                .map(|quality| super::deep_research_report_audit::ReportAudit {
+                passed: true,
+                accepted_sources: quality.source_count,
+                cited_sources: quality.cited_source_count,
+                issues: Vec::new(),
+                reason: "host publication passed the direct-answer, cited-claim, and source-relevance quality gate"
+                    .to_string(),
+                })
         };
         if let Some(audit) = audit.as_ref() {
             append_event_with_retry(

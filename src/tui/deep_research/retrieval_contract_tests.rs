@@ -1,5 +1,5 @@
 #[test]
-fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
+fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
     let args = super::deep_research_workflow_args_with_scope(
         "跨语言核实一个公开结论",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
@@ -8,42 +8,39 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
 
     assert!(args["input"].get("semantic_plan_contract").is_none());
     assert_eq!(contract["version"], 1);
-    assert_eq!(contract["pattern"], "minimal-deep-research");
+    assert_eq!(contract["pattern"], "evidence-first-deep-research");
     assert_eq!(contract["goal"], "跨语言核实一个公开结论");
     assert_eq!(contract["controller"], "host_inquiry_reducer");
-    assert_eq!(contract["quota"]["mode"], "unlimited");
-    assert_eq!(contract["execution"]["mode"], "coverage_driven");
+    assert_eq!(contract["quota"]["mode"], "bounded");
+    assert_eq!(contract["execution"]["mode"], "progressively_publishable");
     assert_eq!(
         contract["execution"]["stages"],
         serde_json::json!([
-            "semantic_plan",
-            "initial_retrieval",
-            "semantic_chunk_selection",
-            "typed_coverage_evaluation",
-            "optional_supplemental_retrieval",
-            "final_closed_question_review",
-            "host_contract_reduction",
-            "sectioned_report_transaction"
+            "bootstrap_acquisition",
+            "optional_outline",
+            "batched_evidence_extraction",
+            "host_coverage_reduction",
+            "optional_gap_acquisition",
+            "optional_gap_extraction",
+            "report_document_generation",
+            "deterministic_publication"
         ])
     );
     for field in [
-        "semantic_iterations",
-        "retrieval_passes",
-        "semantic_selections",
-        "section_revision_rounds",
-    ] {
-        assert_eq!(contract["cardinality"][field], 2, "{field}");
-    }
-    for field in [
-        "question_reviews",
-        "contract_assessments",
-        "report_transactions",
+        "outline_generations",
+        "initial_extractions",
+        "gap_extractions",
+        "report_generations",
+        "report_repairs",
     ] {
         assert_eq!(contract["cardinality"][field], 1, "{field}");
     }
     assert_eq!(contract["planner"]["agent"], "research-planner");
     assert_eq!(contract["planner"]["max_steps"], 1);
     assert_eq!(contract["planner"]["timeout_ms"], 90_000);
+    assert!(contract["planner"].get("outline_prompt").is_none());
+    assert!(contract["planner"].get("track_prompt").is_none());
+    assert!(contract["planner"].get("retrieval_prompt").is_none());
     assert_eq!(contract["hard_caps"]["max_searches"], 4);
     assert_eq!(contract["hard_caps"]["max_fetches"], 8);
     assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 2);
@@ -73,29 +70,37 @@ fn production_contract_is_one_plan_with_one_bounded_coverage_supplement() {
         .map(String::as_str)
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(actual, expected.into_iter().collect());
-    assert!(properties.get("budget").is_none());
-    assert!(properties.get("search_queries").is_none());
-    assert!(properties.get("stop_conditions").is_none());
+    assert_eq!(
+        properties["tracks"]["items"]["properties"]
+            .as_object()
+            .expect("outline track properties")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["id", "material", "title"].into_iter().collect()
+    );
 }
 
 #[test]
-fn outline_prompt_is_language_agnostic_and_provider_query_is_host_owned() {
+fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
     let args = super::deep_research_workflow_args_with_scope(
         "¿Qué demuestra la evidencia?",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
     );
-    let outline_prompt = args["input"]["loop_contract"]["planner"]["prompt"]
+    let prompt = args["input"]["loop_contract"]["planner"]["prompt"]
         .as_str()
-        .expect("outline planner prompt");
-    assert!(outline_prompt.chars().count() < 3_000);
+        .expect("optional outline prompt");
+    assert!(prompt.chars().count() < 3_000);
 
-    assert!(outline_prompt.contains("Do not route by keywords"));
-    assert!(outline_prompt.contains("Use the query language"));
-    assert!(outline_prompt.contains("original provider query"));
-    assert!(outline_prompt.contains("one material track for each coherent evidence family"));
-    assert!(outline_prompt.contains("absence can be disclosed"));
-    assert!(outline_prompt.contains("Do not return focus, questions"));
-    assert!(outline_prompt.contains("universal stop conditions"));
+    assert!(prompt.contains("Do not route by keywords"));
+    assert!(prompt.contains("Use the query language"));
+    assert!(prompt.contains("original provider query"));
+    assert!(prompt.contains("no target-detail or retrieval-planner call follows"));
+    assert!(prompt.contains("one material track for each coherent evidence family"));
+    assert!(prompt.contains("absence can be disclosed"));
+    assert!(prompt.contains("independently published projects"));
+    assert!(prompt.contains("Do not return focus, questions"));
+    assert!(prompt.contains("universal stop conditions"));
     for obsolete in [
         "research_method",
         "execution_route",
@@ -104,7 +109,7 @@ fn outline_prompt_is_language_agnostic_and_provider_query_is_host_owned() {
         "maker",
     ] {
         assert!(
-            !outline_prompt.contains(obsolete),
+            !prompt.contains(obsolete),
             "obsolete planner field: {obsolete}"
         );
     }
@@ -134,6 +139,7 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
         "judge meaning across languages",
         "model_generation_active_timeout_ms",
         "document_range_count",
+        "bounded_discovery_fallback",
         "exact workspace paths observed with read or grep",
     ] {
         assert!(
@@ -141,9 +147,41 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
             "missing retrieval behavior: {required}"
         );
     }
-    assert!(source.contains(r#"["anysearch", "tavily", "ddg"]"#));
+    assert!(!source.contains(r#"["anysearch", "tavily", "ddg"]"#));
+    assert!(!source.contains("WEB_SEARCH_ENGINES"));
     assert!(!source.contains(r#"["ddg", "wiki"]"#));
+    assert!(!source.contains("provider_round_robin"));
+    assert!(!source.contains("deterministicWebCandidates"));
+    assert!(source.contains("boundedDiscoveryFallback"));
+    assert!(source.contains(
+        "continued with bounded cross-query discovery candidates for deterministic Host review"
+    ));
+    assert!(source.contains("fallbackCandidatePriority"));
+    assert!(source.contains("protectedPublisherLookalike"));
+    assert!(source
+        .contains("Reject unrelated results even when fetch slots remain; return an empty list"));
+    assert!(
+        source.contains("Reject social or community posts, anonymous score trackers")
+            && source
+                .contains("Do not infer authority from a title or snippet claiming to be official"),
+        "semantic source admission must distinguish topicality from source trust"
+    );
+    assert!(
+        source.contains("publisher only provides storage")
+            && source.contains("earlier-stage snapshot"),
+        "source admission must reject self-publishing disclaimers and stale event phases"
+    );
+    assert!(
+        source.contains("limit: 16"),
+        "exact-query discovery must expose enough candidates for authority-aware admission"
+    );
     assert!(source.contains("MODEL_GENERATION_ACTIVE_TIMEOUT_MS = 300_000"));
+    assert!(source.contains("WEB_SOURCE_SELECTION_ACTIVE_TIMEOUT_MS = 60_000"));
+    assert!(source.contains("timeout_ms: WEB_SOURCE_SELECTION_ACTIVE_TIMEOUT_MS"));
+    assert!(source.contains("const webSourceSelectionRetry"));
+    assert!(source.contains("const bootstrapWebSourceSelectionRetry"));
+    assert!(source.contains("retry: bootstrapWebSourceSelectionRetry"));
+    assert!(source.contains("semantic_web_selection_retry: webSourceSelectionRetry"));
     for obsolete in [
         "checker",
         "maker",
@@ -242,21 +280,42 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
 #[test]
 fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
     let foundation = include_str!("workflow/retrieval_foundation.js");
+    let web_source_quality = include_str!("workflow/retrieval_web_source_quality.js");
     let web = include_str!("workflow/retrieval_web.js");
     let selection = include_str!("workflow/retrieval_selection.js");
+    let reduction = include_str!("workflow/retrieval_reduction.js");
+    let materialization = include_str!("workflow/retrieval_materialization.js");
     let loop_source = include_str!("workflow/retrieval_loop.js");
     let local = include_str!("workflow/retrieval_local.js");
+    let local_collection = include_str!("workflow/retrieval_local_collection.js");
     let execution = include_str!("workflow/retrieval_execution.js");
-    let dispatch = include_str!("workflow/retrieval_dispatch.js");
 
     assert!(foundation.lines().count() < 1_000);
+    assert!(web_source_quality.lines().count() < 1_000);
     assert!(web.lines().count() < 1_000);
     assert!(selection.lines().count() < 1_000);
+    assert!(reduction.lines().count() < 1_000);
+    assert!(materialization.lines().count() < 1_000);
     assert!(loop_source.lines().count() < 1_000);
     assert!(local.lines().count() < 1_000);
+    assert!(local_collection.lines().count() < 1_000);
     assert!(execution.lines().count() < 1_000);
-    assert!(dispatch.lines().count() < 1_000);
-    let combined = format!("{foundation}{web}{selection}{loop_source}{local}{execution}{dispatch}");
+    assert!(local_collection.contains("const collectLocal"));
+    assert!(reduction.contains("const reducedSelectorPacket"));
+    assert!(materialization.contains("const materializeEvidence"));
+    for misplaced_responsibility in [
+        "const collectLocal",
+        "const reducedSelectorPacket",
+        "const materializeEvidence",
+    ] {
+        assert!(
+            !execution.contains(misplaced_responsibility),
+            "execution scheduling must not absorb {misplaced_responsibility}"
+        );
+    }
+    let combined = format!(
+        "{foundation}{web_source_quality}{web}{selection}{reduction}{materialization}{loop_source}{local}{local_collection}{execution}"
+    );
     assert!(combined.starts_with("async function run(ctx, inputs)"));
     assert!(combined.trim_end().ends_with('}'));
     assert_eq!(

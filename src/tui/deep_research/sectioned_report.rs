@@ -400,17 +400,17 @@ pub(super) async fn generate_sectioned_report(
     }
     let resume_mode = recovery::resume_mode(&state)?;
     if resume_mode != recovery::ReportResumeMode::VerifyCompleted {
-        revision::revise_invalid_sections_once(
+        revision::revise_invalid_sections_once(revision::SectionRevisionContext {
             session,
             query,
             run_id,
-            &outline,
-            &mut events,
-            &mut state,
-            &evidence,
-            &mut sections_by_id,
-            &deadline,
-        )
+            outline: &outline,
+            events: &mut events,
+            state: &mut state,
+            evidence: &evidence,
+            sections: &mut sections_by_id,
+            deadline: &deadline,
+        })
         .await?;
     }
     if resume_mode == recovery::ReportResumeMode::DraftSections {
@@ -442,7 +442,6 @@ pub(super) async fn generate_sectioned_report(
         session,
         query,
         run_id,
-        canonical_workflow_output: &canonical,
         outline: &outline,
         events: &mut events,
         state: &mut state,

@@ -23,70 +23,57 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
 ) -> String {
     let lower_markdown = markdown.to_ascii_lowercase();
     let recovery = lower_markdown.contains("# deepresearch recovery report");
+    let source_backed = markdown.contains("这是可核查的来源证据视图")
+        || markdown.contains("This is a verifiable source-evidence view");
+    let no_evidence = markdown.contains("本次检索没有获得可安全发布的来源文字")
+        || markdown.contains("This retrieval obtained no source text that can be published safely");
+    let degraded = recovery || source_backed || no_evidence;
     let title = concise_report_title(&deep_research_markdown_report_title(markdown, query));
-    let language = "und";
-    let raw_body = strip_first_h1(&deep_research_markdown_to_html_fragment(markdown));
+    let labels = report_labels(query, degraded);
+    let language = labels.language;
+    let raw_body = mark_ineligible_source_evidence(&strip_first_h1(
+        &deep_research_markdown_to_html_fragment(markdown),
+    ));
     let source_count = unique_external_source_count(&raw_body);
     let section_plan = presentation
         .map(|presentation| presentation.section_plan.as_slice())
         .unwrap_or_default();
     let composition = compose_report_fragment(&raw_body, section_plan);
-    let finding_count = composition.finding_count.max(
-        markdown
-            .lines()
-            .filter(|line| line.starts_with("### "))
-            .count(),
-    );
-    let reading_minutes = estimated_reading_minutes(markdown);
+    let finding_count = composition
+        .finding_count
+        .max(markdown_declared_finding_count(markdown));
+    let (content_count, content_label) = if finding_count > 0 {
+        (finding_count, labels.findings)
+    } else {
+        (report_content_section_count(markdown), labels.sections)
+    };
+    let reading_minutes = estimated_reading_minutes(&raw_body);
     let theme = presentation
         .map(ReportPresentation::body_classes)
         .unwrap_or_else(|| ReportPresentation::default().body_classes());
-    let body_class = if recovery {
+    let body_class = if degraded {
         format!("{theme} report-degraded")
     } else {
         theme.to_string()
     };
-    let evidence_label = if recovery {
-        "Insufficient evidence · Degraded"
-    } else {
-        "Traceable evidence"
-    };
-    let sources_label = "Cited sources";
-    let confidence_label = if recovery {
-        "Not a final domain conclusion"
-    } else {
-        "Confidence & limits stated"
-    };
-    let brief_label = if recovery {
-        "A3S Deep Research · Degraded"
-    } else {
-        "A3S Deep Research"
-    };
-    let reading_label = "Research report";
-    let metadata_label = "Report metadata";
-    let profile_label = "Evidence profile";
-    let findings_label = "Key findings";
-    let reading_time_label = "Min read";
-    let fallback_thesis = if recovery {
-        "This run did not meet the evidence gate; the page preserves only traceable sources, failure limits, and next actions."
-    } else {
-        "A source-backed reading experience separating conclusions, evidence strength, and unresolved limits."
-    };
     let thesis = authored_thesis
         .map(str::trim)
         .filter(|thesis| (12..=1_200).contains(&thesis.chars().count()))
-        .unwrap_or(fallback_thesis);
+        .unwrap_or(labels.fallback_thesis);
     let hero_support = match presentation.map(|value| value.hero) {
         Some(ReportHero::Statement) => String::new(),
         Some(ReportHero::Split) => composition.hero_guide.clone(),
         Some(ReportHero::Metrics) | None => format!(
-            r#"<aside class="evidence-profile" aria-label="{profile_label}"><p class="profile-label">{profile_label}</p><div class="profile-grid"><div><strong>{source_count:02}</strong><span>{sources_label}</span></div><div><strong>{finding_count:02}</strong><span>{findings_label}</span></div><div><strong>{reading_minutes:02}</strong><span>{reading_time_label}</span></div></div></aside>"#
+            r#"<aside class="evidence-profile" aria-label="{profile_label}"><p class="profile-label">{profile_label}</p><div class="profile-grid"><div><strong>{source_count:02}</strong><span>{sources_label}</span></div><div><strong>{content_count:02}</strong><span>{content_label}</span></div><div><strong>{reading_minutes:02}</strong><span>{reading_time_label}</span></div></div></aside>"#,
+            profile_label = labels.profile,
+            sources_label = labels.sources,
+            reading_time_label = labels.reading_time,
         ),
     };
     format!(
         r#"<!doctype html>
 <html lang="{language}">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><style>{css}</style></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{title}</title><style>:root{{--table-scroll-hint:'{table_scroll_hint}';}}{css}</style></head>
 <body class="{theme}">
 <header class="hero"><div class="hero-inner"><div class="hero-grid"><div><p class="eyebrow">{brief_label}</p><h1>{title}</h1><p class="hero-thesis">{thesis}</p><div class="signal-row"><span class="signal">● <b>{evidence_label}</b></span><span class="signal">{confidence_label}</span></div></div>{hero_support}</div></div></header>
 <main><div class="report-shell"><aside class="rail" aria-label="{metadata_label}"><p class="rail-label">{reading_label}</p>{toc}</aside><article id="report">{body}</article></div></main>
@@ -96,26 +83,169 @@ pub(super) fn deep_research_completed_report_html_with_presentation(
         language = language,
         title = html_escape(&title),
         css = REPORT_CSS,
+        table_scroll_hint = labels.table_scroll_hint,
         theme = body_class,
-        brief_label = brief_label,
+        brief_label = labels.brief,
         thesis = html_escape(thesis),
-        evidence_label = evidence_label,
-        confidence_label = confidence_label,
+        evidence_label = labels.evidence,
+        confidence_label = labels.confidence,
         hero_support = hero_support,
-        metadata_label = metadata_label,
-        reading_label = reading_label,
+        metadata_label = labels.metadata,
+        reading_label = labels.reading,
         toc = composition.toc,
         body = composition.body,
     )
 }
 
-fn estimated_reading_minutes(markdown: &str) -> usize {
+#[derive(Clone, Copy)]
+struct ReportLabels {
+    language: &'static str,
+    brief: &'static str,
+    evidence: &'static str,
+    sources: &'static str,
+    confidence: &'static str,
+    reading: &'static str,
+    metadata: &'static str,
+    profile: &'static str,
+    findings: &'static str,
+    sections: &'static str,
+    reading_time: &'static str,
+    fallback_thesis: &'static str,
+    table_scroll_hint: &'static str,
+}
+
+fn report_labels(query: &str, degraded: bool) -> ReportLabels {
+    if query.chars().any(is_han_character) {
+        ReportLabels {
+            language: "zh-CN",
+            brief: if degraded {
+                "A3S 深度研究 · 已降级"
+            } else {
+                "A3S 深度研究"
+            },
+            evidence: if degraded {
+                "证据不足 · 已降级"
+            } else {
+                "证据可追溯"
+            },
+            sources: "引用来源",
+            confidence: if degraded {
+                "非最终领域结论"
+            } else {
+                "已说明置信度与限制"
+            },
+            reading: "研究报告",
+            metadata: "报告元数据",
+            profile: "证据概况",
+            findings: "关键发现",
+            sections: "报告章节",
+            reading_time: "分钟阅读",
+            fallback_thesis: if degraded {
+                "本次运行未达到证据门槛；页面仅保留可追溯来源、失败边界与后续行动。"
+            } else {
+                "一份区分结论、证据强度与未决限制的可追溯研究报告。"
+            },
+            table_scroll_hint: "← 横向滑动查看全部列 →",
+        }
+    } else {
+        ReportLabels {
+            language: "en",
+            brief: if degraded {
+                "A3S Deep Research · Degraded"
+            } else {
+                "A3S Deep Research"
+            },
+            evidence: if degraded {
+                "Insufficient evidence · Degraded"
+            } else {
+                "Traceable evidence"
+            },
+            sources: "Cited sources",
+            confidence: if degraded {
+                "Not a final domain conclusion"
+            } else {
+                "Confidence & limits stated"
+            },
+            reading: "Research report",
+            metadata: "Report metadata",
+            profile: "Evidence profile",
+            findings: "Key findings",
+            sections: "Report sections",
+            reading_time: "Min read",
+            fallback_thesis: if degraded {
+                "This run did not meet the evidence gate; the page preserves only traceable sources, failure limits, and next actions."
+            } else {
+                "A source-backed reading experience separating conclusions, evidence strength, and unresolved limits."
+            },
+            table_scroll_hint: "← swipe to inspect all columns →",
+        }
+    }
+}
+
+fn is_han_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F
+    )
+}
+
+fn report_content_section_count(markdown: &str) -> usize {
     markdown
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && !ch.is_control())
+        .lines()
+        .filter_map(|line| line.strip_prefix("## ").map(str::trim))
+        .filter(|heading| {
+            !heading.eq_ignore_ascii_case("sources")
+                && !heading.eq_ignore_ascii_case("source ledger")
+                && !matches!(*heading, "来源" | "参考来源")
+        })
         .count()
-        .div_ceil(900)
         .max(1)
+}
+
+fn markdown_declared_finding_count(markdown: &str) -> usize {
+    let mut in_findings = false;
+    let mut count = 0usize;
+    for line in markdown.lines().map(str::trim) {
+        if let Some(heading) = line.strip_prefix("## ").map(str::trim) {
+            in_findings = matches!(
+                heading.to_ascii_lowercase().as_str(),
+                "findings" | "key findings"
+            ) || matches!(heading, "研究发现" | "核心发现" | "关键发现");
+            continue;
+        }
+        if !in_findings {
+            continue;
+        }
+        if line.starts_with("### ") || line.starts_with("- ") || line.starts_with("* ") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn estimated_reading_minutes(fragment: &str) -> usize {
+    let mut visible = String::with_capacity(fragment.len());
+    let mut inside_tag = false;
+    for character in fragment.chars() {
+        match character {
+            '<' => inside_tag = true,
+            '>' => {
+                inside_tag = false;
+                visible.push(' ');
+            }
+            _ if !inside_tag => visible.push(character),
+            _ => {}
+        }
+    }
+    let han_count = visible
+        .chars()
+        .filter(|character| is_han_character(*character))
+        .count();
+    let word_count = visible
+        .split_whitespace()
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .count();
+    han_count.div_ceil(500).max(word_count.div_ceil(220)).max(1)
 }
 
 fn unique_external_source_count(fragment: &str) -> usize {
@@ -163,6 +293,24 @@ fn strip_first_h1(fragment: &str) -> String {
     };
     let end = start + relative_end + "</h1>".len();
     format!("{}{}", &fragment[..start], &fragment[end..])
+}
+
+fn mark_ineligible_source_evidence(fragment: &str) -> String {
+    [
+        "<blockquote>\n<p><strong>证据资格：不可用于结论</strong>",
+        "<blockquote>\n<p><strong>Claim eligibility: not eligible for conclusions</strong>",
+    ]
+    .into_iter()
+    .fold(fragment.to_string(), |html, marker| {
+        html.replace(
+            marker,
+            &marker.replacen(
+                "<blockquote>",
+                "<blockquote class=\"report-evidence-ineligible\">",
+                1,
+            ),
+        )
+    })
 }
 
 fn deep_research_markdown_report_title(markdown: &str, query: &str) -> String {

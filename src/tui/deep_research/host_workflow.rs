@@ -11,12 +11,15 @@ pub(super) fn deep_research_workflow_source() -> &'static str {
     SOURCE.get_or_init(|| {
         compact_workflow_source(concat!(
             include_str!("workflow/retrieval_foundation.js"),
+            include_str!("workflow/retrieval_web_source_quality.js"),
             include_str!("workflow/retrieval_web.js"),
             include_str!("workflow/retrieval_selection.js"),
+            include_str!("workflow/retrieval_reduction.js"),
+            include_str!("workflow/retrieval_materialization.js"),
             include_str!("workflow/retrieval_loop.js"),
             include_str!("workflow/retrieval_local.js"),
+            include_str!("workflow/retrieval_local_collection.js"),
             include_str!("workflow/retrieval_execution.js"),
-            include_str!("workflow/retrieval_dispatch.js"),
         ))
     })
 }

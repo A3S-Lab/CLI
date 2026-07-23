@@ -54,6 +54,7 @@ fn automatic_loop_workflow_args(query: &str) -> Value {
     serde_json::json!({
         "input": {
             "query": query,
+            "current_date": "2026-07-19",
             "loop_contract": crate::tui::loop_engineering::deep_research_loop_contract(
                 query,
                 "2026-07-19",
@@ -65,21 +66,79 @@ fn automatic_loop_workflow_args(query: &str) -> Value {
 }
 
 #[test]
-fn host_fallback_contract_preserves_the_original_provider_query() {
+fn host_fallback_contract_preserves_the_original_query_and_adds_one_authority_query() {
     let query = "截至 2026 年核实一个 planner 失败后仍必须检索的公开结论";
     let mut args = automatic_loop_workflow_args(query);
     args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
 
     let fallback = host_fallback_plan(&args).expect("host fallback plan");
 
-    assert_eq!(fallback.value["search_queries"], serde_json::json!([query]));
-    assert_eq!(fallback.value["budget"]["direct_searches"], 1);
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        format!("{query} 2026年7月19日 最新进展 最终结果 新闻")
+    );
+    assert_eq!(
+        fallback.value["search_queries"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(fallback.value["budget"]["direct_searches"], 2);
     assert_eq!(fallback.value["budget"]["direct_fetches"], 8);
+    assert_eq!(fallback.value["budget"]["retrieval_timeout_ms"], 150_000);
     assert_eq!(fallback.value["tracks"][0]["id"], "request.primary");
     assert_eq!(fallback.value["tracks"][0]["material"], true);
     assert_eq!(
         fallback.value["stop_conditions"],
         serde_json::json!(["Material evidence is retained or the request is explicitly bounded."])
+    );
+}
+
+#[test]
+fn authority_companion_uses_the_current_date_and_a_query_script_hint() {
+    let query = "Verify the current World Cup result";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        "Verify the current World Cup result 2026 final result final score champion winner authoritative report"
+    );
+    assert_eq!(
+        fallback.value["search_queries"].as_array().unwrap().len(),
+        2
+    );
+}
+
+#[test]
+fn competition_outcome_companion_targets_terminal_evidence() {
+    let query = "世界杯战况";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        "世界杯 2026 决赛 冠军 比分"
+    );
+}
+
+#[test]
+fn competition_outcome_companion_does_not_repeat_year_or_generic_intent() {
+    let query = "2026世界杯赛况结果";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        "2026世界杯 决赛 冠军 比分"
     );
 }
 
@@ -157,38 +216,54 @@ fn planned_state(plan: &Value) -> (InquiryState, Vec<InquiryEvent>, InquiryLimit
 }
 
 #[test]
-fn automatic_loop_contract_is_unlimited_and_coverage_driven() {
+fn automatic_loop_contract_is_bounded_and_progressively_publishable() {
     let args = automatic_loop_workflow_args("跨语言核实公开结论");
     let planner = validated_loop_planner(&args).expect("valid automatic loop contract");
     let contract = &args["input"]["loop_contract"];
 
     assert!(planner["output_schema"].is_object());
     assert_eq!(
-        planner["output_schema"]["properties"]["tracks"]["maxItems"],
-        4
+        planner["output_schema"]["properties"]
+            .as_object()
+            .expect("outline properties")
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>(),
+        [
+            "report_title",
+            "freshness_required",
+            "workspace_evidence_required",
+            "tracks"
+        ]
+        .into_iter()
+        .collect()
     );
     assert_eq!(planner["max_steps"], 1);
     assert_eq!(planner["timeout_ms"], 90_000);
-    assert_eq!(contract["quota"]["mode"], "unlimited");
-    assert_eq!(contract["execution"]["mode"], "coverage_driven");
+    assert_eq!(contract["quota"]["mode"], "bounded");
+    assert_eq!(contract["execution"]["mode"], "progressively_publishable");
     assert_eq!(
         contract["execution"]["stages"],
         serde_json::json!([
-            "semantic_plan",
-            "initial_retrieval",
-            "semantic_chunk_selection",
-            "typed_coverage_evaluation",
-            "optional_supplemental_retrieval",
-            "final_closed_question_review",
-            "host_contract_reduction",
-            "sectioned_report_transaction"
+            "bootstrap_acquisition",
+            "optional_outline",
+            "batched_evidence_extraction",
+            "host_coverage_reduction",
+            "optional_gap_acquisition",
+            "optional_gap_extraction",
+            "report_document_generation",
+            "deterministic_publication"
         ])
     );
-    assert_eq!(contract["cardinality"]["semantic_iterations"], 2);
-    assert_eq!(contract["cardinality"]["retrieval_passes"], 2);
-    assert_eq!(contract["cardinality"]["semantic_selections"], 2);
-    assert_eq!(contract["cardinality"]["question_reviews"], 1);
-    assert_eq!(contract["cardinality"]["contract_assessments"], 1);
+    for field in [
+        "outline_generations",
+        "initial_extractions",
+        "gap_extractions",
+        "report_generations",
+        "report_repairs",
+    ] {
+        assert_eq!(contract["cardinality"][field], 1, "{field}");
+    }
 }
 
 #[test]
@@ -213,10 +288,15 @@ fn one_optional_outline_becomes_a_complete_host_owned_plan() {
 
     let plan = host_plan_from_outline(&args, outline).expect("Host-completed outline plan");
 
-    assert_eq!(plan.value["search_queries"], serde_json::json!([query]));
+    assert_eq!(plan.value["search_queries"][0], query);
+    assert_eq!(
+        plan.value["search_queries"][1],
+        format!("{query} 2026年7月19日 最新进展 最终结果 新闻")
+    );
     assert_eq!(plan.value["seed_urls"], serde_json::json!([]));
-    assert_eq!(plan.value["budget"]["direct_searches"], 1);
+    assert_eq!(plan.value["budget"]["direct_searches"], 2);
     assert_eq!(plan.value["budget"]["direct_fetches"], 8);
+    assert_eq!(plan.value["budget"]["retrieval_timeout_ms"], 150_000);
     assert_eq!(plan.value["workspace_evidence_required"], true);
     assert_eq!(plan.value["tracks"][0]["focus"], "发布方原始记录");
     assert_eq!(
@@ -244,19 +324,16 @@ fn one_optional_outline_becomes_a_complete_host_owned_plan() {
 }
 
 #[test]
-fn local_only_loop_contract_reserves_no_web_fetches() {
+fn local_only_host_fallback_reserves_no_web_transport() {
     let mut args = automatic_loop_workflow_args("inspect this workspace");
     args["input"]["evidence_scope"] = serde_json::json!("local_only");
-    args["input"]["loop_contract"] = crate::tui::loop_engineering::deep_research_loop_contract(
-        "inspect this workspace",
-        "2026-07-19",
-        "offline/local-only evidence",
-        4,
-    );
-    let fallback = host_fallback_plan(&args).expect("local-only host fallback plan");
 
-    assert_eq!(fallback.value["budget"]["direct_fetches"], 0);
+    let fallback = host_fallback_plan(&args).expect("local-only Host fallback");
+
+    assert_eq!(fallback.value["search_queries"], serde_json::json!([]));
     assert_eq!(fallback.value["budget"]["direct_searches"], 0);
+    assert_eq!(fallback.value["budget"]["direct_fetches"], 0);
+    assert_eq!(fallback.value["workspace_evidence_required"], true);
 }
 
 #[test]
@@ -270,23 +347,22 @@ fn mutated_loop_identity_quota_graph_or_cardinality_fails_closed() {
         (
             "/input/loop_contract/quota/mode",
             serde_json::json!("metered"),
-            "must be `unlimited`",
+            "must be `bounded`",
         ),
         (
             "/input/loop_contract/execution/stages",
             serde_json::json!([
-                "semantic_plan",
-                "initial_retrieval",
-                "final_closed_question_review",
-                "host_contract_reduction",
-                "sectioned_report_transaction"
+                "bootstrap_acquisition",
+                "optional_outline",
+                "batched_evidence_extraction",
+                "deterministic_publication"
             ]),
             "stage graph differs",
         ),
         (
-            "/input/loop_contract/cardinality/retrieval_passes",
+            "/input/loop_contract/cardinality/initial_extractions",
             serde_json::json!(3),
-            "must be exactly 2",
+            "must be exactly 1",
         ),
     ];
 
@@ -555,26 +631,20 @@ fn closed_retrieval_failure_bounds_every_unanswered_question() {
 }
 
 #[test]
-fn one_semantic_review_leaves_contract_reduction_to_the_host() {
-    const RESOLUTION: &str = include_str!("../execution/resolution.rs");
+fn one_batched_extraction_leaves_contract_reduction_to_the_host() {
+    const EXTRACTION: &str = include_str!("../execution/extraction.rs");
     const GENERATION: &str = include_str!("../../workflow/generation.js");
 
-    assert_eq!(super::QUESTION_RESOLUTION_ATTEMPT_TIMEOUT_MS, 360_000);
-    assert_eq!(super::QUESTION_RESOLUTION_MAX_ATTEMPTS, 2);
-    assert_eq!(super::QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS, 735_000);
-    const {
-        assert!(
-            super::QUESTION_RESOLUTION_WORKFLOW_TIMEOUT_MS
-                < super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS
-        );
-    }
+    assert_eq!(super::EVIDENCE_EXTRACTION_ATTEMPT_TIMEOUT_MS, 360_000);
+    assert_eq!(super::EVIDENCE_EXTRACTION_STAGE_TIMEOUT_MS, 375_000);
     assert!(GENERATION.contains("inputs.input.max_attempts"));
     assert!(GENERATION.contains("retry: { max_attempts: maxAttempts"));
     assert!(GENERATION.contains("exitCode ?? result.exit_code"));
     assert!(GENERATION.contains("throw new Error(`Durable structured generation failed"));
-    assert!(RESOLUTION.contains("derive_research_contract_assessment"));
-    assert!(!RESOLUTION.contains("research_contract_assessment_generation_chunks"));
-    assert!(!RESOLUTION.contains("contract-assessment-"));
+    assert!(EXTRACTION.contains("run_batched_evidence_extraction"));
+    assert!(EXTRACTION.contains("apply_batched_evidence_extraction"));
+    assert!(EXTRACTION.contains("Target decoding and coverage reduction are Host-owned"));
+    assert!(EXTRACTION.contains("execution_timeout_ms,\n        1,"));
 }
 
 #[test]
@@ -737,6 +807,8 @@ fn inquiry_budget_keeps_the_full_closed_review_reserve_after_retrieval() {
     assert_eq!(super::PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS, 105_000);
     assert_eq!(super::MAX_PLANNER_TRACK_EFFECTS, 4);
     assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 105_000);
+    assert_eq!(super::BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS, 150_000);
+    assert_eq!(super::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS, 150_000);
     let accounted = super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS
         + super::DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS

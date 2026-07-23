@@ -249,13 +249,21 @@ async fn run_install_with_registry(
         progress,
         resolved_releases: Default::default(),
         resolved_sources: Default::default(),
+        resolved_release_bundles: Default::default(),
         resolved_registry_packages: Default::default(),
     };
     for component in &options.components {
         validate_install_plan(component, &request)?;
     }
-    validate_registry_preflight(&options.components, &request, registries)?;
-    enforce_install_network_policy(&options.components, &request, paths, offline)?;
+    preflight_install_sources(
+        &options.components,
+        &request,
+        paths,
+        offline,
+        options.channel.as_str(),
+        registries,
+    )
+    .await?;
     let _locks = acquire_operation_locks(&options.components, paths).await?;
     let mut prepared = Vec::with_capacity(options.components.len());
     for component in &options.components {
@@ -300,6 +308,7 @@ async fn run_install_with_registry(
         let mut prepared_request = request.clone();
         prepared_request.resolved_releases = prepared.resolved_releases;
         prepared_request.resolved_sources = prepared.resolved_sources;
+        prepared_request.resolved_release_bundles = prepared.resolved_release_bundles;
         prepared_request.resolved_registry_packages = prepared.resolved_registry_packages;
         match install_component_locked(&component, &prepared_request, paths).await {
             Ok(operation) => {
@@ -474,6 +483,7 @@ async fn run_update_with_registry(
             }
             if state.provenance == Some(InstallProvenance::Delegated)
                 && catalog::find(&component).is_none()
+                && prepared.resolved_release_bundles.is_empty()
                 && prepared.resolved_registry_packages.is_empty()
             {
                 bail!(
@@ -489,6 +499,7 @@ async fn run_update_with_registry(
                 progress,
                 resolved_releases: prepared.resolved_releases,
                 resolved_sources: prepared.resolved_sources,
+                resolved_release_bundles: prepared.resolved_release_bundles,
                 resolved_registry_packages: prepared.resolved_registry_packages,
                 ..InstallRequest::default()
             };
@@ -522,7 +533,10 @@ fn is_upgrade_all_candidate(component: &super::state::ComponentState) -> bool {
     component.presence == Presence::Managed
         && (component.kind == ComponentKind::Product
             || (component.kind == ComponentKind::Extension
-                && component.trust == super::state::Trust::RegistryTuf))
+                && matches!(
+                    component.trust,
+                    super::state::Trust::RegistryTuf | super::state::Trust::ReleaseBundle
+                )))
 }
 
 pub async fn run_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -845,23 +859,47 @@ async fn populate_updates(
     }
 }
 
-fn enforce_install_network_policy(
+async fn preflight_install_sources(
     components: &[ComponentId],
     request: &InstallRequest,
     paths: &ComponentPaths,
     offline: bool,
+    channel: &str,
+    registries: Option<&RegistryStore>,
 ) -> anyhow::Result<()> {
-    if !offline {
-        return Ok(());
-    }
     for component in components {
         if request.package.is_none() && is_external_use_extension(component) {
-            bail!(
-                "signed registry package '{}' cannot be resolved in offline mode",
-                component
-            );
+            let package_id = component
+                .relative_to(&ComponentId::parse("use")?)
+                .context("external extension is outside the Use namespace")?;
+            let bundle = super::release_bundle::resolve_release_bundle(
+                paths,
+                package_id,
+                request.version.as_deref(),
+                channel,
+            )
+            .await;
+            if bundle.as_ref().is_ok_and(Option::is_some) {
+                continue;
+            }
+            if offline {
+                bundle?;
+                bail!(
+                    "extension '{}' has no installed A3S Use release bundle and a signed registry cannot be resolved in offline mode",
+                    component
+                );
+            }
+            registries
+                .context(
+                    "extension installation requires an A3S Use release bundle or the umbrella registry configuration",
+                )?
+                .require_configured_registry()?;
+            continue;
         }
         if request.package.is_some() && is_external_use_extension(component) {
+            if !offline {
+                continue;
+            }
             let parent = ComponentId::parse("use")?;
             if find_state(&parent, paths)?.is_ready() {
                 continue;
@@ -872,7 +910,7 @@ fn enforce_install_network_policy(
                 parent
             );
         }
-        if !find_state(component, paths)?.is_ready() {
+        if offline && !find_state(component, paths)?.is_ready() {
             bail!(
                 "component '{}' is not available from an installed or explicit local source in offline mode",
                 component
@@ -880,29 +918,6 @@ fn enforce_install_network_policy(
         }
     }
     Ok(())
-}
-
-fn validate_registry_preflight(
-    components: &[ComponentId],
-    request: &InstallRequest,
-    registries: Option<&RegistryStore>,
-) -> anyhow::Result<()> {
-    if request.package.is_some() || !components.iter().any(is_external_use_extension) {
-        return Ok(());
-    }
-    let registries = registries
-        .context("signed extension installation requires the umbrella registry configuration")?;
-    if registries
-        .list()?
-        .iter()
-        .any(|registry| registry.configured)
-    {
-        Ok(())
-    } else {
-        bail!(
-            "no package registry has a production TUF trust root; add one with 'a3s registry add'"
-        )
-    }
 }
 
 async fn acquire_operation_locks(

@@ -243,16 +243,7 @@ impl RegistryStore {
         version: Option<&str>,
         channel: &str,
     ) -> anyhow::Result<ResolvedRegistryPackage> {
-        let registries = self
-            .list()?
-            .into_iter()
-            .filter(|registry| registry.configured)
-            .collect::<Vec<_>>();
-        if registries.is_empty() {
-            bail!(
-                "no package registry has a production TUF trust root; add one with 'a3s registry add'"
-            );
-        }
+        let registries = self.configured_registries()?;
         let mut matches = Vec::new();
         for record in registries {
             let registry = record.trusted_registry(state_root)?;
@@ -287,6 +278,24 @@ impl RegistryStore {
                 )
             }
         }
+    }
+
+    pub fn require_configured_registry(&self) -> anyhow::Result<()> {
+        self.configured_registries().map(|_| ())
+    }
+
+    fn configured_registries(&self) -> anyhow::Result<Vec<RegistryRecord>> {
+        let registries = self
+            .list()?
+            .into_iter()
+            .filter(|registry| registry.configured)
+            .collect::<Vec<_>>();
+        if registries.is_empty() {
+            bail!(
+                "no package registry has a production TUF trust root; add one with 'a3s registry add'"
+            );
+        }
+        Ok(registries)
     }
 
     pub async fn resolve_upgrade(

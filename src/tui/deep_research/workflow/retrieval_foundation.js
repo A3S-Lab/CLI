@@ -16,15 +16,16 @@ async function run(ctx, inputs) {
   const MAX_EXCERPTS_PER_SOURCE = 4;
   const MAX_EXCERPT_CHARS_PER_SOURCE = 2800;
   const MAX_DOCUMENT_RANGES = 3;
+  const MAX_HTML_RANGES = 2;
   const MAX_LOCAL_SOURCES = 8;
   const MAX_LOCAL_RANGES = 3;
   const MAX_LOCAL_RANGE_LINES = 240;
-  // Candidate admission and small-catalog selection have repeatedly exhausted
-  // 210 seconds on the same ordinary eight-slot web portfolio. Give those
-  // cross-source decisions the same five-minute active window used by the
-  // closed question review; model-admission queue wait remains separate, while
-  // the 25-minute whole-stage deadline still bounds retries, queued units, and
-  // replacement work across the full portfolio.
+  // Candidate admission happens before any URL is fetched. Bound that one
+  // cross-source decision independently so it cannot consume the complete
+  // 150-second acquisition stage and starve transport. Closed fetched-text
+  // selection keeps the longer active window below because it runs after raw
+  // acquisition has already been durably checkpointed.
+  const WEB_SOURCE_SELECTION_ACTIVE_TIMEOUT_MS = 60_000;
   const MODEL_GENERATION_ACTIVE_TIMEOUT_MS = 300_000;
   // A real primary-source selector exceeded 210 seconds. Keep exactly one
   // attempt so a slow source cannot starve later siblings, but allow the same
@@ -314,18 +315,32 @@ async function run(ctx, inputs) {
     }
   };
   const documentRange = (metadata) => {
-    const range = object(metadata && metadata.range);
-    const offset = Number(range.offset);
+    const rawRange = metadata && metadata.range;
+    if (!rawRange || typeof rawRange !== "object" || Array.isArray(rawRange)) {
+      return null;
+    }
+    if (rawRange.offset === null || rawRange.offset === undefined) {
+      return null;
+    }
+    const offset = Number(rawRange.offset);
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      return null;
+    }
+    const range = object(rawRange);
     const nextOffset = range.next_offset === null || range.next_offset === undefined
       ? null
       : Number(range.next_offset);
-    return {
-      offset: Number.isSafeInteger(offset) && offset >= 0 ? offset : null,
-      next_offset: Number.isSafeInteger(nextOffset) && nextOffset >= 0
-        ? nextOffset
-        : null,
-      eof: range.eof === true,
-    };
+    if (
+      nextOffset !== null &&
+      (!Number.isSafeInteger(nextOffset) || nextOffset <= offset)
+    ) {
+      return null;
+    }
+    const eof = range.eof === true;
+    if (eof !== (nextOffset === null)) {
+      return null;
+    }
+    return { offset, next_offset: nextOffset, eof };
   };
   const extractedDocument = (metadata) => {
     const kind = String(metadata && metadata.document_kind || "").toLowerCase();
@@ -333,14 +348,83 @@ async function run(ctx, inputs) {
     return kind === "pdf" || kind === "document" ||
       /^application\/pdf(?:;|$)/.test(contentType);
   };
-  const cleanFetchedText = (value, document) => {
-    let text = String(value || "").replace(/\r\n?/g, "\n");
-    if (document) {
-      text = text
-        .replace(/\n*\.\.\. \(more fetched content available; continue with offset=\d+\)\s*/gi, "\n")
-        .replace(/([A-Za-z])-\s*\n\s*(?=[a-z])/g, "$1");
+  const stripEmbeddedConstructorScriptTail = (value) => {
+    const line = String(value || "");
+    const match = /(?:^|[\s;])((?:(?:var|let|const)\s+)?[a-z_$][\w$\\]*\s*=\s*new\s+[a-z_$][\w$.]*\s*\()/i.exec(line);
+    if (!match) return line;
+    const assignmentOffset = match.index + match[0].indexOf(match[1]);
+    return line.slice(0, assignmentOffset).trimEnd();
+  };
+  const stripEmbeddedSerializedConfigurationTail = (value) => {
+    const line = String(value || "");
+    const match = /((?:\\?"type\\?"\s*:\s*\\?"keyValue\\?"|\\?"variables\\?"\s*:\s*\[))/i.exec(line);
+    if (!match) return line;
+    let payloadOffset = match.index;
+    while (
+      payloadOffset > 0 &&
+      /[\s{}\[\],;]/.test(line[payloadOffset - 1])
+    ) {
+      payloadOffset -= 1;
     }
-    return text.trim();
+    return line.slice(0, payloadOffset).trimEnd();
+  };
+  const fetchedNoiseLine = (value) => {
+    const line = String(value || "").replace(/\s+/g, " ").trim();
+    const lower = line.toLowerCase();
+    if (!line) return true;
+    if (
+      /your current user-agent string appears to be from an automated process/i.test(line) ||
+      /does(?:n't| not) work properly without javascript enabled/i.test(line) ||
+      /please enable javascript (?:to continue|and reload)/i.test(line) ||
+      /toggle the table of contents\s+\d+\s+languages/i.test(line) ||
+      /open main menu/i.test(line) ||
+      /__next_data__|webpack|document\.cookie|meeportal\.g_userfeatures|globalthis\.|process\.env|window\.onscroll|echo\.init\(|\$\(function/i.test(line) ||
+      /"@context"\s*:\s*"https?:\\?\/\\?\/schema\.org/i.test(line)
+    ) {
+      return true;
+    }
+    const scriptAssignment = /^(?:var|let|const)\s+[a-z_$][\w$]*\s*=|^(?:window|document)\.|^function\s+[a-z_$]|^\$\(["']/i
+      .test(line);
+    const markdownLinkCount = (line.match(/\]\([^)]{1,500}\)/g) || []).length;
+    const navigationList = markdownLinkCount >= 12 ||
+      (markdownLinkCount >= 7 && /^\s*(?:[*+-]\s*)?\[/.test(line));
+    const punctuation = Array.from(line)
+      .filter((character) => /[{}\[\];=]/.test(character)).length;
+    const codeLike = line.length >= 160 && punctuation / line.length > 0.16 &&
+      !/[.!?。！？]\s*$/.test(line);
+    const jsonPairCount = (line.match(/"\s*:/g) || []).length;
+    const escapedQuoteCount = (line.match(/\\"/g) || []).length;
+    const serializedConfiguration = line.length >= 120 &&
+      (jsonPairCount >= 6 || escapedQuoteCount >= 8) &&
+      punctuation / line.length > 0.04;
+    return scriptAssignment || navigationList || codeLike || serializedConfiguration ||
+      lower === "javascript is disabled";
+  };
+  const cleanFetchedText = (value, document) => {
+    let text = String(value || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "\n")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "\n")
+      .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, "\n")
+      .replace(/\n*\.\.\. \(more fetched content available; continue with offset=\d+\)\s*/gi, "\n");
+    if (document) {
+      text = text.replace(/([A-Za-z])-\s*\n\s*(?=[a-z])/g, "$1");
+    }
+    const seen = new Set();
+    return text
+      .split(/\n+/)
+      .map(stripEmbeddedConstructorScriptTail)
+      .map(stripEmbeddedSerializedConfigurationTail)
+      .map((line) => line.replace(/\s+/g, " ").trim())
+      .filter((line) => {
+        if (fetchedNoiseLine(line)) return false;
+        const key = line.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .join("\n")
+      .trim();
   };
   const substantive = (value) => {
     const visible = String(value || "")
@@ -366,13 +450,15 @@ async function run(ctx, inputs) {
 
   const evidenceLines = (value) => String(value || "")
     .split(/\n+/)
+    .map(stripEmbeddedConstructorScriptTail)
+    .map(stripEmbeddedSerializedConfigurationTail)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter((line) => {
       if (Array.from(line).length < 12) {
         return false;
       }
-      return !/<script|<\/script|document\.cookie|__next_data__|webpack|data-color-mode|--color-[a-z-]+\s*:/i.test(line) &&
-        !/"@context"\s*:\s*"https?:\\?\/\\?\/schema\.org/i.test(line);
+      return !fetchedNoiseLine(line) &&
+        !/<script|<\/script|data-color-mode|--color-[a-z-]+\s*:/i.test(line);
     });
   const splitLongText = (value) => {
     const characters = Array.from(String(value || ""));

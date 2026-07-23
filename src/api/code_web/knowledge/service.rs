@@ -3,18 +3,27 @@ use std::sync::Arc;
 
 use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
+use tokio::sync::Mutex;
 
-use super::controller::{KbAddNoteRequest, KbImportRequest, KbSearchRequest};
+use super::controller::{
+    KbAddNoteRequest, KbImportRequest, KbSearchRequest, KnowledgeBaseCreateRequest,
+    KnowledgeBaseImportRequest, KnowledgeBasePinRequest,
+};
+use super::personal_bases::{self, KnowledgeBaseMutation, KnowledgeStoreError};
 use crate::api::code_web::state::CodeWebState;
 use crate::tui::kbutil::{self, ImportKind, ImportPreview, KbStats, SearchHit};
 
 pub(in crate::api::code_web) struct KnowledgeService {
     state: Arc<CodeWebState>,
+    operation_lock: Mutex<()>,
 }
 
 impl KnowledgeService {
     pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            operation_lock: Mutex::new(()),
+        }
     }
 
     pub(in crate::api::code_web) async fn kb_home(
@@ -119,6 +128,139 @@ impl KnowledgeService {
         }))
     }
 
+    pub(in crate::api::code_web) async fn marketplace(
+        &self,
+        workspace: Option<String>,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(workspace);
+        let bases = run_blocking("list personal knowledge bases", {
+            let workspace = workspace.clone();
+            move || Ok(personal_bases::list_knowledge_bases(&workspace))
+        })
+        .await?;
+        let installed = bases
+            .items
+            .iter()
+            .filter_map(|base| base.marketplace_id.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        let items = super::marketplace::packages()
+            .iter()
+            .map(|package| {
+                json!({
+                    "id": package.id,
+                    "name": package.name,
+                    "description": package.description,
+                    "publisher": package.publisher,
+                    "version": package.version,
+                    "category": package.category,
+                    "tags": package.tags,
+                    "featured": package.featured,
+                    "updatedAt": package.updated_at,
+                    "sourceCount": package.source_count(),
+                    "conceptCount": package.concept_count(),
+                    "installed": installed.contains(package.id),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "schemaVersion": 1,
+            "format": "okf",
+            "workspaceRoot": workspace.display().to_string(),
+            "source": {
+                "id": "a3s-curated",
+                "label": "A3S Curated",
+                "kind": "builtin",
+                "verified": true,
+            },
+            "items": items,
+            "warnings": bases.warnings,
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn knowledge_bases(
+        &self,
+        workspace: Option<String>,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(workspace);
+        let bases = run_blocking("list personal knowledge bases", {
+            let workspace = workspace.clone();
+            move || Ok(personal_bases::list_knowledge_bases(&workspace))
+        })
+        .await?;
+        let total = bases.items.len();
+        Ok(json!({
+            "schemaVersion": 1,
+            "workspaceRoot": workspace.display().to_string(),
+            "root": personal_bases::bases_root(&workspace).display().to_string(),
+            "items": bases.items,
+            "total": total,
+            "warnings": bases.warnings,
+        }))
+    }
+
+    pub(in crate::api::code_web) async fn create_knowledge_base(
+        &self,
+        request: KnowledgeBaseCreateRequest,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(request.workspace);
+        let name = request.name;
+        let description = request.description;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("create personal knowledge base", move || {
+            personal_bases::create_knowledge_base(&workspace, &name, description.as_deref())
+        })
+        .await?;
+        Ok(mutation_json(mutation))
+    }
+
+    pub(in crate::api::code_web) async fn import_knowledge_base(
+        &self,
+        request: KnowledgeBaseImportRequest,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(request.workspace);
+        let source = PathBuf::from(required_path_arg(&request.path)?);
+        let name = request.name;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("import personal knowledge base", move || {
+            personal_bases::import_knowledge_base(&workspace, &source, name.as_deref())
+        })
+        .await?;
+        Ok(mutation_json(mutation))
+    }
+
+    pub(in crate::api::code_web) async fn install_marketplace_item(
+        &self,
+        id: &str,
+        workspace: Option<String>,
+    ) -> BootResult<Value> {
+        let package = super::marketplace::package(id).ok_or_else(|| {
+            BootError::NotFound(format!("knowledge marketplace item `{id}` was not found"))
+        })?;
+        let workspace = self.workspace_from_request(workspace);
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("install knowledge marketplace item", move || {
+            personal_bases::install_market_package(&workspace, package)
+        })
+        .await?;
+        Ok(mutation_json(mutation))
+    }
+
+    pub(in crate::api::code_web) async fn set_knowledge_base_pinned(
+        &self,
+        id: &str,
+        request: KnowledgeBasePinRequest,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let workspace = self.workspace_from_request(request.workspace);
+        let pinned = request.pinned;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("update personal knowledge base", move || {
+            personal_bases::set_pinned(&workspace, &id, pinned)
+        })
+        .await?;
+        Ok(mutation_json(mutation))
+    }
+
     async fn ensure_workspace(&self, workspace: &Path) -> BootResult<()> {
         let kb_root = kbutil::kb_dir(&workspace.display().to_string());
         tokio::fs::create_dir_all(kb_root.join("sources"))
@@ -206,6 +348,33 @@ fn required_path_arg(path: &str) -> BootResult<String> {
 
 fn fs_error(error: std::io::Error) -> BootError {
     BootError::Internal(error.to_string())
+}
+
+fn mutation_json(mutation: KnowledgeBaseMutation) -> Value {
+    json!({
+        "changed": mutation.changed,
+        "knowledgeBase": mutation.knowledge_base,
+    })
+}
+
+async fn run_blocking<T, F>(operation: &str, task: F) -> BootResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, KnowledgeStoreError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| BootError::Internal(format!("failed to {operation}: {error}")))?
+        .map_err(store_error)
+}
+
+fn store_error(error: KnowledgeStoreError) -> BootError {
+    match error {
+        KnowledgeStoreError::Invalid(message) => BootError::BadRequest(message),
+        KnowledgeStoreError::NotFound(message) => BootError::NotFound(message),
+        KnowledgeStoreError::Conflict(message) => BootError::Conflict(message),
+        KnowledgeStoreError::Io(message) => BootError::Internal(message),
+    }
 }
 
 #[cfg(test)]

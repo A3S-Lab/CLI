@@ -2966,9 +2966,9 @@ fn deep_research_workflow_args_are_minimal_and_scope_is_explicit() {
     assert_eq!(args["input"]["evidence_scope"], "web_and_workspace");
     assert_eq!(
         args["input"]["loop_contract"]["pattern"],
-        "minimal-deep-research"
+        "evidence-first-deep-research"
     );
-    assert_eq!(args["input"]["loop_contract"]["quota"]["mode"], "unlimited");
+    assert_eq!(args["input"]["loop_contract"]["quota"]["mode"], "bounded");
     assert!(args["input"]["current_date"]
         .as_str()
         .is_some_and(|date| date.len() == 10));

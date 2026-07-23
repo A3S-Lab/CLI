@@ -3,6 +3,29 @@
 use super::*;
 use crate::tui::app_rewind::capture_rewind_checkpoint_seed;
 
+struct DeepResearchTerminalJournalRequest<'a> {
+    workspace: &'a Path,
+    run_id: &'a str,
+    query: Option<&'a str>,
+    host_managed_inquiry: bool,
+    workflow_output: &'a str,
+    workflow_metadata: Option<&'a serde_json::Value>,
+    outcome: ResearchOutcome,
+    artifacts: Option<&'a ResearchReportArtifacts>,
+}
+
+struct StreamStartRequest {
+    prompt: String,
+    display_task: String,
+    clear_turn_artifacts: bool,
+    synthesis: bool,
+    runtime_expectation: Option<RuntimeExpectation>,
+    submitted_images: Vec<PendingImage>,
+    execution_mode: Mode,
+    plan_draft: Option<PlanDraftRequest>,
+    capture_rewind: bool,
+}
+
 fn take_matching_queue_claim<T>(
     active: &mut Option<PriorityItem<T>>,
     active_token: &mut Option<u64>,
@@ -13,6 +36,100 @@ fn take_matching_queue_claim<T>(
     }
     *active_token = None;
     active.take()
+}
+
+async fn finalize_deep_research_terminal_journal(
+    request: DeepResearchTerminalJournalRequest<'_>,
+) -> Result<ResearchRunProjection, String> {
+    let DeepResearchTerminalJournalRequest {
+        workspace,
+        run_id,
+        query,
+        host_managed_inquiry,
+        workflow_output,
+        workflow_metadata,
+        outcome,
+        artifacts,
+    } = request;
+    let evidence_first = match query {
+        Some(query) => {
+            deep_research_evidence_first_published_report(workspace, query, workflow_output)?
+        }
+        None => None,
+    };
+    if let Some(published) = evidence_first {
+        let published_outcome = match published.publication {
+            DeepResearchEvidenceFirstPublication::Synthesized => ResearchOutcome::Completed,
+            DeepResearchEvidenceFirstPublication::SourceBacked => ResearchOutcome::Degraded,
+            DeepResearchEvidenceFirstPublication::NoEvidence => ResearchOutcome::Degraded,
+        };
+        if published_outcome != outcome {
+            return Err(format!(
+                "evidence-first publication outcome {published_outcome:?} disagrees with terminal outcome {outcome:?}"
+            ));
+        }
+        if artifacts != Some(&published.artifacts) {
+            return Err(
+                "evidence-first terminal artifacts differ from the validated publication"
+                    .to_string(),
+            );
+        }
+        return record_deep_research_validated_publication_terminal(
+            workspace,
+            run_id,
+            outcome,
+            &published.artifacts,
+            &published.quality,
+        )
+        .await
+        .map_err(|error| error.to_string());
+    } else {
+        let successful_report = matches!(
+            outcome,
+            ResearchOutcome::Completed | ResearchOutcome::Qualified
+        );
+        if successful_report {
+            match deep_research_inquiry_publication_outcome(workflow_output, workflow_metadata) {
+                Ok(Some(DeepResearchRunOutcome::Completed))
+                    if outcome == ResearchOutcome::Completed => {}
+                Ok(Some(DeepResearchRunOutcome::Qualified))
+                    if outcome == ResearchOutcome::Qualified => {}
+                Ok(Some(actual)) => {
+                    return Err(format!(
+                        "DeepResearch report outcome disagrees with terminal Inquiry: {actual:?}"
+                    ));
+                }
+                Ok(None) if host_managed_inquiry => {
+                    return Err(
+                        "host-managed DeepResearch cannot journal success without an Inquiry projection"
+                            .to_string(),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        match inquiry_projection_from_workflow(workflow_output, workflow_metadata) {
+            Ok(Some((events, state))) => {
+                record_deep_research_inquiry_state(workspace, run_id, &events, &state)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(None) if host_managed_inquiry && successful_report => {
+                return Err(
+                    "host-managed DeepResearch terminal journal omitted its Inquiry projection"
+                        .to_string(),
+                );
+            }
+            Ok(None) => {}
+            Err(error) if successful_report => return Err(error),
+            Err(_) => {}
+        }
+    }
+
+    record_deep_research_run_terminal(workspace, run_id, outcome, artifacts)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 impl App {
@@ -59,7 +176,7 @@ impl App {
         } else {
             Vec::new()
         };
-        self.start_stream_inner_with_runtime_and_images(
+        self.start_stream_inner_with_runtime_and_images(StreamStartRequest {
             prompt,
             display_task,
             clear_turn_artifacts,
@@ -67,24 +184,27 @@ impl App {
             runtime_expectation,
             submitted_images,
             execution_mode,
-            None,
-            false,
-        )
+            plan_draft: None,
+            capture_rewind: false,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
     fn start_stream_inner_with_runtime_and_images(
         &mut self,
-        prompt: String,
-        display_task: String,
-        clear_turn_artifacts: bool,
-        synthesis: bool,
-        runtime_expectation: Option<RuntimeExpectation>,
-        submitted_images: Vec<PendingImage>,
-        execution_mode: Mode,
-        plan_draft: Option<PlanDraftRequest>,
-        capture_rewind: bool,
+        request: StreamStartRequest,
     ) -> Option<Cmd<Msg>> {
+        let StreamStartRequest {
+            prompt,
+            display_task,
+            clear_turn_artifacts,
+            synthesis,
+            runtime_expectation,
+            submitted_images,
+            execution_mode,
+            plan_draft,
+            capture_rewind,
+        } = request;
         let attachments = match submitted_images
             .iter()
             .map(PendingImage::attachment)
@@ -300,17 +420,17 @@ impl App {
                 }
                 return command;
             }
-            let command = self.start_stream_inner_with_runtime_and_images(
-                queued.text,
-                queued.display,
-                true,
-                false,
-                queued.runtime_expectation,
-                queued.images,
+            let command = self.start_stream_inner_with_runtime_and_images(StreamStartRequest {
+                prompt: queued.text,
+                display_task: queued.display,
+                clear_turn_artifacts: true,
+                synthesis: false,
+                runtime_expectation: queued.runtime_expectation,
+                submitted_images: queued.images,
                 execution_mode,
                 plan_draft,
-                true,
-            );
+                capture_rewind: true,
+            });
             if command.is_some() {
                 self.active_queued_turn_token = Some(self.stream_start_token);
                 self.active_queued_turn = Some(next);
@@ -692,6 +812,13 @@ impl App {
             .args
             .as_ref()
             .is_some_and(deep_research_host_managed_inquiry);
+        let query = self
+            .deep_research_workflow
+            .args
+            .as_ref()
+            .and_then(|args| args.pointer("/input/query"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         let outcome = match self.deep_research_outcome {
             DeepResearchRunOutcome::Active if exit == DeepResearchSettlementExit::Interrupted => {
                 Some(ResearchOutcome::Failed)
@@ -712,74 +839,18 @@ impl App {
                 .unwrap_or_default();
             let workflow_metadata = self.deep_research_workflow.metadata.clone();
             return Some(cmd::cmd(move || async move {
-                let successful_report = matches!(
-                    outcome,
-                    ResearchOutcome::Completed | ResearchOutcome::Qualified
-                );
-                let publication_result = if successful_report {
-                    match deep_research_inquiry_publication_outcome(
-                        &workflow_output,
-                        workflow_metadata.as_ref(),
-                    ) {
-                        Ok(Some(DeepResearchRunOutcome::Completed))
-                            if outcome == ResearchOutcome::Completed =>
-                        {
-                            Ok(())
-                        }
-                        Ok(Some(DeepResearchRunOutcome::Qualified))
-                            if outcome == ResearchOutcome::Qualified =>
-                        {
-                            Ok(())
-                        }
-                        Ok(Some(actual)) => Err(format!(
-                            "DeepResearch report outcome disagrees with terminal Inquiry: {actual:?}"
-                        )),
-                        Ok(None) if host_managed_inquiry => Err(
-                            "host-managed DeepResearch cannot journal success without an Inquiry projection"
-                                .to_string(),
-                        ),
-                        Ok(None) => Ok(()),
-                        Err(error) => Err(error),
-                    }
-                } else {
-                    Ok(())
-                };
-                let inquiry_result = match publication_result {
-                    Ok(()) => match inquiry_projection_from_workflow(
-                        &workflow_output,
-                        workflow_metadata.as_ref(),
-                    ) {
-                        Ok(Some((events, state))) => {
-                            record_deep_research_inquiry_state(
-                                &workspace,
-                                &run_id,
-                                &events,
-                                &state,
-                            )
-                            .await
-                            .map_err(|error| error.to_string())
-                        }
-                        Ok(None) if host_managed_inquiry && successful_report => Err(
-                            "host-managed DeepResearch terminal journal omitted its Inquiry projection"
-                                .to_string(),
-                        ),
-                        Ok(None) => Ok(()),
-                        Err(error) if successful_report => Err(error),
-                        Err(_) => Ok(()),
-                    },
-                    Err(error) => Err(error),
-                };
-                let result = match inquiry_result {
-                    Ok(()) => record_deep_research_run_terminal(
-                        &workspace,
-                        &run_id,
+                let result =
+                    finalize_deep_research_terminal_journal(DeepResearchTerminalJournalRequest {
+                        workspace: &workspace,
+                        run_id: &run_id,
+                        query: query.as_deref(),
+                        host_managed_inquiry,
+                        workflow_output: &workflow_output,
+                        workflow_metadata: workflow_metadata.as_ref(),
                         outcome,
-                        artifacts.as_ref(),
-                    )
-                    .await
-                    .map_err(|error| error.to_string()),
-                    Err(error) => Err(error),
-                };
+                        artifacts: artifacts.as_ref(),
+                    })
+                    .await;
                 Msg::DeepResearchJournalFinalized {
                     run_id,
                     exit,
@@ -971,5 +1042,207 @@ mod queue_claim_tests {
         assert!(take_matching_queue_claim(&mut active, &mut active_token, 21).is_none());
         assert!(active.is_none());
         assert_eq!(active_token, None);
+    }
+}
+
+#[cfg(test)]
+mod evidence_first_journal_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn source_backed_publication_settles_as_degraded_without_an_inquiry_projection() {
+        let workspace = tempfile::tempdir().expect("create evidence-first journal workspace");
+        let query = "Which Nimbus release is supported?";
+        let run_id = "evidence-first-tui-settlement";
+        let acquisition = serde_json::json!({
+            "query": query,
+            "mode": "bootstrap_acquisition",
+            "acquisition": {
+                "status": "success",
+                "packet": {
+                    "version": 1,
+                    "focuses": [],
+                    "sources": [{
+                        "source_id": "bootstrap-web-source-1",
+                        "title": "Official Nimbus support record",
+                        "url_or_path": "https://example.test/nimbus",
+                        "chunks": [{
+                            "chunk_id": "bootstrap-web-source-1:chunk:1",
+                            "text": "The official record states that Nimbus version 2 receives fixes through September 2027."
+                        }]
+                    }]
+                }
+            }
+        });
+        let artifacts =
+            super::super::deep_research_artifacts::materialize_deep_research_source_backed_report(
+                workspace.path(),
+                query,
+                &acquisition.to_string(),
+                None,
+            )
+            .expect("materialize source-backed settlement report")
+            .expect("source-backed settlement artifacts");
+        let slug = super::super::deep_research_artifacts::deep_research_report_slug(query);
+        let workflow_output = serde_json::json!({
+            "query": query,
+            "mode": "evidence_first_report",
+            "publication": {
+                "status": "source_backed",
+                "markdown": format!(".a3s/research/{slug}/report.md"),
+                "html": format!(".a3s/research/{slug}/index.html"),
+                "quality": {
+                    "direct_answer_count": 0,
+                    "finding_count": 0,
+                    "accepted_claim_count": 0,
+                    "cited_source_count": 0,
+                    "relevant_source_count": 1,
+                    "source_count": 1
+                }
+            }
+        })
+        .to_string();
+        let args = serde_json::json!({
+            "run_id": run_id,
+            "input": {
+                "query": query,
+                "current_date": "2026-07-21",
+                "evidence_scope": "web_and_workspace",
+                "inquiry_host_managed": true
+            }
+        });
+        record_deep_research_workflow_started(
+            workspace.path(),
+            run_id,
+            deep_research_evidence_first_research_spec(&args),
+        )
+        .await
+        .expect("start evidence-first settlement journal");
+        record_deep_research_workflow_completed(workspace.path(), run_id, true)
+            .await
+            .expect("close evidence-first workflow track");
+
+        let projection =
+            finalize_deep_research_terminal_journal(DeepResearchTerminalJournalRequest {
+                workspace: workspace.path(),
+                run_id,
+                query: Some(query),
+                host_managed_inquiry: true,
+                workflow_output: &workflow_output,
+                workflow_metadata: None,
+                outcome: ResearchOutcome::Degraded,
+                artifacts: Some(&artifacts),
+            })
+            .await
+            .expect("settle evidence-first publication without Inquiry state");
+
+        assert_eq!(projection.outcome, ResearchOutcome::Degraded);
+        assert!(projection.active_steps.is_empty());
+        assert!(projection.active_children.is_empty());
+        assert!(projection.artifact_evidence_head.is_some());
+    }
+
+    #[tokio::test]
+    async fn synthesized_publication_records_nonzero_claim_and_citation_metrics() {
+        let workspace = tempfile::tempdir().expect("create synthesized journal workspace");
+        let query = "Which Nimbus release is supported?";
+        let run_id = "evidence-first-synthesized-settlement";
+        let catalog = super::super::deep_research_artifacts::DeepResearchSourceCatalog {
+            sources: vec![super::super::deep_research_artifacts::DeepResearchCatalogSource {
+                alias: "source-1".to_string(),
+                title: "Official Nimbus support record".to_string(),
+                anchor: "https://docs.rs/nimbus/latest/nimbus/".to_string(),
+                chunks: vec![
+                    "The official record states that Nimbus version 2 receives fixes through September 2027."
+                        .to_string(),
+                ],
+                claim_eligible: true,
+            }],
+            omitted_source_count: 0,
+            omitted_chunk_count: 0,
+        };
+        let report = super::super::deep_research_artifacts::admit_deep_research_report_proposal(
+            query,
+            &catalog,
+            serde_json::json!({
+                "summary": [{
+                    "text": "Nimbus version 2 receives fixes through September 2027.",
+                    "source_aliases": ["source-1"]
+                }],
+                "findings": [{
+                    "text": "The official record identifies Nimbus version 2 and September 2027 as the support boundary.",
+                    "source_aliases": ["source-1"]
+                }],
+                "recommendations": [],
+                "limitations": []
+            }),
+        )
+        .expect("admit synthesized settlement report")
+        .expect("quality-gated settlement report");
+        let artifacts =
+            super::super::deep_research_artifacts::materialize_deep_research_admitted_report(
+                workspace.path(),
+                query,
+                &report,
+            )
+            .expect("materialize synthesized settlement report");
+        let slug = super::super::deep_research_artifacts::deep_research_report_slug(query);
+        let workflow_output = serde_json::json!({
+            "query": query,
+            "mode": "evidence_first_report",
+            "publication": {
+                "status": "synthesized",
+                "markdown": format!(".a3s/research/{slug}/report.md"),
+                "html": format!(".a3s/research/{slug}/index.html"),
+                "quality": {
+                    "direct_answer_count": 1,
+                    "finding_count": 1,
+                    "accepted_claim_count": 2,
+                    "cited_source_count": 1,
+                    "relevant_source_count": 1,
+                    "source_count": 1
+                }
+            }
+        })
+        .to_string();
+        let args = serde_json::json!({
+            "run_id": run_id,
+            "input": {
+                "query": query,
+                "current_date": "2026-07-22",
+                "evidence_scope": "web_and_workspace",
+                "inquiry_host_managed": true
+            }
+        });
+        record_deep_research_workflow_started(
+            workspace.path(),
+            run_id,
+            deep_research_evidence_first_research_spec(&args),
+        )
+        .await
+        .expect("start synthesized settlement journal");
+        record_deep_research_workflow_completed(workspace.path(), run_id, true)
+            .await
+            .expect("close synthesized workflow track");
+
+        let projection =
+            finalize_deep_research_terminal_journal(DeepResearchTerminalJournalRequest {
+                workspace: workspace.path(),
+                run_id,
+                query: Some(query),
+                host_managed_inquiry: true,
+                workflow_output: &workflow_output,
+                workflow_metadata: None,
+                outcome: ResearchOutcome::Completed,
+                artifacts: Some(&artifacts),
+            })
+            .await
+            .expect("settle synthesized publication");
+
+        assert_eq!(projection.outcome, ResearchOutcome::Completed);
+        assert_eq!(projection.accepted_evidence_count, 1);
+        assert_eq!(projection.source_count, 1);
+        assert_eq!(projection.claim_count, 2);
+        assert_eq!(projection.report_cited_source_count, Some(1));
     }
 }

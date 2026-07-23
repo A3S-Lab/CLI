@@ -41,16 +41,17 @@ default_model = "openai/my-model"
 # }
 
 # Optional: a3s-search configuration. Without explicit engine entries,
-# web_search uses AnySearch (anonymous, or authenticated by ANYSEARCH_API_KEY).
-# Any engine entries replace that default. Enable the headless block only for
-# google or baidu; manage browser runtimes with `a3s search browser ...` and
-# verify them with `a3s search doctor`.
+# web_search uses DuckDuckGo and Wikipedia. Engine entries replace that
+# default, so AnySearch is used only when it is explicitly enabled here.
+# Enable the headless block only for google or baidu; manage browser runtimes
+# with `a3s search browser ...` and verify them with `a3s search doctor`.
 # search {
 #   timeout = 20
 #   engine {
 #     ddg   { enabled = true  weight = 1.0 }
 #     brave { enabled = true  weight = 1.0 }
 #     wiki  { enabled = true  weight = 0.8 }
+#     # anysearch { enabled = true weight = 1.0 } # opt in; ANYSEARCH_API_KEY is optional
 #     # baidu  { enabled = true weight = 1.0 }
 #     # bing_cn { enabled = true weight = 1.0 }
 #   }

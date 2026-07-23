@@ -627,6 +627,41 @@ impl AgentPresencePublisher {
         result
     }
 
+    async fn collect_read_only_snapshot(&self) -> SystemAgentSnapshot {
+        let process_result = collect_processes().await;
+        let now_ms = epoch_ms();
+        let mut warnings = Vec::new();
+        let observed_pids = process_result.as_ref().ok().map(|processes| {
+            processes
+                .iter()
+                .map(|process| process.pid)
+                .collect::<HashSet<_>>()
+        });
+        let scan = match self.scan_presences(now_ms, observed_pids.as_ref()).await {
+            Ok(scan) => scan,
+            Err(error) => {
+                warnings.push(format!("presence: {error}"));
+                PresenceScan::default()
+            }
+        };
+        if scan.truncated {
+            warnings.push(format!(
+                "presence: live registry exceeds the {MAX_PRESENCE_FILES}-publisher evidence limit"
+            ));
+        }
+        let processes = match process_result {
+            Ok(processes) => processes,
+            Err(error) => {
+                warnings.push(format!("processes: {error}"));
+                Vec::new()
+            }
+        };
+        SystemAgentSnapshot {
+            activities: aggregate_activities(&scan.presences, &processes, "", now_ms),
+            warnings,
+        }
+    }
+
     pub(crate) async fn remove(&self) {
         self.closed.store(true, Ordering::Release);
         self.control_grants.clear();
@@ -838,6 +873,14 @@ impl AgentPresencePublisher {
             .consume_requests(self.directory.as_deref(), &self.instance_id, now_ms)
             .await
     }
+}
+
+/// Collect sanitized cooperative heartbeat and inferred process evidence
+/// without publishing a heartbeat or writing a shared snapshot.
+pub(crate) async fn collect_system_agent_snapshot() -> SystemAgentSnapshot {
+    AgentPresencePublisher::from_environment()
+        .collect_read_only_snapshot()
+        .await
 }
 
 fn absolute_status_directory(directory: PathBuf, current_dir: Option<&Path>) -> Option<PathBuf> {

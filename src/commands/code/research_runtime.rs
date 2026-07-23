@@ -85,15 +85,35 @@ pub(crate) async fn execute_deepresearch_in(
     memory_dir: PathBuf,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     let opts = parse_deepresearch_args(args)?;
+    execute_deepresearch_query_in(
+        &opts.query,
+        opts.evidence_scope,
+        deep_research_default_budget(),
+        workspace,
+        code_config,
+        memory_dir,
+    )
+    .await
+}
+
+pub(crate) async fn execute_deepresearch_query_in(
+    query: &str,
+    evidence_scope: Option<crate::tui::DeepResearchEvidenceScope>,
+    budget: BudgetPlan,
+    workspace: &Path,
+    code_config: CodeConfig,
+    memory_dir: PathBuf,
+) -> anyhow::Result<DeepResearchReportSynthesis> {
+    let query = query.trim();
+    if query.is_empty() {
+        anyhow::bail!("DeepResearch query must not be empty");
+    }
     let workspace_text = workspace.to_string_lossy().to_string();
     let (session, report_tool_gate) =
         build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
     eprintln!("deepresearch: gathering evidence via the host-managed workflow…");
-    let mut workflow_args = crate::tui::deep_research_cli_workflow_args_for_budget(
-        &opts.query,
-        deep_research_default_budget(),
-        opts.evidence_scope,
-    );
+    let mut workflow_args =
+        crate::tui::deep_research_cli_workflow_args_for_budget(query, budget, evidence_scope);
     let run_id = crate::tui::ensure_deep_research_workflow_run_id(&mut workflow_args)
         .ok_or_else(|| anyhow::anyhow!("failed to assign a DeepResearch workflow run ID"))?;
     let workflow = run_deepresearch_inquiry(Arc::clone(&session), workflow_args.clone()).await;
@@ -103,17 +123,53 @@ pub(crate) async fn execute_deepresearch_in(
         Err(error) => (error, 1, None),
     };
 
-    let mut synthesis = synthesize_deepresearch_report(
-        &session,
+    let mut synthesis = match crate::tui::deep_research_evidence_first_published_report(
         workspace,
-        &opts.query,
+        query,
         &workflow_output,
-        exit_code,
-        metadata.as_ref(),
-        &run_id,
-        &report_tool_gate,
     )
-    .await?;
+    .map_err(anyhow::Error::msg)?
+    {
+        Some(published) => {
+            let text = crate::tui::clean_deep_research_final_text_from_artifacts(
+                &published.artifacts,
+                workspace,
+            )
+            .unwrap_or_else(|| "DeepResearch report published without a text preview.".to_string());
+            let status = match published.publication {
+                crate::tui::DeepResearchEvidenceFirstPublication::Synthesized => {
+                    DeepResearchReportStatus::Completed
+                }
+                crate::tui::DeepResearchEvidenceFirstPublication::SourceBacked => {
+                    DeepResearchReportStatus::Degraded
+                }
+                crate::tui::DeepResearchEvidenceFirstPublication::NoEvidence => {
+                    DeepResearchReportStatus::Degraded
+                }
+            };
+            DeepResearchReportSynthesis {
+                text,
+                artifacts: ResearchReportArtifacts {
+                    markdown: published.artifacts.markdown,
+                    html: published.artifacts.html,
+                },
+                status,
+            }
+        }
+        None => {
+            synthesize_deepresearch_report(
+                &session,
+                workspace,
+                query,
+                &workflow_output,
+                exit_code,
+                metadata.as_ref(),
+                &run_id,
+                &report_tool_gate,
+            )
+            .await?
+        }
+    };
     let requested_outcome = match synthesis.status {
         DeepResearchReportStatus::Completed => crate::tui::ResearchOutcome::Completed,
         DeepResearchReportStatus::Qualified => crate::tui::ResearchOutcome::Qualified,
@@ -123,17 +179,19 @@ pub(crate) async fn execute_deepresearch_in(
         markdown: synthesis.artifacts.markdown.clone(),
         html: synthesis.artifacts.html.clone(),
     };
-    let settled_outcome = crate::tui::settle_deep_research_cli_run(
-        workspace,
-        &run_id,
-        workflow_succeeded,
-        &workflow_output,
-        metadata.as_ref(),
-        requested_outcome,
-        &journal_artifacts,
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    let settled_outcome =
+        crate::tui::settle_deep_research_cli_run(crate::tui::DeepResearchCliSettlement {
+            workspace,
+            run_id: &run_id,
+            query,
+            workflow_succeeded,
+            workflow_output: &workflow_output,
+            workflow_metadata: metadata.as_ref(),
+            requested_outcome,
+            artifacts: &journal_artifacts,
+        })
+        .await
+        .map_err(anyhow::Error::msg)?;
     synthesis.status = match settled_outcome {
         crate::tui::ResearchOutcome::Completed => DeepResearchReportStatus::Completed,
         crate::tui::ResearchOutcome::Qualified => DeepResearchReportStatus::Qualified,
@@ -438,8 +496,9 @@ async fn run_deepresearch_inquiry(
     session: Arc<AgentSession>,
     args: serde_json::Value,
 ) -> Result<ToolCallResult, String> {
-    let timeout_ms = crate::tui::DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
-    let (mut progress_rx, workflow_join) = crate::tui::spawn_deep_research_inquiry(session, args);
+    let timeout_ms = crate::tui::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
+    let (mut progress_rx, workflow_join) =
+        crate::tui::spawn_deep_research_evidence_first(session, args);
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
     let result = match tokio::time::timeout(
@@ -453,7 +512,7 @@ async fn run_deepresearch_inquiry(
         Err(_) => {
             workflow_abort.abort();
             Err(format!(
-                "DeepResearch inquiry timed out after {timeout_ms} ms while gathering and reviewing evidence"
+                "DeepResearch timed out after {timeout_ms} ms while acquiring sources and publishing its Host-owned report"
             ))
         }
     };
@@ -470,6 +529,9 @@ async fn run_deepresearch_inquiry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Frozen replay tests stay isolated from production control flow.
+    #[path = "baseline.rs"]
+    mod baseline;
     #[path = "cli.rs"]
     mod cli;
     #[path = "workflow.rs"]

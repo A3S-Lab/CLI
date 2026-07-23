@@ -308,6 +308,13 @@ impl WorkspaceService {
         Ok(items)
     }
 
+    pub(in crate::api::code_web) async fn watch(
+        &self,
+        root_path: String,
+    ) -> BootResult<a3s_boot::BootResponse> {
+        super::watch::watch_workspace(root_path).await
+    }
+
     pub(in crate::api::code_web) async fn rename_path(
         &self,
         request: Value,

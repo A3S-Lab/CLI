@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_WORKFLOW_STORE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const BOOTSTRAP_ACQUISITION_CHECKPOINT_STEP_ID: &str = "checkpoint_bootstrap_acquisition";
+#[cfg(test)]
 const INITIAL_RETRIEVAL_CHECKPOINT_STEP_ID: &str = "checkpoint_initial_retrieval";
 
 fn safe_existing_workflow_store(workspace: &Path, store: &Path) -> bool {
@@ -86,6 +87,7 @@ pub(crate) fn recover_deep_research_workflow_run_from_store(
 /// supplemental pass is still running as the shared retrieval deadline fires.
 /// The checkpoint is an ordinary durable Flow step, so recovery remains tied
 /// to the exact run ID and query rather than becoming a query-result cache.
+#[cfg(test)]
 pub(crate) fn recover_deep_research_initial_retrieval_from_store(
     workspace: &Path,
     args: &serde_json::Value,

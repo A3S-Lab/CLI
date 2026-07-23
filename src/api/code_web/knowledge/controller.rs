@@ -32,6 +32,29 @@ pub(super) struct KbSearchRequest {
     pub(super) query: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeBaseCreateRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeBaseImportRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) path: String,
+    pub(super) name: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeBasePinRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) pinned: bool,
+}
+
 pub(super) struct KnowledgeController {
     service: Arc<KnowledgeService>,
 }
@@ -78,5 +101,57 @@ impl KnowledgeController {
     #[post("/kb/ensure")]
     async fn ensure(&self, #[body] request: KbWorkspaceRequest) -> BootResult<serde_json::Value> {
         self.service.ensure(request.workspace).await
+    }
+
+    #[get("/marketplace")]
+    async fn marketplace(
+        &self,
+        #[query("workspace")] workspace: Option<String>,
+    ) -> BootResult<serde_json::Value> {
+        self.service.marketplace(workspace).await
+    }
+
+    #[post("/marketplace/{id}/install")]
+    async fn install_marketplace_item(
+        &self,
+        #[param("id")] id: String,
+        #[body] request: KbWorkspaceRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .install_marketplace_item(&id, request.workspace)
+            .await
+    }
+
+    #[get("/bases")]
+    async fn knowledge_bases(
+        &self,
+        #[query("workspace")] workspace: Option<String>,
+    ) -> BootResult<serde_json::Value> {
+        self.service.knowledge_bases(workspace).await
+    }
+
+    #[post("/bases")]
+    async fn create_knowledge_base(
+        &self,
+        #[body] request: KnowledgeBaseCreateRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.create_knowledge_base(request).await
+    }
+
+    #[post("/bases/import")]
+    async fn import_knowledge_base(
+        &self,
+        #[body] request: KnowledgeBaseImportRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.import_knowledge_base(request).await
+    }
+
+    #[post("/bases/{id}/pinned")]
+    async fn set_knowledge_base_pinned(
+        &self,
+        #[param("id")] id: String,
+        #[body] request: KnowledgeBasePinRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.set_knowledge_base_pinned(&id, request).await
     }
 }

@@ -435,10 +435,13 @@ fn multi_component_preflight_failure_prevents_network_and_every_mutation() {
     assert_eq!(result["command"], "component.install");
     assert_eq!(result["ok"], false);
     assert_eq!(result["error"]["code"], "operation.failed");
-    assert!(result["error"]["message"]
+    let message = result["error"]["message"]
         .as_str()
-        .unwrap()
-        .contains("no package registry has a production TUF trust root"));
+        .expect("structured component preflight error message");
+    assert!(
+        message.contains("no package registry has a production TUF trust root"),
+        "unexpected component preflight error: {result:#}"
+    );
     assert!(server.requests().is_empty());
     assert!(!temp.path("state/components").exists());
     assert!(!temp.path("data/components").exists());

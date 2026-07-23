@@ -15,6 +15,7 @@ use super::os::OsModule;
 use super::plugins::PluginsModule;
 use super::processes::ProcessesModule;
 use super::state::CodeWebState;
+use super::weixin::WeixinModule;
 use super::work::WorkModule;
 use super::workspace::WorkspaceModule;
 
@@ -50,6 +51,7 @@ impl Module for CodeWebModule {
             Arc::new(LoopsModule),
             Arc::new(PluginsModule),
             Arc::new(OsModule),
+            Arc::new(WeixinModule::configured()),
         ]
     }
 }
@@ -90,5 +92,164 @@ impl Module for CodeWebStateModule {
             state.close().await;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use a3s_boot::{BootApplication, BootRequest, HttpMethod};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn complete_code_web_module_builds_with_nested_remote_kernel_imports() {
+        let temporary = tempfile::tempdir().expect("create Code Web module fixture");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create fixture workspace");
+        let code_config = a3s_code_core::CodeConfig::from_acl(
+            r#"
+                default_model = "openai/test-model"
+                providers "openai" {
+                  apiKey = "sk-test"
+                  baseUrl = "https://example.com/v1"
+                  models "test-model" {}
+                }
+            "#,
+        )
+        .expect("parse fixture config");
+        let agent = Arc::new(
+            a3s_code_core::Agent::from_config(code_config.clone())
+                .await
+                .expect("create fixture agent"),
+        );
+        let repository = Arc::new(
+            super::super::session_store::CodeWebSessionRepository::open(
+                temporary.path().join("sessions"),
+            )
+            .await
+            .expect("open fixture session repository"),
+        );
+        let state = Arc::new(CodeWebState::new(
+            agent,
+            temporary.path().join("config.acl"),
+            workspace,
+            code_config,
+            repository,
+        ));
+        let app = BootApplication::builder()
+            .global_prefix("/api")
+            .import(CodeWebModule::new(Arc::clone(&state)))
+            .build()
+            .expect("build complete Code Web application");
+
+        let capability = app
+            .call(BootRequest::new(
+                HttpMethod::Get,
+                "/api/v1/weixin/capability",
+            ))
+            .await
+            .expect("read disabled Weixin capability")
+            .body_json::<serde_json::Value>()
+            .expect("decode capability");
+        assert_eq!(capability["protocolMode"], "disabled");
+
+        let targets = app
+            .call(BootRequest::new(HttpMethod::Get, "/api/v1/weixin/targets"))
+            .await
+            .expect("read disabled remote target snapshot")
+            .body_json::<serde_json::Value>()
+            .expect("decode target snapshot");
+        assert_eq!(targets["schemaVersion"], 1);
+        assert_eq!(targets["items"], serde_json::json!([]));
+        assert_eq!(
+            targets["warnings"],
+            serde_json::json!(["remote_read_disabled"])
+        );
+
+        app.shutdown().await.expect("shutdown Code Web application");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn complete_code_web_module_enables_configured_weixin_production_runtime() {
+        let temporary = tempfile::tempdir().expect("create Code Web module fixture");
+        let workspace = temporary.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create fixture workspace");
+        let source = r#"
+            default_model = "openai/test-model"
+            providers "openai" {
+              apiKey = "sk-test"
+              baseUrl = "https://example.com/v1"
+              models "test-model" {}
+            }
+            channels {
+              weixin {
+                enabled = true
+                app_id = "a3s-production-test"
+                bot_type = "3"
+                client_version = "1.0.0"
+                bot_agent = "A3S/1.0.0"
+                allowed_hosts = ["ilinkai.weixin.qq.com"]
+              }
+            }
+        "#;
+        let config_path = temporary.path().join("config.acl");
+        std::fs::write(&config_path, source).expect("write configured fixture");
+        let code_config =
+            a3s_code_core::CodeConfig::from_acl(source).expect("parse configured fixture");
+        let agent = Arc::new(
+            a3s_code_core::Agent::from_config(code_config.clone())
+                .await
+                .expect("create fixture agent"),
+        );
+        let repository = Arc::new(
+            super::super::session_store::CodeWebSessionRepository::open(
+                temporary.path().join("sessions"),
+            )
+            .await
+            .expect("open fixture session repository"),
+        );
+        let state = Arc::new(CodeWebState::new(
+            agent,
+            config_path,
+            workspace,
+            code_config,
+            repository,
+        ));
+        let app = BootApplication::builder()
+            .global_prefix("/api")
+            .import(CodeWebModule::new(state))
+            .build()
+            .expect("build configured Code Web application");
+
+        app.bootstrap()
+            .await
+            .expect("bootstrap configured Code Web application");
+        let capability = app
+            .call(BootRequest::new(
+                HttpMethod::Get,
+                "/api/v1/weixin/capability",
+            ))
+            .await
+            .expect("read configured Weixin capability")
+            .body_json::<serde_json::Value>()
+            .expect("decode configured capability");
+        assert_eq!(capability["state"], "unbound");
+        assert_eq!(capability["protocolMode"], "tencent");
+        assert_eq!(capability["productionEntitled"], true);
+        assert_eq!(capability["releaseBlockers"], serde_json::json!([]));
+
+        let account = app
+            .call(BootRequest::new(HttpMethod::Get, "/api/v1/weixin/account"))
+            .await
+            .expect("read configured Weixin account")
+            .body_json::<serde_json::Value>()
+            .expect("decode configured account");
+        assert_eq!(account["bound"], false);
+        assert_eq!(account["protocolMode"], "tencent");
+
+        app.shutdown()
+            .await
+            .expect("shutdown configured Code Web application");
     }
 }

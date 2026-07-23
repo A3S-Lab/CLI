@@ -32,6 +32,15 @@ impl KernelService {
             .as_ref()
             .map(queued_turn_visible_content)
             .unwrap_or_else(|| direct_content.unwrap_or_default().to_string());
+        if let Some(research_turn) = queued_turn
+            .as_ref()
+            .filter(|turn| turn.mode == CodeWebQueuedTurnMode::DeepResearch)
+            .cloned()
+        {
+            return self
+                .stream_deep_research_turn(session, research_turn, visible_content)
+                .await;
+        }
         let prompt = match queued_turn.as_ref().map(|turn| turn.kind) {
             Some(CodeWebQueuedTurnKind::GoalContinuation) => {
                 let controls = self.session_controls_snapshot(session_id).await;

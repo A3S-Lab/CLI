@@ -687,7 +687,7 @@ fn validate_assessment_input_state(
     }
     if !material_evidence_floor(state) {
         return Err(ResearchContractAssessmentError::new(
-            "every material research obligation requires a traceable answered material question before contract assessment",
+            "at least one material research obligation requires a traceable answered material question before contract assessment",
         ));
     }
     let mut diagnostic_ids = BTreeSet::new();

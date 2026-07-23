@@ -1,4 +1,5 @@
 #[derive(Clone, Debug)]
+#[cfg(test)]
 pub(super) struct PreparedQuestionEvidencePacket {
     pub(super) allowed_evidence_ids: BTreeSet<String>,
     pub(super) payload: String,
@@ -10,6 +11,7 @@ pub(super) struct PreparedQuestionEvidencePacket {
 /// excerpts stay in the durable ledger used by report generation. This avoids
 /// a second text representation without lexical matching or sampling. A
 /// selector result that exceeds the closed review budget fails closed.
+#[cfg(test)]
 pub(super) fn prepare_question_evidence_packet(
     evidence: &[AcceptedEvidence],
     maximum_items: usize,
@@ -56,6 +58,7 @@ pub(super) fn prepare_question_evidence_packet(
     })
 }
 
+#[cfg(test)]
 fn compact_question_evidence_payload(evidence: &[AcceptedEvidence]) -> Result<String, String> {
     let evidence_items = evidence
         .iter()
@@ -86,6 +89,7 @@ fn compact_question_evidence_payload(evidence: &[AcceptedEvidence]) -> Result<St
 /// matching. Newly selected evidence carries exact relevance edges; legacy or
 /// non-selector evidence remains unscoped and is conservatively available to
 /// every group.
+#[cfg(test)]
 pub(super) fn question_group_evidence(
     evidence: &[AcceptedEvidence],
     questions: &[Question],
@@ -270,28 +274,6 @@ pub(super) async fn run_dynamic_workflow(
     Ok(result)
 }
 
-pub(super) async fn run_retrieval_stage(
-    session: &AgentSession,
-    args: Value,
-    progress_tx: &mpsc::Sender<AgentEvent>,
-    timeout_ms: u64,
-) -> Result<ToolCallResult, String> {
-    let recovery_args = args.clone();
-    let result = within_inquiry_stage_timeout(
-        run_dynamic_workflow(session, args, progress_tx),
-        timeout_ms,
-        "retrieval",
-    )
-    .await;
-    match result {
-        Ok(result) => Ok(result),
-        Err(error) if error.starts_with("DeepResearch retrieval stage timed out after ") => {
-            recover_initial_retrieval_after_timeout(session, &recovery_args).ok_or(error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 pub(super) async fn run_bootstrap_acquisition_stage(
     session: &AgentSession,
     args: Value,
@@ -388,34 +370,6 @@ fn bootstrap_acquisition_value(output: &str, expected_query: &str) -> Option<Val
     valid.then_some(acquisition)
 }
 
-fn recover_initial_retrieval_after_timeout(
-    session: &AgentSession,
-    args: &Value,
-) -> Option<ToolCallResult> {
-    let recovered =
-        recover_deep_research_initial_retrieval_from_store(session.workspace(), args)?;
-    let output = recovered.output?;
-    let value = serde_json::from_str::<Value>(&output).ok()?;
-    let expected_query = args.pointer("/input/query").and_then(Value::as_str)?;
-    if value.get("query").and_then(Value::as_str) != Some(expected_query)
-        || value.get("mode").and_then(Value::as_str) != Some("inquiry_collection")
-        || value
-            .pointer("/execution/terminal_authority")
-            .and_then(Value::as_str)
-            != Some("host_inquiry_reducer")
-        || accepted_evidence_ledger(&output, Some(&recovered.metadata)).is_empty()
-    {
-        return None;
-    }
-    Some(ToolCallResult {
-        name: "dynamic_workflow".to_string(),
-        output,
-        exit_code: 0,
-        metadata: Some(recovered.metadata),
-        error_kind: None,
-    })
-}
-
 pub(super) async fn within_inquiry_stage_timeout<T, F>(
     future: F,
     timeout_ms: u64,
@@ -432,6 +386,7 @@ where
     }
 }
 
+#[cfg(test)]
 pub(super) async fn collect_inquiry_stage_results<S>(
     stream: S,
     timeout_ms: u64,

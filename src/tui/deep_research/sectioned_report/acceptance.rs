@@ -6,7 +6,6 @@ pub(super) struct ReportAcceptanceContext<'a> {
     pub(super) session: &'a AgentSession,
     pub(super) query: &'a str,
     pub(super) run_id: &'a str,
-    pub(super) canonical_workflow_output: &'a str,
     pub(super) outline: &'a ResearchOutline,
     pub(super) events: &'a mut Vec<InquiryEvent>,
     pub(super) state: &'a mut InquiryState,
@@ -26,15 +25,16 @@ pub(super) async fn accept_report(
     mut context: ReportAcceptanceContext<'_>,
 ) -> Result<AcceptedReport, String> {
     let mut frame = generate_frame(
-        context.session,
-        context.query,
-        context.run_id,
-        context.canonical_workflow_output,
-        context.outline,
-        context.state,
-        context.evidence,
+        composition::FrameGenerationContext {
+            session: context.session,
+            query: context.query,
+            run_id: context.run_id,
+            outline: context.outline,
+            state: context.state,
+            evidence: context.evidence,
+            deadline: context.deadline,
+        },
         None,
-        context.deadline,
     )
     .await?;
     let (used_evidence, resolved_used_evidence) =
@@ -48,16 +48,18 @@ pub(super) async fn accept_report(
         context.evidence,
     )?;
     let initial_semantic_audit = semantic_audit::audit_report_semantics(
-        context.session,
-        context.query,
-        context.run_id,
+        semantic_audit::SemanticAuditContext {
+            session: context.session,
+            query: context.query,
+            run_id: context.run_id,
+            outline: context.outline,
+            state: context.state,
+            sections: context.sections,
+            frame: &frame,
+            evidence: context.evidence,
+            deadline: context.deadline,
+        },
         "semantic_audit_1",
-        context.outline,
-        context.state,
-        context.sections,
-        &frame,
-        context.evidence,
-        context.deadline,
     )
     .await?;
     let initial_audit =
@@ -132,16 +134,18 @@ pub(super) async fn accept_report(
     // checking changed prose, this independent pass can catch a false clear
     // from the initial model audit, as observed in the real-model v26 run.
     let revised_semantic_audit = semantic_audit::audit_report_semantics(
-        context.session,
-        context.query,
-        context.run_id,
+        semantic_audit::SemanticAuditContext {
+            session: context.session,
+            query: context.query,
+            run_id: context.run_id,
+            outline: context.outline,
+            state: context.state,
+            sections: context.sections,
+            frame: &frame,
+            evidence: context.evidence,
+            deadline: context.deadline,
+        },
         "semantic_audit_2",
-        context.outline,
-        context.state,
-        context.sections,
-        &frame,
-        context.evidence,
-        context.deadline,
     )
     .await?;
     let revised_audit =
@@ -177,17 +181,19 @@ pub(super) async fn accept_report(
     // targets replaced by the final repair are redelivered, with their stable
     // report ordinal preserved in each durable Flow ID.
     let final_target_reviews = semantic_audit::audit_report_semantics_for_targets(
-        context.session,
-        context.query,
-        context.run_id,
+        semantic_audit::SemanticAuditContext {
+            session: context.session,
+            query: context.query,
+            run_id: context.run_id,
+            outline: context.outline,
+            state: context.state,
+            sections: context.sections,
+            frame: &frame,
+            evidence: context.evidence,
+            deadline: context.deadline,
+        },
         "semantic_audit_3",
-        context.outline,
-        context.state,
-        context.sections,
-        &frame,
-        context.evidence,
         &final_changed_targets,
-        context.deadline,
     )
     .await?;
     let final_semantic_audit = semantic_audit::merge_reaudited_targets(
@@ -233,20 +239,18 @@ async fn apply_targeted_report_repair(
         }
         redraft_first_section(context).await?;
     } else {
-        revision::revise_targets(
-            context.session,
-            context.query,
-            context.run_id,
-            context.outline,
-            context.events,
-            context.state,
-            context.evidence,
-            context.sections,
-            targets,
-            &audit.reason,
-            context.deadline,
-        )
-        .await?;
+        let mut section_revision = revision::SectionRevisionContext {
+            session: context.session,
+            query: context.query,
+            run_id: context.run_id,
+            outline: context.outline,
+            events: &mut *context.events,
+            state: &mut *context.state,
+            evidence: context.evidence,
+            sections: &mut *context.sections,
+            deadline: context.deadline,
+        };
+        revision::revise_targets(&mut section_revision, targets, &audit.reason).await?;
     }
     revision::ensure_sections_valid_after_revision(
         context.sections,
@@ -262,15 +266,16 @@ async fn apply_targeted_report_repair(
     if frame_implicated {
         let revision_context = semantic.revision_context_for_target("frame");
         *frame = generate_frame(
-            context.session,
-            context.query,
-            context.run_id,
-            context.canonical_workflow_output,
-            context.outline,
-            context.state,
-            context.evidence,
+            composition::FrameGenerationContext {
+                session: context.session,
+                query: context.query,
+                run_id: context.run_id,
+                outline: context.outline,
+                state: context.state,
+                evidence: context.evidence,
+                deadline: context.deadline,
+            },
             Some(&revision_context),
-            context.deadline,
         )
         .await?;
         changed_target_ids.insert("frame".to_string());

@@ -6,7 +6,7 @@ use std::io::Write;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use a3s::research::{
@@ -29,6 +29,14 @@ const SECTION_RUN_ID: &str = "process-section-resume";
 const FRAME_RUN_ID: &str = "process-frame-resume";
 const SEMANTIC_AUDIT_RUN_ID: &str = "process-semantic-audit-resume";
 const SECOND_REPAIR_RUN_ID: &str = "bounded-second-semantic-repair";
+// These process tests deliberately leave one model effect pending until the
+// parent observes its durable journal and terminates the worker. Keep that
+// fixture budget independent of the host's scheduling latency under the full
+// test suite; the production deadline contract is covered by focused tests.
+const PROCESS_REPORT_TIMEOUT_MS: u64 = 180_000;
+const PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(60);
+const PROCESS_COMPLETION_TIMEOUT: Duration = Duration::from_secs(90);
+static PROCESS_INVOCATION_LOG_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Clone)]
 struct ProcessFixture {
@@ -65,6 +73,9 @@ impl ProcessResumeClient {
     }
 
     fn record_call(&self, label: &str) -> anyhow::Result<()> {
+        let _guard = PROCESS_INVOCATION_LOG_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = self.workspace.join("model-invocations.log");
         let mut file = OpenOptions::new().create(true).append(true).open(path)?;
         writeln!(file, "{label}")?;
@@ -603,7 +614,7 @@ async fn worker_session(
         .with_session_id("sectioned-report-process-worker")
         .with_llm_client(client)
         .with_auto_save(false)
-        .with_tool_timeout(60_000);
+        .with_tool_timeout(PROCESS_REPORT_TIMEOUT_MS);
     let session = agent
         .session_async(workspace.to_string_lossy().to_string(), Some(options))
         .await
@@ -626,7 +637,7 @@ async fn initialize_process_journal(workspace: &Path, run_id: &str) {
                 "The accepted alpha finding is established.".to_string(),
                 "The accepted beta finding is established.".to_string(),
             ],
-            total_budget_ms: 60_000,
+            total_budget_ms: PROCESS_REPORT_TIMEOUT_MS,
             retrieval_stage_budget_ms: 30_000,
             question_review_stage_budget_ms: 20_000,
             finalization_reserve_ms: 5_000,
@@ -654,7 +665,7 @@ async fn run_section_worker(workspace: &Path, role: &str) {
         &mut workflow_output,
         &mut workflow_metadata,
         SECTION_RUN_ID,
-        60_000,
+        PROCESS_REPORT_TIMEOUT_MS,
     )
     .await;
     if role == "section-interrupt" {
@@ -675,17 +686,19 @@ async fn run_frame_worker(workspace: &Path, role: &str) {
         ClientMode::DenyModelCalls
     };
     let (_agent, session) = worker_session(workspace, &fixture, mode).await;
-    let deadline = ReportDeadline::new(Instant::now() + Duration::from_secs(60));
+    let deadline =
+        ReportDeadline::new(Instant::now() + Duration::from_millis(PROCESS_REPORT_TIMEOUT_MS));
     let frame = generate_frame(
-        &session,
-        "Verify durable report-stage recovery.",
-        FRAME_RUN_ID,
-        &fixture.workflow_output,
-        &fixture.outline,
-        &fixture.drafted_state,
-        &fixture.evidence,
+        composition::FrameGenerationContext {
+            session: &session,
+            query: "Verify durable report-stage recovery.",
+            run_id: FRAME_RUN_ID,
+            outline: &fixture.outline,
+            state: &fixture.drafted_state,
+            evidence: &fixture.evidence,
+            deadline: &deadline,
+        },
         None,
-        &deadline,
     )
     .await
     .expect("frame generation or recovery");
@@ -712,33 +725,37 @@ async fn run_semantic_audit_worker(workspace: &Path, role: &str) {
         ClientMode::CompleteReport
     };
     let (_agent, session) = worker_session(workspace, &fixture, mode).await;
-    let deadline = ReportDeadline::new(Instant::now() + Duration::from_secs(60));
+    let deadline =
+        ReportDeadline::new(Instant::now() + Duration::from_millis(PROCESS_REPORT_TIMEOUT_MS));
     let frame = generate_frame(
-        &session,
-        "Verify durable report-stage recovery.",
-        SEMANTIC_AUDIT_RUN_ID,
-        &fixture.workflow_output,
-        &fixture.outline,
-        &fixture.drafted_state,
-        &fixture.evidence,
+        composition::FrameGenerationContext {
+            session: &session,
+            query: "Verify durable report-stage recovery.",
+            run_id: SEMANTIC_AUDIT_RUN_ID,
+            outline: &fixture.outline,
+            state: &fixture.drafted_state,
+            evidence: &fixture.evidence,
+            deadline: &deadline,
+        },
         None,
-        &deadline,
     )
     .await
     .expect("semantic-audit fixture frame generation or recovery");
     let sections = recovery::sections_from_drafts(&fixture.outline, &fixture.drafted_state)
         .expect("restore semantic-audit fixture sections");
     let result = semantic_audit::audit_report_semantics(
-        &session,
-        "Verify durable report-stage recovery.",
-        SEMANTIC_AUDIT_RUN_ID,
+        semantic_audit::SemanticAuditContext {
+            session: &session,
+            query: "Verify durable report-stage recovery.",
+            run_id: SEMANTIC_AUDIT_RUN_ID,
+            outline: &fixture.outline,
+            state: &fixture.drafted_state,
+            sections: &sections,
+            frame: &frame,
+            evidence: &fixture.evidence,
+            deadline: &deadline,
+        },
         "semantic_audit_1",
-        &fixture.outline,
-        &fixture.drafted_state,
-        &sections,
-        &frame,
-        &fixture.evidence,
-        &deadline,
     )
     .await;
     if role == "semantic-audit-interrupt" {
@@ -775,7 +792,8 @@ fn spawn_worker(test_name: &str, workspace: &Path, role: &str) -> Child {
         .expect("spawn process-resume worker")
 }
 
-async fn wait_for_condition(
+async fn wait_for_child_condition(
+    child: &mut Child,
     description: &str,
     timeout: Duration,
     mut condition: impl FnMut() -> bool,
@@ -785,16 +803,20 @@ async fn wait_for_condition(
         if condition() {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {description}"
-        );
+        if let Some(status) = child.try_wait().expect("poll process-resume worker") {
+            panic!("process-resume worker exited with {status} while waiting for {description}");
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timed out waiting for {description}");
+        }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
 async fn wait_for_success(child: &mut Child, description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + PROCESS_COMPLETION_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait().expect("poll worker") {
             assert!(status.success(), "{description} exited with {status}");
@@ -803,7 +825,10 @@ async fn wait_for_success(child: &mut Child, description: &str) {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{description} did not finish within 60 seconds");
+            panic!(
+                "{description} did not finish within {} seconds",
+                PROCESS_COMPLETION_TIMEOUT.as_secs()
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -943,9 +968,10 @@ async fn process_interruption_resumes_completed_section_effects() {
     let first_section_prefix = format!("{SECTION_RUN_ID}-sections-section_1-");
     let second_section_prefix = format!("{SECTION_RUN_ID}-sections-section_2-");
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "section-interrupt");
-    wait_for_condition(
+    wait_for_child_condition(
+        &mut interrupted,
         "one completed section and one running section",
-        Duration::from_secs(60),
+        PROCESS_OBSERVATION_TIMEOUT,
         || {
             let first = flow_journals_with_prefix(workspace.path(), first_section_prefix.as_str());
             let second =
@@ -1099,9 +1125,10 @@ async fn process_interruption_reuses_completed_semantic_target_audits() {
     let target_prefix =
         |ordinal: usize| format!("{SEMANTIC_AUDIT_RUN_ID}-semantic_audit_1_target_{ordinal}-");
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "semantic-audit-interrupt");
-    wait_for_condition(
+    wait_for_child_condition(
+        &mut interrupted,
         "two completed semantic targets and one running target",
-        Duration::from_secs(60),
+        PROCESS_OBSERVATION_TIMEOUT,
         || {
             let first = flow_journals_with_prefix(workspace.path(), &target_prefix(1));
             let second = flow_journals_with_prefix(workspace.path(), &target_prefix(2));
@@ -1179,9 +1206,10 @@ async fn process_interruption_reuses_completed_frame_effect() {
     let workspace = tempfile::tempdir().expect("process frame workspace");
     let test_name = exact_test_name("process_interruption_reuses_completed_frame_effect");
     let mut interrupted = spawn_worker(&test_name, workspace.path(), "frame-interrupt");
-    wait_for_condition(
+    wait_for_child_condition(
+        &mut interrupted,
         "completed frame effect before caller acknowledgement",
-        Duration::from_secs(60),
+        PROCESS_OBSERVATION_TIMEOUT,
         || workspace.path().join("frame-effect-returned").is_file(),
     )
     .await;

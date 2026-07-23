@@ -47,7 +47,7 @@ impl Scenario {
         match self {
             Self::Planner => Some("planner-outline"),
             Self::Retrieval => None,
-            Self::Resolution => Some("question-review"),
+            Self::Resolution => Some("evidence-extraction"),
         }
     }
 }
@@ -139,6 +139,10 @@ impl ProcessInquiryClient {
             append_invocation(&self.workspace, "planner-retrieval")?;
             return Ok(retrieval_plan_fragment(inquiry_plan()));
         }
+        if prompt.contains("CLOSED_EVIDENCE_EXTRACTION_PACKET=") {
+            append_invocation(&self.workspace, "evidence-extraction")?;
+            return Ok(process_extraction_fixture());
+        }
         if prompt.contains("CLOSED_QUESTION_EVIDENCE_PACKET=") {
             append_invocation(&self.workspace, "resolution")?;
             return Ok(json!({
@@ -165,6 +169,74 @@ impl ProcessInquiryClient {
             meta: None,
         }
     }
+}
+
+fn process_extraction_fixture() -> Value {
+    json!({
+        "targets": [{
+            "target_id": "track:material.v2",
+            "status": "covered",
+            "answer": "The alpha source contains the fixture fact.",
+            "limitation": "",
+            "findings": [{
+                "statement": "The alpha source contains the fixture fact.",
+                "source_id": "bootstrap-web-source-1",
+                "chunk_ids": ["bootstrap-web-source-1:chunk:1"],
+                "completion_criterion_indexes": [0],
+                "source_roles": ["supporting"]
+            }],
+            "contradictions": [],
+            "gaps": []
+        }]
+    })
+}
+
+fn isolated_extraction_fixture() -> Value {
+    json!({
+        "targets": [{
+            "target_id": "track:material-alpha",
+            "status": "covered",
+            "answer": "The alpha source contains the fixture fact.",
+            "limitation": "",
+            "findings": [{
+                "statement": "The alpha source contains the fixture fact.",
+                "source_id": "bootstrap-web-source-1",
+                "chunk_ids": ["bootstrap-web-source-1:chunk:1"],
+                "completion_criterion_indexes": [0],
+                "source_roles": ["supporting"]
+            }],
+            "contradictions": [],
+            "gaps": []
+        }, {
+            "target_id": "track:supporting-gap",
+            "status": "covered",
+            "answer": "The alpha source contains the fixture fact.",
+            "limitation": "",
+            "findings": [{
+                "statement": "The alpha source contains the fixture fact.",
+                "source_id": "bootstrap-web-source-1",
+                "chunk_ids": ["bootstrap-web-source-2:chunk:1"],
+                "completion_criterion_indexes": [0],
+                "source_roles": ["supporting"]
+            }],
+            "contradictions": [],
+            "gaps": []
+        }, {
+            "target_id": "track:material-beta",
+            "status": "partial",
+            "answer": "The beta source contains the fixture fact.",
+            "limitation": "The closed packet does not establish one supporting beta detail.",
+            "findings": [{
+                "statement": "The beta source contains the fixture fact.",
+                "source_id": "bootstrap-web-source-2",
+                "chunk_ids": ["bootstrap-web-source-2:chunk:1"],
+                "completion_criterion_indexes": [],
+                "source_roles": ["supporting"]
+            }],
+            "contradictions": [],
+            "gaps": ["The closed packet does not establish one supporting beta detail."]
+        }]
+    })
 }
 
 fn plan_fragment(plan: Value, fields: &[&str]) -> Value {
@@ -298,6 +370,10 @@ impl IsolatedReviewInquiryClient {
         if prompt.contains("Return the isolated-review retrieval portfolio.") {
             append_invocation(&self.workspace, "isolated:planner-retrieval")?;
             return Ok(retrieval_plan_fragment(isolated_review_plan()));
+        }
+        if prompt.contains("CLOSED_EVIDENCE_EXTRACTION_PACKET=") {
+            append_invocation(&self.workspace, "isolated:evidence-extraction")?;
+            return Ok(isolated_extraction_fixture());
         }
         if prompt.contains("CLOSED_QUESTION_EVIDENCE_PACKET=") {
             let question_ids = [
@@ -682,7 +758,12 @@ async fn run_worker(workspace: &Path, run_id: &str, scenario: Scenario, role: &s
         super::inquiry_projection_from_workflow(&result.output, result.metadata.as_ref())
             .expect("decode process inquiry projection")
             .expect("host process inquiry projection");
-    assert_eq!(state.phase, InquiryPhase::Outlining);
+    assert_eq!(
+        state.phase,
+        InquiryPhase::Outlining,
+        "unexpected resumed Inquiry terminal event: {:?}",
+        events.last()
+    );
     assert!(state.contract_assessment.is_some());
     std::fs::write(
         workspace.join("process-result.json"),
@@ -1023,17 +1104,31 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
         0
     );
     assert_eq!(invocation_count(workspace.path(), "planner-retrieval"), 0);
-    assert_eq!(invocation_count(workspace.path(), "resolution"), 1);
+    assert_eq!(invocation_count(workspace.path(), "evidence-extraction"), 1);
+    assert_eq!(invocation_count(workspace.path(), "resolution"), 0);
     assert_eq!(invocation_count(workspace.path(), "contract"), 0);
-    assert_eq!(invocation_count(workspace.path(), "retrieval:alpha"), 1);
-    assert_eq!(
-        invocation_count(workspace.path(), "retrieval:beta"),
-        if scenario == Scenario::Retrieval {
-            2
-        } else {
-            1
+    let alpha_invocations = invocation_count(workspace.path(), "retrieval:alpha");
+    let beta_invocations = invocation_count(workspace.path(), "retrieval:beta");
+    match scenario {
+        Scenario::Planner => {
+            assert!(
+                (1..=2).contains(&alpha_invocations),
+                "an acquisition in flight at the planner interruption may be redelivered once"
+            );
+            assert!(
+                (1..=2).contains(&beta_invocations),
+                "an acquisition in flight at the planner interruption may be redelivered once"
+            );
         }
-    );
+        Scenario::Retrieval => {
+            assert_eq!(alpha_invocations, 1);
+            assert_eq!(beta_invocations, 2);
+        }
+        Scenario::Resolution => {
+            assert_eq!(alpha_invocations, 1);
+            assert_eq!(beta_invocations, 1);
+        }
+    }
     assert_eq!(invocation_count(workspace.path(), "unexpected:model"), 0);
 
     for journal in flow_journals(workspace.path()) {
@@ -1044,21 +1139,22 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
             journal.display()
         );
     }
-    if scenario == Scenario::Retrieval {
-        let journal = workspace
-            .path()
-            .join(".a3s/workflow")
-            .join(format!("{run_id}-bootstrap.jsonl"));
-        assert_eq!(event_count(&journal, "step_started", Some("alpha")), 1);
-        assert_eq!(event_count(&journal, "step_completed", Some("alpha")), 1);
+    let bootstrap_journal = workspace
+        .path()
+        .join(".a3s/workflow")
+        .join(format!("{run_id}-bootstrap.jsonl"));
+    for step_id in ["alpha", "beta"] {
         assert_eq!(
-            event_count(&journal, "step_started", Some("beta")),
+            event_count(&bootstrap_journal, "step_started", Some(step_id)),
             1,
-            "ambiguous retrieval redelivery reuses the interrupted attempt"
+            "ambiguous retrieval redelivery must reuse the existing attempt"
         );
-        assert_eq!(event_count(&journal, "step_completed", Some("beta")), 1);
-        assert_eq!(event_count(&journal, "run_completed", None), 1);
+        assert_eq!(
+            event_count(&bootstrap_journal, "step_completed", Some(step_id)),
+            1
+        );
     }
+    assert_eq!(event_count(&bootstrap_journal, "run_completed", None), 1);
 }
 
 #[cfg(unix)]
@@ -1092,7 +1188,7 @@ async fn process_interruption_reuses_resolution_before_checkpoint() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
+async fn per_target_extraction_failure_is_isolated_and_durable_on_replay() {
     let workspace = tempfile::tempdir().expect("isolated review workspace");
     let (_agent, session) = isolated_review_session(workspace.path()).await;
     let session = Arc::new(session);
@@ -1111,6 +1207,7 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
     args["input"]["loop_contract"] = loop_contract;
 
     let mut projections = Vec::new();
+    let mut workflow_outputs = Vec::new();
     for _ in 0..2 {
         let (progress_tx, mut progress_rx) = mpsc::channel(128);
         tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
@@ -1118,6 +1215,7 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
             .await
             .expect("isolated review inquiry");
         assert_eq!(result.exit_code, 0, "{}", result.output);
+        workflow_outputs.push(result.output.clone());
         projections.push(
             super::inquiry_projection_from_workflow(&result.output, result.metadata.as_ref())
                 .expect("decode isolated review projection")
@@ -1130,7 +1228,12 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
         "durable replay must reproduce the same Inquiry projection"
     );
     let (events, state) = &projections[0];
-    assert_eq!(state.phase, InquiryPhase::Outlining);
+    assert_eq!(
+        state.phase,
+        InquiryPhase::Outlining,
+        "{}",
+        workflow_outputs[0]
+    );
     assert_eq!(
         a3s::research::research_contract_outcome(state),
         Some(a3s::research::ResearchContractOutcome::Qualified)
@@ -1148,9 +1251,7 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
     assert_eq!(state.questions[1].status, QuestionStatus::Bounded);
     assert_eq!(
         state.questions[1].bound_reason.as_deref(),
-        Some(
-            "closed-evidence assessment did not establish a valid, traceable answer for this question"
-        )
+        Some("The extraction returned no valid closed-catalog finding for this target.")
     );
     assert_eq!(state.questions[2].status, QuestionStatus::Answered);
     assert!(!state.questions[2].evidence_ids.is_empty());
@@ -1187,16 +1288,7 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
         0
     );
     assert_eq!(
-        invocation_count(workspace.path(), "isolated:review:question:plan-1-1"),
-        1
-    );
-    assert_eq!(
-        invocation_count(workspace.path(), "isolated:review:question:plan-2-1"),
-        2,
-        "a provider-level failure gets one bounded retry inside the same durable review unit"
-    );
-    assert_eq!(
-        invocation_count(workspace.path(), "isolated:review:question:plan-3-1"),
+        invocation_count(workspace.path(), "isolated:evidence-extraction"),
         1
     );
     assert_eq!(invocation_count(workspace.path(), "retrieval:alpha"), 1);
@@ -1210,20 +1302,11 @@ async fn per_question_review_failure_is_isolated_and_durable_on_replay() {
         0
     );
 
-    for ordinal in 1..=3 {
-        let prefix = format!("{run_id}-question-review-{ordinal}-");
-        let journal = flow_journal_with_prefix(workspace.path(), &prefix)
-            .unwrap_or_else(|| panic!("missing isolated review journal `{prefix}`"));
-        assert_eq!(event_count(&journal, "run_created", None), 1);
-        if ordinal == 2 {
-            assert_eq!(event_count(&journal, "step_started", Some("generation")), 2);
-            assert_eq!(event_count(&journal, "run_completed", None), 0);
-            assert_eq!(event_count(&journal, "run_failed", None), 1);
-            assert!(event_count(&journal, "step_failed", Some("generation")) >= 1);
-        } else {
-            assert_eq!(event_count(&journal, "step_started", Some("generation")), 1);
-            assert_eq!(event_count(&journal, "run_completed", None), 1);
-            assert_eq!(event_count(&journal, "step_failed", Some("generation")), 0);
-        }
-    }
+    let prefix = format!("{run_id}-evidence-extraction-");
+    let journal = flow_journal_with_prefix(workspace.path(), &prefix)
+        .unwrap_or_else(|| panic!("missing isolated extraction journal `{prefix}`"));
+    assert_eq!(event_count(&journal, "run_created", None), 1);
+    assert_eq!(event_count(&journal, "step_started", Some("generation")), 1);
+    assert_eq!(event_count(&journal, "run_completed", None), 1);
+    assert_eq!(event_count(&journal, "step_failed", Some("generation")), 0);
 }

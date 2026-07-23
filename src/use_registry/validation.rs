@@ -131,14 +131,12 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                     binding.id
                 );
             }
-            if !activity.entry.path.is_absolute()
-                || activity.entry.media_type != "text/html"
-                || !is_lower_sha256(&activity.entry.sha256)
-            {
-                bail!(
-                    "A3S Use capability '{}' projects an invalid Activity Bar asset",
-                    binding.id
-                );
+            validate_projected_activity_asset(&binding.id, &activity.entry, "text/html")?;
+            for style in &activity.styles {
+                validate_projected_activity_asset(&binding.id, style, "text/css")?;
+            }
+            for script in &activity.scripts {
+                validate_projected_activity_asset(&binding.id, script, "text/javascript")?;
             }
         }
     }
@@ -195,15 +193,16 @@ pub(super) async fn load_managed_skill(
         .map(Arc::new)
 }
 
-pub(super) async fn load_managed_activity(
+pub(super) async fn load_managed_activity_asset(
     package_root: &Path,
     entry_path: &Path,
     expected_sha256: &str,
     media_type: &str,
+    expected_media_type: &str,
     max_bytes: u64,
 ) -> anyhow::Result<Arc<str>> {
-    if media_type != "text/html" {
-        bail!("A3S Use Activity Bar assets must use text/html");
+    if media_type != expected_media_type {
+        bail!("A3S Use Activity Bar asset must use {expected_media_type}, got {media_type}");
     }
     if !is_lower_sha256(expected_sha256) {
         bail!("A3S Use Activity Bar asset has an invalid SHA-256 digest");
@@ -266,6 +265,23 @@ pub(super) async fn load_managed_activity(
     }
     let html = String::from_utf8(bytes).context("A3S Use Activity Bar asset must be UTF-8")?;
     Ok(Arc::from(html))
+}
+
+fn validate_projected_activity_asset(
+    binding_id: &str,
+    asset: &super::ProjectedManagedAsset,
+    expected_media_type: &str,
+) -> anyhow::Result<()> {
+    if !asset.path.is_absolute()
+        || asset.media_type != expected_media_type
+        || !is_lower_sha256(&asset.sha256)
+    {
+        bail!(
+            "A3S Use capability '{}' projects an invalid Activity Bar {expected_media_type} asset",
+            binding_id
+        );
+    }
+    Ok(())
 }
 
 fn parse_skill_bytes(path: &Path, bytes: Vec<u8>) -> anyhow::Result<Skill> {

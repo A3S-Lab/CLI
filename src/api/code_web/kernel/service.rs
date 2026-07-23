@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use a3s_boot::{BootError, BootResponse, Result as BootResult, SseEvent};
 use a3s_code_core::store::SessionData;
-use a3s_code_core::{AgentEvent, AgentSession, ContentBlock, Message, PlanningMode, TokenUsage};
+use a3s_code_core::{
+    AgentEvent, AgentSession, ContentBlock, Message, PlanningMode, TokenUsage, ToolErrorKind,
+};
 use serde_json::{json, Value};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
@@ -16,8 +18,8 @@ use super::controls::{
 };
 use super::sleep::{parse_sleep_report, sleep_directive, sleep_today, store_sleep_memories};
 use super::turn_queue::{
-    CodeWebQueuedTurn, CodeWebQueuedTurnKind, CodeWebSessionTurnQueue, CodeWebStoredTurnQueue,
-    GOAL_CONTINUATION_PRIORITY, USER_TURN_PRIORITY,
+    CodeWebQueuedTurn, CodeWebQueuedTurnKind, CodeWebQueuedTurnMode, CodeWebSessionTurnQueue,
+    CodeWebStoredTurnQueue, GOAL_CONTINUATION_PRIORITY, USER_TURN_PRIORITY,
 };
 use crate::api::code_web::dto::{
     ChatRequest, ChatResponse, ConfirmToolUseRequest, CreateSessionRequest, ForkSessionRequest,
@@ -41,11 +43,20 @@ mod goal_runtime;
 mod maintenance;
 mod messages;
 mod persistence;
+mod remote_read;
+mod research;
 mod sessions;
 mod shell_output;
 mod streaming;
 mod text;
 mod turn_queue;
+
+pub(in crate::api::code_web) use remote_read::{
+    ManagedChildEvidence, ManagedChildStatus, ManagedGoalStatus, ManagedSessionEvidence,
+    ManagedSessionReadPort,
+};
+#[cfg(test)]
+pub(in crate::api::code_web) use remote_read::{ManagedGoalEvidence, ManagedQueueEvidence};
 
 pub(in crate::api) struct KernelService {
     state: Arc<CodeWebState>,

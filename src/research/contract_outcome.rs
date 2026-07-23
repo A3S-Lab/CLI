@@ -11,10 +11,11 @@ use super::{
     QuestionStatus, ResearchContractOutcome, ResearchObligation, ResearchObligationAssessment,
 };
 
-/// Return whether every material obligation has at least one traceable,
-/// answered material question. Bounded questions may coexist with that path,
-/// but an obligation with no accepted material evidence cannot be published as
-/// a qualified result.
+/// Return whether the inquiry has at least one traceable answer on a material
+/// obligation path. Other material obligations may remain explicitly bounded:
+/// a qualified report is useful precisely because it preserves supported
+/// findings without pretending that every requested dimension was covered.
+/// No material answer at all remains an unsatisfied research run.
 pub fn material_evidence_floor(state: &InquiryState) -> bool {
     let material_obligations = state
         .obligations
@@ -27,7 +28,7 @@ pub fn material_evidence_floor(state: &InquiryState) -> bool {
             .iter()
             .any(|question| question.material && answered_question_is_traceable(state, question));
     }
-    material_obligations.iter().all(|obligation| {
+    material_obligations.iter().any(|obligation| {
         state.questions.iter().any(|question| {
             question.material
                 && question.obligation_ids.contains(&obligation.id)
@@ -81,7 +82,8 @@ pub fn research_contract_outcome(state: &InquiryState) -> Option<ResearchContrac
         let item = obligation_assessments.get(obligation.id.as_str())?;
         if obligation.material {
             if material_obligation_is_uncovered(obligation, item) {
-                return Some(ResearchContractOutcome::Unsatisfied);
+                qualified = true;
+                continue;
             }
             qualified |= !material_obligation_is_satisfied(obligation, item, &bounded_diagnostics);
         } else {
@@ -94,7 +96,7 @@ pub fn research_contract_outcome(state: &InquiryState) -> Option<ResearchContrac
             ContractAssessmentStatus::Satisfied => {}
             ContractAssessmentStatus::Bounded => qualified = true,
             ContractAssessmentStatus::Uncovered => {
-                return Some(ResearchContractOutcome::Unsatisfied)
+                qualified = true;
             }
         }
     }

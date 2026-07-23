@@ -255,33 +255,31 @@ pub(crate) fn deep_research_loop_contract(
 
     serde_json::json!({
         "version": 1,
-        "pattern": "minimal-deep-research",
+        "pattern": "evidence-first-deep-research",
         "goal": query,
         "controller": "host_inquiry_reducer",
         "quota": {
-            "mode": "unlimited"
+            "mode": "bounded"
         },
         "execution": {
-            "mode": "coverage_driven",
+            "mode": "progressively_publishable",
             "stages": [
-                "semantic_plan",
-                "initial_retrieval",
-                "semantic_chunk_selection",
-                "typed_coverage_evaluation",
-                "optional_supplemental_retrieval",
-                "final_closed_question_review",
-                "host_contract_reduction",
-                "sectioned_report_transaction"
+                "bootstrap_acquisition",
+                "optional_outline",
+                "batched_evidence_extraction",
+                "host_coverage_reduction",
+                "optional_gap_acquisition",
+                "optional_gap_extraction",
+                "report_document_generation",
+                "deterministic_publication"
             ]
         },
         "cardinality": {
-            "semantic_iterations": 2,
-            "retrieval_passes": 2,
-            "semantic_selections": 2,
-            "question_reviews": 1,
-            "contract_assessments": 1,
-            "report_transactions": 1,
-            "section_revision_rounds": 2
+            "outline_generations": 1,
+            "initial_extractions": 1,
+            "gap_extractions": 1,
+            "report_generations": 1,
+            "report_repairs": 1
         },
         "planner": {
             "agent": "research-planner",

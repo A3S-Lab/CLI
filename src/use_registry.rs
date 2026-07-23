@@ -38,6 +38,7 @@ const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_JSON_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_STDERR_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_ACTIVITY_HTML_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_ACTIVITY_RESOURCE_BYTES: u64 = 2 * 1024 * 1024;
 // Browser installation has a bounded 15-minute HTTP timeout, while Office
 // and OCR installations are bounded at five minutes. Keep the host request
 // alive slightly longer than the longest supported Use operation so the
@@ -299,6 +300,10 @@ struct ProjectedActivityBarContribution {
     description: String,
     icon: String,
     entry: ProjectedManagedAsset,
+    #[serde(default)]
+    styles: Vec<ProjectedManagedAsset>,
+    #[serde(default)]
+    scripts: Vec<ProjectedManagedAsset>,
     skill: String,
     order: i32,
 }
@@ -353,6 +358,8 @@ pub(crate) struct UseActivityCatalogItem {
 struct DesiredActivity {
     catalog: UseActivityCatalogItem,
     html: Arc<str>,
+    styles: Vec<Arc<str>>,
+    scripts: Vec<Arc<str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -374,6 +381,8 @@ pub(crate) struct UseActivityContent {
     pub(crate) sha256: String,
     pub(crate) media_type: String,
     pub(crate) html: String,
+    pub(crate) styles: Vec<String>,
+    pub(crate) scripts: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -582,14 +591,43 @@ impl UseRegistryClient {
                     activity.skill
                 );
             }
-            let html = validation::load_managed_activity(
+            let html = validation::load_managed_activity_asset(
                 &binding.package_root,
                 &activity.entry.path,
                 &activity.entry.sha256,
                 &activity.entry.media_type,
+                "text/html",
                 MAX_ACTIVITY_HTML_BYTES,
             )
             .await?;
+            let mut styles = Vec::with_capacity(activity.styles.len());
+            for style in &activity.styles {
+                styles.push(
+                    validation::load_managed_activity_asset(
+                        &binding.package_root,
+                        &style.path,
+                        &style.sha256,
+                        &style.media_type,
+                        "text/css",
+                        MAX_ACTIVITY_RESOURCE_BYTES,
+                    )
+                    .await?,
+                );
+            }
+            let mut scripts = Vec::with_capacity(activity.scripts.len());
+            for script in &activity.scripts {
+                scripts.push(
+                    validation::load_managed_activity_asset(
+                        &binding.package_root,
+                        &script.path,
+                        &script.sha256,
+                        &script.media_type,
+                        "text/javascript",
+                        MAX_ACTIVITY_RESOURCE_BYTES,
+                    )
+                    .await?,
+                );
+            }
             let key = format!("{}:{}", binding.route, activity.id);
             let desired_activity = DesiredActivity {
                 catalog: UseActivityCatalogItem {
@@ -608,6 +646,8 @@ impl UseRegistryClient {
                     media_type: activity.entry.media_type.clone(),
                 },
                 html,
+                styles,
+                scripts,
             };
             if desired
                 .activities
@@ -1280,6 +1320,8 @@ impl UseRegistryHandle {
             sha256: activity.catalog.sha256.clone(),
             media_type: activity.catalog.media_type.clone(),
             html: activity.html.to_string(),
+            styles: activity.styles.iter().map(ToString::to_string).collect(),
+            scripts: activity.scripts.iter().map(ToString::to_string).collect(),
         })
     }
 

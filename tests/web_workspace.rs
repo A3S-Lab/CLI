@@ -7,6 +7,73 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+fn deep_research_report_route_serves_only_session_workspace_artifacts_with_a_sandbox_csp() {
+    let root = tempfile::tempdir().expect("temporary DeepResearch report fixture");
+    let workspace = root.path().join("workspace");
+    let report_dir = workspace.join(".a3s/research/report-fixture");
+    let web_dir = root.path().join("web");
+    let state_dir = root.path().join("state");
+    let config_path = root.path().join("config.acl");
+    fs::create_dir_all(&report_dir).expect("create report directory");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        report_dir.join("index.html"),
+        "<!doctype html><title>DeepResearch fixture</title><h1>Source-backed report</h1>",
+    )
+    .expect("write report fixture");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S DeepResearch route test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&workspace, &config_path, &web_dir, &state_dir);
+
+    let session = http_json(
+        &address,
+        "POST",
+        "/api/v1/kernel/sessions",
+        Some(&serde_json::json!({ "workspace": workspace }).to_string()),
+        "200",
+    );
+    let session_id = session["session"]["sessionId"]
+        .as_str()
+        .expect("created session id");
+    let response = http_request(
+        &address,
+        "GET",
+        &format!(
+            "/api/v1/kernel/sessions/{session_id}/research-report?path=.a3s/research/report-fixture/index.html"
+        ),
+        None,
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("content-security-policy: sandbox allow-popups"),
+        "{response}"
+    );
+    assert!(response.contains("<h1>Source-backed report</h1>"));
+
+    let rejected = http_json(
+        &address,
+        "GET",
+        &format!(
+            "/api/v1/kernel/sessions/{session_id}/research-report?path=.a3s/research/../secret/index.html"
+        ),
+        None,
+        "400",
+    );
+    assert!(rejected["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("generated .a3s/research")));
+
+    daemon.stop();
+    wait_until_stopped(&address);
+}
+
+#[test]
 fn workspace_directory_picker_accepts_a_client_selected_directory() {
     let root = tempfile::tempdir().expect("temporary workspace picker fixture");
     let workspace = root.path().join("workspace");

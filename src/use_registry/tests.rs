@@ -51,6 +51,20 @@ fn fixture_activity_digest() -> String {
     format!("{:x}", Sha256::digest(fixture_activity().as_bytes()))
 }
 
+fn fixture_activity_style() -> &'static str {
+    "main { color: rebeccapurple; }"
+}
+
+fn fixture_activity_script() -> &'static str {
+    "window.parent.postMessage({ protocol: 'a3s.activity.v1', type: 'activity.ready' }, '*');"
+}
+
+fn fixture_asset_digest(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
 #[test]
 fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
     const {
@@ -368,6 +382,8 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     .unwrap();
     std::fs::create_dir_all(package.join("web")).unwrap();
     std::fs::write(package.join("web/activity.html"), fixture_activity()).unwrap();
+    std::fs::write(package.join("web/activity.css"), fixture_activity_style()).unwrap();
+    std::fs::write(package.join("web/activity.js"), fixture_activity_script()).unwrap();
 
     let binding = serde_json::json!({
         "id": "use/acme/report",
@@ -391,6 +407,16 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
                 "sha256": fixture_activity_digest(),
                 "mediaType": "text/html"
             },
+            "styles": [{
+                "path": package.join("web/activity.css"),
+                "sha256": fixture_asset_digest(fixture_activity_style()),
+                "mediaType": "text/css"
+            }],
+            "scripts": [{
+                "path": package.join("web/activity.js"),
+                "sha256": fixture_asset_digest(fixture_activity_script()),
+                "mediaType": "text/javascript"
+            }],
             "skill": "fixture-report",
             "order": 110
         }]
@@ -430,6 +456,8 @@ async fn process_client_resolves_unified_snapshot_and_managed_skill() {
     assert_eq!(activity.catalog.package_id, "use/acme/report");
     assert_eq!(activity.catalog.skill, "fixture-report");
     assert_eq!(&*activity.html, fixture_activity());
+    assert_eq!(&*activity.styles[0], fixture_activity_style());
+    assert_eq!(&*activity.scripts[0], fixture_activity_script());
 }
 
 #[cfg(unix)]
@@ -1720,6 +1748,8 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
                     media_type: "text/html".to_string(),
                 },
                 html: Arc::from(fixture_activity()),
+                styles: vec![Arc::from(fixture_activity_style())],
+                scripts: vec![Arc::from(fixture_activity_script())],
             },
         )]),
         ..DesiredCapabilities::default()
@@ -1768,6 +1798,8 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
         .expect("enabled fixture Activity must be readable");
     assert_eq!(content.html, fixture_activity());
     assert_eq!(content.sha256, fixture_activity_digest());
+    assert_eq!(content.styles, [fixture_activity_style()]);
+    assert_eq!(content.scripts, [fixture_activity_script()]);
 
     handle.shutdown().await;
     first.close().await;

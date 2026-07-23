@@ -7,6 +7,7 @@ use a3s_code_core::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use super::kernel::turn_queue::CodeWebSessionTurnQueue;
 use super::session_store::{CodeWebSessionMetadata, CodeWebSessionRepository};
@@ -130,6 +131,8 @@ pub(in crate::api) struct CodeWebState {
     pub(in crate::api::code_web) session_settings: Mutex<HashMap<String, CodeWebSessionSettings>>,
     pub(in crate::api::code_web) session_turn_queues:
         Mutex<HashMap<String, CodeWebSessionTurnQueue>>,
+    pub(in crate::api::code_web) active_research_runs:
+        Mutex<HashMap<String, Arc<CancellationToken>>>,
     use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
     workspace_backends: WorkspaceBackendCache,
 }
@@ -160,6 +163,7 @@ impl CodeWebState {
             session_contexts: Mutex::new(HashMap::new()),
             session_settings: Mutex::new(HashMap::new()),
             session_turn_queues: Mutex::new(HashMap::new()),
+            active_research_runs: Mutex::new(HashMap::new()),
             use_registry: RwLock::new(None),
             workspace_backends: WorkspaceBackendCache::default(),
         }
@@ -234,6 +238,16 @@ impl CodeWebState {
     }
 
     pub(in crate::api::code_web) async fn close(&self) {
+        let research_runs = self
+            .active_research_runs
+            .lock()
+            .await
+            .drain()
+            .map(|(_, cancellation)| cancellation)
+            .collect::<Vec<_>>();
+        for cancellation in research_runs {
+            cancellation.cancel();
+        }
         let registry = self
             .use_registry
             .read()

@@ -21,8 +21,14 @@ use std::path::{Path, PathBuf};
 mod evidence_parser;
 #[path = "artifacts/html.rs"]
 mod html;
+#[cfg(test)]
+#[path = "artifacts/proposal_tests.rs"]
+mod proposal_tests;
 #[path = "artifacts/recovery.rs"]
 mod recovery;
+#[cfg(test)]
+#[path = "artifacts/source_backed_tests.rs"]
+mod source_backed_tests;
 #[path = "artifacts/sources.rs"]
 mod sources;
 #[cfg(test)]
@@ -36,6 +42,15 @@ use html::{
 #[cfg(test)]
 pub(crate) fn deep_research_completed_report_html_for_test(query: &str, markdown: &str) -> String {
     deep_research_completed_report_html(query, markdown)
+}
+#[cfg(test)]
+pub(crate) fn deep_research_write_report_pair_for_test(
+    markdown_path: &Path,
+    markdown: impl AsRef<[u8]>,
+    html_path: &Path,
+    html: impl AsRef<[u8]>,
+) -> Result<(), String> {
+    write_research_report_pair(markdown_path, markdown, html_path, html)
 }
 use recovery::{looks_like_deep_research_recovery_report, recovery_research_report_artifacts};
 use sources::{
@@ -51,4 +66,8 @@ include!("artifacts/generated.rs");
 include!("artifacts/resolution.rs");
 include!("artifacts/quality.rs");
 include!("artifacts/fallback.rs");
+include!("artifacts/source_quality.rs");
+include!("artifacts/source_backed.rs");
+include!("artifacts/proposal.rs");
+include!("artifacts/outcome_extract.rs");
 include!("artifacts/artifact_tests.rs");

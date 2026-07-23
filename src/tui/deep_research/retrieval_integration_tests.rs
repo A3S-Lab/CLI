@@ -14,6 +14,11 @@ struct QuerySearchFixture {
     results_by_query: BTreeMap<String, serde_json::Value>,
 }
 
+struct FallbackNoticeSearchFixture {
+    queries: Arc<Mutex<Vec<String>>>,
+    results: serde_json::Value,
+}
+
 struct TextFetchFixture {
     urls: Arc<Mutex<Vec<String>>>,
     bodies: BTreeMap<String, String>,
@@ -28,6 +33,7 @@ struct SemanticSelectorFixture {
 struct RetryOnceSemanticSelectorFixture {
     calls: Arc<AtomicUsize>,
     selector: SemanticSelectorFixture,
+    retry_web_source_selection: bool,
 }
 
 struct FailMatchingSemanticSelectorFixture {
@@ -36,7 +42,15 @@ struct FailMatchingSemanticSelectorFixture {
     selector: SemanticSelectorFixture,
 }
 
+struct FailWebSourceSelectionFixture {
+    selector: SemanticSelectorFixture,
+}
+
 struct PaginatedPdfFixture {
+    offsets: Arc<Mutex<Vec<u64>>>,
+}
+
+struct PaginatedHtmlFixture {
     offsets: Arc<Mutex<Vec<u64>>>,
 }
 
@@ -69,10 +83,9 @@ impl Tool for SearchFixture {
         args: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutput> {
-        assert_eq!(
-            args.get("engines"),
-            Some(&serde_json::json!(["anysearch", "tavily", "ddg"])),
-            "DeepResearch must use its fixed non-Wikipedia search ensemble"
+        assert!(
+            args.get("engines").is_none(),
+            "DeepResearch must inherit the default search engines from config.acl"
         );
         self.queries.lock().unwrap().push(
             args.get("query")
@@ -103,10 +116,9 @@ impl Tool for QuerySearchFixture {
         args: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutput> {
-        assert_eq!(
-            args.get("engines"),
-            Some(&serde_json::json!(["anysearch", "tavily", "ddg"])),
-            "DeepResearch must use its fixed non-Wikipedia search ensemble"
+        assert!(
+            args.get("engines").is_none(),
+            "DeepResearch must inherit the default search engines from config.acl"
         );
         let query = args
             .get("query")
@@ -119,6 +131,61 @@ impl Tool for QuerySearchFixture {
             .get(&query)
             .ok_or_else(|| anyhow::anyhow!("unexpected fixture query: {query}"))?;
         Ok(ToolOutput::success(results.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for FallbackNoticeSearchFixture {
+    fn name(&self) -> &str {
+        "fixture_fallback_web_search"
+    }
+
+    fn description(&self) -> &str {
+        "Returns deterministic candidates with generic fallback metadata."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        assert!(
+            args.get("engines").is_none(),
+            "DeepResearch must inherit the default search engines from config.acl"
+        );
+        self.queries.lock().unwrap().push(
+            args.get("query")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        );
+        Ok(ToolOutput::success(self.results.to_string()).with_metadata(
+            serde_json::json!({
+                "status": "partial",
+                "engine_selection_source": "config",
+                "selected_engines": ["anysearch"],
+                "notices": [
+                    "Search degraded because AnySearch quota is exhausted; automatically fell back to Brave and Bing."
+                ],
+                "search_fallback": {
+                    "trigger": "engine_failure",
+                    "mode": "additional_engines",
+                    "attempted": true,
+                    "engines": ["brave", "bing"],
+                    "successful": true,
+                    "failures": [{
+                        "engine": "AnySearch",
+                        "provider": "anysearch",
+                        "kind": "provider_quota",
+                        "transient": false
+                    }]
+                }
+            }),
+        ))
     }
 }
 
@@ -406,7 +473,16 @@ impl Tool for RetryOnceSemanticSelectorFixture {
         args: &serde_json::Value,
         ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutput> {
-        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+        let web_source_selection = matches!(
+            args.get("schema_name").and_then(serde_json::Value::as_str),
+            Some(
+                "deep_research_web_source_selection"
+                    | "deep_research_supplemental_web_source_selection"
+            )
+        );
+        if web_source_selection == self.retry_web_source_selection
+            && self.calls.fetch_add(1, Ordering::SeqCst) == 0
+        {
             return Ok(ToolOutput::error(
                 "simulated transient semantic selector failure",
             ));
@@ -440,6 +516,40 @@ impl Tool for FailMatchingSemanticSelectorFixture {
             .unwrap_or_default();
         if args["schema_name"] == self.schema_name && prompt.contains(&self.fragment) {
             return Ok(ToolOutput::error("simulated source-local shard timeout"));
+        }
+        self.selector.execute(args, ctx).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for FailWebSourceSelectionFixture {
+    fn name(&self) -> &str {
+        "generate_object"
+    }
+
+    fn description(&self) -> &str {
+        "Fails web source admission while allowing fetched-text selection."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        if matches!(
+            args.get("schema_name").and_then(serde_json::Value::as_str),
+            Some(
+                "deep_research_web_source_selection"
+                    | "deep_research_supplemental_web_source_selection"
+            )
+        ) {
+            return Ok(ToolOutput::error(
+                "simulated permanent web source admission failure",
+            ));
         }
         self.selector.execute(args, ctx).await
     }
@@ -487,6 +597,57 @@ impl Tool for PaginatedPdfFixture {
         Ok(ToolOutput::success(body).with_metadata(serde_json::json!({
             "document_kind": "pdf",
             "content_type": "application/pdf",
+            "range": {
+                "offset": offset,
+                "next_offset": next_offset,
+                "eof": next_offset.is_none()
+            }
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for PaginatedHtmlFixture {
+    fn name(&self) -> &str {
+        "fixture_html_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Returns three deterministic HTML ranges from one admitted source."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let offset = args
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        self.offsets.lock().unwrap().push(offset);
+        let (body, next_offset) = match offset {
+            0 => (
+                "赛事页面前段记录了小组赛背景和参赛队伍，并提示后续还有完整淘汰赛结果。",
+                Some(100),
+            ),
+            100 => (
+                "赛事页面后段记录了半决赛晋级过程，并确认决赛冠军、最终比分和颁奖日期。",
+                Some(200),
+            ),
+            200 => (
+                "赛事页面末段确认决赛冠军、最终比分和颁奖日期，构成当前战况的完整事实记录。",
+                None,
+            ),
+            _ => return Ok(ToolOutput::error("unexpected HTML range offset")),
+        };
+        Ok(ToolOutput::success(body).with_metadata(serde_json::json!({
+            "document_kind": "html",
+            "content_type": "text/html; charset=utf-8",
             "range": {
                 "offset": offset,
                 "next_offset": next_offset,
@@ -683,7 +844,7 @@ async fn execute(executor: &ToolExecutor, args: &serde_json::Value) -> serde_jso
 }
 
 #[tokio::test]
-async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
+async fn bootstrap_acquisition_adds_accountable_resilience_to_semantic_selection() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -695,8 +856,8 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
             "url": "https://bootstrap.example/first",
             "engines": ["fixture"]
         }, {
-            "title": "Second ranked source",
-            "url": "https://bootstrap.example/second",
+            "title": "Accountable Reuters alternative",
+            "url": "https://www.reuters.com/bootstrap/second",
             "engines": ["fixture"]
         }, {
             "title": "Unspent candidate",
@@ -709,15 +870,23 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
         bodies: BTreeMap::from([
             (
                 "https://bootstrap.example/first".to_string(),
-                "The first fetched source contains substantive traceable bootstrap evidence."
+                "Your current User-Agent string appears to be from an automated process.\n\
+                 <script>window.__BOOTSTRAP__ = true;</script>\n\
+                 The first fetched source contains substantive traceable bootstrap evidence.\n\
+                 Toggle the table of contents 164 languages [Afrikaans](https://example.test/af)"
                     .to_string(),
             ),
             (
-                "https://bootstrap.example/second".to_string(),
+                "https://www.reuters.com/bootstrap/second".to_string(),
                 "The second fetched source contains separate substantive bootstrap evidence."
                     .to_string(),
             ),
         ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["First ranked source".to_string()],
+        fail: false,
+        invalid_selection: false,
     }));
     let query = "Acquire evidence before semantic planning";
     let mut plan = minimal_plan(
@@ -737,8 +906,6 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
     args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
     args["run_id"] = serde_json::json!("deepresearch-bootstrap-acquisition-test");
 
-    // No generate_object fixture is registered. A successful run therefore
-    // proves that bootstrap acquisition never waits for model admission.
     let output = execute(&executor, &args).await;
 
     assert_eq!(*queries.lock().unwrap(), [query]);
@@ -746,7 +913,7 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
         *urls.lock().unwrap(),
         [
             "https://bootstrap.example/first",
-            "https://bootstrap.example/second"
+            "https://www.reuters.com/bootstrap/second"
         ]
     );
     assert_eq!(output["mode"], "bootstrap_acquisition");
@@ -756,9 +923,20 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
             .map(Vec::len),
         Some(2)
     );
+    let retained_text = output["acquisition"]["packet"]["sources"][0]["chunks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|chunk| chunk["text"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(retained_text.contains("substantive traceable bootstrap evidence"));
+    assert!(!retained_text.contains("User-Agent"), "{retained_text}");
+    assert!(!retained_text.contains("__BOOTSTRAP__"), "{retained_text}");
+    assert!(!retained_text.contains("164 languages"), "{retained_text}");
     assert_eq!(
         output["acquisition"]["metadata"]["source_selection_mode"],
-        "provider_round_robin"
+        "semantic_candidate_ids"
     );
     let history = std::fs::read_to_string(
         workspace
@@ -771,6 +949,544 @@ async fn bootstrap_acquisition_persists_raw_sources_without_model_admission() {
         event["event"]["type"] == "step_completed"
             && event["event"]["step_id"] == "checkpoint_bootstrap_acquisition"
     }));
+}
+
+#[tokio::test]
+async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "First bounded bootstrap fallback",
+            "url": "https://bootstrap-fallback-one.example/record",
+            "engines": ["fixture"]
+        }, {
+            "title": "Second bounded bootstrap fallback",
+            "url": "https://bootstrap-fallback-two.example/record",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://bootstrap-fallback-one.example/record".to_string(),
+                "The first bounded bootstrap source is retained for later semantic review."
+                    .to_string(),
+            ),
+            (
+                "https://bootstrap-fallback-two.example/record".to_string(),
+                "The second bounded bootstrap source is retained on a distinct host.".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "Acquire evidence when source admission fails";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "Original request", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-bootstrap-fallback-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*queries.lock().unwrap(), [query]);
+    assert_eq!(
+        *urls.lock().unwrap(),
+        [
+            "https://bootstrap-fallback-one.example/record",
+            "https://bootstrap-fallback-two.example/record"
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "bounded_discovery_fallback"
+    );
+    assert_eq!(
+        output["acquisition"]["packet"]["sources"]
+            .as_array()
+            .map(Vec::len),
+        Some(2)
+    );
+    assert!(output
+        .to_string()
+        .contains("simulated permanent web source admission failure"));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_uses_accountable_cross_host_candidates_without_model_admission()
+{
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "世界杯八强战况、比分、结果与晋级汇总",
+            "url": "https://cj.sina.com.cn/articles/world-cup-quarter-finals",
+            "content": "1/8决赛战况、比分、赛果、结果、晋级与最终八强名单。",
+            "engines": ["fixture"]
+        }, {
+            "title": "World Cup schedule, results and scores",
+            "url": "https://www.olympics.com/world-cup/schedule-results",
+            "content": "Who will be crowned champion? View the complete schedule and upcoming matches.",
+            "engines": ["fixture"]
+        }, {
+            "title": "BBC World Cup semi-final result",
+            "url": "https://www.bbc.com/sport/football/world-cup-semifinal",
+            "content": "Argentina beat England in the World Cup semi-final.",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯数据中心：比赛结果与比分",
+            "url": "https://sports.163.com/world-cup/data",
+            "content": "赛程、比赛结果、比分、积分榜和球队数据。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯决赛：西班牙战胜阿根廷夺冠",
+            "url": "https://www.news.cn/sports/world-cup-final",
+            "content": "西班牙1:0战胜阿根廷，夺得世界杯冠军。",
+            "engines": ["fixture"]
+        }, {
+            "title": "2026世界杯冠军与最终赛果",
+            "url": "https://www.xinmin.cn/2026WorldCup/",
+            "content": "决赛中西班牙1:0战胜阿根廷，费兰·托雷斯打入制胜球。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯用户赛后讨论",
+            "url": "https://www.xiaohongshu.com/world-cup/final",
+            "content": "用户发布的世界杯决赛讨论。",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://www.news.cn/sports/world-cup-final".to_string(),
+                "新华社报道，西班牙在世界杯决赛中1:0战胜阿根廷并夺得冠军。".to_string(),
+            ),
+            (
+                "https://www.xinmin.cn/2026WorldCup/".to_string(),
+                "新民晚报记录，西班牙在世界杯决赛中1:0战胜阿根廷，费兰·托雷斯打入制胜球。"
+                    .to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-fast-path-test");
+
+    let output = execute(&executor, &args).await;
+
+    let fetched_urls = urls.lock().unwrap().clone();
+    assert_eq!(fetched_urls.len(), 2, "{fetched_urls:#?}");
+    assert!(
+        fetched_urls.contains(&"https://www.news.cn/sports/world-cup-final".to_string()),
+        "{fetched_urls:#?}"
+    );
+    assert!(
+        fetched_urls.contains(&"https://www.xinmin.cn/2026WorldCup/".to_string()),
+        "{fetched_urls:#?}"
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "deterministic_outcome_candidates"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-outcome-bootstrap-fast-path-test.jsonl"),
+    )
+    .expect("durable outcome-bootstrap history");
+    assert!(history.lines().all(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["step_id"] != "select_web_sources"
+    }));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_pairs_bbc_with_an_accountable_ifeng_final_report() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "FIFA世界杯2026：西班牙击败阿根廷二度封王",
+            "url": "https://www.bbc.com/zhongwen/articles/world-cup-final",
+            "content": "西班牙在世界杯决赛中夺冠，费兰·托雷斯于加时赛攻入一球。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯大结局：西班牙夺冠！",
+            "url": "https://sports.ifeng.com/c/world-cup-final",
+            "content": "世界杯决赛中，西班牙加时1:0战胜阿根廷并夺冠。",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://www.bbc.com/zhongwen/articles/world-cup-final".to_string(),
+                "BBC报道，西班牙在世界杯决赛中夺冠，费兰·托雷斯于加时赛攻入一球。".to_string(),
+            ),
+            (
+                "https://sports.ifeng.com/c/world-cup-final".to_string(),
+                "凤凰体育报道，西班牙在世界杯决赛中加时1:0战胜阿根廷并夺冠。".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-ifeng-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(
+        urls.lock().unwrap().clone(),
+        [
+            "https://www.bbc.com/zhongwen/articles/world-cup-final",
+            "https://sports.ifeng.com/c/world-cup-final"
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "deterministic_outcome_candidates"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-outcome-bootstrap-ifeng-test.jsonl"),
+    )
+    .expect("durable outcome-bootstrap history");
+    assert!(history.lines().all(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["step_id"] != "select_web_sources"
+    }));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_keeps_model_admission_when_no_terminal_candidate_exists() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "世界杯八强战况、比分与晋级汇总",
+            "url": "https://cj.sina.com.cn/articles/world-cup-quarter-finals",
+            "content": "1/8决赛战况、比分、赛果、结果与最终八强名单。",
+            "engines": ["fixture"]
+        }, {
+            "title": "BBC World Cup semi-final result",
+            "url": "https://www.bbc.com/sport/football/world-cup-semifinal",
+            "content": "Argentina beat England in the World Cup semi-final.",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://cj.sina.com.cn/articles/world-cup-quarter-finals".to_string(),
+                "新浪体育回顾世界杯八强阶段的比赛结果与晋级情况。".to_string(),
+            ),
+            (
+                "https://www.bbc.com/sport/football/world-cup-semifinal".to_string(),
+                "BBC reported that Argentina beat England in the World Cup semi-final.".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["BBC World Cup semi-final result".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-semantic-admission-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(urls.lock().unwrap().len(), 2);
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "semantic_candidate_ids"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-outcome-bootstrap-semantic-admission-test.jsonl"),
+    )
+    .expect("durable semantic-admission history");
+    assert!(history.lines().any(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["step_id"] == "select_web_sources"
+    }));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_pairs_one_terminal_source_with_accountable_editorial_coverage()
+{
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "2026美加墨世界杯_新华网",
+            "url": "https://www.news.cn/sports/topic/fifa2026/index.htm",
+            "content": "金靴、金球等奖项揭晓；闭幕式构成决赛日多个看点。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯完整赛程、比赛结果、进球和积分榜一览",
+            "url": "https://www.olympics.com/world-cup/schedule-results",
+            "content": "赛事正在进行；查看完整赛程、每日赛果、比分和积分榜。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯数据系统",
+            "url": "https://sports.163.com/world-cup/data",
+            "content": "比分直播、赛程、比赛结果、积分榜和球队数据。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯小组赛战况",
+            "url": "https://www.sohu.com/a/world-cup-group-stage",
+            "content": "截至目前，小组赛已有18支球队出线，8支球队出局。",
+            "engines": ["fixture"]
+        }, {
+            "title": "2026年FIFA世界杯 - 联合早报",
+            "url": "https://www.zaobao.com.sg/specials/fifa-world-cup-2026",
+            "content": "带来实时报道、最新成绩与赛程、评论以及场边花絮。更多赛况消息及专业分析，请关注本页面。",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://www.news.cn/sports/topic/fifa2026/index.htm".to_string(),
+                "新华社报道，西班牙在世界杯决赛中1:0战胜阿根廷并夺得冠军。".to_string(),
+            ),
+            (
+                "https://www.zaobao.com.sg/specials/fifa-world-cup-2026".to_string(),
+                "联合早报报道，西班牙在世界杯决赛中1比0击败阿根廷，捧起冠军奖杯。".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-portfolio-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(
+        urls.lock().unwrap().clone(),
+        [
+            "https://www.news.cn/sports/topic/fifa2026/index.htm",
+            "https://www.zaobao.com.sg/specials/fifa-world-cup-2026"
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "deterministic_outcome_candidates"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_fallback_prioritizes_accountable_hosts_over_lookalikes_and_social_pages() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    let results = serde_json::json!([{
+        "title": "Social result",
+        "url": "https://www.xiaohongshu.com/world-cup/result",
+        "engines": ["fixture"]
+    }, {
+        "title": "Lookalike official result",
+        "url": "https://zh.2026fifa-worldcup-sohu.com.cn/result",
+        "engines": ["fixture"]
+    }, {
+        "title": "Institutional result",
+        "url": "https://www.olympics.com/world-cup/result",
+        "engines": ["fixture"]
+    }, {
+        "title": "Accountable newsroom result",
+        "url": "https://www.reuters.com/sports/world-cup-result",
+        "engines": ["fixture"]
+    }, {
+        "title": "BBC tournament politics background",
+        "url": "https://www.bbc.com/sport/world-cup-politics",
+        "engines": ["fixture"]
+    }, {
+        "title": "BBC World Cup final result and score",
+        "url": "https://www.bbc.com/sport/world-cup-final-result",
+        "engines": ["fixture"]
+    }, {
+        "title": "Unknown but non-lookalike result",
+        "url": "https://scores.example.test/world-cup-result",
+        "engines": ["fixture"]
+    }]);
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: results.clone(),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: results
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|result| {
+                (
+                    result["url"].as_str().unwrap().to_string(),
+                    "The fetched World Cup result contains enough substantive evidence for the fallback packet."
+                        .to_string(),
+                )
+            })
+            .collect(),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "Acquire accountable evidence after source admission failure";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "Original request", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(3);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-bootstrap-fallback-priority-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*queries.lock().unwrap(), [query]);
+    assert_eq!(
+        *urls.lock().unwrap(),
+        [
+            "https://www.olympics.com/world-cup/result",
+            "https://www.bbc.com/sport/world-cup-final-result",
+            "https://www.reuters.com/sports/world-cup-result",
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "bounded_discovery_fallback"
+    );
 }
 
 #[tokio::test]
@@ -883,6 +1599,80 @@ async fn provider_query_and_cross_language_semantic_selection_are_preserved() {
         output["research"]["results"][0]["structured"]["sources"][0]["quote_or_fact"]
             .as_str()
             .is_some_and(|text| text.contains("正常に稼働"))
+    );
+}
+
+#[tokio::test]
+async fn search_fallback_notice_is_preserved_as_partial_research_metadata() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let url = "https://fallback.example/record";
+    executor.register_dynamic_tool(Arc::new(FallbackNoticeSearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "Fallback record",
+            "url": url,
+            "engines": ["Brave"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::new(Mutex::new(Vec::new())),
+        bodies: BTreeMap::from([(
+            url.to_string(),
+            "The fallback engine returned substantive source text that remains traceable after provider quota exhaustion."
+                .to_string(),
+        )]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["substantive source text".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "Preserve generic search fallback diagnostics";
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "search.fallback",
+            "Search fallback",
+            "Retain evidence returned by an automatic fallback engine"
+        )]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(1);
+    let args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_fallback_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*queries.lock().unwrap(), [query]);
+    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(
+        output["research"]["metadata"]["web"]["search_fallback_count"],
+        1
+    );
+    assert_eq!(
+        output["research"]["metadata"]["web"]["search_fallback_engines"],
+        serde_json::json!(["brave", "bing"])
+    );
+    assert_eq!(
+        output["research"]["metadata"]["web"]["search_engine_selection_sources"],
+        serde_json::json!(["config"])
+    );
+    assert!(output["research"]["warnings"]["collection_errors"]
+        .as_array()
+        .is_some_and(|errors| errors.iter().any(|error| error
+            .as_str()
+            .is_some_and(|error| error.contains("AnySearch quota is exhausted")))));
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        url
     );
 }
 
@@ -1579,6 +2369,7 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
             fail: false,
             invalid_selection: false,
         },
+        retry_web_source_selection: true,
     }));
     let mut plan = minimal_plan(
         serde_json::json!([track(
@@ -1605,7 +2396,7 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
         .expect("retrieval workflow execution");
 
     assert_eq!(result.exit_code, 0, "{}", result.output);
-    assert_eq!(selector_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(selector_calls.load(Ordering::SeqCst), 2);
     assert_eq!(queries.lock().unwrap().len(), 1);
     assert_eq!(
         *urls.lock().unwrap(),
@@ -1759,6 +2550,11 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
                 oversized,
             ),
         ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
     }));
     let mut plan = minimal_plan(
         serde_json::json!([track(
@@ -2218,6 +3014,7 @@ async fn transient_selector_failure_retries_only_the_durable_selection_step() {
             fail: false,
             invalid_selection: false,
         },
+        retry_web_source_selection: false,
     }));
     let plan = minimal_plan(
         serde_json::json!([track(
@@ -2258,11 +3055,91 @@ async fn transient_selector_failure_retries_only_the_durable_selection_step() {
         .as_ref()
         .and_then(|metadata| metadata["dynamic_workflow"]["snapshot"]["steps"].as_object())
         .expect("durable workflow steps");
-    assert_eq!(steps.len(), 4);
+    assert_eq!(steps.len(), 5);
     assert_eq!(steps["discover_web_sources"]["attempt"], 1);
+    assert_eq!(steps["select_web_sources"]["attempt"], 1);
     assert_eq!(steps["retrieve_web"]["attempt"], 1);
     assert_eq!(steps["select_evidence_chunks"]["attempt"], 2);
     assert_eq!(steps["checkpoint_initial_retrieval"]["attempt"], 1);
+}
+
+#[tokio::test]
+async fn source_admission_failure_uses_bounded_discovery_fallback_before_chunk_review() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "Fallback candidate one",
+            "url": "https://fallback-one.example/record",
+            "content": "A candidate that requires fetched-text review.",
+            "engines": ["fixture"]
+        }, {
+            "title": "Fallback candidate two",
+            "url": "https://fallback-two.example/record",
+            "content": "An independent candidate on another host.",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://fallback-one.example/record".to_string(),
+                "The verified fallback evidence directly resolves the requested focus.".to_string(),
+            ),
+            (
+                "https://fallback-two.example/record".to_string(),
+                "The second fetched candidate remains available for closed review.".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: vec!["verified fallback evidence".to_string()],
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "fallback.review",
+            "Fallback review",
+            "Review verified fallback evidence"
+        )]),
+        serde_json::json!(["fallback evidence"]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let args = workflow_args(
+        "Verify source-admission failure recovery",
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(queries.lock().unwrap().len(), 1);
+    assert_eq!(
+        *urls.lock().unwrap(),
+        [
+            "https://fallback-one.example/record",
+            "https://fallback-two.example/record"
+        ]
+    );
+    assert_eq!(
+        output["research"]["metadata"]["web"]["source_selection_mode"],
+        "bounded_discovery_fallback"
+    );
+    assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    assert!(output.to_string().contains("verified fallback evidence"));
+    assert!(output
+        .to_string()
+        .contains("simulated permanent web source admission failure"));
 }
 
 #[tokio::test]
@@ -2415,6 +3292,146 @@ async fn pdf_additional_ranges_remain_one_source_in_one_retrieval_pass() {
         sources[0]["evidence_excerpts"].as_array().map(Vec::len),
         Some(3)
     );
+}
+
+#[tokio::test]
+async fn html_additional_ranges_reach_late_article_evidence() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let offsets = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(PaginatedHtmlFixture {
+        offsets: Arc::clone(&offsets),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec![
+            "小组赛背景".to_string(),
+            "半决赛晋级".to_string(),
+            "决赛冠军".to_string(),
+        ],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let plan = minimal_plan(
+        serde_json::json!([
+            track("background", "背景", "小组赛背景"),
+            track("semifinal", "半决赛", "半决赛晋级"),
+            track("final", "决赛", "决赛冠军")
+        ]),
+        serde_json::json!([]),
+        serde_json::json!(["https://news.example/world-cup.html"]),
+    );
+    let args = workflow_args(
+        "分析赛事从小组赛到决赛的完整战况",
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_html_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*offsets.lock().unwrap(), [0, 100]);
+    assert_eq!(
+        output["research"]["metadata"]["web"]["document_range_count"],
+        2
+    );
+    let sources = output["research"]["results"][0]["structured"]["sources"]
+        .as_array()
+        .expect("HTML sources");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(
+        sources[0]["evidence_excerpts"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert!(sources[0]["evidence_excerpts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|excerpt| excerpt["quote_or_fact"]
+            .as_str()
+            .is_some_and(|text| text.contains("决赛冠军"))));
+}
+
+#[tokio::test]
+async fn embedded_constructor_script_tail_is_removed_before_selection() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    let source_url = "https://sports.example.test/world-cup";
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([(
+            source_url.to_string(),
+            "赛事机构公布了世界杯决赛的最终赛果。[完整赛果](https://sports.example.test/final) var swiper\\_results = new Swiper(\"#results .swiper\", { navigation: { nextEl: \".next\" } });"
+                .to_string(),
+        )]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["世界杯决赛的最终赛果".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let plan = minimal_plan(
+        serde_json::json!([track("final", "决赛", "世界杯决赛的最终赛果")]),
+        serde_json::json!([]),
+        serde_json::json!([source_url]),
+    );
+    let args = workflow_args(
+        "世界杯战况",
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(*urls.lock().unwrap(), [source_url]);
+    assert!(output.to_string().contains("世界杯决赛的最终赛果"));
+    assert!(!output.to_string().contains("Swiper"));
+    assert!(!output.to_string().contains("swiper\\\\_results"));
+}
+
+#[tokio::test]
+async fn embedded_serialized_configuration_tail_is_removed_before_chunking() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    let source_url = "https://sports.example.test/world-cup";
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([(
+            source_url.to_string(),
+            r#"赛事机构公布了世界杯决赛的最终赛果。 },{\"type\":\"keyValue\",\"key\":\"ddna_timeout\",\"value\":\"5000\"},{\"type\":\"keyValue\",\"key\":\"enabletracking\",\"value\":true}"#
+                .to_string(),
+        )]),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["世界杯决赛的最终赛果".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let plan = minimal_plan(
+        serde_json::json!([track("final", "决赛", "世界杯决赛的最终赛果")]),
+        serde_json::json!([]),
+        serde_json::json!([source_url]),
+    );
+    let args = workflow_args(
+        "世界杯战况",
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+    let rendered = output.to_string();
+
+    assert_eq!(*urls.lock().unwrap(), [source_url]);
+    assert!(rendered.contains("世界杯决赛的最终赛果"), "{rendered}");
+    assert!(!rendered.contains("keyValue"), "{rendered}");
+    assert!(!rendered.contains("ddna_"), "{rendered}");
+    assert!(!rendered.contains("enabletracking"), "{rendered}");
 }
 
 #[tokio::test]
@@ -2633,6 +3650,11 @@ async fn transport_like_error_text_does_not_trigger_an_untyped_retry() {
     }));
     executor.register_dynamic_tool(Arc::new(UntypedFetchFailureFixture {
         calls: Arc::clone(&calls),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
     }));
     let plan = minimal_plan(
         serde_json::json!([track(

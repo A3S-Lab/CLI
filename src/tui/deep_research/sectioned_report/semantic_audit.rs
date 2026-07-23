@@ -20,6 +20,19 @@ const SEMANTIC_CATEGORIES: [&str; 12] = [
     "reader_language_and_internal_jargon",
 ];
 
+#[derive(Clone, Copy)]
+pub(super) struct SemanticAuditContext<'a> {
+    pub(super) session: &'a AgentSession,
+    pub(super) query: &'a str,
+    pub(super) run_id: &'a str,
+    pub(super) outline: &'a ResearchOutline,
+    pub(super) state: &'a InquiryState,
+    pub(super) sections: &'a BTreeMap<String, SectionGeneration>,
+    pub(super) frame: &'a ReportFrame,
+    pub(super) evidence: &'a [AcceptedEvidence],
+    pub(super) deadline: &'a ReportDeadline,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum SemanticCheckResult {
@@ -132,52 +145,22 @@ impl SemanticReportReview {
 
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn audit_report_semantics(
-    session: &AgentSession,
-    query: &str,
-    run_id: &str,
+    context: SemanticAuditContext<'_>,
     label: &str,
-    outline: &ResearchOutline,
-    state: &InquiryState,
-    sections: &BTreeMap<String, SectionGeneration>,
-    frame: &ReportFrame,
-    evidence: &[AcceptedEvidence],
-    deadline: &ReportDeadline,
 ) -> Result<SemanticReportReview, String> {
-    let target_ids = semantic_target_ids(outline).into_iter().collect();
-    audit_report_semantics_for_targets(
-        session,
-        query,
-        run_id,
-        label,
-        outline,
-        state,
-        sections,
-        frame,
-        evidence,
-        &target_ids,
-        deadline,
-    )
-    .await
+    let target_ids = semantic_target_ids(context.outline).into_iter().collect();
+    audit_report_semantics_for_targets(context, label, &target_ids).await
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn audit_report_semantics_for_targets(
-    session: &AgentSession,
-    query: &str,
-    run_id: &str,
+    context: SemanticAuditContext<'_>,
     label: &str,
-    outline: &ResearchOutline,
-    state: &InquiryState,
-    sections: &BTreeMap<String, SectionGeneration>,
-    frame: &ReportFrame,
-    evidence: &[AcceptedEvidence],
     target_ids: &BTreeSet<String>,
-    deadline: &ReportDeadline,
 ) -> Result<SemanticReportReview, String> {
     if target_ids.is_empty() {
         return Err("semantic audit requires at least one exact target".to_string());
     }
-    let known_target_ids = semantic_target_ids(outline)
+    let known_target_ids = semantic_target_ids(context.outline)
         .into_iter()
         .collect::<BTreeSet<_>>();
     let unknown_target_ids = target_ids
@@ -190,20 +173,31 @@ pub(super) async fn audit_report_semantics_for_targets(
             unknown_target_ids.join(", ")
         ));
     }
-    let targets = semantic_audit_packets(query, outline, state, sections, frame, evidence)?
-        .into_iter()
-        .enumerate()
-        .filter(|(_, (target_id, _))| target_ids.contains(target_id))
-        .collect::<Vec<_>>();
+    let targets = semantic_audit_packets(
+        context.query,
+        context.outline,
+        context.state,
+        context.sections,
+        context.frame,
+        context.evidence,
+    )?
+    .into_iter()
+    .enumerate()
+    .filter(|(_, (target_id, _))| target_ids.contains(target_id))
+    .collect::<Vec<_>>();
     let mut results = stream::iter(targets.into_iter().map(
         |(ordinal, (target_id, packet))| async move {
             let target_label = format!("{label}_target_{}", ordinal + 1);
-            let result =
-                audit_semantic_target(session, run_id, &target_label, &target_id, packet, deadline)
-                    .await
-                    .map_err(|error| {
-                        format!("semantic audit failed for target `{target_id}`: {error}")
-                    });
+            let result = audit_semantic_target(
+                context.session,
+                context.run_id,
+                &target_label,
+                &target_id,
+                packet,
+                context.deadline,
+            )
+            .await
+            .map_err(|error| format!("semantic audit failed for target `{target_id}`: {error}"));
             (ordinal, target_id, result)
         },
     ))
@@ -224,7 +218,13 @@ pub(super) async fn audit_report_semantics_for_targets(
         return Err(failures.join("; "));
     }
     let review = SemanticReportReview { reviews };
-    validate_semantic_review_targets(&review, target_ids, sections, frame, state)?;
+    validate_semantic_review_targets(
+        &review,
+        target_ids,
+        context.sections,
+        context.frame,
+        context.state,
+    )?;
     Ok(review)
 }
 

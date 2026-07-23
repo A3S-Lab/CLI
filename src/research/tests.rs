@@ -422,6 +422,108 @@ fn replay_rejects_outlining_when_any_material_question_is_bounded() {
 }
 
 #[test]
+fn active_contract_preserves_a_qualified_report_when_one_material_target_is_uncovered() {
+    let limits = InquiryLimits::default();
+    let obligations = vec![
+        ResearchObligation {
+            id: "target:covered".to_string(),
+            title: "Covered target".to_string(),
+            focus: "Establish the covered target.".to_string(),
+            material: true,
+            completion_criteria: vec!["Traceable evidence establishes the target.".to_string()],
+            evidence_requirements: EvidenceQualityRequirements::default(),
+        },
+        ResearchObligation {
+            id: "target:missing".to_string(),
+            title: "Missing target".to_string(),
+            focus: "Establish or bound the missing target.".to_string(),
+            material: true,
+            completion_criteria: vec!["Traceable evidence establishes the target.".to_string()],
+            evidence_requirements: EvidenceQualityRequirements::default(),
+        },
+    ];
+    let mut covered_question = Question::queued(
+        "question:covered",
+        None,
+        "What evidence establishes the covered target?",
+    );
+    covered_question.obligation_ids = vec!["target:covered".to_string()];
+    covered_question.completion_criterion_indexes = vec![0];
+    let mut missing_question = Question::queued(
+        "question:missing",
+        None,
+        "What evidence establishes the missing target?",
+    );
+    missing_question.obligation_ids = vec!["target:missing".to_string()];
+    missing_question.completion_criterion_indexes = vec![0];
+    let mut events = vec![
+        InquiryEvent::StrategySelected {
+            method: ResearchMethod::Focused,
+        },
+        InquiryEvent::ResearchObligationsCommitted {
+            obligations,
+            stop_conditions: vec![
+                "Publish supported findings and disclose uncovered targets.".to_string()
+            ],
+        },
+        InquiryEvent::QuestionsQueued {
+            questions: vec![covered_question, missing_question],
+        },
+        InquiryEvent::EvidenceAccepted {
+            evidence: EvidenceRef::new(
+                "evidence:covered",
+                vec!["claim:covered".to_string()],
+                vec!["source:covered".to_string()],
+            ),
+        },
+        InquiryEvent::QuestionAnswered {
+            question_id: "question:covered".to_string(),
+            answer: "The accepted source establishes the covered target.".to_string(),
+            evidence_ids: vec!["evidence:covered".to_string()],
+        },
+        InquiryEvent::QuestionBounded {
+            question_id: "question:missing".to_string(),
+            reason: "No accepted source establishes the second target.".to_string(),
+        },
+    ];
+    let mut state = replay(&events, &limits).expect("closed questions should reach outlining");
+    assert!(material_evidence_floor(&state));
+    let assessment = derive_research_contract_assessment(&state)
+        .expect("the Host should assess a partially covered material contract");
+    let assessment_event = InquiryEvent::ResearchContractAssessed { assessment };
+    state
+        .apply(&assessment_event, &limits)
+        .expect("qualified assessment should be accepted");
+    events.push(assessment_event);
+    assert_eq!(
+        research_contract_outcome(&state),
+        Some(ResearchContractOutcome::Qualified)
+    );
+    let outline = InquiryEvent::OutlineCommitted {
+        outline: ResearchOutline {
+            sections: vec![OutlineSection {
+                id: "section:qualified".to_string(),
+                heading: "Supported finding and limitation".to_string(),
+                purpose: "Publish the supported finding and disclose the missing target."
+                    .to_string(),
+                perspective_ids: Vec::new(),
+                question_ids: vec![
+                    "question:covered".to_string(),
+                    "question:missing".to_string(),
+                ],
+                claim_ids: vec!["claim:covered".to_string()],
+                source_ids: vec!["source:covered".to_string()],
+                composition_hint: "Lead with evidence, then state the bounded target.".to_string(),
+            }],
+        },
+    };
+    state
+        .apply(&outline, &limits)
+        .expect("one uncovered material target must not erase a valid sibling report");
+    assert_eq!(state.phase, InquiryPhase::Drafting);
+}
+
+#[test]
 fn replay_allows_outlining_when_only_a_supporting_question_is_bounded() {
     let mut supporting = Question::queued(
         "question:supporting",

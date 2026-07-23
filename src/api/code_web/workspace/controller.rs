@@ -134,6 +134,14 @@ impl WorkspaceController {
         self.service.read_dir(path).await
     }
 
+    #[get("/watch", raw)]
+    async fn watch_workspace(
+        &self,
+        #[query("rootPath")] root_path: String,
+    ) -> BootResult<BootResponse> {
+        self.service.watch(root_path).await
+    }
+
     #[post("/rename")]
     async fn rename_workspace_path(
         &self,

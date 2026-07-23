@@ -197,7 +197,7 @@ pub(crate) struct WebStartArgs {
     #[arg(short = 'd', long = "detach")]
     pub detach: bool,
 
-    /// Gracefully replace an A3S-managed instance; never stop an unrelated process.
+    /// Gracefully replace a verified A3S Web instance; never stop an unrelated process.
     #[arg(long)]
     pub replace: bool,
 
