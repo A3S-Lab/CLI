@@ -1,6 +1,7 @@
 pub(super) fn inquiry_plan() -> serde_json::Value {
     serde_json::json!({
         "report_title": "Bounded inquiry fixture",
+        "research_scope": "focused",
         "freshness_required": false,
         "workspace_evidence_required": false,
         "tracks": [{

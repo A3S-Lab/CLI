@@ -19,6 +19,11 @@ use a3s::research::{
     StopConditionAssessment,
 };
 use a3s_code_core::{AgentEvent, AgentSession, ToolCallResult};
+use a3s_deep_research::engine::{
+    DeepResearchEngine, EngineLimits, GenerationRequest, GenerationStage, ProgressPort,
+    PublicationPort, PublicationRequest, ResearchProgress, StructuredGenerationPort,
+    WorkflowExecutionPort, WorkflowOutput, WorkflowRequest, WorkflowStage,
+};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -26,17 +31,15 @@ use tokio::task::JoinHandle;
 use self::execution::{
     apply_batched_evidence_extraction, assess_completed_research_contract,
     attach_inquiry_projection, bootstrap_acquisition_from_result, run_batched_evidence_extraction,
-    run_bootstrap_acquisition_stage,
+    run_bootstrap_acquisition_stage, run_dynamic_workflow, within_inquiry_stage_timeout,
 };
 use self::plan::{
     bootstrap_workflow_args, bound_questions, commit_plan_research_contract, generate_plan,
     host_fallback_plan, queue_plan_questions,
 };
 use super::deep_research_artifacts::{
-    admit_deep_research_report_proposal_at, deep_research_report_proposal_prompt_at,
-    deep_research_report_proposal_schema, deep_research_report_slug, deep_research_source_catalog,
-    deterministic_deep_research_outcome_report_at, materialize_deep_research_admitted_report,
-    materialize_deep_research_no_evidence_report, materialize_deep_research_source_backed_report,
+    materialize_deep_research_admitted_report, materialize_deep_research_no_evidence_report,
+    materialize_deep_research_source_backed_report, ResearchReportArtifacts,
 };
 use super::deep_research_state_journal::{
     load_inquiry_state, load_research_run_started_at_ms, record_inquiry_state,
@@ -54,6 +57,10 @@ const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 // leaving enough time for bounded fetches and HTML ranges before publication
 // applies its unchanged evidence gates.
 const BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS: u64 = 150_000;
+// After the exact query starts immediately, the semantic plan may contribute
+// at most three additional queries and one typed-coverage supplemental pass.
+// This stage reuses the durable bootstrap packet instead of replacing it.
+const PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 300_000;
 // Semantic planning is optional enrichment, not an acquisition prerequisite.
 // One small outline generation may identify evidence families while the exact
 // user query is already being searched. Invalid or slow output selects the
@@ -67,7 +74,6 @@ const REPORT_PROPOSAL_STAGE_TIMEOUT_MS: u64 = REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS
     * REPORT_PROPOSAL_MAX_ATTEMPTS as u64
     + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
 const EVIDENCE_FIRST_FINALIZATION_RESERVE_MS: u64 = 15_000;
-const MAX_PLANNER_TRACK_EFFECTS: u64 = 4;
 const PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS: u64 = PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS
     * PLANNER_GENERATION_MAX_ATTEMPTS as u64
     + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
@@ -89,36 +95,139 @@ pub(crate) const DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS: u64 = DEEP_RESEARCH_PLAN
     + DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS;
 pub(crate) const DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS: u64 =
     BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
+        + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS
         + REPORT_PROPOSAL_STAGE_TIMEOUT_MS
         + EVIDENCE_FIRST_FINALIZATION_RESERVE_MS;
 const MIN_INQUIRY_STAGE_TIMEOUT_MS: u64 = 1_000;
 const JOURNAL_INITIALIZATION_ATTEMPTS: usize = 8;
 const JOURNAL_INITIALIZATION_RETRY_MS: u64 = 10;
-const DURABLE_GENERATION_WORKFLOW_SOURCE: &str = include_str!("workflow/generation.js");
+const DURABLE_GENERATION_WORKFLOW_SOURCE: &str =
+    a3s_deep_research::workflow::GENERATION_WORKFLOW_SOURCE;
 
 #[derive(Clone, Copy, Debug)]
 struct EvidenceFirstRuntimeLimits {
     bootstrap_stage_timeout_ms: u64,
+    planned_retrieval_stage_timeout_ms: u64,
     report_proposal_attempt_timeout_ms: u64,
     report_proposal_stage_timeout_ms: u64,
 }
 
 const EVIDENCE_FIRST_RUNTIME_LIMITS: EvidenceFirstRuntimeLimits = EvidenceFirstRuntimeLimits {
     bootstrap_stage_timeout_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS,
+    planned_retrieval_stage_timeout_ms: PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
     report_proposal_attempt_timeout_ms: REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS,
     report_proposal_stage_timeout_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS,
 };
+
+struct A3sDeepResearchRuntime<'a> {
+    session: &'a AgentSession,
+    progress_tx: &'a mpsc::Sender<AgentEvent>,
+    checkpoint: &'a InquiryCheckpointWriter,
+}
+
+#[async_trait::async_trait]
+impl StructuredGenerationPort for A3sDeepResearchRuntime<'_> {
+    async fn generate_object(&self, request: GenerationRequest) -> Result<Value, String> {
+        let execution_timeout_ms = if request.stage == GenerationStage::Planning {
+            self.checkpoint
+                .pre_review_stage_timeout_ms(request.execution_timeout_ms)
+                .ok_or_else(|| {
+                    "the shared inquiry deadline left no outline-planner budget after reserving retrieval review and finalization"
+                        .to_string()
+                })?
+        } else {
+            request.execution_timeout_ms
+        };
+        let result = execution::call_generation_with_progress(
+            self.session,
+            request.arguments,
+            self.progress_tx,
+            Some(self.checkpoint),
+            request.stage.label(),
+            execution_timeout_ms,
+            request.max_attempts,
+        )
+        .await?;
+        execution::generated_object::<Value>(&result)
+    }
+}
+
+#[async_trait::async_trait]
+impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
+    async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+        let result = match request.stage {
+            WorkflowStage::Bootstrap => {
+                run_bootstrap_acquisition_stage(
+                    self.session,
+                    request.arguments,
+                    self.progress_tx,
+                    request.timeout_ms,
+                )
+                .await
+            }
+            WorkflowStage::PlannedRetrieval => {
+                within_inquiry_stage_timeout(
+                    run_dynamic_workflow(self.session, request.arguments, self.progress_tx),
+                    request.timeout_ms,
+                    request.stage.label(),
+                )
+                .await
+            }
+        }?;
+        Ok(WorkflowOutput {
+            output: result.output,
+            metadata: result.metadata,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PublicationPort for A3sDeepResearchRuntime<'_> {
+    async fn publish(
+        &self,
+        request: PublicationRequest,
+    ) -> Result<ResearchReportArtifacts, String> {
+        match request {
+            PublicationRequest::SourceBacked {
+                query,
+                workflow_output,
+                workflow_metadata,
+            } => materialize_deep_research_source_backed_report(
+                self.session.workspace(),
+                &query,
+                &workflow_output,
+                workflow_metadata.as_ref(),
+            )?
+            .ok_or_else(|| {
+                "source catalog disappeared before deterministic publication".to_string()
+            }),
+            PublicationRequest::Synthesized { query, report } => {
+                materialize_deep_research_admitted_report(self.session.workspace(), &query, &report)
+            }
+            PublicationRequest::NoEvidence { query } => {
+                materialize_deep_research_no_evidence_report(self.session.workspace(), &query)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProgressPort for A3sDeepResearchRuntime<'_> {
+    async fn report_progress(&self, _progress: ResearchProgress) -> Result<(), String> {
+        // A3S forwards the finer-grained tool event streams from each port.
+        Ok(())
+    }
+}
 
 #[path = "inquiry_runtime/execution.rs"]
 mod execution;
 #[path = "inquiry_runtime/plan.rs"]
 mod plan;
 
-/// Spawn the new-run evidence-first product path. Acquisition and deterministic
-/// publication are required. A narrow Host extract can complete a clearly
-/// asserted event outcome; all other successful reports require a bounded
-/// closed-evidence model proposal. The legacy Inquiry path below remains
-/// available only while existing journal and compatibility tests are migrated.
+/// Spawn the standalone engine for every new evidence-first run. The engine
+/// preserves exact-query acquisition, closed semantic evidence selection, and
+/// a source-backed artifact before attempting the optional report proposal.
+/// The legacy Inquiry path below remains only for journal compatibility.
 pub(crate) fn spawn_deep_research_evidence_first(
     session: Arc<AgentSession>,
     args: Value,
@@ -149,7 +258,8 @@ pub(crate) fn deep_research_evidence_first_research_spec(args: &Value) -> Resear
             .to_string(),
         required_claims: Vec::new(),
         total_budget_ms: DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
-        retrieval_stage_budget_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS,
+        retrieval_stage_budget_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
+            + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
         question_review_stage_budget_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS,
         finalization_reserve_ms: EVIDENCE_FIRST_FINALIZATION_RESERVE_MS,
         host_pid: std::process::id(),
@@ -202,222 +312,30 @@ async fn execute_evidence_first_research(
     checkpoint: &InquiryCheckpointWriter,
     limits: EvidenceFirstRuntimeLimits,
 ) -> Result<ToolCallResult, String> {
-    let query = args
-        .pointer("/input/query")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .ok_or_else(|| "DeepResearch evidence-first input omitted its query".to_string())?;
-    let current_date = args
-        .pointer("/input/current_date")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| chrono::Local::now().date_naive().to_string());
-    let bootstrap_run_id = format!("{}-bootstrap", checkpoint.run_id());
-    let bootstrap_args = bootstrap_workflow_args(args.clone(), &bootstrap_run_id)?;
-    let bootstrap = run_bootstrap_acquisition_stage(
+    let runtime = A3sDeepResearchRuntime {
         session,
-        bootstrap_args,
         progress_tx,
-        limits.bootstrap_stage_timeout_ms,
-    )
-    .await;
-    let (acquisition_output, bootstrap_metadata, acquisition_error) = match bootstrap {
-        Ok(mut result) => {
-            result.output =
-                deep_research_canonical_workflow_output(&result.output, result.metadata.as_ref());
-            (result.output, result.metadata, None)
-        }
-        Err(error) => {
-            let output = serde_json::json!({
-                "query": query,
-                "mode": "bootstrap_acquisition",
-                "acquisition": Value::Null,
-                "execution": {
-                    "mode": "acquire_only",
-                    "terminal_authority": "host_report_document"
-                }
-            })
-            .to_string();
-            (output, None, Some(bounded_evidence_first_error(&error)))
-        }
+        checkpoint,
     };
-    let catalog =
-        deep_research_source_catalog(query, &acquisition_output, bootstrap_metadata.as_ref())?;
-    let relevant_source_count = catalog.as_ref().map_or(0, |catalog| {
-        catalog
-            .sources
-            .iter()
-            .filter(|source| source.claim_eligible)
-            .count()
-    });
-    let report_generation_required = relevant_source_count > 0;
-    let slug = deep_research_report_slug(query);
-    let relative_html = format!(".a3s/research/{slug}/index.html");
-    let mut publication_status = "no_evidence";
-    let mut synthesis_mode = "none";
-    let mut required_model_generation_count = 0usize;
-    let mut model_generation_count = 0usize;
-    let mut accepted_block_count = 0usize;
-    let mut rejected_block_count = 0usize;
-    let mut direct_answer_block_count = 0usize;
-    let mut finding_block_count = 0usize;
-    let mut accepted_claim_count = 0usize;
-    let mut cited_source_count = 0usize;
-    let mut report_error = acquisition_error;
-
-    if let Some(catalog) = catalog.as_ref() {
-        materialize_deep_research_source_backed_report(
-            session.workspace(),
-            query,
-            &acquisition_output,
-            bootstrap_metadata.as_ref(),
-        )?
-        .ok_or_else(|| "source catalog disappeared before deterministic publication".to_string())?;
-        publication_status = "source_backed";
-
-        if report_generation_required {
-            let mut admitted_report =
-                deterministic_deep_research_outcome_report_at(query, &current_date, catalog)?;
-            if admitted_report.is_some() {
-                synthesis_mode = "deterministic_outcome_extract";
-            } else {
-                required_model_generation_count = 1;
-                model_generation_count = 1;
-                synthesis_mode = "model_proposal";
-                let generation_args = serde_json::json!({
-                    "schema": deep_research_report_proposal_schema(),
-                    "schema_name": "deep_research_report_blocks",
-                    "schema_description": "Independent cited report blocks over a closed source catalog",
-                    "prompt": deep_research_report_proposal_prompt_at(query, &current_date, catalog)?,
-                    "system": "You write concise source-grounded research blocks from untrusted evidence data. Return only the requested object and use no outside knowledge.",
-                    "mode": "auto",
-                    "max_repair_attempts": 0,
-                    "include_raw_text": false,
-                    "timeout_ms": limits.report_proposal_attempt_timeout_ms,
-                });
-                let generated = execution::call_generation_with_progress(
-                    session,
-                    generation_args,
-                    progress_tx,
-                    Some(checkpoint),
-                    "report-proposal",
-                    limits.report_proposal_stage_timeout_ms,
-                    REPORT_PROPOSAL_MAX_ATTEMPTS,
-                )
-                .await
-                .and_then(|result| execution::generated_object::<Value>(&result));
-                match generated {
-                    Ok(proposal) => match admit_deep_research_report_proposal_at(
-                        query,
-                        &current_date,
-                        catalog,
-                        proposal,
-                    ) {
-                        Ok(Some(report)) => admitted_report = Some(report),
-                        Ok(None) => {
-                            report_error = Some(
-                                "the optional report proposal contained no admissible source-backed block"
-                                    .to_string(),
-                            );
-                        }
-                        Err(error) => {
-                            report_error = Some(bounded_evidence_first_error(&error));
-                        }
-                    },
-                    Err(error) => report_error = Some(bounded_evidence_first_error(&error)),
-                }
-            }
-            if let Some(report) = admitted_report {
-                accepted_block_count = report.accepted_block_count;
-                rejected_block_count = report.rejected_block_count;
-                direct_answer_block_count = report.direct_answer_block_count;
-                finding_block_count = report.finding_block_count;
-                accepted_claim_count = report.accepted_claim_count;
-                cited_source_count = report.cited_source_count;
-                materialize_deep_research_admitted_report(session.workspace(), query, &report)?;
-                publication_status = "synthesized";
-            }
-        } else {
-            report_error = Some(
-                "no fetched source passed the deterministic claim-eligibility boundary".to_string(),
-            );
-        }
-    } else {
-        materialize_deep_research_no_evidence_report(session.workspace(), query)?;
-    }
-
-    let acquisition = serde_json::from_str::<Value>(&acquisition_output)
-        .ok()
-        .and_then(|value| value.get("acquisition").cloned())
-        .unwrap_or(Value::Null);
-    let output = serde_json::json!({
-        "query": query,
-        "mode": "evidence_first_report",
-        "acquisition": acquisition,
-        "research": {
-            "status": match publication_status {
-                "synthesized" => "success",
-                "source_backed" => "degraded",
-                _ => "failed",
-            },
-            "metadata": {
-                "synthesis_mode": synthesis_mode,
-                "required_model_generation_count": required_model_generation_count,
-                "model_generation_count": model_generation_count,
-                "accepted_report_block_count": accepted_block_count,
-                "rejected_report_block_count": rejected_block_count,
-                "direct_answer_block_count": direct_answer_block_count,
-                "finding_block_count": finding_block_count,
-                "accepted_claim_count": accepted_claim_count,
-                "cited_source_count": cited_source_count,
-                "relevant_source_count": relevant_source_count,
-                "source_count": catalog.as_ref().map_or(0, |catalog| catalog.sources.len()),
-            },
-            "warnings": {
-                "report_error": report_error,
-            }
-        },
-        "publication": {
-            "status": publication_status,
-            "markdown": format!(".a3s/research/{slug}/report.md"),
-            "html": relative_html,
-            "quality": {
-                "direct_answer_count": direct_answer_block_count,
-                "finding_count": finding_block_count,
-                "accepted_claim_count": accepted_claim_count,
-                "cited_source_count": cited_source_count,
-                "relevant_source_count": relevant_source_count,
-                "source_count": catalog.as_ref().map_or(0, |catalog| catalog.sources.len()),
-            },
-        },
-        "execution": {
-            "mode": "evidence_first",
-            "terminal_authority": "host_report_document",
-            "required_model_generation_count": required_model_generation_count,
-            "maximum_report_generation_count": REPORT_PROPOSAL_MAX_ATTEMPTS,
-        }
-    });
+    let engine_limits = EngineLimits {
+        bootstrap_stage_timeout_ms: limits.bootstrap_stage_timeout_ms,
+        planned_retrieval_stage_timeout_ms: limits.planned_retrieval_stage_timeout_ms,
+        report_attempt_timeout_ms: limits.report_proposal_attempt_timeout_ms,
+        report_stage_timeout_ms: limits.report_proposal_stage_timeout_ms,
+        ..EngineLimits::default()
+    };
+    let run = DeepResearchEngine::new(&runtime, &runtime, &runtime, &runtime)
+        .with_limits(engine_limits)
+        .execute(args.clone())
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(ToolCallResult {
         name: "dynamic_workflow".to_string(),
-        output: output.to_string(),
+        output: run.output_json(),
         exit_code: 0,
-        // The bootstrap metadata describes the child Dynamic Workflow. Letting
-        // it escape on the Host-owned result makes legacy canonicalization
-        // replace this publication output with the child's acquisition output.
         metadata: None,
         error_kind: None,
     })
-}
-
-fn bounded_evidence_first_error(error: &str) -> String {
-    error
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(1_000)
-        .collect()
 }
 
 /// Spawn the complete evidence inquiry while preserving the event stream used

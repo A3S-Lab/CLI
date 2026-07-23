@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(test)]
 pub(super) fn deep_research_verified_structured_evidence(
     result: &serde_json::Value,
     structured: &serde_json::Value,
@@ -152,6 +153,7 @@ pub(super) fn deep_research_safe_source_query(url: &reqwest::Url) -> Vec<(String
     safe_query
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_reported_source_candidates(value: &str) -> Vec<(String, String)> {
     let Some(exact) = deep_research_safe_source_anchor(value) else {
         return Vec::new();
@@ -186,6 +188,7 @@ pub(super) fn deep_research_reported_source_candidates(value: &str) -> Vec<(Stri
     candidates
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_sanitize_evidence_urls(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => {
@@ -205,6 +208,7 @@ pub(super) fn deep_research_sanitize_evidence_urls(value: &mut serde_json::Value
     }
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_sanitize_evidence_text(text: &str) -> String {
     let lower = text.to_ascii_lowercase();
     let mut output = String::with_capacity(text.len());
@@ -247,6 +251,7 @@ pub(super) fn deep_research_sanitize_evidence_text(text: &str) -> String {
     output
 }
 
+#[cfg(test)]
 pub(super) fn copy_json_field(
     target: &mut serde_json::Map<String, serde_json::Value>,
     source: &serde_json::Value,
@@ -257,6 +262,7 @@ pub(super) fn copy_json_field(
     }
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_compact_count_metadata(
     metadata: &serde_json::Value,
 ) -> serde_json::Value {
@@ -292,6 +298,7 @@ pub(super) fn deep_research_compact_count_metadata(
     serde_json::Value::Object(counts)
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_compact_warnings(warnings: &serde_json::Value) -> serde_json::Value {
     let mut compact = serde_json::Map::new();
     if let Some(failed_tasks) = warnings

@@ -122,6 +122,7 @@ pub(super) fn is_deep_research_evidence_object(value: &serde_json::Value) -> boo
             .is_some()
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_compact_evidence_object(
     evidence: &serde_json::Value,
     round: Option<u64>,
@@ -466,6 +467,7 @@ pub(super) fn deep_research_compact_string_array(
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_compact_json_text(value: &serde_json::Value, limit: usize) -> String {
     let text = value
         .as_str()
@@ -486,6 +488,7 @@ pub(super) fn deep_research_digest_text(text: &str, limit: usize) -> String {
     deep_research_truncate_chars(&compact, limit)
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_error_or_digest_text(
     value: &serde_json::Value,
     limit: usize,
@@ -501,6 +504,7 @@ pub(super) fn deep_research_error_or_digest_text(
     }
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_failure_summary(value: &serde_json::Value) -> String {
     let text = value
         .as_str()

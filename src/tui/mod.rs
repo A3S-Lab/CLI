@@ -108,18 +108,19 @@ pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
 pub(crate) use deep_research_artifacts::{
-    clean_deep_research_final_text_from_artifacts, deep_research_contains_workflow_store_reference,
-    deep_research_evidence_first_published_report, deep_research_output_has_internal_leak,
+    clean_deep_research_final_text_from_artifacts, deep_research_evidence_first_published_report,
+    deep_research_output_has_internal_leak,
     deep_research_report_rejection_diagnostic_from_answer_text,
     deep_research_workflow_needs_recovery_report_with_metadata,
     materialize_deep_research_completed_report_from_generation,
-    materialize_deep_research_recovery_report, parse_embedded_structured_evidence_json,
-    research_report_artifacts_from_output, DeepResearchEvidenceFirstPublication,
-    ResearchReportArtifacts,
+    materialize_deep_research_recovery_report, research_report_artifacts_from_output,
+    DeepResearchEvidenceFirstPublication, ResearchReportArtifacts,
 };
 #[cfg(test)]
 use deep_research_artifacts::{
+    deep_research_contains_workflow_store_reference,
     deep_research_report_artifacts_from_output_for_query, deep_research_report_slug,
+    parse_embedded_structured_evidence_json,
 };
 use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
 use deep_research_convergence::{
