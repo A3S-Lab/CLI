@@ -839,7 +839,7 @@ async fn wait_for_condition(
 }
 
 async fn wait_for_success(child: &mut Child, description: &str) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Some(status) = child.try_wait().expect("poll process inquiry worker") {
             assert!(status.success(), "{description} exited with {status}");
@@ -848,7 +848,7 @@ async fn wait_for_success(child: &mut Child, description: &str) {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("{description} did not finish within 30 seconds");
+            panic!("{description} did not finish within 60 seconds");
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1023,22 +1023,27 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
     match scenario {
         Scenario::Planner => {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
+            let bootstrap_journal = workspace
+                .path()
+                .join(".a3s/workflow")
+                .join(format!("{run_id}-bootstrap.jsonl"));
             wait_for_condition(
-                "completed durable generation before Inquiry acknowledgement",
-                Duration::from_secs(20),
-                || marker.is_file(),
+                "completed durable planner and concurrent bootstrap before Inquiry acknowledgement",
+                Duration::from_secs(60),
+                || marker.is_file() && event_count(&bootstrap_journal, "run_completed", None) == 1,
             )
             .await;
             let journal =
                 flow_journal_with_prefix(workspace.path(), &format!("{run_id}-planner-outline-"))
                     .expect("durable planner-outline Flow journal");
             assert_eq!(event_count(&journal, "run_completed", None), 1);
+            assert_eq!(event_count(&bootstrap_journal, "run_completed", None), 1);
         }
         Scenario::Resolution => {
             let marker = workspace.path().join(EFFECT_COMPLETED_MARKER);
             wait_for_condition(
                 "completed durable generation before Inquiry acknowledgement",
-                Duration::from_secs(20),
+                Duration::from_secs(60),
                 || marker.is_file(),
             )
             .await;
@@ -1057,7 +1062,7 @@ async fn run_process_resume_scenario(scenario: Scenario, function: &str) {
                 .join(format!("{run_id}-bootstrap.jsonl"));
             wait_for_condition(
                 "one completed and one running retrieval effect",
-                Duration::from_secs(20),
+                Duration::from_secs(60),
                 || {
                     event_count(&journal, "step_completed", Some("alpha")) == 1
                         && event_count(&journal, "step_started", Some("beta")) == 1

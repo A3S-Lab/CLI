@@ -35,6 +35,11 @@ a3s search browser update chrome
 a3s search browser repair lightpanda
 ```
 
+The bundled Code runtime uses AnySearch as `web_search`'s default when no
+request or ACL engine selection is provided. AnySearch works anonymously and
+can use `ANYSEARCH_API_KEY` when set; Tavily and conventional engines remain
+available through explicit tool or ACL selection.
+
 Managed downloads remain under `~/.a3s/chromium/` and
 `~/.a3s/lightpanda/`. `a3s search doctor` reads the same project-local or
 user-global `config.acl` selected by `a3s code`, reports enabled headless
@@ -1734,6 +1739,11 @@ When Codex CLI is logged in (`codex login`), the Codex tab can switch the
 current session to Codex account models using `$CODEX_HOME/auth.json` or
 `~/.codex/auth.json`.
 
+For local account paths, native Windows uses `%USERPROFILE%` (or
+`%HOMEDRIVE%%HOMEPATH%`) when the `HOME` environment variable is absent. This
+applies consistently to Claude Code, Codex, Kimi Code, and WorkBuddy state;
+Kimi Desktop continues to use its `%APPDATA%` Daimon state.
+
 Codex account requests start with the native Responses WebSocket transport.
 HTTP 403/426 during the upgrade switches the same request immediately to HTTPS
 SSE; other connection failures receive two bounded WebSocket retries before the
@@ -1797,8 +1807,11 @@ uses the app's bundled CodeBuddy CLI and `~/.workbuddy` account state. A3S does
 not read, copy, persist, or log WorkBuddy's private tokens. Opening the tab
 refreshes the model ids currently enabled for the account; `a3s model list` and
 `a3s code models` use the same discovery path. The app bundle is detected
-automatically on macOS, installed `codebuddy` and `cbc` commands are supported
-on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard installation.
+automatically on macOS. Windows discovery checks standard per-user and Program
+Files locations plus registered uninstall metadata, so custom installation
+directories remain discoverable. Installed `codebuddy` and `cbc` commands are
+supported on `PATH`, and `A3S_CODEBUDDY_CLI` can select a non-standard
+installation.
 
 Claude Code and WorkBuddy share the account-CLI stream and A3S host-tool bridge.
 Their own CLI tools are disabled, provider tool-call output is normalized into

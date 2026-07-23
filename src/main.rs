@@ -21,6 +21,7 @@ mod top;
 mod tui;
 mod update;
 mod use_registry;
+mod user_paths;
 
 #[cfg(test)]
 static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

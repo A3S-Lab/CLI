@@ -65,6 +65,16 @@ fn fixture_asset_digest(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
+#[test]
+fn use_mcp_timeout_covers_the_longest_bounded_component_install() {
+    const {
+        assert!(
+            MCP_REQUEST_TIMEOUT_SECS >= 15 * 60,
+            "Use MCP calls must outlive the bounded 15-minute Browser installer"
+        );
+    }
+}
+
 #[derive(Clone, Default)]
 struct UseCallingLlm {
     calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -1572,7 +1582,7 @@ esac
 
 #[cfg(unix)]
 #[tokio::test]
-async fn timed_out_startup_discovery_converges_from_the_watch_generation() {
+async fn timed_out_startup_discovery_converges_within_the_projection_budget() {
     use std::os::unix::fs::PermissionsExt;
 
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
@@ -1654,12 +1664,13 @@ esac
             .await
             .unwrap(),
     );
-    let (handle, warning) = start_with_budget(
+    let (handle, warning) = start_with_budgets(
         executable,
         temp.path().to_path_buf(),
         CancellationToken::new(),
         Arc::clone(&session),
         Duration::from_millis(20),
+        Duration::from_secs(2),
     )
     .await;
 
@@ -1669,21 +1680,13 @@ esac
             .is_some_and(|message| message.contains("exceeded 20 ms")),
         "{warning:?}"
     );
-    // This bounds eventual background convergence, not the 20 ms startup SLA
-    // asserted above. The full test binary starts many external processes in
-    // parallel, so leave enough scheduling headroom without changing any
-    // production command or retry timeout.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !session
+    assert!(
+        session
             .skill_names()
             .iter()
-            .any(|name| name == "fixture-report")
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the watch loop must recover the generation skipped at startup");
+            .any(|name| name == "fixture-report"),
+        "the projection budget must include background discovery and Skill replay"
+    );
 
     drop(handle);
     session.close().await;
@@ -1806,8 +1809,21 @@ async fn replacement_session_receives_live_skills_without_waiting_for_projection
 #[cfg(unix)]
 #[tokio::test]
 async fn partial_reconciliation_never_advances_the_generation() {
+    use std::os::unix::fs::PermissionsExt;
+
     let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
     let temp = tempfile::tempdir().unwrap();
+    let executable = temp.path().join("rejecting-mcp");
+    std::fs::write(
+        &executable,
+        r#"#!/bin/sh
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"fixture failure"}}'
+"#,
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&executable, permissions).unwrap();
     let skill_path = temp.path().join("SKILL.md");
     std::fs::write(&skill_path, fixture_skill()).unwrap();
     let skill = Arc::new(Skill::from_file(&skill_path).unwrap());
@@ -1846,9 +1862,9 @@ async fn partial_reconciliation_never_advances_the_generation() {
         warnings: Vec::new(),
     };
 
-    let error = reconcile(Path::new("/usr/bin/false"), &mut applied, &desired)
+    let error = reconcile(&executable, &mut applied, &desired)
         .await
-        .expect_err("a process that exits immediately cannot become an MCP server");
+        .expect_err("a server that rejects initialization cannot become an MCP server");
     assert!(error.to_string().contains("failed to attach"), "{error:#}");
     assert_eq!(applied.generation, 0);
     assert!(applied.revision.is_empty());

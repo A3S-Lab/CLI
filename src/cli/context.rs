@@ -110,7 +110,7 @@ impl InvocationContext {
         let initial_directory =
             std::env::current_dir().context("failed to determine the invocation directory")?;
         let directory = resolve_directory(cli.directory.as_deref(), &initial_directory)?;
-        let home = environment.nonempty_var_os("HOME").map(PathBuf::from);
+        let home = crate::user_paths::user_home_dir_from(|name| environment.var_os(name));
         let explicit_config = cli
             .config
             .clone()

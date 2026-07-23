@@ -56,9 +56,9 @@ impl WorkspaceController {
     #[post("/actions/pick-directory")]
     async fn pick_workspace_directory(
         &self,
-        #[body] _request: serde_json::Value,
+        #[body] request: serde_json::Value,
     ) -> BootResult<serde_json::Value> {
-        self.service.pick_directory().await
+        self.service.pick_directory(request).await
     }
 
     #[post("/mkdir")]

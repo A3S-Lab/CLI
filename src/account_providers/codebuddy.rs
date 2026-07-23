@@ -5,6 +5,7 @@
 //! directory and consumes its documented `stream-json` output.
 
 use super::cli_transport::{account_cli_system_prompt, complete_streaming, CliInvocation};
+use crate::user_paths::user_home_dir;
 use a3s_code_core::llm::{LlmClient, LlmResponse, Message, StreamEvent, ToolDefinition};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -16,6 +17,9 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+#[cfg(windows)]
+mod windows;
 
 const DISCOVERY_MODEL: &str = "__a3s_account_model_discovery__";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -70,13 +74,36 @@ impl CodeBuddyCli {
             });
         }
 
-        for app in workbuddy_app_candidates() {
+        #[cfg(target_os = "macos")]
+        for app in workbuddy_macos_app_candidates() {
             let program = app.join("Contents/MacOS/Electron");
             let archive = app.join("Contents/Resources/app.asar");
             let script = app.join("Contents/Resources/app.asar/cli/bin/codebuddy");
             // `script` is an Electron ASAR virtual path, so the host filesystem
             // correctly reports it as "not a file" even though Electron can
             // execute it. Validate the containing archive instead.
+            if program.is_file() && archive.is_file() {
+                return Ok(Self {
+                    program,
+                    prefix_args: vec![script.into_os_string()],
+                    config_dir: workbuddy_config_dir(),
+                    electron_run_as_node: true,
+                });
+            }
+        }
+
+        #[cfg(windows)]
+        for program in windows::workbuddy_executable_candidates() {
+            let Some(app_dir) = program.parent() else {
+                continue;
+            };
+            let archive = app_dir.join("resources/app.asar");
+            let unpacked_script = app_dir.join("resources/app.asar.unpacked/cli/bin/codebuddy");
+            let script = if unpacked_script.is_file() {
+                unpacked_script
+            } else {
+                app_dir.join("resources/app.asar/cli/bin/codebuddy")
+            };
             if program.is_file() && archive.is_file() {
                 return Ok(Self {
                     program,
@@ -337,7 +364,7 @@ pub(crate) fn workbuddy_config_dir() -> Option<PathBuf> {
     non_empty_env("WORKBUDDY_CONFIG_DIR")
         .or_else(|| non_empty_env("CODEBUDDY_CONFIG_DIR"))
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".workbuddy")))
+        .or_else(|| user_home_dir().map(|home| home.join(".workbuddy")))
 }
 
 fn has_account_state(config_dir: &Path) -> bool {
@@ -356,10 +383,11 @@ fn non_empty_env(name: &str) -> Option<OsString> {
     std::env::var_os(name).filter(|value| !value.is_empty())
 }
 
-fn workbuddy_app_candidates() -> Vec<PathBuf> {
+#[cfg(target_os = "macos")]
+fn workbuddy_macos_app_candidates() -> Vec<PathBuf> {
     let mut candidates = vec![PathBuf::from("/Applications/WorkBuddy.app")];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(Path::new(&home).join("Applications/WorkBuddy.app"));
+    if let Some(home) = user_home_dir() {
+        candidates.push(home.join("Applications/WorkBuddy.app"));
     }
     candidates
 }

@@ -6,7 +6,6 @@ use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::process::Command;
 
 use crate::api::code_web::state::CodeWebState;
 
@@ -97,12 +96,11 @@ impl WorkspaceService {
         }))
     }
 
-    pub(in crate::api::code_web) async fn pick_directory(&self) -> BootResult<serde_json::Value> {
-        let path = pick_native_directory().await?;
-        Ok(json!({
-            "cancelled": path.is_none(),
-            "path": path.map(|value| value.display().to_string()),
-        }))
+    pub(in crate::api::code_web) async fn pick_directory(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        super::picker::pick_directory(&self.state.default_workspace, request).await
     }
 
     pub(in crate::api::code_web) async fn create_dir(
@@ -544,97 +542,6 @@ impl WorkspaceService {
     }
 }
 
-#[cfg(target_os = "macos")]
-async fn pick_native_directory() -> BootResult<Option<PathBuf>> {
-    let output = Command::new("osascript")
-        .args([
-            "-e",
-            "POSIX path of (choose folder with prompt \"Select a local folder\")",
-        ])
-        .output()
-        .await
-        .map_err(|error| {
-            BootError::Internal(format!("could not open the macOS folder picker: {error}"))
-        })?;
-    directory_picker_output(output, "macOS")
-}
-
-#[cfg(target_os = "windows")]
-async fn pick_native_directory() -> BootResult<Option<PathBuf>> {
-    let script = "$shell = New-Object -ComObject Shell.Application; $folder = $shell.BrowseForFolder(0, 'Select a local folder', 0); if ($folder) { $folder.Self.Path }";
-    for program in ["pwsh", "powershell"] {
-        match Command::new(program)
-            .args(["-NoProfile", "-Command", script])
-            .output()
-            .await
-        {
-            Ok(output) => return directory_picker_output(output, "Windows"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(BootError::Internal(format!(
-                    "could not open the Windows folder picker: {error}"
-                )))
-            }
-        }
-    }
-    Err(BootError::Internal(
-        "could not open the Windows folder picker because PowerShell is unavailable".to_string(),
-    ))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-async fn pick_native_directory() -> BootResult<Option<PathBuf>> {
-    let candidates: [(&str, &[&str]); 2] = [
-        (
-            "zenity",
-            &[
-                "--file-selection",
-                "--directory",
-                "--title=Select a local folder",
-            ],
-        ),
-        ("kdialog", &["--getexistingdirectory", "."]),
-    ];
-    for (program, arguments) in candidates {
-        match Command::new(program).args(arguments).output().await {
-            Ok(output) => return directory_picker_output(output, "Linux"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(BootError::Internal(format!(
-                    "could not open the Linux folder picker: {error}"
-                )))
-            }
-        }
-    }
-    Err(BootError::Internal(
-        "no supported graphical folder picker is installed; enter the folder path manually"
-            .to_string(),
-    ))
-}
-
-fn directory_picker_output(
-    output: std::process::Output,
-    platform: &str,
-) -> BootResult<Option<PathBuf>> {
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if output
-            .status
-            .code()
-            .is_some_and(|code| matches!(code, 1 | 2 | 130))
-            || stderr.to_ascii_lowercase().contains("cancel")
-        {
-            return Ok(None);
-        }
-        return Err(BootError::Internal(format!(
-            "{platform} folder picker failed: {}",
-            stderr.trim()
-        )));
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
-}
-
 async fn path_exists(path: &Path) -> bool {
     fs::metadata(path).await.is_ok()
 }
@@ -690,8 +597,8 @@ pub(super) fn required_path(value: String) -> BootResult<PathBuf> {
 
 fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return Path::new(&home).join(rest);
+        if let Some(home) = crate::user_paths::user_home_dir() {
+            return home.join(rest);
         }
     }
     PathBuf::from(path)

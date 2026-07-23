@@ -10,6 +10,7 @@ mod stream;
 mod tls;
 mod transport;
 
+use crate::user_paths::user_home_dir;
 use a3s_code_core::llm::{
     structured::{NativeStructuredSupport, StructuredDirective},
     ContentBlock, LlmClient, LlmResponse, Message, ModelGenerationConcurrency,
@@ -18,12 +19,7 @@ use a3s_code_core::llm::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -42,7 +38,7 @@ pub(crate) fn codex_home() -> Option<PathBuf> {
     if let Some(configured) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
         return Some(expand_home_path(PathBuf::from(configured)));
     }
-    std::env::var_os("HOME").map(|home| Path::new(&home).join(".codex"))
+    user_home_dir().map(|home| home.join(".codex"))
 }
 
 pub(crate) fn codex_auth_path() -> Option<PathBuf> {
@@ -60,9 +56,7 @@ fn expand_home_path(path: PathBuf) -> PathBuf {
     let Some(rest) = raw.strip_prefix("~/") else {
         return path;
     };
-    std::env::var_os("HOME")
-        .map(|home| Path::new(&home).join(rest))
-        .unwrap_or(path)
+    user_home_dir().map(|home| home.join(rest)).unwrap_or(path)
 }
 
 pub(crate) fn native_reasoning_effort_for_a3s(a3s_effort: &str) -> Option<&'static str> {

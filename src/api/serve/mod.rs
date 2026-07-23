@@ -385,7 +385,8 @@ fn ensure_config_path(options: &ServeOptions) -> anyhow::Result<String> {
         }
     }
 
-    let path = config::default_config_path().ok_or_else(|| anyhow::anyhow!("HOME is not set"))?;
+    let path = config::default_config_path()
+        .ok_or_else(|| anyhow::anyhow!("user home directory is unavailable"))?;
     config::write_template_config(&path)?;
     anyhow::bail!(
         "created starter config at {}; fill in a provider/model, then rerun `a3s web`",

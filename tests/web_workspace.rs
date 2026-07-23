@@ -7,6 +7,47 @@ use std::thread;
 use std::time::Duration;
 
 #[test]
+fn workspace_directory_picker_accepts_a_client_selected_directory() {
+    let root = tempfile::tempdir().expect("temporary workspace picker fixture");
+    let workspace = root.path().join("workspace");
+    let selected = root.path().join("selected-workspace");
+    let web_dir = root.path().join("web");
+    let state_dir = root.path().join("state");
+    let config_path = root.path().join("config.acl");
+    fs::create_dir_all(&workspace).expect("create default workspace");
+    fs::create_dir_all(&selected).expect("create selected workspace");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S workspace picker test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+    let (mut daemon, address) = start_detached_web(&workspace, &config_path, &web_dir, &state_dir);
+
+    let request = serde_json::json!({ "path": selected }).to_string();
+    let response = http_json(
+        &address,
+        "POST",
+        "/api/v1/workspace/actions/pick-directory",
+        Some(&request),
+        "200",
+    );
+    assert_eq!(response["cancelled"], false);
+    assert_eq!(
+        response["path"],
+        selected
+            .canonicalize()
+            .expect("canonical selected workspace")
+            .display()
+            .to_string()
+    );
+
+    daemon.stop();
+    wait_until_stopped(&address);
+}
+
+#[test]
 fn workspace_file_create_is_atomic_and_never_truncates_existing_content() {
     let root = tempfile::tempdir().expect("temporary workspace create fixture");
     let workspace = root.path().join("workspace");

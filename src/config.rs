@@ -40,16 +40,18 @@ default_model = "openai/my-model"
 #   llmExtractionMaxInputChars = 8000
 # }
 
-# Optional: a3s-search configuration. HTTP engines need no browser. Enable the
-# headless block only for google or baidu; manage browser runtimes
-# with `a3s search browser ...` and verify them with `a3s search doctor`.
+# Optional: a3s-search configuration. Without explicit engine entries,
+# web_search uses AnySearch (anonymous, or authenticated by ANYSEARCH_API_KEY).
+# Any engine entries replace that default. Enable the headless block only for
+# google or baidu; manage browser runtimes with `a3s search browser ...` and
+# verify them with `a3s search doctor`.
 # search {
 #   timeout = 20
 #   engine {
 #     ddg   { enabled = true  weight = 1.0 }
 #     brave { enabled = true  weight = 1.0 }
 #     wiki  { enabled = true  weight = 0.8 }
-#     # anysearch { enabled = true weight = 1.0 } # opt-in provider
+#     # anysearch { enabled = true weight = 1.0 } # explicitly configure the default provider
 #     # baidu  { enabled = true weight = 1.0 }
 #     # bing_cn { enabled = true weight = 1.0 }
 #   }
@@ -80,7 +82,7 @@ providers "openai" {
 
 /// `~/.a3s/config.acl` — the default user-global config location.
 pub(crate) fn default_config_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".a3s/config.acl"))
+    crate::user_paths::user_home_dir().map(|home| home.join(".a3s/config.acl"))
 }
 
 /// Where the interactive `/model` picker stores the last successful choice.
@@ -128,8 +130,12 @@ pub(crate) fn save_tui_effort_preference(index: usize) -> std::io::Result<()> {
     let profile = crate::budget::EFFORT_LEVELS.get(index).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TUI effort index")
     })?;
-    let path = tui_effort_preference_path()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let path = tui_effort_preference_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "user home directory is unavailable",
+        )
+    })?;
     save_tui_effort_id(&path, profile.id)
 }
 
@@ -143,7 +149,7 @@ fn save_tui_effort_id(path: &std::path::Path, id: &str) -> std::io::Result<()> {
 }
 
 fn tui_effort_preference_path() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".a3s/tui/effort"))
+    crate::user_paths::user_home_dir().map(|home| home.join(".a3s/tui/effort"))
 }
 
 /// Where long-term memory is stored: `$A3S_MEMORY_DIR`, else a top-level
@@ -165,8 +171,8 @@ pub(crate) fn memory_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".a3s/memory"))
+    crate::user_paths::user_home_dir()
+        .map(|home| home.join(".a3s/memory"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/memory"))
 }
 
@@ -186,8 +192,8 @@ pub(crate) fn flow_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".a3s/flows"))
+    crate::user_paths::user_home_dir()
+        .map(|home| home.join(".a3s/flows"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/flows"))
 }
 
@@ -207,8 +213,8 @@ pub(crate) fn agent_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".a3s/agents"))
+    crate::user_paths::user_home_dir()
+        .map(|home| home.join(".a3s/agents"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/agents"))
 }
 
@@ -228,8 +234,8 @@ pub(crate) fn mcp_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".a3s/mcps"))
+    crate::user_paths::user_home_dir()
+        .map(|home| home.join(".a3s/mcps"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/mcps"))
 }
 
@@ -249,8 +255,8 @@ pub(crate) fn skill_dir() -> std::path::PathBuf {
             }
         }
     }
-    std::env::var_os("HOME")
-        .map(|h| std::path::Path::new(&h).join(".a3s/skills"))
+    crate::user_paths::user_home_dir()
+        .map(|home| home.join(".a3s/skills"))
         .unwrap_or_else(|| std::path::PathBuf::from(".a3s/skills"))
 }
 
@@ -307,11 +313,11 @@ fn top_level_str(text: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Expand a leading `~/` to `$HOME` (config values are user-typed paths).
+/// Expand a leading `~/` to the native user home (config values are user-typed paths).
 fn expand_home(p: &str) -> std::path::PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(h) = std::env::var_os("HOME") {
-            return std::path::Path::new(&h).join(rest);
+        if let Some(home) = crate::user_paths::user_home_dir() {
+            return home.join(rest);
         }
     }
     std::path::PathBuf::from(p)
@@ -347,8 +353,8 @@ pub(crate) fn find_config() -> Option<String> {
             dir = d.parent();
         }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = std::path::Path::new(&home).join(".a3s/config.acl");
+    if let Some(home) = crate::user_paths::user_home_dir() {
+        let candidate = home.join(".a3s/config.acl");
         if candidate.is_file() {
             return Some(candidate.to_string_lossy().into_owned());
         }
