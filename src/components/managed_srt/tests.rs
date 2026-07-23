@@ -533,6 +533,70 @@ async fn real_packaged_payload_enforces_complete_local_command_policy() {
     assert!(!workspace.join("blocked.sock").exists());
 }
 
+/// Run explicitly after preparing `support/managed-srt/node_modules` to verify
+/// that macOS transports a large Seatbelt profile by file instead of argv.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "requires the prepared release payload, Node.js, and macOS Seatbelt"]
+async fn real_packaged_payload_handles_large_macos_profile() {
+    const MARKER: &str = "a3s-managed-srt-large-profile-ready";
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let outside = root.path().join("outside-secret");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(&outside, "HARDLINK_SECRET=hidden").unwrap();
+
+    for directory in 0..128 {
+        let nested = workspace.join(format!("service-{directory:03}/config"));
+        std::fs::create_dir_all(&nested).unwrap();
+        for variant in 0..4 {
+            std::fs::write(
+                nested.join(format!(".env.variant-{variant}")),
+                "MANY_PATHS_SECRET=hidden",
+            )
+            .unwrap();
+        }
+    }
+    for index in 0..1_024 {
+        std::fs::hard_link(
+            &outside,
+            workspace.join(format!(
+                "outside-hardlink-profile-alias-with-a-deliberately-long-name-{index:04}.txt"
+            )),
+        )
+        .unwrap();
+    }
+
+    let mut paths = ComponentPaths::for_test(root.path());
+    paths.path_env = std::env::var_os("PATH");
+    paths.current_exe = Path::new(env!("CARGO_MANIFEST_DIR")).join("a3s-release-fixture");
+    let resolution = resolve_managed_srt(&paths, &workspace, false, true, false).await;
+    assert!(resolution.warning.is_none(), "{:?}", resolution.warning);
+    let runtime = resolution.runtime.expect("packaged managed SRT");
+    let sandbox = runtime.build_and_probe_sandbox(&workspace).await.unwrap();
+
+    let output = sandbox
+        .exec_command(
+            "cat service-127/config/.env.variant-3 2>/dev/null || true; \
+             cat outside-hardlink-profile-alias-with-a-deliberately-long-name-1023.txt \
+             2>/dev/null || true; \
+             printf a3s-managed-srt-large-profile-ready",
+            "/workspace",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        output.exit_code, 0,
+        "large managed SRT profile failed: {}{}",
+        output.stdout, output.stderr
+    );
+    assert_eq!(
+        output.stdout, MARKER,
+        "large profile exposed protected data"
+    );
+}
+
 #[cfg(unix)]
 async fn assert_sandbox_denies(
     sandbox: &impl BashSandbox,

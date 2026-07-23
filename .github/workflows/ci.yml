@@ -15,13 +15,13 @@ jobs:
       - name: Use published A3S crates
         run: bash .github/scripts/use-published-a3s-crates.sh
       - name: Test managed sandbox compatibility patch
-        run: node src/components/managed_srt/patch-managed-srt-linux.mjs --self-test
+        run: node src/components/managed_srt/patch-managed-srt.mjs --self-test
       - name: Verify crate package contents
         run: |
           set -euo pipefail
           cargo package --locked --allow-dirty --list \
             | grep -Fx \
-              'src/components/managed_srt/patch-managed-srt-linux.mjs'
+              'src/components/managed_srt/patch-managed-srt.mjs'
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all-targets
@@ -55,7 +55,11 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
-          node ../../src/components/managed_srt/patch-managed-srt-linux.mjs .
+          node ../../src/components/managed_srt/patch-managed-srt.mjs .
+          node --check \
+            node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js
+          node --check \
+            node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
           node -e '
             const fs = require("node:fs");
             for (const path of [
@@ -95,6 +99,12 @@ jobs:
           cargo test --locked --lib \
             components::managed_srt::tests::real_packaged_payload_enforces_complete_local_command_policy \
             -- --ignored --exact --nocapture
+      - name: Prove large macOS Seatbelt profiles avoid argv limits
+        run: |
+          set -euo pipefail
+          cargo test --locked --lib \
+            components::managed_srt::tests::real_packaged_payload_handles_large_macos_profile \
+            -- --ignored --exact --nocapture
       - name: Prove managed sandbox first-use installation
         run: |
           set -euo pipefail
@@ -130,7 +140,11 @@ jobs:
             --engine-strict=true \
             --registry=https://registry.npmjs.org/ \
             --replace-registry-host=never
-          node ../../src/components/managed_srt/patch-managed-srt-linux.mjs .
+          node ../../src/components/managed_srt/patch-managed-srt.mjs .
+          node --check \
+            node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js
+          node --check \
+            node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
           node -e '
             const fs = require("node:fs");
             for (const path of [

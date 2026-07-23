@@ -21,13 +21,13 @@ mod tree;
 
 const SRT_COMPONENT_ID: &str = "code/srt";
 const SRT_PACKAGE_INTEGRITY: &str =
-    "sha512-OE7QiGZJXe7ZshP47U2vk2z9FGSyiSN4ca9krVrE28LS2Qj0AHRWZz+gAce6FzG3gx/4OjNFwIhDuHXnI0WWwA==";
+    "sha512-4doSyr6KNdc/4zARMXYEawhFu3z6bPQjgKRq3lKp6dbgEYVMv39oaLJ28QsDc7TmLvrLqzHW+VzD2LAXxvnw8A==";
 const LOCKED_NPM_PACKAGES: &[LockedNpmPackage] = &[
     LockedNpmPackage {
         path: "node_modules/@anthropic-ai/sandbox-runtime",
-        version: "0.0.66",
+        version: "0.0.67",
         integrity: SRT_PACKAGE_INTEGRITY,
-        resolved: "https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/-/sandbox-runtime-0.0.66.tgz",
+        resolved: "https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/-/sandbox-runtime-0.0.67.tgz",
     },
     LockedNpmPackage {
         path: "node_modules/@pondwader/socks5-server",
@@ -54,7 +54,7 @@ const LOCKED_NPM_PACKAGES: &[LockedNpmPackage] = &[
         resolved: "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
     },
 ];
-const SRT_SOURCE: &str = "npm:@anthropic-ai/sandbox-runtime@0.0.66";
+const SRT_SOURCE: &str = "npm:@anthropic-ai/sandbox-runtime@0.0.67";
 const NPM_REGISTRY: &str = "https://registry.npmjs.org/";
 const PACKAGE_INTEGRITY_KEY: &str = "npm-package-integrity";
 const INSTALL_TREE_KEY: &str = "install-tree-sha256";
@@ -62,7 +62,7 @@ pub const MANAGED_SRT_PAYLOAD_RELATIVE_ROOT: &str = "support/managed-srt";
 const PACKAGED_SRT_TREE_SHA256: &str = include_str!("../../support/managed-srt.tree-sha256");
 const MANAGED_PACKAGE_JSON: &[u8] = include_bytes!("../../support/managed-srt/package.json");
 const MANAGED_PACKAGE_LOCK: &[u8] = include_bytes!("../../support/managed-srt/package-lock.json");
-const MANAGED_SRT_LINUX_PATCHER: &str = include_str!("managed_srt/patch-managed-srt-linux.mjs");
+const MANAGED_SRT_COMPAT_PATCHER: &str = include_str!("managed_srt/patch-managed-srt.mjs");
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const INSTALL_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -581,7 +581,7 @@ async fn apply_managed_srt_compat_patches(
     trusted_path: &OsStr,
 ) -> anyhow::Result<()> {
     let patcher = root.join(".a3s-managed-srt-compat.mjs");
-    tokio::fs::write(&patcher, MANAGED_SRT_LINUX_PATCHER)
+    tokio::fs::write(&patcher, MANAGED_SRT_COMPAT_PATCHER)
         .await
         .with_context(|| {
             format!(

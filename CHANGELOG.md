@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-07-23
+
+### Changed
+
+- Updated the managed local sandbox to sandbox-runtime 0.0.67 and A3S Code
+  Core 6.4.2.
+
+### Fixed
+
+- Passed generated macOS Seatbelt profiles through private mode-0600 files
+  instead of the process argument vector, preventing `spawn E2BIG` when a
+  workspace requires many credential or hard-link rules.
+- Kept managed-runtime temporary files inside the command's private scratch
+  directory so profile-file cleanup follows the command lifecycle.
+
 ## [0.10.3] - 2026-07-23
 
 ### Fixed
