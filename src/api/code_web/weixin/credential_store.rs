@@ -389,7 +389,7 @@ fn verify_ancestor_chain(
         }
         let mode = metadata.permissions().mode();
         let writable_by_others = mode & 0o022 != 0;
-        let sticky = mode & libc::S_ISVTX as u32 != 0;
+        let sticky = mode & 0o1000 != 0;
         if writable_by_others && !sticky {
             return Err(CredentialStoreError::UnsafePermissions);
         }
