@@ -240,6 +240,7 @@ fn osc52_payload(text: &str) -> &str {
 /// keeps this marker clickable.
 pub(super) const VIEW_BUTTON_MARKER: &str = "Open view";
 pub(super) const VIEW_BUTTON_CLICK_DRIFT_COLS: u16 = 2;
+#[cfg(test)]
 pub(super) const RESEARCH_VIEW_MARKER: &str = "A3S_RESEARCH_VIEW:";
 
 pub(super) fn remote_view_button(detail: &str) -> String {

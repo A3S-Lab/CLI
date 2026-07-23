@@ -14,7 +14,6 @@ use super::*;
 
 const FETCHED_SENTENCE: &str =
     "The official Nimbus record states that version 2 receives fixes through September 2027.";
-const FETCHED_OUTCOME: &str = "世界杯冠军西班牙队击败阿根廷队。阿根廷主帅表示西班牙队配得上胜利。国际足联正在调查世界杯决赛赛后冲突。";
 
 struct EvidenceFirstSearch {
     return_source: bool,
@@ -74,60 +73,6 @@ impl Tool for EvidenceFirstFetch {
     }
 }
 
-struct EvidenceFirstOutcomeSearch;
-
-#[async_trait::async_trait]
-impl Tool for EvidenceFirstOutcomeSearch {
-    fn name(&self) -> &str {
-        "evidence_first_fixture_search"
-    }
-
-    fn description(&self) -> &str {
-        "Returns one accountable event-outcome source."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type": "object"})
-    }
-
-    async fn execute(&self, _args: &Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::success(
-            serde_json::json!([{
-                "title": "世界杯决赛赛果",
-                "url": "https://www.news.cn/sports/world-cup-final",
-                "engines": ["fixture"]
-            }])
-            .to_string(),
-        ))
-    }
-}
-
-struct EvidenceFirstOutcomeFetch;
-
-#[async_trait::async_trait]
-impl Tool for EvidenceFirstOutcomeFetch {
-    fn name(&self) -> &str {
-        "evidence_first_fixture_fetch"
-    }
-
-    fn description(&self) -> &str {
-        "Returns one accountable event-outcome record."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type": "object"})
-    }
-
-    async fn execute(&self, args: &Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        anyhow::ensure!(
-            args.get("url").and_then(Value::as_str)
-                == Some("https://www.news.cn/sports/world-cup-final"),
-            "unexpected outcome fixture URL"
-        );
-        Ok(ToolOutput::success(FETCHED_OUTCOME))
-    }
-}
-
 #[derive(Clone, Copy)]
 enum ProposalBehavior {
     Slow,
@@ -149,9 +94,74 @@ impl EvidenceFirstProposal {
             .map(Message::text)
             .collect::<Vec<_>>()
             .join("\n");
+        if prompt.contains("Create one bounded semantic retrieval plan") {
+            return Ok(serde_json::json!({
+                "report_title": "Nimbus support research",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "support.boundary",
+                    "title": "Support boundary",
+                    "focus": "Establish the supported Nimbus release and maintenance boundary.",
+                    "material": true,
+                    "completion_criteria": [
+                        "A traceable source identifies the release and support boundary."
+                    ],
+                    "evidence_requirements": {
+                        "primary_source_required": true,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "supplemental_queries": []
+            }));
+        }
         if prompt.contains("CLOSED_WEB_DISCOVERY_PACKET=") {
             return Ok(serde_json::json!({
                 "candidate_ids": ["web-candidate-1"]
+            }));
+        }
+        if let Some((_, packet)) = prompt.split_once("CLOSED_EVIDENCE_PACKET=") {
+            let packet: Value = serde_json::from_str(packet)?;
+            let source = packet["sources"]
+                .as_array()
+                .and_then(|sources| sources.first())
+                .ok_or_else(|| anyhow::anyhow!("fixture evidence packet omitted source"))?;
+            let source_id = source["source_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("fixture evidence source omitted ID"))?;
+            let chunk_id = source["chunks"]
+                .as_array()
+                .and_then(|chunks| chunks.first())
+                .and_then(|chunk| chunk["chunk_id"].as_str())
+                .ok_or_else(|| anyhow::anyhow!("fixture evidence source omitted chunk"))?;
+            let focus = packet["focuses"]
+                .as_array()
+                .and_then(|focuses| focuses.first())
+                .ok_or_else(|| anyhow::anyhow!("fixture evidence packet omitted focus"))?;
+            let obligation_id = focus["obligation_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("fixture focus omitted obligation ID"))?;
+            let criterion_count = focus["completion_criteria"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(1);
+            return Ok(serde_json::json!({
+                "chunk_ids": [chunk_id],
+                "source_coverage": [{
+                    "source_id": source_id,
+                    "obligation_id": obligation_id,
+                    "completion_criterion_indexes": (0..criterion_count).collect::<Vec<_>>(),
+                    "roles": {
+                        "supporting": true,
+                        "primary": focus["evidence_requirements"]["primary_source_required"] == true,
+                        "independent": focus["evidence_requirements"]["independent_corroboration_required"] == true
+                    }
+                }],
+                "source_relevance": [{
+                    "source_id": source_id,
+                    "obligation_id": obligation_id
+                }]
             }));
         }
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -171,7 +181,8 @@ impl EvidenceFirstProposal {
             ProposalBehavior::Invalid => Ok(serde_json::json!({
                 "summary": [{
                     "text": "A fabricated source claims support through 2099.",
-                    "source_aliases": ["source-99"]
+                    "source_aliases": ["source-99"],
+                    "track_ids": ["support.boundary"]
                 }],
                 "findings": [],
                 "recommendations": [],
@@ -183,11 +194,13 @@ impl EvidenceFirstProposal {
             ProposalBehavior::FailOnceThenValid => Ok(serde_json::json!({
                 "summary": [{
                     "text": "Nimbus version 2 receives fixes through September 2027.",
-                    "source_aliases": ["source-1"]
+                    "source_aliases": ["source-1"],
+                    "track_ids": ["support.boundary"]
                 }],
                 "findings": [{
                     "text": "The official Nimbus record identifies version 2 and September 2027 as the support boundary.",
-                    "source_aliases": ["source-1"]
+                    "source_aliases": ["source-1"],
+                    "track_ids": ["support.boundary"]
                 }],
                 "recommendations": [],
                 "limitations": []
@@ -243,21 +256,78 @@ struct UnexpectedProposal {
 impl LlmClient for UnexpectedProposal {
     async fn complete(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _system: Option<&str>,
         _tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
+        let prompt = messages
+            .iter()
+            .map(Message::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if prompt.contains("Create one bounded semantic retrieval plan") {
+            return Ok(EvidenceFirstProposal::response(serde_json::json!({
+                "report_title": "Nimbus evidence check",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "request.primary",
+                    "title": "Requested evidence",
+                    "focus": "Establish the requested answer.",
+                    "material": true,
+                    "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "evidence_requirements": {
+                        "primary_source_required": false,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "supplemental_queries": []
+            })));
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
         anyhow::bail!("no-evidence publication must not invoke report generation")
     }
 
     async fn complete_streaming(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
         _system: Option<&str>,
         _tools: &[ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        let prompt = messages
+            .iter()
+            .map(Message::text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if prompt.contains("Create one bounded semantic retrieval plan") {
+            let response = EvidenceFirstProposal::response(serde_json::json!({
+                "report_title": "Nimbus evidence check",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "request.primary",
+                    "title": "Requested evidence",
+                    "focus": "Establish the requested answer.",
+                    "material": true,
+                    "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "evidence_requirements": {
+                        "primary_source_required": false,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "supplemental_queries": []
+            }));
+            let text = response.message.text();
+            let (tx, rx) = mpsc::channel(4);
+            tokio::spawn(async move {
+                tx.send(StreamEvent::TextDelta(text)).await.ok();
+                tx.send(StreamEvent::Done(response)).await.ok();
+            });
+            return Ok(rx);
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
         anyhow::bail!("no-evidence publication must not invoke report generation")
     }
@@ -420,50 +490,6 @@ async fn empty_acquisition_publishes_honest_artifacts_without_a_model_call() {
     );
 }
 
-#[tokio::test]
-async fn accountable_event_outcome_publishes_without_waiting_for_report_generation() {
-    let workspace = tempfile::tempdir().expect("create deterministic outcome workspace");
-    let query = "世界杯战况";
-    let calls = Arc::new(AtomicUsize::new(0));
-    let saw_staged_report = Arc::new(AtomicBool::new(false));
-    let report_path = report_markdown_path(workspace.path(), query);
-    let (_agent, session) = outcome_fixture_session(
-        workspace.path(),
-        Arc::new(EvidenceFirstProposal {
-            behavior: ProposalBehavior::Slow,
-            report_path,
-            calls: Arc::clone(&calls),
-            saw_staged_report,
-        }),
-    )
-    .await;
-    let args = evidence_first_args(query, "evidence-first-deterministic-outcome");
-
-    let result = execute_fixture_runtime(session, args, 2_000)
-        .await
-        .expect("accountable outcome evidence should publish without a report-model call");
-
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "{}", result.output);
-    let output: Value = serde_json::from_str(&result.output).expect("decode outcome output");
-    assert_eq!(output["publication"]["status"], "synthesized");
-    assert_eq!(output["research"]["status"], "success");
-    assert_eq!(
-        output["research"]["metadata"]["synthesis_mode"],
-        "deterministic_outcome_extract"
-    );
-    assert_eq!(
-        output["research"]["metadata"]["required_model_generation_count"],
-        0
-    );
-    assert_eq!(output["research"]["metadata"]["model_generation_count"], 0);
-    let markdown = std::fs::read_to_string(report_markdown_path(workspace.path(), query))
-        .expect("read deterministic outcome report");
-    assert!(markdown.contains("## 直接回答"), "{markdown}");
-    assert!(markdown.contains("世界杯冠军西班牙队击败阿根廷队"));
-    assert!(markdown.contains("## 研究发现"), "{markdown}");
-    assert!(!markdown.contains("已保留的来源证据"), "{markdown}");
-}
-
 async fn fixture_session(
     workspace: &Path,
     return_source: bool,
@@ -502,46 +528,6 @@ async fn fixture_session(
     session
         .register_dynamic_tool(Arc::new(EvidenceFirstFetch))
         .expect("register fixture fetch");
-    (agent, session)
-}
-
-async fn outcome_fixture_session(
-    workspace: &Path,
-    proposal: Arc<dyn LlmClient>,
-) -> (Agent, AgentSession) {
-    let config = workspace.join("outcome-config.acl");
-    std::fs::write(
-        &config,
-        "default_model = \"openai/x\"\n\
-         providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
-         models \"x\" { name = \"x\" }\n}\n",
-    )
-    .expect("write outcome fixture config");
-    let agent = Agent::new(config.to_string_lossy().to_string())
-        .await
-        .expect("create outcome fixture agent");
-    let options = SessionOptions::new()
-        .with_session_id(format!(
-            "evidence-first-outcome-fixture-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ))
-        .with_llm_client(proposal)
-        .with_auto_save(false)
-        .with_tool_timeout(5_000);
-    let session = agent
-        .session_async(workspace.to_string_lossy().to_string(), Some(options))
-        .await
-        .expect("create outcome fixture session");
-    session
-        .register_dynamic_workflow_runtime()
-        .expect("register outcome workflow runtime");
-    session
-        .register_dynamic_tool(Arc::new(EvidenceFirstOutcomeSearch))
-        .expect("register outcome search");
-    session
-        .register_dynamic_tool(Arc::new(EvidenceFirstOutcomeFetch))
-        .expect("register outcome fetch");
     (agent, session)
 }
 
@@ -587,6 +573,7 @@ async fn execute_fixture_runtime(
         progress_tx,
         EvidenceFirstRuntimeLimits {
             bootstrap_stage_timeout_ms: 5_000,
+            planned_retrieval_stage_timeout_ms: 5_000,
             report_proposal_attempt_timeout_ms: proposal_stage_timeout_ms
                 .saturating_sub(200)
                 .max(1_000),

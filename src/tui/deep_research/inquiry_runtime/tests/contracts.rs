@@ -22,6 +22,7 @@ use super::plan::{
 fn minimal_plan() -> Value {
     serde_json::json!({
         "report_title": "跨语言证据报告",
+        "research_scope": "comprehensive",
         "freshness_required": true,
         "workspace_evidence_required": false,
         "tracks": [{
@@ -66,25 +67,18 @@ fn automatic_loop_workflow_args(query: &str) -> Value {
 }
 
 #[test]
-fn host_fallback_contract_preserves_the_original_query_and_adds_one_authority_query() {
+fn host_fallback_contract_searches_only_the_exact_original_query() {
     let query = "截至 2026 年核实一个 planner 失败后仍必须检索的公开结论";
     let mut args = automatic_loop_workflow_args(query);
     args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
 
     let fallback = host_fallback_plan(&args).expect("host fallback plan");
 
-    assert_eq!(fallback.value["search_queries"][0], query);
-    assert_eq!(
-        fallback.value["search_queries"][1],
-        format!("{query} 2026年7月19日 最新进展 最终结果 新闻")
-    );
-    assert_eq!(
-        fallback.value["search_queries"].as_array().unwrap().len(),
-        2
-    );
-    assert_eq!(fallback.value["budget"]["direct_searches"], 2);
+    assert_eq!(fallback.value["search_queries"], serde_json::json!([query]));
+    assert_eq!(fallback.value["budget"]["direct_searches"], 1);
     assert_eq!(fallback.value["budget"]["direct_fetches"], 8);
     assert_eq!(fallback.value["budget"]["retrieval_timeout_ms"], 150_000);
+    assert_eq!(fallback.value["research_scope"], "comprehensive");
     assert_eq!(fallback.value["tracks"][0]["id"], "request.primary");
     assert_eq!(fallback.value["tracks"][0]["material"], true);
     assert_eq!(
@@ -94,52 +88,20 @@ fn host_fallback_contract_preserves_the_original_query_and_adds_one_authority_qu
 }
 
 #[test]
-fn authority_companion_uses_the_current_date_and_a_query_script_hint() {
-    let query = "Verify the current World Cup result";
-    let mut args = automatic_loop_workflow_args(query);
-    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+fn fallback_shape_is_identical_for_unrelated_topics_and_bare_entities() {
+    for query in [
+        "Aurora",
+        "核聚变商业化",
+        "PostgreSQL logical replication reliability",
+    ] {
+        let mut args = automatic_loop_workflow_args(query);
+        args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+        let fallback = host_fallback_plan(&args).expect("host fallback plan");
 
-    let fallback = host_fallback_plan(&args).expect("host fallback plan");
-
-    assert_eq!(fallback.value["search_queries"][0], query);
-    assert_eq!(
-        fallback.value["search_queries"][1],
-        "Verify the current World Cup result 2026 final result final score champion winner authoritative report"
-    );
-    assert_eq!(
-        fallback.value["search_queries"].as_array().unwrap().len(),
-        2
-    );
-}
-
-#[test]
-fn competition_outcome_companion_targets_terminal_evidence() {
-    let query = "世界杯战况";
-    let mut args = automatic_loop_workflow_args(query);
-    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
-
-    let fallback = host_fallback_plan(&args).expect("host fallback plan");
-
-    assert_eq!(fallback.value["search_queries"][0], query);
-    assert_eq!(
-        fallback.value["search_queries"][1],
-        "世界杯 2026 决赛 冠军 比分"
-    );
-}
-
-#[test]
-fn competition_outcome_companion_does_not_repeat_year_or_generic_intent() {
-    let query = "2026世界杯赛况结果";
-    let mut args = automatic_loop_workflow_args(query);
-    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
-
-    let fallback = host_fallback_plan(&args).expect("host fallback plan");
-
-    assert_eq!(fallback.value["search_queries"][0], query);
-    assert_eq!(
-        fallback.value["search_queries"][1],
-        "2026世界杯 决赛 冠军 比分"
-    );
+        assert_eq!(fallback.value["search_queries"], serde_json::json!([query]));
+        assert_eq!(fallback.value["tracks"].as_array().unwrap().len(), 1);
+        assert_eq!(fallback.value["tracks"][0]["focus"], query);
+    }
 }
 
 #[test]
@@ -231,7 +193,9 @@ fn automatic_loop_contract_is_bounded_and_progressively_publishable() {
             .collect::<std::collections::BTreeSet<_>>(),
         [
             "report_title",
+            "research_scope",
             "freshness_required",
+            "supplemental_queries",
             "workspace_evidence_required",
             "tracks"
         ]
@@ -273,44 +237,68 @@ fn one_optional_outline_becomes_a_complete_host_owned_plan() {
     args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
     let outline = serde_json::json!({
         "report_title": "公开结论核实",
+        "research_scope": "comprehensive",
         "freshness_required": true,
         "workspace_evidence_required": true,
         "tracks": [{
             "id": "publisher.primary",
             "title": "发布方原始记录",
-            "material": true
+            "focus": "核实发布方记录中的核心结论",
+            "material": true,
+            "completion_criteria": ["发布方记录直接说明核心结论"],
+            "evidence_requirements": {
+                "primary_source_required": true,
+                "independent_corroboration_required": false
+            }
         }, {
             "id": "independent.context",
             "title": "独立背景材料",
-            "material": false
-        }]
+            "focus": "寻找独立材料说明背景与限制",
+            "material": false,
+            "completion_criteria": ["独立材料说明至少一项背景或限制"],
+            "evidence_requirements": {
+                "primary_source_required": false,
+                "independent_corroboration_required": true
+            }
+        }],
+        "supplemental_queries": [
+            "公开结论 发布方 原始记录",
+            "公开结论 独立评估 限制"
+        ]
     });
 
     let plan = host_plan_from_outline(&args, outline).expect("Host-completed outline plan");
 
     assert_eq!(plan.value["search_queries"][0], query);
     assert_eq!(
-        plan.value["search_queries"][1],
-        format!("{query} 2026年7月19日 最新进展 最终结果 新闻")
+        plan.value["search_queries"],
+        serde_json::json!([
+            query,
+            "公开结论 发布方 原始记录",
+            "公开结论 独立评估 限制"
+        ])
     );
     assert_eq!(plan.value["seed_urls"], serde_json::json!([]));
-    assert_eq!(plan.value["budget"]["direct_searches"], 2);
+    assert_eq!(plan.value["budget"]["direct_searches"], 3);
     assert_eq!(plan.value["budget"]["direct_fetches"], 8);
     assert_eq!(plan.value["budget"]["retrieval_timeout_ms"], 150_000);
     assert_eq!(plan.value["workspace_evidence_required"], true);
-    assert_eq!(plan.value["tracks"][0]["focus"], "发布方原始记录");
+    assert_eq!(
+        plan.value["tracks"][0]["focus"],
+        "核实发布方记录中的核心结论"
+    );
     assert_eq!(
         plan.value["tracks"][0]["questions"],
-        serde_json::json!(["发布方原始记录"])
+        serde_json::json!(["核实发布方记录中的核心结论"])
     );
     assert_eq!(
         plan.value["tracks"][0]["completion_criteria"],
-        serde_json::json!(["发布方原始记录"])
+        serde_json::json!(["发布方记录直接说明核心结论"])
     );
     assert_eq!(
         plan.value["tracks"][0]["evidence_requirements"],
         serde_json::json!({
-            "primary_source_required": false,
+            "primary_source_required": true,
             "independent_corroboration_required": false
         })
     );
@@ -321,6 +309,48 @@ fn one_optional_outline_becomes_a_complete_host_owned_plan() {
             "Any remaining limitation is disclosed and cannot make the qualified answer misleading."
         ])
     );
+}
+
+#[test]
+fn semantic_supplements_reject_urls_duplicates_and_exact_query_repetition() {
+    let query = "Aurora";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+    let outline = |supplemental_queries: Value| {
+        serde_json::json!({
+            "report_title": "Aurora research",
+            "research_scope": "comprehensive",
+            "freshness_required": false,
+            "workspace_evidence_required": false,
+            "tracks": [{
+                "id": "aurora.primary",
+                "title": "Aurora evidence",
+                "focus": "Establish what Aurora refers to and the requested evidence.",
+                "material": true,
+                "completion_criteria": ["The entity and requested facts are traceable."],
+                "evidence_requirements": {
+                    "primary_source_required": false,
+                    "independent_corroboration_required": true
+                }
+            }],
+            "supplemental_queries": supplemental_queries
+        })
+    };
+
+    for queries in [
+        serde_json::json!([query]),
+        serde_json::json!(["https://example.test/aurora"]),
+        serde_json::json!(["Aurora independent assessment", "Aurora independent assessment"]),
+    ] {
+        let error = host_plan_from_outline(&args, outline(queries))
+            .expect_err("invalid semantic supplements must fail closed");
+        assert!(
+            error.contains("exact query")
+                || error.contains("URL")
+                || error.contains("duplicate"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
@@ -484,8 +514,14 @@ fn active_runtime_cannot_emit_legacy_research_control_events() {
     let active_sources = [
         include_str!("../../inquiry_runtime.rs"),
         include_str!("../plan.rs"),
-        include_str!("../plan/planning.rs"),
-        include_str!("../plan/bounding.rs"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/planner/planning.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/planner/bounding.rs"
+        )),
         include_str!("../execution.rs"),
         include_str!("../execution/resolution.rs"),
         include_str!("../execution/evidence.rs"),
@@ -510,9 +546,76 @@ fn active_runtime_cannot_emit_legacy_research_control_events() {
         );
     }
 
-    let model = include_str!("../../../../research/model.rs");
+    let model = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/research/model.rs"
+    ));
     assert!(!model.contains("pub fn follow_up"));
     assert!(!model.contains("impl Perspective"));
+}
+
+#[test]
+fn production_research_routing_contains_no_topic_specific_rules() {
+    let active_sources = [
+        include_str!("../../inquiry_runtime.rs"),
+        include_str!("../plan.rs"),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/planner/contract.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/planner/planning.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/planner/bounding.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/workflow/retrieval_web.js"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/workflow/retrieval_execution.js"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/report/artifacts/proposal.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/report/artifacts/report_scope.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/report/artifacts/source_backed.rs"
+        )),
+        include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../deep-research/src/report/artifacts/source_quality.rs"
+        )),
+    ];
+    for forbidden in [
+        "world cup",
+        "世界杯",
+        "fifa",
+        "football",
+        "soccer",
+        "olympic",
+        "competition-result",
+        "standings",
+        "champion",
+        "deterministicOutcome",
+        "queryRequestsCompetition",
+    ] {
+        assert!(
+            active_sources
+                .iter()
+                .all(|source| !source.to_ascii_lowercase().contains(forbidden)),
+            "production DeepResearch routing contains topic-specific rule `{forbidden}`"
+        );
+    }
 }
 
 #[test]
@@ -633,7 +736,7 @@ fn closed_retrieval_failure_bounds_every_unanswered_question() {
 #[test]
 fn one_batched_extraction_leaves_contract_reduction_to_the_host() {
     const EXTRACTION: &str = include_str!("../execution/extraction.rs");
-    const GENERATION: &str = include_str!("../../workflow/generation.js");
+    const GENERATION: &str = a3s_deep_research::workflow::GENERATION_WORKFLOW_SOURCE;
 
     assert_eq!(super::EVIDENCE_EXTRACTION_ATTEMPT_TIMEOUT_MS, 360_000);
     assert_eq!(super::EVIDENCE_EXTRACTION_STAGE_TIMEOUT_MS, 375_000);
@@ -805,7 +908,6 @@ fn inquiry_budget_keeps_the_full_closed_review_reserve_after_retrieval() {
     assert_eq!(super::PLANNER_OUTLINE_ATTEMPT_TIMEOUT_MS, 90_000);
     assert_eq!(super::PLANNER_GENERATION_MAX_ATTEMPTS, 1);
     assert_eq!(super::PLANNER_OUTLINE_WORKFLOW_TIMEOUT_MS, 105_000);
-    assert_eq!(super::MAX_PLANNER_TRACK_EFFECTS, 4);
     assert_eq!(super::DEEP_RESEARCH_PLANNER_STAGE_TIMEOUT_MS, 105_000);
     assert_eq!(super::BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS, 150_000);
     assert_eq!(super::DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS, 150_000);

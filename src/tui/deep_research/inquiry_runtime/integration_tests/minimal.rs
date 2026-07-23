@@ -1,23 +1,20 @@
 #[test]
-fn production_runtime_has_exactly_one_retrieval_call_site() {
+fn production_runtime_delegates_the_evidence_first_pipeline_to_one_engine_call() {
     const RUNTIME: &str = include_str!("../../inquiry_runtime.rs");
     let active_start = RUNTIME
         .find("async fn execute_evidence_first_research(")
         .expect("production evidence-first runtime");
     let active_end = RUNTIME[active_start..]
-        .find("\nfn bounded_evidence_first_error(")
+        .find("\n/// Spawn the complete evidence inquiry")
         .map(|offset| active_start + offset)
         .expect("end of production evidence-first runtime");
     let active_runtime = &RUNTIME[active_start..active_end];
 
-    assert_eq!(
-        active_runtime
-            .matches("run_bootstrap_acquisition_stage(")
-            .count(),
-        1
-    );
+    assert_eq!(active_runtime.matches("DeepResearchEngine::new(").count(), 1);
+    assert_eq!(active_runtime.matches(".execute(args.clone())").count(), 1);
+    assert!(!active_runtime.contains("run_bootstrap_acquisition_stage("));
+    assert!(!active_runtime.contains("run_dynamic_workflow("));
     assert!(!active_runtime.contains("run_retrieval_stage("));
-    assert!(!active_runtime.contains("run_dynamic_workflow(session"));
     for obsolete in [
         "resolve_questions_with_bounded_follow_up_waves",
         "perspective_research_plan",

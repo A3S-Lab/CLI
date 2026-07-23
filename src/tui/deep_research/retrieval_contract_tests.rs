@@ -59,7 +59,9 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
     let properties = &contract["planner"]["output_schema"]["properties"];
     let expected = [
         "report_title",
+        "research_scope",
         "freshness_required",
+        "supplemental_queries",
         "workspace_evidence_required",
         "tracks",
     ];
@@ -77,7 +79,16 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
             .keys()
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>(),
-        ["id", "material", "title"].into_iter().collect()
+        [
+            "completion_criteria",
+            "evidence_requirements",
+            "focus",
+            "id",
+            "material",
+            "title",
+        ]
+        .into_iter()
+        .collect()
     );
 }
 
@@ -92,15 +103,14 @@ fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
         .expect("optional outline prompt");
     assert!(prompt.chars().count() < 3_000);
 
-    assert!(prompt.contains("Do not route by keywords"));
+    assert!(prompt.contains("Do not use fixed topic taxonomies"));
     assert!(prompt.contains("Use the query language"));
-    assert!(prompt.contains("original provider query"));
-    assert!(prompt.contains("no target-detail or retrieval-planner call follows"));
-    assert!(prompt.contains("one material track for each coherent evidence family"));
-    assert!(prompt.contains("absence can be disclosed"));
-    assert!(prompt.contains("independently published projects"));
-    assert!(prompt.contains("Do not return focus, questions"));
-    assert!(prompt.contains("universal stop conditions"));
+    assert!(prompt.contains("always searches the exact user query first"));
+    assert!(prompt.contains("one to four coherent evidence tracks"));
+    assert!(prompt.contains("observable completion criteria"));
+    assert!(prompt.contains("zero to three supplemental_queries"));
+    assert!(prompt.contains("not a URL"));
+    assert!(prompt.contains("Do not return URLs"));
     for obsolete in [
         "research_method",
         "execution_route",
@@ -156,12 +166,20 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
     assert!(source.contains(
         "continued with bounded cross-query discovery candidates for deterministic Host review"
     ));
-    assert!(source.contains("fallbackCandidatePriority"));
-    assert!(source.contains("protectedPublisherLookalike"));
+    assert!(
+        !source.contains("fallbackCandidatePriority")
+            && !source.contains("protectedPublisherLookalike"),
+        "bounded fallback must not rank sources through publisher or host heuristics"
+    );
+    assert!(
+        source
+            .contains("Fetched text will pass through the same closed semantic evidence selector"),
+        "fallback acquisition must remain provisional until closed semantic evidence selection"
+    );
     assert!(source
         .contains("Reject unrelated results even when fetch slots remain; return an empty list"));
     assert!(
-        source.contains("Reject social or community posts, anonymous score trackers")
+        source.contains("Reject social or community posts, anonymous live-status pages")
             && source
                 .contains("Do not infer authority from a title or snippet claiming to be official"),
         "semantic source admission must distinguish topicality from source trust"
@@ -279,19 +297,44 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
 
 #[test]
 fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
-    let foundation = include_str!("workflow/retrieval_foundation.js");
-    let web_source_quality = include_str!("workflow/retrieval_web_source_quality.js");
-    let web = include_str!("workflow/retrieval_web.js");
-    let selection = include_str!("workflow/retrieval_selection.js");
-    let reduction = include_str!("workflow/retrieval_reduction.js");
-    let materialization = include_str!("workflow/retrieval_materialization.js");
-    let loop_source = include_str!("workflow/retrieval_loop.js");
-    let local = include_str!("workflow/retrieval_local.js");
-    let local_collection = include_str!("workflow/retrieval_local_collection.js");
-    let execution = include_str!("workflow/retrieval_execution.js");
+    let foundation = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_foundation.js"
+    ));
+    let web = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_web.js"
+    ));
+    let selection = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_selection.js"
+    ));
+    let reduction = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_reduction.js"
+    ));
+    let materialization = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_materialization.js"
+    ));
+    let loop_source = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_loop.js"
+    ));
+    let local = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_local.js"
+    ));
+    let local_collection = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_local_collection.js"
+    ));
+    let execution = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../deep-research/src/workflow/retrieval_execution.js"
+    ));
 
     assert!(foundation.lines().count() < 1_000);
-    assert!(web_source_quality.lines().count() < 1_000);
     assert!(web.lines().count() < 1_000);
     assert!(selection.lines().count() < 1_000);
     assert!(reduction.lines().count() < 1_000);
@@ -314,7 +357,7 @@ fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
         );
     }
     let combined = format!(
-        "{foundation}{web_source_quality}{web}{selection}{reduction}{materialization}{loop_source}{local}{local_collection}{execution}"
+        "{foundation}{web}{selection}{reduction}{materialization}{loop_source}{local}{local_collection}{execution}"
     );
     assert!(combined.starts_with("async function run(ctx, inputs)"));
     assert!(combined.trim_end().ends_with('}'));

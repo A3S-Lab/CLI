@@ -261,17 +261,28 @@ fn plan_outline_fragment(plan: Value) -> Value {
         plan,
         &[
             "report_title",
+            "research_scope",
             "freshness_required",
             "workspace_evidence_required",
             "tracks",
         ],
     );
+    outline["supplemental_queries"] = json!(["fixture evidence"]);
     let tracks = outline["tracks"]
         .as_array_mut()
         .expect("fixture outline tracks");
     for track in tracks {
         let track = track.as_object_mut().expect("fixture outline track");
-        track.retain(|field, _| matches!(field.as_str(), "id" | "title" | "material"));
+        track.retain(|field, _| {
+            matches!(
+                field.as_str(),
+                "id" | "title"
+                    | "focus"
+                    | "material"
+                    | "completion_criteria"
+                    | "evidence_requirements"
+            )
+        });
     }
     outline
 }
@@ -467,6 +478,7 @@ fn append_invocation(workspace: &Path, label: &str) -> anyhow::Result<()> {
 fn isolated_review_plan() -> Value {
     json!({
         "report_title": "Isolated question review fixture",
+        "research_scope": "focused",
         "freshness_required": false,
         "workspace_evidence_required": false,
         "tracks": [{

@@ -772,7 +772,7 @@ async fn record_run_terminal_with_artifact_authority(
                 accepted_sources: quality.source_count,
                 cited_sources: quality.cited_source_count,
                 issues: Vec::new(),
-                reason: "host publication passed the direct-answer, cited-claim, and source-relevance quality gate"
+                reason: "host publication passed the query-scoped answer, depth, citation, and source-relevance quality gate"
                     .to_string(),
                 })
         };

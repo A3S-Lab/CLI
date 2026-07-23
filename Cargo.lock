@@ -9,6 +9,7 @@ dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
  "a3s-code-core",
+ "a3s-deep-research",
  "a3s-lane",
  "a3s-memory",
  "a3s-search",
@@ -176,6 +177,25 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "a3s-deep-research"
+version = "0.1.0"
+dependencies = [
+ "a3s-acl 0.3.0",
+ "async-trait",
+ "chrono",
+ "comrak",
+ "futures",
+ "rand 0.8.7",
+ "regex",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
+ "url",
 ]
 
 [[package]]
@@ -488,7 +508,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

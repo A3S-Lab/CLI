@@ -1096,6 +1096,7 @@ mod evidence_first_journal_tests {
                     "finding_count": 0,
                     "accepted_claim_count": 0,
                     "cited_source_count": 0,
+                    "substantive_character_count": 0,
                     "relevant_source_count": 1,
                     "source_count": 1
                 }
@@ -1157,6 +1158,8 @@ mod evidence_first_journal_tests {
                         .to_string(),
                 ],
                 claim_eligible: true,
+                semantically_admitted: true,
+                coverage: Vec::new(),
             }],
             omitted_source_count: 0,
             omitted_chunk_count: 0,
@@ -1167,11 +1170,13 @@ mod evidence_first_journal_tests {
             serde_json::json!({
                 "summary": [{
                     "text": "Nimbus version 2 receives fixes through September 2027.",
-                    "source_aliases": ["source-1"]
+                    "source_aliases": ["source-1"],
+                    "track_ids": ["request.primary"]
                 }],
                 "findings": [{
                     "text": "The official record identifies Nimbus version 2 and September 2027 as the support boundary.",
-                    "source_aliases": ["source-1"]
+                    "source_aliases": ["source-1"],
+                    "track_ids": ["request.primary"]
                 }],
                 "recommendations": [],
                 "limitations": []
@@ -1199,6 +1204,7 @@ mod evidence_first_journal_tests {
                     "finding_count": 1,
                     "accepted_claim_count": 2,
                     "cited_source_count": 1,
+                    "substantive_character_count": report.substantive_character_count,
                     "relevant_source_count": 1,
                     "source_count": 1
                 }

@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 a3s-code-core = "=6.4.0"
+a3s-deep-research = "=0.1.0"
 a3s-boot = { version = "=0.1.3", features = ["ilink"] }
 a3s-lane = "=0.5.1"
 # Long-term memory store (same crate/version a3s-code-core uses) — the `/ctx save`
@@ -93,6 +94,7 @@ strip = true
 # Monorepo development builds should exercise the local A3S crates instead of
 # waiting for every submodule change to be published to crates.io.
 a3s-code-core = { path = "../code/core" }
+a3s-deep-research = { path = "../deep-research" }
 a3s-acl = { path = "../acl" }
 a3s-boot = { path = "../boot" }
 a3s-common = { path = "../common" }
