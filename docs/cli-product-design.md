@@ -338,9 +338,10 @@ managed instance associated with the canonical workspace. Stop and status
 validate process identity and never signal an unrelated process from a stale
 PID file. Repeated detached starts reuse a healthy same-workspace instance,
 concurrent starts converge under a workspace lock, and stale records are
-quarantined. `--replace` gracefully replaces only a CLI-managed instance; it
-does not kill an unknown port listener or take ownership of an A3S server
-started elsewhere.
+quarantined. `--replace` gracefully replaces a CLI-managed instance or a
+same-workspace foreground A3S Web process verified by health PID, executable,
+command, and explicit port. It does not kill an unknown or ambiguous port
+listener.
 
 GitHub archives and Homebrew installations carry the matching Web workspace.
 When Cargo cannot install those data files, the first online Web start resolves
@@ -353,10 +354,12 @@ first-use download begins.
 Start is idempotent: it reuses a healthy workspace instance instead of treating
 repeat invocation as a failure. It may discover a healthy foreground or legacy
 A3S instance through the versioned health contract, but that observation does
-not grant lifecycle ownership. `--replace` performs authenticated graceful
-shutdown only for a managed instance; it refuses unmanaged A3S and foreign port
-owners. Port ownership is checked before assets, configuration, or persisted
-sessions are loaded.
+not grant general lifecycle ownership. `--replace` uses authenticated graceful
+shutdown for a managed instance. It may interrupt an observed foreground
+instance only after its workspace, health PID, executable, `web` command, and
+explicit requested port are verified twice around process inspection. Foreign
+and ambiguous port owners are refused. Port ownership is checked before assets,
+configuration, or persisted sessions are loaded.
 
 Web sessions for the same canonical workspace share one Code Intelligence
 runtime. Monaco consumes typed status, outline, navigation, and diagnostics

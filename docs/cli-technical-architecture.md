@@ -565,9 +565,13 @@ Before configuration or session restoration, foreground startup reserves the
 requested listener and detached startup probes any occupied address. A
 versioned A3S health response identifies healthy foreground and legacy
 instances for reuse and diagnostics, but it does not expose the control nonce
-or confer stop authority. `--replace` is accepted only for an authenticated
-managed record. A foreign listener and an unmanaged A3S listener are never
-signaled.
+or confer general stop authority. `--replace` uses the authenticated control
+route for a managed record. For an observed foreground instance, replacement
+additionally requires the same canonical workspace, a health-reported PID, the
+current A3S executable, a `web` command with the requested explicit port, and a
+second health probe immediately before signaling. The CLI sends an interrupt
+and waits for the listener to be released. A foreign or ambiguous listener is
+never signaled.
 
 Foreground and detached modes use the same server configuration and startup
 path. Logs rotate under the shared state/log path policy and never contain

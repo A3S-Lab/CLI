@@ -116,20 +116,30 @@ async fn run_foreground(
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             if let Some(existing) = background::discover_requested_instance(&options).await? {
                 if options.replace {
-                    anyhow::bail!(
-                        "A3S Web {} is healthy but is not managed by this CLI state; no process \
-                         was stopped. Stop its original command or managed service before using \
-                         --replace",
-                        existing.address
-                    );
+                    let executable = std::env::current_exe().map_err(|error| {
+                        anyhow::anyhow!(
+                            "could not locate the current a3s executable before replacement: {error}"
+                        )
+                    })?;
+                    background::replace_observed_instance(&existing, &options, &executable).await?;
+                    tokio::net::TcpListener::bind(options.addr)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to bind {} after replacing the previous A3S Web process",
+                                options.addr
+                            )
+                        })?
+                } else {
+                    return Ok(Some(existing));
                 }
-                return Ok(Some(existing));
+            } else {
+                anyhow::bail!(
+                    "{} is already in use by another application; no process was stopped. Stop that \
+                     application or select an available port with --port 0",
+                    options.addr
+                );
             }
-            anyhow::bail!(
-                "{} is already in use by another application; no process was stopped. Stop that \
-                 application or select an available port with --port 0",
-                options.addr
-            );
         }
         Err(error) => {
             return Err(anyhow::anyhow!(
