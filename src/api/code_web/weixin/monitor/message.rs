@@ -3,8 +3,8 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::super::credential_store::WeixinCredentials;
-use super::super::ilink::{SecretValue, WeixinMessage, MESSAGE_STATE_FINISH, MESSAGE_TYPE_USER};
 use super::super::runtime_store::InboundMessage;
+use a3s_boot::ilink::{SecretValue, WeixinMessage, MESSAGE_STATE_FINISH, MESSAGE_TYPE_USER};
 
 pub(super) const MAX_HANDLER_RESPONSE_BYTES: usize = 16 * 1024;
 

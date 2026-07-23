@@ -1,9 +1,8 @@
 mod account_controller;
 mod capability_controller;
+mod channel_config;
 mod credential_store;
 mod dto;
-mod entitlement;
-mod ilink;
 mod login_controller;
 mod login_coordinator;
 mod module;

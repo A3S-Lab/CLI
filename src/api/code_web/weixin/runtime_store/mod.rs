@@ -14,7 +14,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use super::credential_store::CredentialStoreError;
-use super::ilink::SecretValue;
+use a3s_boot::ilink::SecretValue;
 pub(super) use model::{
     IdempotencyState, InboundMessage, InboxRecord, InboxState, OutboundDraft, OutboundRecord,
     OutboundState, RemoteListContext, RemoteListKind, RemoteSelection,

@@ -148,30 +148,30 @@ mod tests {
                 "/api/v1/weixin/capability",
             ))
             .await
-            .expect("read disabled Weixin capability")
+            .expect("read built-in Weixin capability")
             .body_json::<serde_json::Value>()
             .expect("decode capability");
-        assert_eq!(capability["protocolMode"], "disabled");
+        assert_eq!(capability["state"], "unbound");
+        assert_eq!(capability["protocolMode"], "tencent");
+        assert_eq!(capability["schemaVersion"], 2);
+        assert_eq!(capability["releaseBlockers"], serde_json::json!([]));
 
         let targets = app
             .call(BootRequest::new(HttpMethod::Get, "/api/v1/weixin/targets"))
             .await
-            .expect("read disabled remote target snapshot")
+            .expect("read remote target snapshot")
             .body_json::<serde_json::Value>()
             .expect("decode target snapshot");
         assert_eq!(targets["schemaVersion"], 1);
         assert_eq!(targets["items"], serde_json::json!([]));
-        assert_eq!(
-            targets["warnings"],
-            serde_json::json!(["remote_read_disabled"])
-        );
+        assert_eq!(targets["warnings"], serde_json::json!([]));
 
         app.shutdown().await.expect("shutdown Code Web application");
     }
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn complete_code_web_module_enables_configured_weixin_production_runtime() {
+    async fn complete_code_web_module_honors_explicit_weixin_enable() {
         let temporary = tempfile::tempdir().expect("create Code Web module fixture");
         let workspace = temporary.path().join("workspace");
         std::fs::create_dir_all(&workspace).expect("create fixture workspace");
@@ -185,11 +185,6 @@ mod tests {
             channels {
               weixin {
                 enabled = true
-                app_id = "a3s-production-test"
-                bot_type = "3"
-                client_version = "1.0.0"
-                bot_agent = "A3S/1.0.0"
-                allowed_hosts = ["ilinkai.weixin.qq.com"]
               }
             }
         "#;
@@ -236,7 +231,7 @@ mod tests {
             .expect("decode configured capability");
         assert_eq!(capability["state"], "unbound");
         assert_eq!(capability["protocolMode"], "tencent");
-        assert_eq!(capability["productionEntitled"], true);
+        assert_eq!(capability["schemaVersion"], 2);
         assert_eq!(capability["releaseBlockers"], serde_json::json!([]));
 
         let account = app

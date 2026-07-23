@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::ilink::SecretValue;
+use a3s_boot::ilink::SecretValue;
+
+const WEIXIN_CAPABILITY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +53,6 @@ pub(super) struct WeixinCapabilityResponse {
     pub(super) schema_version: u32,
     pub(super) state: WeixinCapabilityState,
     pub(super) protocol_mode: WeixinProtocolMode,
-    pub(super) production_entitled: bool,
     pub(super) supported_scopes: Vec<RemoteScope>,
     pub(super) release_blockers: Vec<SafeBlocker>,
 }
@@ -59,24 +60,22 @@ pub(super) struct WeixinCapabilityResponse {
 impl WeixinCapabilityResponse {
     pub(super) fn unavailable() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: WEIXIN_CAPABILITY_SCHEMA_VERSION,
             state: WeixinCapabilityState::Unavailable,
             protocol_mode: WeixinProtocolMode::Disabled,
-            production_entitled: false,
             supported_scopes: Vec::new(),
             release_blockers: vec![SafeBlocker {
-                code: "ilink_entitlement_missing".to_string(),
-                message: "An A3S-specific iLink entitlement is required.".to_string(),
+                code: "ilink_channel_unavailable".to_string(),
+                message: "The Weixin iLink channel is not enabled in this runtime.".to_string(),
             }],
         }
     }
 
     pub(super) fn mock(state: WeixinCapabilityState) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: WEIXIN_CAPABILITY_SCHEMA_VERSION,
             state,
             protocol_mode: WeixinProtocolMode::Mock,
-            production_entitled: false,
             supported_scopes: vec![RemoteScope::AgentsRead, RemoteScope::SessionsRead],
             release_blockers: vec![SafeBlocker {
                 code: "mock_runtime_only".to_string(),
@@ -87,10 +86,9 @@ impl WeixinCapabilityResponse {
 
     pub(super) fn unavailable_with(blocker: SafeBlocker) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: WEIXIN_CAPABILITY_SCHEMA_VERSION,
             state: WeixinCapabilityState::Unavailable,
             protocol_mode: WeixinProtocolMode::Disabled,
-            production_entitled: false,
             supported_scopes: Vec::new(),
             release_blockers: vec![blocker],
         }
@@ -98,10 +96,9 @@ impl WeixinCapabilityResponse {
 
     pub(super) fn production(state: WeixinCapabilityState) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: WEIXIN_CAPABILITY_SCHEMA_VERSION,
             state,
             protocol_mode: WeixinProtocolMode::Tencent,
-            production_entitled: true,
             supported_scopes: vec![RemoteScope::AgentsRead, RemoteScope::SessionsRead],
             release_blockers: Vec::new(),
         }
@@ -109,10 +106,9 @@ impl WeixinCapabilityResponse {
 
     pub(super) fn production_unavailable(blocker: SafeBlocker) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: WEIXIN_CAPABILITY_SCHEMA_VERSION,
             state: WeixinCapabilityState::Unavailable,
             protocol_mode: WeixinProtocolMode::Tencent,
-            production_entitled: true,
             supported_scopes: vec![RemoteScope::AgentsRead, RemoteScope::SessionsRead],
             release_blockers: vec![blocker],
         }
