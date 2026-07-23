@@ -1004,6 +1004,10 @@ jobs:
             depends_on "ripgrep"
             depends_on "a3s-lab/tap/a3s-webview"
 
+            # Homebrew rewrites Node shebangs during keg cleanup. The managed
+            # sandbox payload is integrity-checked byte-for-byte at runtime.
+            skip_clean "share/a3s/support"
+
             on_macos do
               on_arm do
                 url "${base}/a3s-${tag}-aarch64-apple-darwin.tar.gz"
@@ -1036,6 +1040,9 @@ jobs:
             test do
               assert_match "a3s", shell_output("#{bin}/a3s --version")
               assert_predicate pkgshare/"web/index.html", :exist?
+              managed_srt_cli = pkgshare/"support/managed-srt/node_modules"/
+                                "@anthropic-ai/sandbox-runtime/dist/cli.js"
+              assert_equal "#!/usr/bin/env node", managed_srt_cli.open(&:readline).chomp
             end
           end
           RB
