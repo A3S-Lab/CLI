@@ -1286,6 +1286,8 @@ Offline mode and `A3S_NO_AUTO_INSTALL=1` can use either verified state or the
 verified release payload but forbid registry bootstrap. Setup failure remains
 non-fatal: Default can ask for one exact host Bash invocation and Auto denies
 Bash. There is no silent unsandboxed fallback.
+Startup warnings include the complete causal error chain so a workspace scan,
+runtime verification, or platform failure remains actionable.
 
 The local sandbox denies command network egress, local binding, and Unix
 sockets; allows writes only in the active workspace and a private per-run
@@ -1296,7 +1298,8 @@ process-group cancellation, bounded output, and streaming deltas use the same
 contract as the normal Bash tool. Existing `.env*` files are denied at every
 governed source-tree depth, and pre-existing multi-link source files are masked
 for both reads and writes so a workspace hardlink cannot expose an outside
-inode.
+inode. Workspace policy scans tolerate an entry removed concurrently after
+enumeration while permission and other I/O failures remain fatal.
 
 The TUI also enables Core's local workspace credential policy for in-process
 tools. `read`, range reads, `grep`, `write`, `edit`, and `patch` therefore

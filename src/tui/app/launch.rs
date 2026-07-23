@@ -8,6 +8,14 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
+fn sandbox_load_warning(error: &anyhow::Error) -> String {
+    format!(
+        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
+         Default mode will ask before exact host Bash execution; Auto mode will deny \
+         Bash. Repair the reported platform prerequisite and restart `a3s code`"
+    )
+}
+
 fn with_tui_prompt_context(
     options: SessionOptions,
     instructions: Option<&str>,
@@ -688,14 +696,7 @@ pub(crate) async fn run_in(
                 Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
                 None,
             ),
-            Err(error) => (
-                None,
-                Some(format!(
-                    "Local command sandbox failed its bounded OS capability probe: {error}. \
-                     Default mode will ask before exact host Bash execution; Auto mode will deny \
-                     Bash. Repair the reported platform prerequisite and restart `a3s code`"
-                )),
-            ),
+            Err(error) => (None, Some(sandbox_load_warning(&error))),
         },
         None => (None, managed_srt.warning),
     };
@@ -1378,6 +1379,19 @@ mod tests {
 
         assert!(!rendered.contains("\x1b["));
         assert!(rendered.contains("a3s code resume session-42"));
+    }
+
+    #[test]
+    fn sandbox_warning_includes_the_complete_error_chain() {
+        let error = anyhow::anyhow!("No such file or directory (os error 2)")
+            .context("failed to scan SRT workspace /workspace/transient")
+            .context("managed SRT failed its Core capability handshake");
+
+        let warning = sandbox_load_warning(&error);
+
+        assert!(warning.contains("managed SRT failed its Core capability handshake"));
+        assert!(warning.contains("failed to scan SRT workspace /workspace/transient"));
+        assert!(warning.contains("No such file or directory (os error 2)"));
     }
 
     #[tokio::test]
