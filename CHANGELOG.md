@@ -7,10 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-07-23
+
 ### Fixed
 
 - Trusted the official A3S tap before release smoke installation so current
   Homebrew versions can resolve the tap-owned `a3s-webview` dependency.
+- Updated Core so the managed SRT capability handshake tolerates files and
+  directories removed concurrently by other workspace processes.
+- Included the complete causal error chain in local-sandbox startup warnings
+  instead of hiding the actionable workspace or platform failure.
 
 ## [0.10.2] - 2026-07-23
 
