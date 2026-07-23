@@ -9,6 +9,7 @@ use fs2::FileExt;
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 use tokio::time::{sleep, Instant};
 
 use super::options::ServeOptions;
@@ -18,6 +19,7 @@ pub(super) const INSTANCE_NONCE_ENV: &str = "A3S_INTERNAL_WEB_INSTANCE_NONCE";
 pub(super) const INSTANCE_FILE_ENV: &str = "A3S_INTERNAL_WEB_INSTANCE_FILE";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const START_LOCK_TIMEOUT: Duration = Duration::from_secs(20);
+const OBSERVED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -99,13 +101,10 @@ pub(super) async fn start(
 
     if let Some(existing) = discover_requested_instance(options).await? {
         if options.replace {
-            bail!(
-                "A3S Web {} is healthy but is not managed by this CLI state; no process was \
-                 stopped. Stop its original command or managed service before using --replace",
-                existing.address
-            );
+            replace_observed_instance(&existing, options, &executable).await?;
+        } else {
+            return Ok(BackgroundStart::Existing(existing));
         }
-        return Ok(BackgroundStart::Existing(existing));
     }
     ensure_requested_port_available(options).await?;
     let _prepared_web_root = super::resolve_web_root(options).await?;
@@ -261,6 +260,233 @@ async fn stop_owned_instance(path: &Path, instance: &WebInstanceRecord) -> anyho
         sleep(POLL_INTERVAL).await;
     }
     bail!("A3S Web did not stop within 10 seconds; no force signal was sent")
+}
+
+pub(super) async fn replace_observed_instance(
+    existing: &WebEndpoint,
+    options: &ServeOptions,
+    executable: &Path,
+) -> anyhow::Result<()> {
+    let pid = existing.pid.ok_or_else(|| {
+        anyhow::anyhow!(
+            "A3S Web {} did not report a process ID; no process was stopped",
+            existing.address
+        )
+    })?;
+    if pid == std::process::id() {
+        bail!(
+            "A3S Web {} reported the current process ID; no process was stopped",
+            existing.address
+        );
+    }
+    if options.addr.port() == 0 || existing.address.port() != options.addr.port() {
+        bail!(
+            "A3S Web {} does not match the requested port {}; no process was stopped",
+            existing.address,
+            options.addr.port()
+        );
+    }
+
+    let expected_executable = executable.to_path_buf();
+    let expected_port = options.addr.port();
+    let identity =
+        inspect_observed_process(pid, expected_executable.clone(), expected_port).await?;
+
+    let confirmed = probe_web_endpoint(existing.address).await.ok_or_else(|| {
+        anyhow::anyhow!(
+            "A3S Web {} changed while replacement was being verified; no process was stopped",
+            existing.address
+        )
+    })?;
+    if confirmed.pid != Some(pid)
+        || !same_workspace(&existing.workspace, &confirmed.workspace)
+        || !same_workspace(&options.workspace, &confirmed.workspace)
+    {
+        bail!(
+            "A3S Web {} changed while replacement was being verified; no process was stopped",
+            existing.address
+        );
+    }
+
+    signal_observed_process(pid, expected_executable, expected_port, identity).await?;
+    wait_until_port_released(existing.address).await
+}
+
+#[derive(Clone, Copy)]
+struct ObservedProcessIdentity {
+    start_time: u64,
+}
+
+async fn inspect_observed_process(
+    pid: u32,
+    executable: PathBuf,
+    port: u16,
+) -> anyhow::Result<ObservedProcessIdentity> {
+    tokio::task::spawn_blocking(move || inspect_observed_process_sync(pid, &executable, port))
+        .await
+        .context("A3S Web process inspection task failed")?
+}
+
+fn inspect_observed_process_sync(
+    pid: u32,
+    executable: &Path,
+    port: u16,
+) -> anyhow::Result<ObservedProcessIdentity> {
+    let system = process_snapshot(pid);
+    let process = system.process(Pid::from_u32(pid)).ok_or_else(|| {
+        anyhow::anyhow!("A3S Web process {pid} is no longer running; no process was stopped")
+    })?;
+    verify_observed_process(process, executable, port)?;
+    Ok(ObservedProcessIdentity {
+        start_time: process.start_time(),
+    })
+}
+
+async fn signal_observed_process(
+    pid: u32,
+    executable: PathBuf,
+    port: u16,
+    identity: ObservedProcessIdentity,
+) -> anyhow::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let system = process_snapshot(pid);
+        let Some(process) = system.process(Pid::from_u32(pid)) else {
+            return Ok(());
+        };
+        verify_observed_process(process, &executable, port)?;
+        if process.start_time() != identity.start_time {
+            bail!("A3S Web process {pid} changed identity; no process was stopped");
+        }
+        match process.kill_with(Signal::Interrupt) {
+            Some(true) => Ok(()),
+            Some(false) => bail!(
+                "could not interrupt verified A3S Web process {pid}; no force signal was sent"
+            ),
+            None if process.kill() => Ok(()),
+            None => bail!("could not stop verified A3S Web process {pid}"),
+        }
+    })
+    .await
+    .context("A3S Web process stop task failed")?
+}
+
+fn process_snapshot(pid: u32) -> System {
+    let pid = Pid::from_u32(pid);
+    let pids = [pid];
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&pids),
+        true,
+        ProcessRefreshKind::nothing()
+            .with_cmd(UpdateKind::Always)
+            .with_exe(UpdateKind::Always)
+            .without_tasks(),
+    );
+    system
+}
+
+fn verify_observed_process(
+    process: &sysinfo::Process,
+    executable: &Path,
+    port: u16,
+) -> anyhow::Result<()> {
+    let pid = process.pid().as_u32();
+    let Some(process_executable) = process.exe() else {
+        bail!("could not verify the executable for A3S Web process {pid}; no process was stopped");
+    };
+    if !same_executable(process_executable, executable) {
+        bail!(
+            "A3S Web process {pid} does not use the current a3s executable; no process was stopped"
+        );
+    }
+    if !command_declares_web_port(process.cmd(), port) {
+        bail!("A3S Web process {pid} does not declare `web --port {port}`; no process was stopped");
+    }
+    Ok(())
+}
+
+fn same_executable(left: &Path, right: &Path) -> bool {
+    let left = comparable_executable_path(left);
+    let right = comparable_executable_path(right);
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn comparable_executable_path(path: &Path) -> PathBuf {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    const DELETED_SUFFIX: &[u8] = b" (deleted)";
+    let bytes = path.as_os_str().as_bytes();
+    let bytes = bytes.strip_suffix(DELETED_SUFFIX).unwrap_or(bytes);
+    PathBuf::from(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn comparable_executable_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+fn command_declares_web_port(command: &[std::ffi::OsString], expected_port: u16) -> bool {
+    let Some(web_index) = command
+        .iter()
+        .position(|argument| argument.to_string_lossy() == "web")
+    else {
+        return false;
+    };
+    let mut declared_port = None;
+    let mut index = web_index + 1;
+    while index < command.len() {
+        let argument = command[index].to_string_lossy();
+        if argument == "--port" {
+            let Some(value) = command.get(index + 1).and_then(|value| value.to_str()) else {
+                return false;
+            };
+            let Ok(port) = value.parse::<u16>() else {
+                return false;
+            };
+            declared_port = Some(port);
+            index += 2;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--port=") {
+            let Ok(port) = value.parse::<u16>() else {
+                return false;
+            };
+            declared_port = Some(port);
+        }
+        index += 1;
+    }
+    declared_port == Some(expected_port)
+}
+
+async fn wait_until_port_released(address: SocketAddr) -> anyhow::Result<()> {
+    let deadline = Instant::now() + OBSERVED_SHUTDOWN_TIMEOUT;
+    loop {
+        match tokio::net::TcpListener::bind(address).await {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "verified A3S Web process did not release {} within {} seconds",
+                        address,
+                        OBSERVED_SHUTDOWN_TIMEOUT.as_secs()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to verify that A3S Web released {address}"))
+            }
+        }
+        sleep(POLL_INTERVAL).await;
+    }
 }
 
 pub(crate) async fn open(workspace: &Path) -> anyhow::Result<WebEndpoint> {
@@ -697,6 +923,7 @@ fn configure_detached(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
     #[test]
     fn foreground_arguments_remove_parent_only_lifecycle_flags() {
@@ -713,5 +940,32 @@ mod tests {
             foreground_args(&args).cloned().collect::<Vec<_>>(),
             ["--host", "127.0.0.1", "--port", "29653"]
         );
+    }
+
+    #[test]
+    fn observed_replacement_requires_web_with_the_matching_explicit_port() {
+        let matching = ["a3s", "web", "--host", "127.0.0.1", "--port", "29653"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(command_declares_web_port(&matching, 29653));
+
+        let environment_only = ["a3s", "web"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(!command_declares_web_port(&environment_only, 29653));
+
+        let wrong_port = ["a3s", "web", "--port", "29654"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(!command_declares_web_port(&wrong_port, 29653));
+
+        let wrong_command = ["a3s", "code", "--port", "29653"]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert!(!command_declares_web_port(&wrong_command, 29653));
     }
 }

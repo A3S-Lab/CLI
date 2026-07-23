@@ -529,10 +529,12 @@ Starting Web is idempotent. A healthy managed instance for the workspace is
 reused, and a healthy foreground or older A3S instance on the requested address
 is discovered without being killed. `status` and `open` can discover that
 unmanaged default-address instance, while `stop` refuses to signal it. Use
-`--replace` to gracefully restart only an authenticated managed instance. A
-foreign port owner is never terminated. Port binding and asset validation
-happen before configuration-heavy session restoration, so conflicts and broken
-installations fail quickly without unrelated restore warnings.
+`--replace` to restart an authenticated managed instance or a same-workspace
+foreground instance whose health PID, executable, `web` command, and explicit
+port all match the current invocation. A foreign or ambiguous port owner is
+never terminated. Port binding and asset validation happen before
+configuration-heavy session restoration, so conflicts and broken installations
+fail quickly without unrelated restore warnings.
 
 Web tasks, visible messages, titles, goals, effort, model selection, and
 execution mode are saved under `~/.a3s/code-web` and restored before the API

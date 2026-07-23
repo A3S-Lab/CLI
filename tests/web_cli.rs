@@ -872,6 +872,7 @@ fn web_port_conflict_never_stops_an_unrelated_listener() {
     let output = Command::new(a3s_binary())
         .args([
             "web",
+            "--replace",
             "--host",
             "127.0.0.1",
             "--port",
@@ -903,7 +904,7 @@ fn web_port_conflict_never_stops_an_unrelated_listener() {
 }
 
 #[test]
-fn web_reuses_a_healthy_unmanaged_a3s_instance_without_killing_it() {
+fn web_reuses_a_healthy_unmanaged_a3s_instance_and_replaces_it_only_when_requested() {
     let root = temp_directory("reuse-unmanaged-web");
     let config_path = root.join("config.acl");
     let web_dir = root.join("web");
@@ -1021,15 +1022,42 @@ fn web_reuses_a_healthy_unmanaged_a3s_instance_without_killing_it() {
         .env("HOME", &root)
         .current_dir(&root)
         .output()
-        .expect("refuse unmanaged Web replacement");
-    assert!(!replacement.status.success());
-    let stderr = String::from_utf8_lossy(&replacement.stderr);
-    assert!(stderr.contains("not managed"), "{stderr}");
-    assert!(stderr.contains("no process was stopped"), "{stderr}");
-    wait_until_healthy(&address);
+        .expect("replace verified unmanaged Web instance");
+    assert!(
+        replacement.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&replacement.stdout),
+        String::from_utf8_lossy(&replacement.stderr)
+    );
+    let replacement_stdout = String::from_utf8_lossy(&replacement.stdout);
+    let replacement_pid = output_value(&replacement_stdout, "Background PID:")
+        .parse::<u32>()
+        .expect("replacement background PID");
+    assert_ne!(replacement_pid, foreground_pid);
+    let replacement_address = output_value(&replacement_stdout, "A3S Web:")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    assert_eq!(replacement_address, address);
 
-    foreground_guard.stop();
-    foreground.wait().expect("wait for foreground Web");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let foreground_status = loop {
+        if let Some(status) = foreground.try_wait().expect("poll replaced foreground Web") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replaced foreground Web did not stop"
+        );
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(foreground_status.success(), "{foreground_status}");
+    foreground_guard.disarm();
+
+    let health = http_json(&address, "GET", "/api/v1/health", None, "200");
+    assert_eq!(health["pid"], replacement_pid);
+    let mut replacement_guard = DaemonGuard::new(replacement_pid);
+    replacement_guard.stop();
     wait_until_stopped(&address);
     fs::remove_dir_all(root).expect("clean unmanaged Web fixture");
 }
