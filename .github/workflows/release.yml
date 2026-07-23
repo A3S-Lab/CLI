@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 3ef1ddd3db28857ef690327b63369251c4656bd0
+  A3S_WEB_SOURCE_REF: 6e894ce4f0921c89329a7cba30397ff5ac8b6f9a
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_CODE_CORE_VERSION: 6.4.0
