@@ -1101,6 +1101,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           brew tap a3s-lab/tap https://github.com/A3S-Lab/homebrew-tap
+          brew trust --tap a3s-lab/tap
           brew install a3s-lab/tap/a3s
           test "$(brew list --versions a3s | awk '{print $2}')" = "$version"
           brew test a3s-lab/tap/a3s
