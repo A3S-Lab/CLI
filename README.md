@@ -77,29 +77,28 @@ diagnostic; neither condition prevents the TUI from starting.
 
 ### Weixin channel activation
 
-A3S Web contains a native Rust iLink adapter. An official build enables its
-real QR flow only when an A3S-specific app ID and permitted bot type are
-injected at build time. Approved local development can instead set
-`A3S_WEIXIN_ILINK_APP_ID` and `A3S_WEIXIN_ILINK_BOT_TYPE`, or reference them in
-`config.acl`:
+A3S Web uses the native Rust `IlinkModule` provided by A3S Boot. The real
+Tencent QR flow is available by default and does not require browser secrets,
+environment variables, or an application identity in `config.acl`.
 
 ```acl
 channels {
   weixin {
     enabled = true
-    app_id = env("A3S_WEIXIN_ILINK_APP_ID")
-    bot_type = env("A3S_WEIXIN_ILINK_BOT_TYPE")
-    allowed_hosts = ["ilinkai.weixin.qq.com"]
   }
 }
 ```
 
-Restart `a3s web` after changing this boot-time configuration. When valid,
-**Settings → Channels → Weixin** exposes QR binding and starts the supervised
-read-only monitor after binding. Missing identity, the OpenClaw-only `bot`
-identity, unsafe local storage, or an invalid hostname policy keeps the channel
-unavailable and sends no upstream request. Tokens, owner IDs, cursors, and
-authenticated iLink URLs never enter the browser.
+The block is optional; use `enabled = false` only when the local operator wants
+to disable the channel explicitly. **Settings → Channels → Weixin** exposes QR
+binding and starts the supervised read-only monitor after binding. Boot owns
+the Tencent-compatible `iLink-App-Id: bot`, `bot_type=3`, protocol version,
+headers, URL policy, polling, and message transport. The host still identifies
+itself as `A3S/<version>` through `bot_agent`.
+
+Unsafe local storage or invalid server routing keeps the channel unavailable or
+degraded. Tokens, owner IDs, cursors, and authenticated iLink URLs never enter
+the browser.
 
 ### Components and delayed installation
 

@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use super::credential_store::{
     CredentialStoreError, PrivateFileCredentialStore, WeixinCredentialStore, WeixinCredentials,
 };
-use super::ilink::SecretValue;
+use a3s_boot::ilink::SecretValue;
 
 fn credentials() -> WeixinCredentials {
     credentials_with_token("bot-token-canary")

@@ -8,10 +8,6 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use super::credential_store::{CredentialStoreError, WeixinCredentialStore, WeixinCredentials};
-use super::ilink::{
-    GetConfigResponse, GetUpdatesResponse, IlinkAuth, IlinkError, IlinkMessagingTransport,
-    NotifyResponse, SecretValue, SendMessageResponse, SendTypingResponse, ValidatedBaseUrl,
-};
 use super::monitor::{
     AlphaDisabledHandler, MonitorErrorCode, MonitorLifecycleState, WeixinMonitorSupervisor,
 };
@@ -22,6 +18,10 @@ use crate::api::code_web::remote::RemoteAgentReadService;
 use crate::system_agents::{
     AgentActivityConfidence, AgentActivityState, AgentVendor, SystemAgentActivity,
     SystemAgentSnapshot,
+};
+use a3s_boot::ilink::{
+    GetConfigResponse, GetUpdatesResponse, IlinkAuth, IlinkError, IlinkMessagingTransport,
+    NotifyResponse, SecretValue, SendMessageResponse, SendTypingResponse, ValidatedBaseUrl,
 };
 
 fn secret(value: &str) -> SecretValue {
@@ -282,7 +282,8 @@ impl FakeMessagingTransport {
         sends: impl IntoIterator<Item = Result<SendMessageResponse, IlinkError>>,
     ) -> Self {
         Self {
-            base_url: ValidatedBaseUrl::for_test("http://127.0.0.1:43126/").unwrap(),
+            base_url: ValidatedBaseUrl::insecure_loopback_for_tests("http://127.0.0.1:43126/")
+                .unwrap(),
             updates: Mutex::new(updates.into_iter().collect()),
             sends: Mutex::new(sends.into_iter().collect()),
             send_calls: Mutex::new(Vec::new()),

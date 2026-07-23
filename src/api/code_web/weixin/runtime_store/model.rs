@@ -4,7 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::api::code_web::weixin::ilink::SecretValue;
+use a3s_boot::ilink::SecretValue;
 
 pub(super) const RUNTIME_SCHEMA_VERSION: u32 = 1;
 pub(super) const MAX_INBOX_ENTRIES: usize = 4_096;

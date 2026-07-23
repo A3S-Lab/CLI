@@ -1,15 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use a3s_boot::ilink::{IlinkClient, IlinkLoginTransport, IlinkMessagingTransport, IlinkModule};
 use a3s_boot::{ControllerDefinition, Module, ModuleRef, ProviderDefinition, Result as BootResult};
 
 use super::account_controller::WeixinAccountController;
 use super::capability_controller::WeixinCapabilityController;
+use super::channel_config::{WeixinChannelConfig, WeixinChannelLoad};
 use super::credential_store::PrivateFileCredentialStore;
 use super::dto::SafeBlocker;
-use super::entitlement::{IlinkEntitlement, IlinkEntitlementLoad};
-#[cfg(test)]
-use super::ilink::{IlinkLoginTransport, IlinkMessagingTransport};
 use super::login_controller::WeixinLoginController;
 use super::remote_controller::WeixinRemoteController;
 use super::service::WeixinService;
@@ -42,7 +41,7 @@ impl WeixinModule {
 
     #[cfg(test)]
     pub(super) fn mock(
-        transport: Arc<dyn super::ilink::IlinkLoginTransport>,
+        transport: Arc<dyn a3s_boot::ilink::IlinkLoginTransport>,
         credential_store: Arc<dyn super::credential_store::WeixinCredentialStore>,
     ) -> Self {
         let login = Arc::new(super::login_coordinator::WeixinLoginCoordinator::new(
@@ -56,7 +55,7 @@ impl WeixinModule {
 
     #[cfg(test)]
     pub(super) fn mock_with_remote(
-        transport: Arc<dyn super::ilink::IlinkLoginTransport>,
+        transport: Arc<dyn a3s_boot::ilink::IlinkLoginTransport>,
         credential_store: Arc<dyn super::credential_store::WeixinCredentialStore>,
         remote_read: Arc<RemoteAgentReadService>,
     ) -> Self {
@@ -75,7 +74,7 @@ impl WeixinModule {
 
     #[cfg(test)]
     pub(super) fn mock_with_monitor(
-        login_transport: Arc<dyn super::ilink::IlinkLoginTransport>,
+        login_transport: Arc<dyn a3s_boot::ilink::IlinkLoginTransport>,
         credential_store: Arc<dyn super::credential_store::WeixinCredentialStore>,
         monitor: Arc<super::monitor::WeixinMonitorSupervisor>,
         runtime_store: super::runtime_store::WeixinRuntimeStore,
@@ -121,7 +120,13 @@ impl Module for WeixinModule {
 
     fn imports(&self) -> Vec<Arc<dyn Module>> {
         match &self.provider {
-            WeixinProvider::ConfiguredWithRemote => vec![Arc::new(RemoteModule)],
+            WeixinProvider::ConfiguredWithRemote => vec![
+                Arc::new(RemoteModule),
+                Arc::new(IlinkModule::weixin(format!(
+                    "A3S/{}",
+                    env!("CARGO_PKG_VERSION")
+                ))),
+            ],
             #[cfg(test)]
             WeixinProvider::Fixed(_) => Vec::new(),
         }
@@ -174,24 +179,18 @@ impl Module for WeixinModule {
 fn configured_service(module_ref: &ModuleRef) -> BootResult<Arc<WeixinService>> {
     let remote_read = module_ref.get::<RemoteAgentReadService>()?;
     let state = module_ref.get::<CodeWebState>()?;
-    let entitlement = match IlinkEntitlement::load(&state.config_path) {
-        IlinkEntitlementLoad::Ready(entitlement) => entitlement,
-        IlinkEntitlementLoad::Unavailable(blocker) => {
+    match WeixinChannelConfig::load(&state.config_path) {
+        WeixinChannelLoad::Enabled => {}
+        WeixinChannelLoad::Unavailable(blocker) => {
             return Ok(Arc::new(WeixinService::disabled_with(
                 Some(remote_read),
                 blocker,
             )))
         }
-    };
-    let transports = match entitlement.build_transports() {
-        Ok(transports) => transports,
-        Err(_) => {
-            return Ok(Arc::new(WeixinService::disabled_with(
-                Some(remote_read),
-                configuration_blocker(),
-            )))
-        }
-    };
+    }
+    let client = module_ref.get::<IlinkClient>()?;
+    let login_transport: Arc<dyn IlinkLoginTransport> = client.clone();
+    let messaging_transport: Arc<dyn IlinkMessagingTransport> = client;
     let state_root = match weixin_state_root(&state.config_path) {
         Ok(state_root) => state_root,
         Err(blocker) => {
@@ -205,8 +204,8 @@ fn configured_service(module_ref: &ModuleRef) -> BootResult<Arc<WeixinService>> 
         state_root.join("credentials"),
     ));
     Ok(Arc::new(WeixinService::production(
-        transports.login,
-        transports.messaging,
+        login_transport,
+        messaging_transport,
         credential_store,
         state_root.join("runtime"),
         remote_read,
@@ -224,11 +223,4 @@ fn weixin_state_root(config_path: &Path) -> Result<PathBuf, SafeBlocker> {
             code: "ilink_state_path_unavailable".to_string(),
             message: "The local Weixin state directory could not be resolved safely.".to_string(),
         })
-}
-
-fn configuration_blocker() -> SafeBlocker {
-    SafeBlocker {
-        code: "ilink_configuration_invalid".to_string(),
-        message: "The local Weixin iLink configuration is invalid.".to_string(),
-    }
 }

@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use super::credential_store::{CredentialStoreError, WeixinCredentialStore, WeixinCredentials};
-use super::ilink::{
+use a3s_boot::ilink::{
     IlinkError, IlinkLoginTransport, PollQrResponse, QrCodeStatus, SecretValue, ValidatedBaseUrl,
 };
 
@@ -76,7 +76,7 @@ impl WeixinLoginCoordinator {
             }
         }
 
-        let response = self.transport.create_qr().await?;
+        let response = self.transport.create_qr(&[]).await?;
         let started_at = Instant::now();
         let attempt = LoginAttempt {
             id: random_attempt_id(),

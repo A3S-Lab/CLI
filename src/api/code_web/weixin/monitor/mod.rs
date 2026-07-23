@@ -12,18 +12,18 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use super::credential_store::{CredentialStoreError, WeixinCredentialStore, WeixinCredentials};
-use super::ilink::{
-    GetUpdatesResponse, IlinkAuth, IlinkError, IlinkMessagingTransport, SecretValue,
-};
 use super::runtime_store::{
     InboxState, OutboundDraft, OutboundState, RuntimeStoreError, WeixinRuntimeStore,
+};
+use a3s_boot::ilink::{
+    GetUpdatesResponse, IlinkAuth, IlinkError, IlinkMessagingTransport, SecretValue,
 };
 #[cfg(test)]
 pub(super) use message::AlphaDisabledHandler;
 use message::{accepted_inbound_message, MAX_HANDLER_RESPONSE_BYTES};
 pub(super) use message::{InboundHandlerError, WeixinInboundHandler};
 
-const DEFAULT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_LONG_POLL_TIMEOUT: Duration = Duration::from_secs(35);
 
 pub(super) struct WeixinMonitorSupervisor {
     transport: Arc<dyn IlinkMessagingTransport>,

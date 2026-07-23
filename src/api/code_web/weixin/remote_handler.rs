@@ -415,8 +415,8 @@ mod tests {
     use super::*;
     use crate::api::code_web::kernel::{ManagedQueueEvidence, ManagedSessionEvidence};
     use crate::api::code_web::remote::RemoteAgentReadService;
-    use crate::api::code_web::weixin::ilink::SecretValue;
     use crate::system_agents::SystemAgentSnapshot;
+    use a3s_boot::ilink::SecretValue;
 
     fn message(text: &str) -> InboundMessage {
         InboundMessage {

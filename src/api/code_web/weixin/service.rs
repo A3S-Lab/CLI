@@ -10,7 +10,6 @@ use super::dto::{
     SafeBlocker, StartWeixinLoginRequest, SubmitWeixinVerificationRequest, WeixinAccountResponse,
     WeixinCapabilityResponse, WeixinCapabilityState, WeixinMonitorState, WeixinProtocolMode,
 };
-use super::ilink::{IlinkLoginTransport, IlinkMessagingTransport};
 use super::login_coordinator::{
     WeixinLoginAttempt, WeixinLoginCoordinator, WeixinLoginError, WeixinLoginState,
 };
@@ -21,6 +20,7 @@ use super::monitor::{
 use super::remote_handler::RemoteReadHandler;
 use super::runtime_store::WeixinRuntimeStore;
 use crate::api::code_web::remote::{RemoteAgentReadService, RemoteReadScope, RemoteSnapshot};
+use a3s_boot::ilink::{IlinkLoginTransport, IlinkMessagingTransport};
 
 pub(super) struct WeixinService {
     runtime: RwLock<Option<Arc<WeixinRuntime>>>,
@@ -595,10 +595,10 @@ fn map_login_error(error: WeixinLoginError) -> BootError {
             BootError::BadGateway("iLink returned an inconsistent login state.".to_string())
         }
         WeixinLoginError::Protocol(error) => match error {
-            super::ilink::IlinkError::Timeout => {
+            a3s_boot::ilink::IlinkError::Timeout => {
                 BootError::GatewayTimeout("iLink login request timed out.".to_string())
             }
-            super::ilink::IlinkError::StaleCredential => BootError::PreconditionFailed(
+            a3s_boot::ilink::IlinkError::StaleCredential => BootError::PreconditionFailed(
                 "The WeChat credential is stale and must be rebound.".to_string(),
             ),
             _ => BootError::BadGateway("iLink login request failed.".to_string()),
@@ -640,12 +640,12 @@ fn map_monitor_error(error: MonitorError) -> BootError {
         MonitorError::NotBound => {
             BootError::PreconditionFailed("No WeChat account is bound.".to_string())
         }
-        MonitorError::Protocol(super::ilink::IlinkError::StaleCredential) => {
+        MonitorError::Protocol(a3s_boot::ilink::IlinkError::StaleCredential) => {
             BootError::PreconditionFailed(
                 "The WeChat credential is stale and must be rebound.".to_string(),
             )
         }
-        MonitorError::Protocol(super::ilink::IlinkError::Timeout) => {
+        MonitorError::Protocol(a3s_boot::ilink::IlinkError::Timeout) => {
             BootError::GatewayTimeout("The WeChat monitor request timed out.".to_string())
         }
         MonitorError::Protocol(_) => {

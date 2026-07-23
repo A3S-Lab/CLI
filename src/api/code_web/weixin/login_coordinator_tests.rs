@@ -7,11 +7,11 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 
 use super::credential_store::{CredentialStoreError, WeixinCredentialStore, WeixinCredentials};
-use super::ilink::{
+use super::login_coordinator::{WeixinLoginCoordinator, WeixinLoginError, WeixinLoginState};
+use a3s_boot::ilink::{
     CreateQrResponse, IlinkError, IlinkLoginTransport, PollQrResponse, QrCodeStatus, SecretValue,
     ValidatedBaseUrl,
 };
-use super::login_coordinator::{WeixinLoginCoordinator, WeixinLoginError, WeixinLoginState};
 
 struct FakeLoginTransport {
     initial_base_url: ValidatedBaseUrl,
@@ -34,8 +34,10 @@ impl FakeLoginTransport {
         let account_base_url = "http://127.0.0.1:43123/".to_string();
         let redirect_origin = "http://127.0.0.1:43124/";
         Self {
-            initial_base_url: ValidatedBaseUrl::for_test(&account_base_url).unwrap(),
-            redirect_base_url: ValidatedBaseUrl::for_test(redirect_origin).unwrap(),
+            initial_base_url: ValidatedBaseUrl::insecure_loopback_for_tests(&account_base_url)
+                .unwrap(),
+            redirect_base_url: ValidatedBaseUrl::insecure_loopback_for_tests(redirect_origin)
+                .unwrap(),
             account_base_url,
             redirect_host: "127.0.0.1:43124".to_string(),
             responses: Mutex::new(responses.into_iter().collect()),
@@ -67,7 +69,10 @@ impl IlinkLoginTransport for FakeLoginTransport {
         }
     }
 
-    async fn create_qr(&self) -> Result<CreateQrResponse, IlinkError> {
+    async fn create_qr(
+        &self,
+        _local_tokens: &[SecretValue],
+    ) -> Result<CreateQrResponse, IlinkError> {
         self.create_count.fetch_add(1, Ordering::Relaxed);
         Ok(CreateQrResponse {
             qrcode: SecretValue::new("qr-code-canary").unwrap(),

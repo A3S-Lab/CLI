@@ -1,10 +1,10 @@
 use std::io::Write;
 
-use super::ilink::SecretValue;
 use super::runtime_store::{
     IdempotencyState, InboundMessage, InboxState, OutboundDraft, OutboundState, RemoteListKind,
     RuntimeStoreError, WeixinRuntimeStore,
 };
+use a3s_boot::ilink::SecretValue;
 
 fn secret(value: impl Into<String>) -> SecretValue {
     SecretValue::new(value).unwrap()

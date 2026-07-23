@@ -9,7 +9,7 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use super::ilink::SecretValue;
+use a3s_boot::ilink::SecretValue;
 
 const CREDENTIAL_SCHEMA_VERSION: u32 = 1;
 const CREDENTIAL_FILE_NAME: &str = "credentials.json";

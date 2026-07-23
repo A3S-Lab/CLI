@@ -10,11 +10,6 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use super::credential_store::{CredentialStoreError, WeixinCredentialStore, WeixinCredentials};
-use super::ilink::{
-    CreateQrResponse, GetConfigResponse, GetUpdatesResponse, IlinkAuth, IlinkError,
-    IlinkLoginTransport, IlinkMessagingTransport, NotifyResponse, PollQrResponse, QrCodeStatus,
-    SecretValue, SendMessageResponse, SendTypingResponse, ValidatedBaseUrl,
-};
 use super::module::WeixinModule;
 use super::monitor::{AlphaDisabledHandler, MonitorLifecycleState, WeixinMonitorSupervisor};
 use super::runtime_store::WeixinRuntimeStore;
@@ -23,6 +18,11 @@ use crate::api::code_web::remote::RemoteAgentReadService;
 use crate::system_agents::{
     AgentActivityConfidence, AgentActivityState, AgentVendor, SystemAgentActivity,
     SystemAgentSnapshot,
+};
+use a3s_boot::ilink::{
+    CreateQrResponse, GetConfigResponse, GetUpdatesResponse, IlinkAuth, IlinkError,
+    IlinkLoginTransport, IlinkMessagingTransport, NotifyResponse, PollQrResponse, QrCodeStatus,
+    SecretValue, SendMessageResponse, SendTypingResponse, ValidatedBaseUrl,
 };
 
 struct ApiLoginTransport {
@@ -34,7 +34,8 @@ struct ApiLoginTransport {
 impl ApiLoginTransport {
     fn new(responses: impl IntoIterator<Item = PollQrResponse>) -> Self {
         Self {
-            base_url: ValidatedBaseUrl::for_test("http://127.0.0.1:43125/").unwrap(),
+            base_url: ValidatedBaseUrl::insecure_loopback_for_tests("http://127.0.0.1:43125/")
+                .unwrap(),
             responses: Mutex::new(responses.into_iter().collect()),
             verify_codes: Mutex::new(Vec::new()),
         }
@@ -59,7 +60,10 @@ impl IlinkLoginTransport for ApiLoginTransport {
         Err(IlinkError::InvalidResponse("redirect_host"))
     }
 
-    async fn create_qr(&self) -> Result<CreateQrResponse, IlinkError> {
+    async fn create_qr(
+        &self,
+        _local_tokens: &[SecretValue],
+    ) -> Result<CreateQrResponse, IlinkError> {
         Ok(CreateQrResponse {
             qrcode: SecretValue::new("qr-code-api-canary").unwrap(),
             qrcode_img_content: SecretValue::new("weixin://qr-api-canary").unwrap(),
@@ -115,7 +119,8 @@ struct ApiMessagingTransport {
 impl ApiMessagingTransport {
     fn new() -> Self {
         Self {
-            base_url: ValidatedBaseUrl::for_test("http://127.0.0.1:43125/").unwrap(),
+            base_url: ValidatedBaseUrl::insecure_loopback_for_tests("http://127.0.0.1:43125/")
+                .unwrap(),
             notify_start_calls: AtomicUsize::new(0),
             notify_stop_calls: AtomicUsize::new(0),
         }
@@ -216,7 +221,7 @@ fn json_request(
 }
 
 #[tokio::test]
-async fn weixin_capability_route_is_disabled_without_entitlement() {
+async fn weixin_capability_route_reports_an_explicitly_disabled_runtime() {
     let app = BootApplication::builder()
         .global_prefix("/api")
         .import(WeixinModule::disabled_isolated())
@@ -238,14 +243,13 @@ async fn weixin_capability_route_is_disabled_without_entitlement() {
     assert_eq!(
         body,
         json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "state": "unavailable",
             "protocolMode": "disabled",
-            "productionEntitled": false,
             "supportedScopes": [],
             "releaseBlockers": [{
-                "code": "ilink_entitlement_missing",
-                "message": "An A3S-specific iLink entitlement is required."
+                "code": "ilink_channel_unavailable",
+                "message": "The Weixin iLink channel is not enabled in this runtime."
             }]
         })
     );
@@ -279,7 +283,7 @@ async fn weixin_capability_route_is_disabled_without_entitlement() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn weixin_production_runtime_exposes_qr_binding_when_entitled() {
+async fn weixin_production_runtime_exposes_qr_binding() {
     let temporary = tempfile::tempdir().expect("create production Weixin fixture");
     let root = std::fs::canonicalize(temporary.path()).expect("canonicalize fixture root");
     let remote = Arc::new(RemoteAgentReadService::for_test(
@@ -316,7 +320,7 @@ async fn weixin_production_runtime_exposes_qr_binding_when_entitled() {
         .expect("decode production capability");
     assert_eq!(capability["state"], "unbound");
     assert_eq!(capability["protocolMode"], "tencent");
-    assert_eq!(capability["productionEntitled"], true);
+    assert_eq!(capability["schemaVersion"], 2);
     assert_eq!(
         capability["supportedScopes"],
         json!(["agents.read", "sessions.read"])
@@ -482,7 +486,7 @@ async fn weixin_mock_login_api_binds_and_disconnects_without_exposing_credential
         .unwrap();
     assert_eq!(capability["state"], "unbound");
     assert_eq!(capability["protocolMode"], "mock");
-    assert_eq!(capability["productionEntitled"], false);
+    assert_eq!(capability["schemaVersion"], 2);
 
     let started = app
         .call(json_request(
