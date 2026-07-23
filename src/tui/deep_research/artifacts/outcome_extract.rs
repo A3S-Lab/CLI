@@ -92,6 +92,8 @@ pub(crate) fn deterministic_deep_research_outcome_report_at(
             || deterministic_outcome_same_event(&candidate.text, &direct_answer.text))
             && !deterministic_outcome_spans_overlap(&candidate.text, &direct_answer.text)
             && deterministic_outcome_finding_adds_dimension(&candidate.text)
+            && (!report_query_requires_terminal_competition_answer(query)
+                || !deterministic_outcome_span_is_earlier_stage(&candidate.text))
     });
     deterministic_outcome_candidates_sort(&mut findings);
     let mut distinct_findings = Vec::new();
@@ -105,8 +107,26 @@ pub(crate) fn deterministic_deep_research_outcome_report_at(
         }
         distinct_findings.push(candidate);
     }
-    let mut findings = distinct_findings;
-    findings.truncate(DETERMINISTIC_OUTCOME_MAX_FINDINGS);
+    let mut findings = Vec::new();
+    let mut retained_cross_source_event = false;
+    if let Some(index) = distinct_findings
+        .iter()
+        .position(|candidate| candidate.source_index != direct_answer.source_index)
+    {
+        let corroboration = distinct_findings.remove(index);
+        retained_cross_source_event =
+            deterministic_outcome_same_event(&corroboration.text, &direct_answer.text);
+        findings.push(corroboration);
+    }
+    findings.extend(
+        distinct_findings
+            .into_iter()
+            .filter(|candidate| {
+                !retained_cross_source_event
+                    || !deterministic_outcome_same_event(&candidate.text, &direct_answer.text)
+            })
+            .take(DETERMINISTIC_OUTCOME_MAX_FINDINGS - findings.len()),
+    );
     if findings.is_empty() {
         return Ok(None);
     }
@@ -141,7 +161,11 @@ fn deterministic_outcome_spans(chunk: &str) -> Vec<String> {
         regex::Regex::new(r"(?:^|\s)(?:\*+|#{1,6}|•|\|)(?:\s|$)")
             .expect("static deterministic outcome structural-boundary regex")
     });
-    let structured = structural_boundary.replace_all(chunk, "\n");
+    let mut emoji_structured = chunk.to_string();
+    for boundary in ["🏆", "🥇", "🥈", "🥉"] {
+        emoji_structured = emoji_structured.replace(boundary, "\n");
+    }
+    let structured = structural_boundary.replace_all(&emoji_structured, "\n");
     let mut spans = Vec::new();
     for unit in structured.lines() {
         let normalized = unit.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -265,6 +289,9 @@ fn deterministic_outcome_span_is_unsafe(text: &str) -> bool {
             "近3届",
             "近三届",
             "历届",
+            "见本页",
+            "本页",
+            "栏目",
         ]
             .iter()
             .any(|marker| text.contains(marker))
@@ -283,6 +310,34 @@ fn deterministic_outcome_span_is_unsafe(text: &str) -> bool {
         || text.contains('*')
         || text.contains('#')
         || text.contains('|')
+        || deterministic_outcome_score_pairs(text).len() > 1
+}
+
+fn deterministic_outcome_span_is_earlier_stage(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "小组赛",
+        "32强",
+        "16强",
+        "八强",
+        "1/8",
+        "1/4",
+        "四分之一决赛",
+        "半决赛",
+        "准决赛",
+        "季军赛",
+        "group stage",
+        "round of 32",
+        "round of 16",
+        "quarter-final",
+        "quarterfinal",
+        "semi-final",
+        "semifinal",
+        "third-place",
+        "third place",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn deterministic_span_asserts_outcome(text: &str) -> bool {
@@ -291,6 +346,8 @@ fn deterministic_span_asserts_outcome(text: &str) -> bool {
         "夺冠",
         "战胜",
         "击败",
+        "力克",
+        "险胜",
         "获胜",
         "胜出",
         "赢得",
@@ -298,6 +355,7 @@ fn deterministic_span_asserts_outcome(text: &str) -> bool {
         "夺得世界杯冠军",
         "成为世界杯冠军",
         "获得世界杯冠军",
+        "捧起",
         "排名第一",
         "位居第一",
         "居首",
@@ -341,6 +399,8 @@ fn deterministic_span_is_material_finding(text: &str) -> bool {
         "夺冠",
         "战胜",
         "击败",
+        "力克",
+        "险胜",
         "胜利",
         "比分",
         "赛果",
@@ -350,6 +410,7 @@ fn deterministic_span_is_material_finding(text: &str) -> bool {
         "金靴",
         "金手套",
         "零封",
+        "进球",
         "决赛",
         "赛后",
         "冲突",
@@ -360,6 +421,7 @@ fn deterministic_span_is_material_finding(text: &str) -> bool {
         "beat",
         "defeated",
         "score",
+        "goal",
         "ranking",
         "investigation",
     ]
@@ -383,6 +445,8 @@ fn deterministic_span_has_assertive_finding_predicate(text: &str) -> bool {
         "夺冠",
         "捧杯",
         "获得",
+        "打入",
+        "攻入",
         "重回",
         "居第",
         "位居",
@@ -408,6 +472,7 @@ fn deterministic_span_has_assertive_finding_predicate(text: &str) -> bool {
         "defeated",
         "ranked",
         "finished",
+        "scored",
         "investigated",
         "investigating",
     ]
@@ -433,7 +498,6 @@ fn deterministic_outcome_finding_adds_dimension(text: &str) -> bool {
         "表示",
         "配得上",
         "巡游",
-        "庆祝",
         "纪录",
         "射手",
         "奖杯",
@@ -455,7 +519,6 @@ fn deterministic_outcome_finding_adds_dimension(text: &str) -> bool {
         "stated",
         "reaction",
         "parade",
-        "celebrat",
         "record",
         "top scorer",
         "award",
@@ -478,8 +541,8 @@ fn deterministic_outcome_span_score(
         .map(|feature| feature.chars().count() as i64)
         .sum::<i64>();
     let outcome_signals = [
-        "冠军", "夺冠", "战胜", "击败", "胜利", "比分", "赛果", "结果", "won", "winner",
-        "champion", "beat", "defeated", "score",
+        "冠军", "夺冠", "战胜", "击败", "力克", "险胜", "捧起", "胜利", "比分", "赛果",
+        "结果", "won", "winner", "champion", "beat", "defeated", "score",
     ]
     .iter()
     .filter(|marker| lower.contains(**marker))
@@ -513,7 +576,10 @@ fn deterministic_outcome_span_score(
         .count() as i64;
     let role_score = match role {
         DeterministicOutcomeRole::DirectAnswer => {
-            overlap * 120 + outcome_signals * 180 - aftermath_signals * 120 + score_signal * 600
+            overlap * 120 + outcome_signals * 180
+                - aftermath_signals * 120
+                + score_signal * 1_200
+                - deterministic_outcome_leading_label_penalty(text)
         }
         DeterministicOutcomeRole::Finding => {
             overlap * 120
@@ -525,6 +591,24 @@ fn deterministic_outcome_span_score(
     };
     role_score + trust + catalog_excerpt_readability_score(text) - character_count * 3
         - source_index as i64
+}
+
+fn deterministic_outcome_leading_label_penalty(text: &str) -> i64 {
+    let Some((prefix, suffix)) = text.split_once(' ') else {
+        return 0;
+    };
+    let prefix_is_bounded_label = prefix.chars().count() <= 36
+        && prefix.chars().any(source_backed_han_character)
+        && ["世界杯", "冠军", "决赛", "战况", "赛况", "赛果", "比分"]
+            .iter()
+            .any(|marker| prefix.contains(marker))
+        && !deterministic_span_has_assertive_finding_predicate(prefix)
+        && !deterministic_outcome_score_literal_observed(prefix);
+    if prefix_is_bounded_label && deterministic_span_asserts_outcome(suffix) {
+        800
+    } else {
+        0
+    }
 }
 
 fn deterministic_outcome_candidates_sort(candidates: &mut [DeterministicOutcomeCandidate]) {
@@ -542,7 +626,7 @@ fn deterministic_outcome_score_literal_observed(value: &str) -> bool {
     SCORE
         .get_or_init(|| {
             regex::Regex::new(
-                r"(?:^|[^0-9])(?:0|[1-9][0-9]?)\s*(?:-|:|：)\s*(?:0|[1-9][0-9]?)(?:$|[^0-9])",
+                r"(?:^|[^0-9])(?:0|[1-9][0-9]?)\s*(?:-|:|：|比)\s*(?:0|[1-9][0-9]?)(?:$|[^0-9])",
             )
             .expect("static deterministic outcome score regex")
         })
@@ -565,7 +649,7 @@ fn deterministic_outcome_score_pairs(value: &str) -> HashSet<String> {
     SCORE
         .get_or_init(|| {
             regex::Regex::new(
-                r"((?:0|[1-9][0-9]?))\s*(?:-|:|：)\s*((?:0|[1-9][0-9]?))",
+                r"((?:0|[1-9][0-9]?))\s*(?:-|:|：|比)\s*((?:0|[1-9][0-9]?))",
             )
             .expect("static deterministic outcome score-pair regex")
         })

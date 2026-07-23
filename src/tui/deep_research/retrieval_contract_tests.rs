@@ -280,6 +280,7 @@ fn production_javascript_contains_retrieval_and_no_control_plane() {
 #[test]
 fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
     let foundation = include_str!("workflow/retrieval_foundation.js");
+    let web_source_quality = include_str!("workflow/retrieval_web_source_quality.js");
     let web = include_str!("workflow/retrieval_web.js");
     let selection = include_str!("workflow/retrieval_selection.js");
     let reduction = include_str!("workflow/retrieval_reduction.js");
@@ -290,6 +291,7 @@ fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
     let execution = include_str!("workflow/retrieval_execution.js");
 
     assert!(foundation.lines().count() < 1_000);
+    assert!(web_source_quality.lines().count() < 1_000);
     assert!(web.lines().count() < 1_000);
     assert!(selection.lines().count() < 1_000);
     assert!(reduction.lines().count() < 1_000);
@@ -312,7 +314,7 @@ fn retrieval_fragments_remain_small_and_reassemble_as_valid_source() {
         );
     }
     let combined = format!(
-        "{foundation}{web}{selection}{reduction}{materialization}{loop_source}{local}{local_collection}{execution}"
+        "{foundation}{web_source_quality}{web}{selection}{reduction}{materialization}{loop_source}{local}{local_collection}{execution}"
     );
     assert!(combined.starts_with("async function run(ctx, inputs)"));
     assert!(combined.trim_end().ends_with('}'));

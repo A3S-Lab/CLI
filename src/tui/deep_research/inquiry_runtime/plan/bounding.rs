@@ -321,6 +321,24 @@ fn host_web_search_queries(workflow_args: &Value, query: &str, local_only: bool)
 }
 
 fn host_authority_companion_query(query: &str, current_date: &str) -> String {
+    if host_query_asks_for_competition_outcome(query) {
+        let year = chrono::NaiveDate::parse_from_str(current_date, "%Y-%m-%d")
+            .map(|date| date.format("%Y").to_string())
+            .unwrap_or_else(|_| current_date.chars().take(4).collect());
+        return if query.chars().any(host_query_han_character) {
+            let subject = host_competition_search_subject(query);
+            let dated_subject = if subject.contains(&year) {
+                subject
+            } else {
+                format!("{subject} {year}")
+            };
+            format!("{dated_subject} 决赛 冠军 比分")
+        } else {
+            format!(
+                "{query} {year} final result final score champion winner authoritative report"
+            )
+        };
+    }
     if query.chars().any(host_query_han_character) {
         let localized_date = chrono::NaiveDate::parse_from_str(current_date, "%Y-%m-%d")
             .map(|date| date.format("%Y年%-m月%-d日").to_string())
@@ -329,6 +347,55 @@ fn host_authority_companion_query(query: &str, current_date: &str) -> String {
     } else {
         format!("{query} {current_date} latest development final outcome news")
     }
+}
+
+fn host_competition_search_subject(query: &str) -> String {
+    let mut subject = query.to_string();
+    for generic_intent in [
+        "比赛结果",
+        "赛事结果",
+        "决赛结果",
+        "战况",
+        "赛况",
+        "赛果",
+        "结果",
+    ] {
+        subject = subject.replace(generic_intent, " ");
+    }
+    let subject = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    if subject.is_empty() {
+        query.trim().to_string()
+    } else {
+        subject
+    }
+}
+
+fn host_query_asks_for_competition_outcome(query: &str) -> bool {
+    let query = query.to_ascii_lowercase();
+    [
+        "战况",
+        "赛况",
+        "赛果",
+        "比分",
+        "比赛结果",
+        "赛事结果",
+        "谁赢",
+        "冠军",
+        "夺冠",
+        "score",
+        "who won",
+        "winner",
+        "champion",
+        "standings",
+        "match result",
+        "game result",
+        "final result",
+    ]
+    .iter()
+    .any(|marker| query.contains(marker))
+        || ["cup result", "tournament result", "championship result"]
+            .iter()
+            .any(|marker| query.contains(marker))
 }
 
 fn host_query_han_character(character: char) -> bool {

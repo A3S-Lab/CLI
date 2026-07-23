@@ -22,12 +22,14 @@ impl KernelService {
         let content = required_queue_content(&request)?;
         let context_files = string_array(&request, "contextFiles")?;
         let skill_names = string_array(&request, "skillNames")?;
+        let mode = queued_turn_mode(&request)?;
         let turn = CodeWebQueuedTurn {
             id: HostEnv::default().next_id(),
             kind: CodeWebQueuedTurnKind::User,
             content,
             context_files,
             skill_names,
+            mode,
             priority: USER_TURN_PRIORITY,
             enqueued_at: chrono::Utc::now().timestamp_millis(),
         };
@@ -227,6 +229,7 @@ impl KernelService {
             ),
             context_files: Vec::new(),
             skill_names: Vec::new(),
+            mode: CodeWebQueuedTurnMode::Standard,
             priority: GOAL_CONTINUATION_PRIORITY,
             enqueued_at: chrono::Utc::now().timestamp_millis(),
         });
@@ -287,4 +290,17 @@ fn string_array(request: &Value, key: &str) -> BootResult<Vec<String>> {
                 .ok_or_else(|| BootError::BadRequest(format!("{key} must contain strings")))
         })
         .collect()
+}
+
+pub(super) fn queued_turn_mode(request: &Value) -> BootResult<CodeWebQueuedTurnMode> {
+    match request.get("mode") {
+        None | Some(Value::Null) => Ok(CodeWebQueuedTurnMode::Standard),
+        Some(Value::String(mode)) if mode == "standard" => Ok(CodeWebQueuedTurnMode::Standard),
+        Some(Value::String(mode)) if mode == "deepResearch" => {
+            Ok(CodeWebQueuedTurnMode::DeepResearch)
+        }
+        Some(_) => Err(BootError::BadRequest(
+            "mode must be `standard` or `deepResearch`".to_string(),
+        )),
+    }
 }

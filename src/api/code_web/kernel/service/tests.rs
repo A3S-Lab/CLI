@@ -11,6 +11,20 @@ use a3s_code_core::hitl::{ConfirmationManager, ConfirmationPolicy};
 use a3s_code_core::SessionOptions;
 
 #[test]
+fn queued_turn_mode_defaults_to_standard_and_validates_deep_research() {
+    assert_eq!(
+        super::turn_queue::queued_turn_mode(&json!({})).expect("default turn mode"),
+        CodeWebQueuedTurnMode::Standard
+    );
+    assert_eq!(
+        super::turn_queue::queued_turn_mode(&json!({ "mode": "deepResearch" }))
+            .expect("DeepResearch turn mode"),
+        CodeWebQueuedTurnMode::DeepResearch
+    );
+    assert!(super::turn_queue::queued_turn_mode(&json!({ "mode": "research" })).is_err());
+}
+
+#[test]
 fn stream_accumulator_uses_last_turn_prompt_tokens_and_final_usage() {
     let mut accumulator = CodeWebStreamAccumulator::default();
     accumulator.observe(AgentEvent::TurnEnd {

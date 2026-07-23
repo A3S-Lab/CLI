@@ -104,11 +104,41 @@ fn authority_companion_uses_the_current_date_and_a_query_script_hint() {
     assert_eq!(fallback.value["search_queries"][0], query);
     assert_eq!(
         fallback.value["search_queries"][1],
-        "Verify the current World Cup result 2026-07-19 latest development final outcome news"
+        "Verify the current World Cup result 2026 final result final score champion winner authoritative report"
     );
     assert_eq!(
         fallback.value["search_queries"].as_array().unwrap().len(),
         2
+    );
+}
+
+#[test]
+fn competition_outcome_companion_targets_terminal_evidence() {
+    let query = "世界杯战况";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        "世界杯 2026 决赛 冠军 比分"
+    );
+}
+
+#[test]
+fn competition_outcome_companion_does_not_repeat_year_or_generic_intent() {
+    let query = "2026世界杯赛况结果";
+    let mut args = automatic_loop_workflow_args(query);
+    args["input"]["evidence_scope"] = serde_json::json!("web_and_workspace");
+
+    let fallback = host_fallback_plan(&args).expect("host fallback plan");
+
+    assert_eq!(fallback.value["search_queries"][0], query);
+    assert_eq!(
+        fallback.value["search_queries"][1],
+        "2026世界杯 决赛 冠军 比分"
     );
 }
 

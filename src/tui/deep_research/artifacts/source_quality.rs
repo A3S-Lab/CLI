@@ -28,13 +28,34 @@ fn catalog_source_claim_eligible(
         "no registration",
         "user-generated content",
     ];
-    let self_publishing_disclaimer = (text.contains("观点仅代表作者本人")
-        && (text.contains("信息发布平台") || text.contains("信息存储空间服务")))
-        || (text.contains("views expressed")
-            && (text.contains("solely those of the author")
-                || text.contains("only those of the author")))
-        || (text.contains("publisher only provides storage")
-            || text.contains("platform only provides information storage"));
+    let chinese_opinion_disclaimer = [
+        "观点仅代表作者本人",
+        "仅代表作者本人观点",
+        "内容仅代表作者本人观点",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+        && ["不代表", "信息发布平台", "信息存储空间服务"]
+            .iter()
+            .any(|marker| text.contains(marker));
+    let chinese_storage_disclaimer = text.contains("信息存储空间服务")
+        && ["仅提供", "用户上传", "自媒体平台", "信息发布平台"]
+            .iter()
+            .any(|marker| text.contains(marker));
+    let english_opinion_disclaimer = text.contains("views expressed")
+        && (text.contains("solely those of the author")
+            || text.contains("only those of the author"));
+    let english_storage_disclaimer = [
+        "publisher only provides storage",
+        "platform only provides information storage",
+        "merely provides information storage space services",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker));
+    let self_publishing_disclaimer = chinese_opinion_disclaimer
+        || chinese_storage_disclaimer
+        || english_opinion_disclaimer
+        || english_storage_disclaimer;
     let content_is_eligible = !self_publishing_disclaimer
         && !low_confidence_markers
             .iter()
@@ -77,6 +98,7 @@ fn accountable_fallback_publisher(anchor: &str) -> bool {
         "chinanews.com.cn",
         "espn.com",
         "ft.com",
+        "ifeng.com",
         "news.cn",
         "nytimes.com",
         "people.com.cn",

@@ -433,6 +433,8 @@ fn report_summary_answers_query_intent(query: &str, text: &str) -> bool {
         "赢",
         "胜",
         "击败",
+        "力克",
+        "险胜",
         "战平",
         "领先",
         "晋级",
@@ -451,10 +453,12 @@ fn report_summary_answers_query_intent(query: &str, text: &str) -> bool {
     .iter()
     .any(|marker| text.contains(marker))
         || report_score_literal_observed(&text);
+    let terminal_answer_required = report_query_requires_terminal_competition_answer(query);
+    let terminal_outcome = report_terminal_competition_outcome_observed(&text);
+    let scored_non_terminal_stage = report_score_literal_observed(&text)
+        && !report_earlier_competition_stage_observed(&text);
     asserts_requested_outcome
-        && (!report_query_requires_terminal_competition_answer(query)
-            || report_score_literal_observed(&text)
-            || report_terminal_competition_outcome_observed(&text))
+        && (!terminal_answer_required || terminal_outcome || scored_non_terminal_stage)
 }
 
 fn report_query_requires_terminal_competition_answer(query: &str) -> bool {
@@ -534,6 +538,7 @@ fn report_terminal_competition_outcome_observed(text: &str) -> bool {
     if [
         "夺冠",
         "捧杯",
+        "捧起",
         "加冕",
         "夺得世界杯冠军",
         "获得世界杯冠军",
@@ -552,20 +557,7 @@ fn report_terminal_competition_outcome_observed(text: &str) -> bool {
     {
         return true;
     }
-    if [
-        "半决赛",
-        "准决赛",
-        "八强",
-        "四分之一决赛",
-        "1/4决赛",
-        "semi-final",
-        "semifinal",
-        "quarter-final",
-        "quarterfinal",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker))
-    {
+    if report_earlier_competition_stage_observed(&text) {
         return false;
     }
     let final_stage = text.contains("决赛")
@@ -576,6 +568,8 @@ fn report_terminal_competition_outcome_observed(text: &str) -> bool {
         && [
             "战胜",
             "击败",
+            "力克",
+            "险胜",
             "获胜",
             "胜出",
             "赢得",
@@ -586,6 +580,33 @@ fn report_terminal_competition_outcome_observed(text: &str) -> bool {
         ]
         .iter()
         .any(|marker| text.contains(marker))
+}
+
+fn report_earlier_competition_stage_observed(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    [
+        "小组赛",
+        "32强",
+        "16强",
+        "八强",
+        "1/8",
+        "1/4",
+        "四分之一决赛",
+        "半决赛",
+        "准决赛",
+        "季军赛",
+        "group stage",
+        "round of 32",
+        "round of 16",
+        "quarter-final",
+        "quarterfinal",
+        "semi-final",
+        "semifinal",
+        "third-place",
+        "third place",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
 }
 
 fn report_query_asks_for_competition_outcome(query: &str) -> bool {
@@ -614,7 +635,7 @@ fn report_score_literal_observed(value: &str) -> bool {
     SCORE
         .get_or_init(|| {
             regex::Regex::new(
-                r"(?:^|[^0-9])(?:0|[1-9][0-9]?)\s*(?:-|:|：)\s*(?:0|[1-9][0-9]?)(?:$|[^0-9])",
+                r"(?:^|[^0-9])(?:0|[1-9][0-9]?)\s*(?:-|:|：|比)\s*(?:0|[1-9][0-9]?)(?:$|[^0-9])",
             )
                 .expect("static score regex")
         })

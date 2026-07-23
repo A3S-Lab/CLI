@@ -411,6 +411,18 @@ fn marks_self_publishing_platform_disclaimers_ineligible_for_report_claims() {
             ),
             source_fixture(
                 "bootstrap-web-source-2",
+                "世界杯决赛数据盘点",
+                "https://k.sina.cn/article_7879995911_1d5af320706802de0u.html",
+                "西班牙在决赛中1-0击败阿根廷。特别声明：以上文章内容仅代表作者本人观点，不代表新浪网观点或立场。"
+            ),
+            source_fixture(
+                "bootstrap-web-source-3",
+                "世界杯大结局：西班牙夺冠",
+                "https://sports.ifeng.com/c/8uu05FDusPD",
+                "西班牙在决赛中1-0击败阿根廷。以上作品为凤凰网旗下自媒体平台用户上传并发布，本平台仅提供信息存储空间服务。"
+            ),
+            source_fixture(
+                "bootstrap-web-source-4",
                 "世界杯赛事机构公告",
                 "https://www.fifa.com/tournaments/world-cup/2026/results",
                 "世界杯赛事机构于2026年7月20日发布了最终赛果。"
@@ -422,9 +434,11 @@ fn marks_self_publishing_platform_disclaimers_ineligible_for_report_claims() {
         .expect("parse publisher-accountability catalog")
         .expect("retain source catalog");
 
-    assert_eq!(catalog.sources.len(), 2);
+    assert_eq!(catalog.sources.len(), 4);
     assert!(!catalog.sources[0].claim_eligible, "{catalog:#?}");
-    assert!(catalog.sources[1].claim_eligible, "{catalog:#?}");
+    assert!(!catalog.sources[1].claim_eligible, "{catalog:#?}");
+    assert!(!catalog.sources[2].claim_eligible, "{catalog:#?}");
+    assert!(catalog.sources[3].claim_eligible, "{catalog:#?}");
 }
 
 #[test]

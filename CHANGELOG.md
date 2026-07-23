@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-07-23
+
+### Added
+
+- Added a one-shot DeepResearch mode to the A3S Web Code composer. Queued turns
+  retain the selected mode, execute through the shared host-managed research
+  runtime, support cancellation and progress streaming, and expose admitted
+  Markdown and sandboxed HTML report artifacts through the session workspace.
+
+### Changed
+
+- Changed the default `web_search` engines to DuckDuckGo and Wikipedia.
+  AnySearch is now opt-in through `config.acl`, while an explicit request or
+  ACL engine selection remains authoritative.
+
+### Fixed
+
+- Applied one provider-neutral fallback policy to search failures and empty
+  results. AnySearch quota exhaustion now appears as a structured
+  `provider_quota` diagnostic before search automatically tries eligible
+  fallback engines.
+- Strengthened DeepResearch outcome extraction, accountable-source admission,
+  citation gates, and report publication so time-sensitive result questions
+  produce a direct source-backed answer or an honest degraded artifact.
+- Removed the legacy A3S Web Code draft that preselected `CLAUDE.md` or
+  `CLAUD.md` and inserted the Chinese “inspect the current code file” prompt,
+  without deleting ordinary saved user drafts.
+
 ## [0.10.0] - 2026-07-22
 
 ### Fixed

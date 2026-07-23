@@ -355,6 +355,7 @@ mod tests {
             content: content.to_string(),
             context_files: Vec::new(),
             skill_names: Vec::new(),
+            mode: CodeWebQueuedTurnMode::Standard,
             priority: USER_TURN_PRIORITY,
             enqueued_at,
         }

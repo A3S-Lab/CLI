@@ -125,6 +125,15 @@ impl KernelService {
             .lock()
             .await
             .remove(session_id);
+        if let Some(cancellation) = self
+            .state
+            .active_research_runs
+            .lock()
+            .await
+            .remove(session_id)
+        {
+            cancellation.cancel();
+        }
         Ok(())
     }
 

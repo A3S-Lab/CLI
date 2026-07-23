@@ -91,7 +91,18 @@ impl KernelService {
         session_id: &str,
     ) -> BootResult<Value> {
         let session = self.kernel_session(session_id).await?;
-        let cancelled = session.cancel().await;
+        let research_cancelled = self
+            .state
+            .active_research_runs
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .is_some_and(|cancellation| {
+                cancellation.cancel();
+                true
+            });
+        let cancelled = session.cancel().await || research_cancelled;
         {
             let mut controls_by_session = self.state.session_controls.lock().await;
             if let Some(run) = controls_by_session

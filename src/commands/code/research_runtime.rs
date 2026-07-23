@@ -85,15 +85,35 @@ pub(crate) async fn execute_deepresearch_in(
     memory_dir: PathBuf,
 ) -> anyhow::Result<DeepResearchReportSynthesis> {
     let opts = parse_deepresearch_args(args)?;
+    execute_deepresearch_query_in(
+        &opts.query,
+        opts.evidence_scope,
+        deep_research_default_budget(),
+        workspace,
+        code_config,
+        memory_dir,
+    )
+    .await
+}
+
+pub(crate) async fn execute_deepresearch_query_in(
+    query: &str,
+    evidence_scope: Option<crate::tui::DeepResearchEvidenceScope>,
+    budget: BudgetPlan,
+    workspace: &Path,
+    code_config: CodeConfig,
+    memory_dir: PathBuf,
+) -> anyhow::Result<DeepResearchReportSynthesis> {
+    let query = query.trim();
+    if query.is_empty() {
+        anyhow::bail!("DeepResearch query must not be empty");
+    }
     let workspace_text = workspace.to_string_lossy().to_string();
     let (session, report_tool_gate) =
         build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
     eprintln!("deepresearch: gathering evidence via the host-managed workflow…");
-    let mut workflow_args = crate::tui::deep_research_cli_workflow_args_for_budget(
-        &opts.query,
-        deep_research_default_budget(),
-        opts.evidence_scope,
-    );
+    let mut workflow_args =
+        crate::tui::deep_research_cli_workflow_args_for_budget(query, budget, evidence_scope);
     let run_id = crate::tui::ensure_deep_research_workflow_run_id(&mut workflow_args)
         .ok_or_else(|| anyhow::anyhow!("failed to assign a DeepResearch workflow run ID"))?;
     let workflow = run_deepresearch_inquiry(Arc::clone(&session), workflow_args.clone()).await;
@@ -105,7 +125,7 @@ pub(crate) async fn execute_deepresearch_in(
 
     let mut synthesis = match crate::tui::deep_research_evidence_first_published_report(
         workspace,
-        &opts.query,
+        query,
         &workflow_output,
     )
     .map_err(anyhow::Error::msg)?
@@ -140,7 +160,7 @@ pub(crate) async fn execute_deepresearch_in(
             synthesize_deepresearch_report(
                 &session,
                 workspace,
-                &opts.query,
+                query,
                 &workflow_output,
                 exit_code,
                 metadata.as_ref(),
@@ -163,7 +183,7 @@ pub(crate) async fn execute_deepresearch_in(
         crate::tui::settle_deep_research_cli_run(crate::tui::DeepResearchCliSettlement {
             workspace,
             run_id: &run_id,
-            query: &opts.query,
+            query,
             workflow_succeeded,
             workflow_output: &workflow_output,
             workflow_metadata: metadata.as_ref(),

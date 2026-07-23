@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use a3s_code_core::llm::{
     LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
@@ -167,10 +167,7 @@ impl EvidenceFirstProposal {
         self.saw_staged_report.store(true, Ordering::SeqCst);
 
         match self.behavior {
-            ProposalBehavior::Slow => {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                anyhow::bail!("slow proposal should have been cancelled by the stage deadline")
-            }
+            ProposalBehavior::Slow => std::future::pending::<anyhow::Result<Value>>().await,
             ProposalBehavior::Invalid => Ok(serde_json::json!({
                 "summary": [{
                     "text": "A fabricated source claims support through 2099.",
@@ -293,15 +290,13 @@ async fn proposal_timeout_preserves_the_already_staged_source_report() {
     .await
     .expect("pre-create the TUI-owned journal with the shared spec");
 
-    let started = Instant::now();
-    let result = execute_fixture_runtime(session, args, 1_200)
-        .await
-        .expect("timeout must fall back instead of failing the run");
-    assert!(
-        started.elapsed() < Duration::from_secs(3),
-        "two bounded proposal attempts must finish before an unbounded slow call: {:?}",
-        started.elapsed()
-    );
+    let result = tokio::time::timeout(
+        Duration::from_secs(6),
+        execute_fixture_runtime(session, args, 1_200),
+    )
+    .await
+    .expect("two bounded proposal attempts must cancel an indefinitely pending model call")
+    .expect("timeout must fall back instead of failing the run");
     assert!(
         (1..=2).contains(&calls.load(Ordering::SeqCst)),
         "{}",

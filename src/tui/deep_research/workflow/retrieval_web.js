@@ -258,100 +258,6 @@
     };
   };
 
-  const hostMatchesDomain = (host, domain) =>
-    host === domain || host.endsWith(`.${domain}`);
-  const protectedPublisherLookalike = (host) => {
-    const compact = String(host || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-    const protectedPublishers = [
-      ["apnews", ["apnews.com"]],
-      ["fifa", ["fifa.com"]],
-      ["oecd", ["oecd.org"]],
-      ["olympic", ["olympics.com", "olympic.org"]],
-      ["reuters", ["reuters.com"]],
-      ["sohu", ["sohu.com"]],
-      ["worldbank", ["worldbank.org"]],
-      ["xinhuanet", ["xinhuanet.com"]],
-    ];
-    return protectedPublishers.some(([marker, domains]) =>
-      compact.includes(marker) &&
-      !domains.some((domain) => hostMatchesDomain(host, domain))
-    );
-  };
-  const fallbackCandidatePriority = (candidate) => {
-    const host = urlHost(candidate && candidate.url);
-    if (!host || protectedPublisherLookalike(host)) return 0;
-    const lowConfidenceDomains = [
-      "facebook.com",
-      "instagram.com",
-      "medium.com",
-      "quora.com",
-      "reddit.com",
-      "substack.com",
-      "tiktok.com",
-      "twitter.com",
-      "weibo.com",
-      "x.com",
-      "xiaohongshu.com",
-      "youtube.com",
-      "zhihu.com",
-    ];
-    if (lowConfidenceDomains.some((domain) => hostMatchesDomain(host, domain))) {
-      return 0;
-    }
-    const institutionalDomains = [
-      "crates.io",
-      "docs.rs",
-      "europa.eu",
-      "fifa.com",
-      "ietf.org",
-      "oecd.org",
-      "olympic.org",
-      "olympics.com",
-      "rfc-editor.org",
-      "un.org",
-      "w3.org",
-      "who.int",
-      "worldbank.org",
-    ];
-    if (
-      institutionalDomains.some((domain) => hostMatchesDomain(host, domain)) ||
-      /\.(?:gov|edu|int)$/i.test(host) ||
-      /\.(?:ac|edu|gov)\.[a-z]{2}$/i.test(host)
-    ) {
-      return 3;
-    }
-    const editorialDomains = [
-      "163.com",
-      "apnews.com",
-      "bbc.co.uk",
-      "bbc.com",
-      "bloomberg.com",
-      "caixin.com",
-      "cctv.cn",
-      "cctv.com",
-      "chinanews.com.cn",
-      "espn.com",
-      "ft.com",
-      "news.cn",
-      "nytimes.com",
-      "people.com.cn",
-      "reuters.com",
-      "sina.cn",
-      "sina.com.cn",
-      "sohu.com",
-      "theguardian.com",
-      "thepaper.cn",
-      "washingtonpost.com",
-      "wsj.com",
-      "xinmin.cn",
-      "xinhuanet.com",
-      "yicai.com",
-      "zaobao.com.sg",
-    ];
-    return editorialDomains.some((domain) => hostMatchesDomain(host, domain))
-      ? 2
-      : 1;
-  };
   const candidateOutcomeOpportunity = (candidate) => {
     const text = `${String(candidate && candidate.title || "")} ${String(
       candidate && candidate.content || ""
@@ -388,10 +294,11 @@
   };
 
   const candidateTerminalOutcomeSignal = (candidate) => {
-    const text = `${String(candidate && candidate.title || "")} ${String(
+    const title = String(candidate && candidate.title || "").toLowerCase();
+    const text = `${title} ${String(
       candidate && candidate.content || ""
     )}`.toLowerCase();
-    if ([
+    const prospective = [
       "who will",
       "will be crowned",
       "will take place",
@@ -407,9 +314,10 @@
       "预测",
       "前瞻",
       "赛程",
-    ].some((marker) => text.includes(marker))) return 0;
+    ].some((marker) => text.includes(marker));
     const strongMarkers = [
-      "crowned",
+      "was crowned",
+      "has been crowned",
       "became champion",
       "won the championship",
       "won the tournament",
@@ -417,6 +325,18 @@
       "闭幕",
       "捧杯",
       "加冕",
+    ];
+    const titleMarkers = [
+      "champion",
+      "final result",
+      "final score",
+      "winner",
+      "冠军",
+      "决赛结果",
+      "决赛比分",
+      "决赛赛果",
+      "最终结果",
+      "最终赛果",
     ];
     const weakMarkers = [
       "champion",
@@ -434,8 +354,19 @@
       (score, marker) => score + (text.includes(marker) ? 1 : 0),
       0
     );
-    if (candidateEarlierStagePenalty(candidate) > 0) return strongSignal;
-    return strongSignal + weakMarkers.reduce(
+    const titleSignal = ["odds", "prediction", "preview", "赔率", "预测", "前瞻"]
+      .some((marker) => title.includes(marker))
+      ? 0
+      : titleMarkers.reduce(
+          (score, marker) => score + (title.includes(marker) ? 1 : 0),
+          0
+        );
+    const earlierStage = candidateEarlierStagePenalty(candidate);
+    const stageSafeTitleSignal = earlierStage <= 1 ? titleSignal : 0;
+    if (prospective || earlierStage > 0) {
+      return strongSignal + stageSafeTitleSignal;
+    }
+    return strongSignal + titleSignal + weakMarkers.reduce(
       (score, marker) => score + (text.includes(marker) ? 1 : 0),
       0
     );
@@ -446,33 +377,61 @@
       candidate && candidate.content || ""
     )}`.toLowerCase();
     const markers = [
-      "group stage",
-      "ongoing",
-      "prediction",
-      "preview",
-      "quarter-final",
-      "quarterfinal",
-      "round of 16",
-      "round of 32",
-      "schedule",
-      "semi-final",
-      "semifinal",
-      "upcoming",
-      "小组赛",
-      "八强",
-      "16强",
-      "32强",
-      "1/8",
-      "1/4",
-      "半决赛",
-      "准决赛",
-      "正在进行",
-      "赛程",
-      "预测",
-      "前瞻",
+      ["group stage", 3],
+      ["ongoing", 2],
+      ["prediction", 3],
+      ["preview", 3],
+      ["quarter-final", 3],
+      ["quarterfinal", 3],
+      ["round of 16", 3],
+      ["round of 32", 3],
+      ["schedule", 1],
+      ["semi-final", 3],
+      ["semifinal", 3],
+      ["upcoming", 2],
+      ["小组赛", 3],
+      ["八强", 3],
+      ["16强", 3],
+      ["32强", 3],
+      ["1/8", 3],
+      ["1/4", 3],
+      ["半决赛", 3],
+      ["准决赛", 3],
+      ["截至目前", 2],
+      ["正在进行", 2],
+      ["出线", 2],
+      ["赛程", 1],
+      ["预测", 3],
+      ["前瞻", 3],
     ];
     return markers.reduce(
-      (penalty, marker) => penalty + (text.includes(marker) ? 1 : 0),
+      (penalty, [marker, weight]) =>
+        penalty + (text.includes(marker) ? weight : 0),
+      0
+    );
+  };
+
+  const candidateRetrievalNoisePenalty = (candidate) => {
+    const text = `${String(candidate && candidate.title || "")} ${String(
+      candidate && candidate.content || ""
+    )}`.toLowerCase();
+    const markers = [
+      ["automatic update", 2],
+      ["complete schedule", 2],
+      ["data center", 3],
+      ["data system", 3],
+      ["live score", 3],
+      ["score tracker", 3],
+      ["完整赛程", 2],
+      ["数据中心", 3],
+      ["数据系统", 3],
+      ["比分直播", 3],
+      ["直播系统", 3],
+      ["自动更新", 2],
+    ];
+    return markers.reduce(
+      (penalty, [marker, weight]) =>
+        penalty + (text.includes(marker) ? weight : 0),
       0
     );
   };
@@ -529,11 +488,18 @@
         outcome: candidateOutcomeOpportunity(candidate),
         terminal: candidateTerminalOutcomeSignal(candidate),
         earlierStage: candidateEarlierStagePenalty(candidate),
+        retrievalNoise: candidateRetrievalNoisePenalty(candidate),
       }))
-      .filter((entry) => entry.priority >= 2 && entry.outcome > 0)
+      .filter((entry) =>
+        entry.priority >= 2 &&
+        entry.outcome > 0 &&
+        (entry.terminal > 0 ||
+          (entry.earlierStage <= 1 && entry.retrievalNoise === 0))
+      )
       .sort((left, right) =>
         right.terminal - left.terminal ||
         left.earlierStage - right.earlierStage ||
+        left.retrievalNoise - right.retrievalNoise ||
         right.outcome - left.outcome ||
         right.priority - left.priority ||
         left.index - right.index

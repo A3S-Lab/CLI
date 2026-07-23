@@ -1147,6 +1147,89 @@ async fn explicit_outcome_bootstrap_uses_accountable_cross_host_candidates_witho
 }
 
 #[tokio::test]
+async fn explicit_outcome_bootstrap_pairs_bbc_with_an_accountable_ifeng_final_report() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "FIFA世界杯2026：西班牙击败阿根廷二度封王",
+            "url": "https://www.bbc.com/zhongwen/articles/world-cup-final",
+            "content": "西班牙在世界杯决赛中夺冠，费兰·托雷斯于加时赛攻入一球。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯大结局：西班牙夺冠！",
+            "url": "https://sports.ifeng.com/c/world-cup-final",
+            "content": "世界杯决赛中，西班牙加时1:0战胜阿根廷并夺冠。",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://www.bbc.com/zhongwen/articles/world-cup-final".to_string(),
+                "BBC报道，西班牙在世界杯决赛中夺冠，费兰·托雷斯于加时赛攻入一球。".to_string(),
+            ),
+            (
+                "https://sports.ifeng.com/c/world-cup-final".to_string(),
+                "凤凰体育报道，西班牙在世界杯决赛中加时1:0战胜阿根廷并夺冠。".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-ifeng-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(
+        urls.lock().unwrap().clone(),
+        [
+            "https://www.bbc.com/zhongwen/articles/world-cup-final",
+            "https://sports.ifeng.com/c/world-cup-final"
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "deterministic_outcome_candidates"
+    );
+    let history = std::fs::read_to_string(
+        workspace
+            .path()
+            .join(".a3s/workflow/deepresearch-outcome-bootstrap-ifeng-test.jsonl"),
+    )
+    .expect("durable outcome-bootstrap history");
+    assert!(history.lines().all(|line| {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        event["event"]["step_id"] != "select_web_sources"
+    }));
+}
+
+#[tokio::test]
 async fn explicit_outcome_bootstrap_keeps_model_admission_when_no_terminal_candidate_exists() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
@@ -1219,6 +1302,95 @@ async fn explicit_outcome_bootstrap_keeps_model_admission_when_no_terminal_candi
         let event: serde_json::Value = serde_json::from_str(line).unwrap();
         event["event"]["step_id"] == "select_web_sources"
     }));
+}
+
+#[tokio::test]
+async fn explicit_outcome_bootstrap_pairs_one_terminal_source_with_accountable_editorial_coverage()
+{
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let urls = Arc::new(Mutex::new(Vec::new()));
+    executor.register_dynamic_tool(Arc::new(SearchFixture {
+        queries: Arc::clone(&queries),
+        results: serde_json::json!([{
+            "title": "2026美加墨世界杯_新华网",
+            "url": "https://www.news.cn/sports/topic/fifa2026/index.htm",
+            "content": "金靴、金球等奖项揭晓；闭幕式构成决赛日多个看点。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯完整赛程、比赛结果、进球和积分榜一览",
+            "url": "https://www.olympics.com/world-cup/schedule-results",
+            "content": "赛事正在进行；查看完整赛程、每日赛果、比分和积分榜。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯数据系统",
+            "url": "https://sports.163.com/world-cup/data",
+            "content": "比分直播、赛程、比赛结果、积分榜和球队数据。",
+            "engines": ["fixture"]
+        }, {
+            "title": "世界杯小组赛战况",
+            "url": "https://www.sohu.com/a/world-cup-group-stage",
+            "content": "截至目前，小组赛已有18支球队出线，8支球队出局。",
+            "engines": ["fixture"]
+        }, {
+            "title": "2026年FIFA世界杯 - 联合早报",
+            "url": "https://www.zaobao.com.sg/specials/fifa-world-cup-2026",
+            "content": "带来实时报道、最新成绩与赛程、评论以及场边花絮。更多赛况消息及专业分析，请关注本页面。",
+            "engines": ["fixture"]
+        }]),
+    }));
+    executor.register_dynamic_tool(Arc::new(TextFetchFixture {
+        urls: Arc::clone(&urls),
+        bodies: BTreeMap::from([
+            (
+                "https://www.news.cn/sports/topic/fifa2026/index.htm".to_string(),
+                "新华社报道，西班牙在世界杯决赛中1:0战胜阿根廷并夺得冠军。".to_string(),
+            ),
+            (
+                "https://www.zaobao.com.sg/specials/fifa-world-cup-2026".to_string(),
+                "联合早报报道，西班牙在世界杯决赛中1比0击败阿根廷，捧起冠军奖杯。".to_string(),
+            ),
+        ]),
+    }));
+    executor.register_dynamic_tool(Arc::new(FailWebSourceSelectionFixture {
+        selector: SemanticSelectorFixture {
+            preferred_fragments: Vec::new(),
+            fail: false,
+            invalid_selection: false,
+        },
+    }));
+    let query = "世界杯战况";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "世界杯战况", query)]),
+        serde_json::json!([query]),
+        serde_json::json!([]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(1);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+    args["input"]["execution_mode"] = serde_json::json!("bootstrap_acquisition");
+    args["run_id"] = serde_json::json!("deepresearch-outcome-bootstrap-portfolio-test");
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(
+        urls.lock().unwrap().clone(),
+        [
+            "https://www.news.cn/sports/topic/fifa2026/index.htm",
+            "https://www.zaobao.com.sg/specials/fifa-world-cup-2026"
+        ]
+    );
+    assert_eq!(
+        output["acquisition"]["metadata"]["source_selection_mode"],
+        "deterministic_outcome_candidates"
+    );
 }
 
 #[tokio::test]

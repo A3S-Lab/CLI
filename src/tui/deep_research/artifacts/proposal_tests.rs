@@ -502,6 +502,50 @@ fn broad_competition_status_rejects_a_scoreless_semifinal_caption_but_a_specific
 }
 
 #[test]
+fn broad_competition_status_rejects_a_scored_semifinal_inside_a_final_report() {
+    let semifinal = "现年39岁的梅西仍是阿根廷的领袖，尤其是在准决赛以2:1击败英格兰的比赛中，他创造了球队的两个入球。";
+    assert!(!report_summary_answers_query_intent(
+        "世界杯战况",
+        semifinal
+    ));
+    assert!(report_summary_answers_query_intent(
+        "阿根廷对阵英格兰的准决赛结果",
+        semifinal
+    ));
+
+    let catalog = DeepResearchSourceCatalog {
+        sources: vec![DeepResearchCatalogSource {
+            alias: "source-1".to_string(),
+            title: "FIFA世界杯2026：西班牙击败阿根廷二度封王".to_string(),
+            anchor: "https://www.bbc.com/zhongwen/articles/world-cup-final".to_string(),
+            chunks: vec![
+                "西班牙在世界杯决赛中实至名归地夺冠，费兰·托雷斯于加时赛攻入一球，最终打破十人应战的阿根廷的顽强抵抗。".to_string(),
+                "加时赛第106分钟，费兰·托雷斯打入全场唯一进球，成为西班牙的英雄。".to_string(),
+                semifinal.to_string(),
+            ],
+            claim_eligible: true,
+        }],
+        omitted_source_count: 0,
+        omitted_chunk_count: 0,
+    };
+
+    let report =
+        deterministic_deep_research_outcome_report_at("世界杯战况", "2026-07-22", &catalog)
+            .expect("evaluate the final report")
+            .expect("the final outcome and goal detail support a report");
+    let answer = report
+        .markdown
+        .split_once("## 直接回答")
+        .and_then(|(_, rest)| rest.split_once("## 研究发现"))
+        .map(|(answer, _)| answer)
+        .expect("localized direct answer and findings");
+
+    assert!(answer.contains("西班牙在世界杯决赛中"), "{answer}");
+    assert!(!answer.contains("准决赛"), "{answer}");
+    assert!(!answer.contains("2:1"), "{answer}");
+}
+
+#[test]
 fn an_atomic_institutional_report_passes_the_strong_support_gate() {
     let catalog = DeepResearchSourceCatalog {
         sources: vec![DeepResearchCatalogSource {
@@ -554,6 +598,9 @@ fn an_atomic_accountable_publisher_report_passes_the_strong_support_gate() {
     };
     assert!(!catalog_source_is_institutional(&catalog.sources[0].anchor));
     assert!(accountable_fallback_publisher(&catalog.sources[0].anchor));
+    assert!(accountable_fallback_publisher(
+        "https://sports.ifeng.com/c/world-cup-final"
+    ));
     let proposal = serde_json::json!({
         "summary": [{
             "text": "2026年7月20日，西班牙以1-0击败阿根廷并夺冠。",
@@ -669,6 +716,59 @@ fn deterministic_outcome_report_uses_exact_accountable_source_spans() {
 }
 
 #[test]
+fn deterministic_outcome_report_prefers_the_atomic_final_score_and_corroborates_it() {
+    let catalog = DeepResearchSourceCatalog {
+        sources: vec![
+            DeepResearchCatalogSource {
+                alias: "source-1".to_string(),
+                title: "费兰·托雷斯加时赛绝杀，西班牙加冕世界杯冠军".to_string(),
+                anchor: "https://www.olympics.com/zh/news/world-cup-final".to_string(),
+                chunks: vec![
+                    "西班牙队在决赛中凭借费兰·托雷斯的加时进球1比0力克十人应战的阿根廷队，时隔16年再度捧起大力神杯。".to_string(),
+                    "此役过后，西班牙队以7场比赛仅失1球的成绩夺冠，而卫冕冠军阿根廷的13场世界杯不败纪录就此终结。".to_string(),
+                    "第106分钟，费兰·托雷斯打入全场比赛唯一进球。".to_string(),
+                ],
+                claim_eligible: true,
+            },
+            DeepResearchCatalogSource {
+                alias: "source-2".to_string(),
+                title: "2026世界杯冠军：西班牙".to_string(),
+                anchor: "https://www.xinmin.cn/2026WorldCup/".to_string(),
+                chunks: vec![
+                    "北京时间7月20日的决赛中，西班牙加时赛1:0战胜阿根廷，费兰·托雷斯第106分钟打入制胜球。".to_string(),
+                    "7月20日 决赛：西班牙 1-0 阿根廷（加时，西班牙夺冠）。".to_string(),
+                    "冠军：西班牙（决赛加时 1:0 战胜阿根廷，费兰·托雷斯第106分钟制胜）。".to_string(),
+                ],
+                claim_eligible: true,
+            },
+        ],
+        omitted_source_count: 0,
+        omitted_chunk_count: 0,
+    };
+
+    let report =
+        deterministic_deep_research_outcome_report_at("世界杯战况", "2026-07-22", &catalog)
+            .expect("build deterministic outcome report")
+            .expect("the independently reported final score supports a report");
+    let answer = report
+        .markdown
+        .split_once("## 直接回答")
+        .and_then(|(_, rest)| rest.split_once("## 研究发现"))
+        .map(|(answer, _)| answer)
+        .expect("localized direct answer and findings");
+
+    assert!(answer.contains("1比0力克"), "{answer}");
+    assert!(!answer.contains("7场比赛仅失1球"), "{answer}");
+    assert_eq!(report.cited_source_count, 2, "{}", report.markdown);
+    assert_eq!(
+        report.markdown.matches("[[2]]").count(),
+        1,
+        "{}",
+        report.markdown
+    );
+}
+
+#[test]
 fn deterministic_outcome_report_rejects_navigation_piles_and_uses_atomic_result() {
     let catalog = DeepResearchSourceCatalog {
         sources: vec![
@@ -718,7 +818,7 @@ fn deterministic_outcome_report_rejects_navigation_piles_and_uses_atomic_result(
                     .to_string(),
                 anchor: "https://www.xinmin.cn/2026WorldCup/".to_string(),
                 chunks: vec![
-                    "北京时间7月20日的决赛中，西班牙加时赛1:0战胜阿根廷，费兰·托雷斯第106分钟打入制胜球。"
+                    "北京时间7月20日的决赛中，西班牙加时赛1比0战胜阿根廷，费兰·托雷斯第106分钟打入制胜球。"
                         .to_string(),
                 ],
                 claim_eligible: true,
@@ -790,7 +890,7 @@ fn deterministic_outcome_report_rejects_navigation_piles_and_uses_atomic_result(
     );
     assert!(
         report.markdown.contains(
-            "北京时间7月20日的决赛中，西班牙加时赛1:0战胜阿根廷，费兰·托雷斯第106分钟打入制胜球。"
+            "北京时间7月20日的决赛中，西班牙加时赛1比0战胜阿根廷，费兰·托雷斯第106分钟打入制胜球。"
         ),
         "{}",
         report.markdown
@@ -918,6 +1018,79 @@ fn deterministic_outcome_report_drops_a_headline_that_only_restates_the_answer()
         report.markdown
     );
     assert_eq!(report.finding_block_count, 1, "{}", report.markdown);
+}
+
+#[test]
+fn deterministic_outcome_report_drops_a_navigation_headline_prefix_and_unrelated_accident() {
+    let catalog = DeepResearchSourceCatalog {
+        sources: vec![DeepResearchCatalogSource {
+            alias: "source-1".to_string(),
+            title: "2026年fifa世界杯 - 联合早报".to_string(),
+            anchor: "https://www.zaobao.com.sg/specials/fifa-world-cup-2026".to_string(),
+            chunks: vec![
+                "冠军球队凭借控制耐心 西班牙凭借托里斯加时赛下半场的进球，以1比0战胜韧性极强的阿根廷夺冠。费兰·托雷斯第106分钟打入全场唯一进球。"
+                    .to_string(),
+                "西班牙夺冠庆祝乐极生悲 喷泉坍塌致13岁少年身亡。".to_string(),
+            ],
+            claim_eligible: true,
+        }],
+        omitted_source_count: 0,
+        omitted_chunk_count: 0,
+    };
+
+    let report =
+        deterministic_deep_research_outcome_report_at("世界杯战况", "2026-07-22", &catalog)
+            .expect("build deterministic topic-page report")
+            .expect("the atomic result and goal detail support a report");
+    let answer = report
+        .markdown
+        .split_once("## 直接回答")
+        .and_then(|(_, rest)| rest.split_once("## 研究发现"))
+        .map(|(answer, _)| answer.trim_start())
+        .expect("localized direct answer and findings");
+
+    assert!(answer.starts_with("西班牙凭借"), "{answer}");
+    assert!(!answer.contains("冠军球队凭借控制耐心"), "{answer}");
+    assert!(!report.markdown.contains("喷泉坍塌"), "{}", report.markdown);
+}
+
+#[test]
+fn deterministic_outcome_report_splits_medal_summary_and_drops_earlier_stage_findings() {
+    let catalog = DeepResearchSourceCatalog {
+        sources: vec![DeepResearchCatalogSource {
+            alias: "source-1".to_string(),
+            title: "2026世界杯冠军：西班牙｜决赛赛果·全部比分".to_string(),
+            anchor: "https://www.xinmin.cn/2026WorldCup/".to_string(),
+            chunks: vec![
+                "新民晚报全媒体 2026世界杯 最终结果 🏆 冠军：西班牙（决赛加时 1:0 战胜阿根廷，费兰·托雷斯第106分钟制胜） 🥉 季军：英格兰（季军赛 6:4 胜法国） 半决赛：法国 0:2 西班牙；"
+                    .to_string(),
+                "7月12日 1/4决赛：阿根廷 3-1 瑞士（加时）。费兰·托雷斯第106分钟打入全场唯一进球。"
+                    .to_string(),
+                "同阶段出局的球队按全部比赛总积分排序，完整战绩见本页最终排名栏目。"
+                    .to_string(),
+            ],
+            claim_eligible: true,
+        }],
+        omitted_source_count: 0,
+        omitted_chunk_count: 0,
+    };
+
+    let report =
+        deterministic_deep_research_outcome_report_at("世界杯战况", "2026-07-22", &catalog)
+            .expect("build deterministic medal-summary report")
+            .expect("the final result and goal detail support a report");
+    let answer = report
+        .markdown
+        .split_once("## 直接回答")
+        .and_then(|(_, rest)| rest.split_once("## 研究发现"))
+        .map(|(answer, _)| answer)
+        .expect("localized direct answer and findings");
+
+    assert!(answer.contains("冠军：西班牙"), "{answer}");
+    assert!(!answer.contains("季军"), "{answer}");
+    assert!(!answer.contains("半决赛"), "{answer}");
+    assert!(!report.markdown.contains("1/4决赛"), "{}", report.markdown);
+    assert!(!report.markdown.contains("见本页"), "{}", report.markdown);
 }
 
 #[test]

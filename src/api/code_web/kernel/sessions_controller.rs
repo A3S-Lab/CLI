@@ -102,6 +102,27 @@ impl KernelSessionsController {
             .await
     }
 
+    #[get("/v1/kernel/sessions/{session_id}/research-report", raw)]
+    async fn read_kernel_deep_research_report(
+        &self,
+        #[param("session_id")] session_id: String,
+        #[query("path")] path: String,
+    ) -> BootResult<BootResponse> {
+        let body = self
+            .service
+            .read_deep_research_report(&session_id, path)
+            .await?;
+        Ok(BootResponse::new(200, body)
+            .with_content_type("text/html; charset=utf-8")
+            .with_header("cache-control", "no-store")
+            .with_header("x-content-type-options", "nosniff")
+            .with_header("referrer-policy", "no-referrer")
+            .with_header(
+                "content-security-policy",
+                "sandbox allow-popups; default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+            ))
+    }
+
     #[post("/v1/kernel/sessions/{session_id}/actions/cancel")]
     async fn cancel_kernel_session(
         &self,
