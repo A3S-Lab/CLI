@@ -789,13 +789,12 @@ impl Tool for TransientFetchFixture {
             calls.iter().filter(|observed| *observed == &url).count()
         };
         if attempt == 1 {
-            return Ok(
-                ToolOutput::error("typed transport failure").with_error_kind(
-                    ToolErrorKind::Transport {
-                        op: "fixture fetch".to_string(),
-                    },
-                ),
-            );
+            return Ok(ToolOutput::error("typed timeout failure").with_error_kind(
+                ToolErrorKind::Timeout {
+                    op: "fixture fetch".to_string(),
+                    duration_ms: 1_000,
+                },
+            ));
         }
         let output =
             format!("The bounded retry fetched substantive authoritative evidence from {url}.");
