@@ -163,31 +163,57 @@ async fn run_foreground(
             .await
             .context("failed to open A3S Code Web session store")?,
     );
-    let state = Arc::new(CodeWebState::new(
-        agent,
-        PathBuf::from(&config_path),
-        options.workspace.clone(),
-        code_config,
-        session_repository,
-    ));
-    match a3s::components::ComponentPaths::from_env_at(&options.workspace)
-        .and_then(|paths| a3s::components::find_ready_executable_with("use", &paths))
-    {
-        Ok(Some(executable)) => {
-            let (registry, warning) = crate::use_registry::start_detached(
-                executable,
-                options.workspace.clone(),
-                CancellationToken::new(),
-            )
-            .await;
-            if let Some(warning) = warning {
-                eprintln!("warning: A3S Use capabilities will continue loading: {warning}");
-            }
-            state.install_use_registry(registry);
-        }
-        Ok(None) => {}
+    let component_paths = match a3s::components::ComponentPaths::from_env_at(&options.workspace) {
+        Ok(paths) => Some(paths),
         Err(error) => {
-            eprintln!("warning: A3S Use hot-plug is unavailable for Code Web: {error}");
+            eprintln!("warning: A3S managed components are unavailable for Code Web: {error}");
+            None
+        }
+    };
+    let managed_srt = if let Some(paths) = component_paths.as_ref() {
+        let resolution = a3s::components::resolve_managed_srt(
+            paths,
+            &options.workspace,
+            options.allow_asset_download,
+            options.offline,
+            false,
+        )
+        .await;
+        if let Some(warning) = resolution.warning {
+            eprintln!("warning: Code Web local command sandbox is unavailable: {warning}");
+        }
+        resolution.runtime
+    } else {
+        None
+    };
+    let state = Arc::new(
+        CodeWebState::new(
+            agent,
+            PathBuf::from(&config_path),
+            options.workspace.clone(),
+            code_config,
+            session_repository,
+        )
+        .with_managed_srt(managed_srt),
+    );
+    if let Some(paths) = component_paths.as_ref() {
+        match a3s::components::find_ready_executable_with("use", paths) {
+            Ok(Some(executable)) => {
+                let (registry, warning) = crate::use_registry::start_detached(
+                    executable,
+                    options.workspace.clone(),
+                    CancellationToken::new(),
+                )
+                .await;
+                if let Some(warning) = warning {
+                    eprintln!("warning: A3S Use capabilities will continue loading: {warning}");
+                }
+                state.install_use_registry(registry);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("warning: A3S Use hot-plug is unavailable for Code Web: {error}");
+            }
         }
     }
     let restore_report = KernelService::new(Arc::clone(&state))

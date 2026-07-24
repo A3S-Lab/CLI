@@ -936,6 +936,13 @@ impl Transcript {
     }
 
     pub(crate) fn anchor_for_row(&self, row: usize) -> Option<TranscriptAnchor> {
+        // The viewport also contains the provisional streaming response, which
+        // is intentionally absent from this completed-transcript layout. Do
+        // not let an offset in that live tail fall back to the last history
+        // entry or every stream repaint will snap manual scrolling backwards.
+        if row >= self.selection_rows.len() {
+            return None;
+        }
         let span = self
             .layout
             .iter()
@@ -2512,6 +2519,27 @@ mod tests {
         assert!(restored >= new_span.start_row);
         assert!(restored < new_span.start_row + new_span.row_count);
         assert_ne!(old_span.start_row, new_span.start_row);
+    }
+
+    #[test]
+    fn semantic_anchor_does_not_claim_rows_in_the_live_stream_tail() {
+        let mut transcript = Transcript::from_entries(vec![TranscriptEntry::user(
+            "completed history before the live response",
+        )]);
+        transcript.render(40, 39);
+        let history_rows = transcript.selection_rows.len();
+
+        assert!(transcript
+            .anchor_for_row(history_rows.saturating_sub(1))
+            .is_some());
+        assert!(
+            transcript.anchor_for_row(history_rows).is_none(),
+            "the first live-stream row must retain an absolute viewport anchor"
+        );
+        assert!(
+            transcript.anchor_for_row(history_rows + 20).is_none(),
+            "later live-stream rows must not snap back to completed history"
+        );
     }
 
     #[test]

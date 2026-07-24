@@ -1,6 +1,10 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
+use a3s_code_core::hitl::{
+    ConfirmationManager, ConfirmationPolicy, ConfirmationProvider, ConfirmationResponse,
+    PendingConfirmationInfo, TimeoutAction,
+};
 use a3s_code_core::permissions::{
     InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
 };
@@ -41,13 +45,47 @@ pub(in crate::api::code_web) fn permission_policy_for_mode(_mode: &str) -> Permi
     // The shared structured checker installed by `permission_checker_for_mode`
     // is authoritative for host-side execution.
     PermissionPolicy::new()
+        .deny_all(&[
+            "Read(/**)",
+            "Read(**/../**)",
+            "Grep(* /**)",
+            "Grep(* **/../**)",
+            "Glob(/**)",
+            "Glob(**/../**)",
+            "LS(/**)",
+            "LS(**/../**)",
+            "Write(/**)",
+            "Edit(/**)",
+            "Write(**/../**)",
+            "Edit(**/../**)",
+        ])
         .allow("mcp__use_*")
         .allow_all(READ_ONLY_TOOLS)
         .ask_all(INTERACTIVE_TOOLS)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CodeWebExecutionMode {
+    Default,
+    Plan,
+    Auto,
+}
+
+impl CodeWebExecutionMode {
+    fn from_name(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "plan" => Self::Plan,
+            "auto" => Self::Auto,
+            _ => Self::Default,
+        }
+    }
+}
+
 pub(in crate::api::code_web) struct CodeWebPermissionChecker {
     interactive: InteractiveToolGuardrail,
+    mode: CodeWebExecutionMode,
+    sandbox_available: bool,
+    workspace: PathBuf,
 }
 
 impl std::ops::Deref for CodeWebPermissionChecker {
@@ -60,16 +98,87 @@ impl std::ops::Deref for CodeWebPermissionChecker {
 
 impl PermissionChecker for CodeWebPermissionChecker {
     fn expose_to_model(&self, tool_name: &str) -> bool {
-        !tool_name.to_ascii_lowercase().starts_with("mcp__use_")
+        let tool = tool_name.to_ascii_lowercase();
+        if tool.starts_with("mcp__use_") {
+            return false;
+        }
+        self.mode != CodeWebExecutionMode::Plan || plan_tool_is_read_only(&tool)
     }
 
     fn check(&self, tool_name: &str, args: &serde_json::Value) -> PermissionDecision {
-        if tool_name.to_ascii_lowercase().starts_with("mcp__use_") {
+        let tool = tool_name.to_ascii_lowercase();
+        if tool.starts_with("mcp__use_") {
             // Keep the parent decision neutral for an explicitly scoped Use
             // worker. The primary Web model never receives this definition.
-            PermissionDecision::Allow
-        } else {
-            self.interactive.check(tool_name, args)
+            return PermissionDecision::Allow;
+        }
+
+        if InteractiveToolGuardrail::default()
+            .with_workspace(&self.workspace)
+            .check(&tool, args)
+            == PermissionDecision::Deny
+        {
+            return PermissionDecision::Deny;
+        }
+
+        let protected_workspace_metadata = targets_protected_workspace_metadata(&tool, args);
+        match self.mode {
+            CodeWebExecutionMode::Plan => {
+                if plan_tool_is_read_only(&tool) {
+                    PermissionDecision::Allow
+                } else {
+                    PermissionDecision::Deny
+                }
+            }
+            CodeWebExecutionMode::Auto => {
+                if protected_workspace_metadata {
+                    return PermissionDecision::Deny;
+                }
+                match tool.as_str() {
+                    "bash" => {
+                        if bash_boundary_request(args) == BashBoundaryRequest::UseDefault
+                            && self.sandbox_available
+                        {
+                            PermissionDecision::Allow
+                        } else {
+                            PermissionDecision::Deny
+                        }
+                    }
+                    "git" => match InteractiveToolGuardrail::risk_decision(&tool, args) {
+                        PermissionDecision::Allow => PermissionDecision::Allow,
+                        PermissionDecision::Ask | PermissionDecision::Deny => {
+                            PermissionDecision::Deny
+                        }
+                    },
+                    _ if auto_tool_stays_inside_governed_boundaries(&tool) => {
+                        PermissionDecision::Allow
+                    }
+                    _ => PermissionDecision::Deny,
+                }
+            }
+            CodeWebExecutionMode::Default => match tool.as_str() {
+                "write" | "edit" | "patch" => {
+                    if protected_workspace_metadata {
+                        PermissionDecision::Ask
+                    } else {
+                        PermissionDecision::Allow
+                    }
+                }
+                "bash" => match bash_boundary_request(args) {
+                    BashBoundaryRequest::UseDefault if self.sandbox_available => {
+                        PermissionDecision::Allow
+                    }
+                    BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
+                        PermissionDecision::Ask
+                    }
+                    BashBoundaryRequest::Invalid => PermissionDecision::Deny,
+                },
+                "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow" | "skill" => {
+                    PermissionDecision::Allow
+                }
+                name if name.starts_with("mcp__") => PermissionDecision::Allow,
+                _ => InteractiveToolGuardrail::risk_decision(&tool, args),
+            },
         }
     }
 }
@@ -77,17 +186,183 @@ impl PermissionChecker for CodeWebPermissionChecker {
 pub(in crate::api::code_web) fn permission_checker_for_mode(
     mode: &str,
     workspace: &Path,
+    sandbox_available: bool,
 ) -> CodeWebPermissionChecker {
+    let execution_mode = CodeWebExecutionMode::from_name(mode);
     CodeWebPermissionChecker {
         interactive: InteractiveToolGuardrail::for_mode(mode).with_workspace(workspace),
+        mode: execution_mode,
+        sandbox_available,
+        workspace: workspace.to_path_buf(),
     }
 }
 
 pub(in crate::api::code_web) fn confirmation_policy_for_mode(_mode: &str) -> ConfirmationPolicy {
-    // Auto mode suppresses only bounded workspace prompts in the permission
-    // checker. HITL stays enabled for shell, runtime, delegation, and unknown
-    // integrations, while hard denials can never be bypassed.
     ConfirmationPolicy::enabled().with_timeout(HITL_CONFIRM_TIMEOUT_MS, TimeoutAction::Reject)
+}
+
+pub(in crate::api::code_web) struct CodeWebModeConfirmationProvider {
+    inner: Arc<ConfirmationManager>,
+    mode: CodeWebExecutionMode,
+}
+
+impl CodeWebModeConfirmationProvider {
+    pub(in crate::api::code_web) fn new(mode: &str, policy: ConfirmationPolicy) -> Self {
+        let (event_tx, _) = tokio::sync::broadcast::channel(16);
+        let timeout_ms = policy.default_timeout_ms;
+        let policy = policy.with_timeout(timeout_ms, TimeoutAction::Reject);
+        Self {
+            inner: Arc::new(ConfirmationManager::new(policy, event_tx)),
+            mode: CodeWebExecutionMode::from_name(mode),
+        }
+    }
+
+    fn auto_response() -> tokio::sync::oneshot::Receiver<ConfirmationResponse> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = tx.send(ConfirmationResponse {
+            approved: false,
+            reason: Some("Denied by the non-interactive Auto execution boundary.".to_string()),
+        });
+        rx
+    }
+}
+
+#[async_trait::async_trait]
+impl ConfirmationProvider for CodeWebModeConfirmationProvider {
+    fn snapshot_for_run(&self) -> Option<Arc<dyn ConfirmationProvider>> {
+        Some(Arc::new(Self {
+            inner: Arc::clone(&self.inner),
+            mode: self.mode,
+        }))
+    }
+
+    async fn requires_confirmation(&self, tool_name: &str) -> bool {
+        self.inner.requires_confirmation(tool_name).await
+    }
+
+    async fn confirmation_available_for(
+        &self,
+        _tool_name: &str,
+        _args: &serde_json::Value,
+    ) -> bool {
+        self.mode != CodeWebExecutionMode::Auto
+    }
+
+    async fn request_confirmation(
+        &self,
+        tool_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> tokio::sync::oneshot::Receiver<ConfirmationResponse> {
+        if self.mode == CodeWebExecutionMode::Auto {
+            Self::auto_response()
+        } else {
+            self.inner
+                .request_confirmation(tool_id, tool_name, args)
+                .await
+        }
+    }
+
+    async fn confirm(
+        &self,
+        tool_id: &str,
+        approved: bool,
+        reason: Option<String>,
+    ) -> Result<bool, String> {
+        self.inner.confirm(tool_id, approved, reason).await
+    }
+
+    async fn policy(&self) -> ConfirmationPolicy {
+        self.inner.policy().await
+    }
+
+    async fn set_policy(&self, policy: ConfirmationPolicy) {
+        let timeout_ms = policy.default_timeout_ms;
+        self.inner
+            .set_policy(policy.with_timeout(timeout_ms, TimeoutAction::Reject))
+            .await;
+    }
+
+    async fn check_timeouts(&self) -> usize {
+        self.inner.check_timeouts().await
+    }
+
+    async fn cancel(&self, tool_id: &str) -> bool {
+        self.inner.cancel(tool_id).await
+    }
+
+    async fn expire(&self, tool_id: &str, _action: TimeoutAction) -> bool {
+        self.inner.expire(tool_id, TimeoutAction::Reject).await
+    }
+
+    async fn cancel_all(&self) -> usize {
+        self.inner.cancel_all().await
+    }
+
+    async fn pending_confirmations(&self) -> Vec<PendingConfirmationInfo> {
+        self.inner.pending_confirmation_details().await
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BashBoundaryRequest {
+    UseDefault,
+    RequireEscalated,
+    Invalid,
+}
+
+fn bash_boundary_request(args: &serde_json::Value) -> BashBoundaryRequest {
+    match args.get("sandbox_permissions") {
+        None => BashBoundaryRequest::UseDefault,
+        Some(serde_json::Value::String(value)) if value == "use_default" => {
+            BashBoundaryRequest::UseDefault
+        }
+        Some(serde_json::Value::String(value)) if value == "require_escalated" => {
+            BashBoundaryRequest::RequireEscalated
+        }
+        Some(_) => BashBoundaryRequest::Invalid,
+    }
+}
+
+fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Value) -> bool {
+    matches!(tool_name, "write" | "edit" | "patch")
+        && args
+            .get("file_path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(a3s_code_core::sandbox::is_protected_workspace_path)
+}
+
+fn plan_tool_is_read_only(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read" | "grep" | "glob" | "ls" | "web_search" | "web_fetch"
+    )
+}
+
+fn auto_tool_stays_inside_governed_boundaries(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "read"
+            | "grep"
+            | "glob"
+            | "ls"
+            | "code_symbols"
+            | "code_navigation"
+            | "code_diagnostics"
+            | "web_search"
+            | "web_fetch"
+            | "generate_object"
+            | "search_skills"
+            | "write"
+            | "edit"
+            | "patch"
+            | "batch"
+            | "program"
+            | "task"
+            | "parallel_task"
+            | "dynamic_workflow"
+            | "skill"
+    ) || tool_name.starts_with("mcp__")
 }
 
 #[cfg(test)]
@@ -98,79 +373,114 @@ mod tests {
     };
     use serde_json::json;
 
-    fn checker(mode: &str) -> CodeWebPermissionChecker {
-        permission_checker_for_mode(mode, Path::new("."))
+    fn checker(mode: &str, sandbox_available: bool) -> CodeWebPermissionChecker {
+        permission_checker_for_mode(mode, Path::new("."), sandbox_available)
     }
 
     #[test]
-    fn default_mode_balances_low_risk_calls_and_side_effects() {
-        let checker = checker("default");
+    fn default_mode_uses_the_sandbox_and_prompts_only_for_host_escalation() {
+        let sandboxed = checker("default", true);
+        let unsandboxed = checker("default", false);
         assert_eq!(
-            checker.check("read", &json!({ "file_path": "src/main.rs" })),
+            unsandboxed.check("read", &json!({ "file_path": "src/main.rs" })),
             PermissionDecision::Allow
         );
         assert_eq!(
-            checker.check("bash", &json!({ "command": "pwd" })),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check("git", &json!({ "command": "status" })),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            checker.check("write", &json!({ "file_path": "src/main.rs" })),
+            unsandboxed.check("bash", &json!({ "command": "pwd" })),
             PermissionDecision::Ask
+        );
+        assert_eq!(
+            sandboxed.check("bash", &json!({ "command": "cargo test" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            sandboxed.check(
+                "bash",
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "needs host access"
+                })
+            ),
+            PermissionDecision::Ask
+        );
+        assert_eq!(
+            unsandboxed.check("git", &json!({ "command": "status" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            unsandboxed.check("write", &json!({ "file_path": "src/main.rs" })),
+            PermissionDecision::Allow
         );
         assert!(confirmation_policy_for_mode("default").enabled);
     }
 
     #[test]
-    fn plan_mode_keeps_reads_quiet_and_requires_explicit_escalation() {
-        let checker = checker("plan");
+    fn plan_mode_is_a_non_escalatable_read_only_boundary() {
+        let checker = checker("plan", true);
         assert_eq!(
             checker.check("grep", &json!({ "pattern": "TODO" })),
             PermissionDecision::Allow
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "pwd" })),
-            PermissionDecision::Allow
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
-            PermissionDecision::Ask
+            PermissionDecision::Deny
         );
+        assert!(!checker.expose_to_model("bash"));
+        assert!(!checker.expose_to_model("write"));
+        assert!(checker.expose_to_model("read"));
         assert!(confirmation_policy_for_mode("plan").enabled);
     }
 
     #[test]
-    fn auto_mode_streamlines_bounded_edits_but_keeps_safety_floor() {
-        let checker = checker("auto");
+    fn auto_mode_runs_inside_srt_without_ever_escalating_to_hitl() {
+        let unsandboxed = checker("auto", false);
+        let checker = checker("auto", true);
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
             PermissionDecision::Allow
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "cargo test" })),
-            PermissionDecision::Ask
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            unsandboxed.check("bash", &json!({ "command": "cargo test" })),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            checker.check(
+                "bash",
+                &json!({
+                    "command": "cargo test",
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "needs host access"
+                })
+            ),
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("runtime", &json!({ "tasks": ["external work"] })),
-            PermissionDecision::Ask
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check(
                 "git",
                 &json!({ "command": "checkout", "ref": "feature", "force": true })
             ),
-            PermissionDecision::Ask
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("git", &json!({ "command": "unknown" })),
-            PermissionDecision::Ask
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "cat *" })),
-            PermissionDecision::Ask
+            PermissionDecision::Allow
         );
         for command in [
             "sort -o/tmp/a3s-hitl-bypass input.txt",
@@ -180,8 +490,8 @@ mod tests {
         ] {
             assert_eq!(
                 checker.check("bash", &json!({ "command": command })),
-                PermissionDecision::Ask,
-                "Web auto must retain HITL for shell side effects: {command}"
+                PermissionDecision::Allow,
+                "sandboxed shell side effects stay inside the governed workspace: {command}"
             );
         }
         for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
@@ -201,13 +511,13 @@ mod tests {
         );
         assert!(
             confirmation_policy_for_mode("auto").enabled,
-            "auto mode must retain HITL for unbounded operations"
+            "the provider keeps a serializable fail-closed policy"
         );
     }
 
     #[test]
-    fn web_auto_applies_selective_risk_routing() {
-        let checker = checker("auto");
+    fn web_auto_keeps_explainable_risk_while_srt_resolves_high_risk_shell_calls() {
+        let checker = checker("auto", true);
         for (tool, args, level, action, permission) in [
             (
                 "read",
@@ -228,7 +538,7 @@ mod tests {
                 json!({"command": "cargo test"}),
                 ToolRiskLevel::High,
                 ToolRiskAction::ReviewByLlm,
-                PermissionDecision::Ask,
+                PermissionDecision::Allow,
             ),
             (
                 "bash",
@@ -243,10 +553,26 @@ mod tests {
             assert_eq!(checker.check(tool, &args), permission);
         }
 
+        assert!(confirmation_policy_for_mode("auto").enabled);
+    }
+
+    #[tokio::test]
+    async fn auto_confirmation_provider_rejects_unexpected_escalation_without_a_prompt() {
+        let provider =
+            CodeWebModeConfirmationProvider::new("auto", confirmation_policy_for_mode("auto"));
         assert!(
-            confirmation_policy_for_mode("auto").enabled,
-            "high risk must have an active HITL fallback"
+            !provider
+                .confirmation_available_for("runtime", &json!({}))
+                .await
         );
+
+        let response = provider
+            .request_confirmation("tool-1", "runtime", &json!({}))
+            .await
+            .await
+            .expect("auto rejection response");
+        assert!(!response.approved);
+        assert!(provider.pending_confirmations().await.is_empty());
     }
 
     #[test]
@@ -273,7 +599,7 @@ mod tests {
 
     #[test]
     fn primary_web_model_hides_raw_use_tools_without_blocking_the_worker() {
-        let checker = checker("default");
+        let checker = checker("default", false);
         let tool = "mcp__use_office__office_list";
 
         assert!(!checker.expose_to_model(tool));

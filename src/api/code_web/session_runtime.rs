@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use super::permissions::{
     confirmation_policy_for_mode, permission_checker_for_mode, permission_policy_for_mode,
+    CodeWebModeConfirmationProvider,
 };
 use super::state::{CodeWebSessionControls, CodeWebSessionSettings, CodeWebState};
 use crate::budget::{self, BudgetWorkload};
@@ -91,8 +92,14 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         Some(context_limit),
         BudgetWorkload::Interactive,
     );
+    let sandbox = state.sandbox_for_workspace(workspace).await;
     let permission_policy = permission_policy_for_mode(&settings.permission_mode);
-    let permission_checker = permission_checker_for_mode(&settings.permission_mode, workspace);
+    let permission_checker =
+        permission_checker_for_mode(&settings.permission_mode, workspace, sandbox.is_some());
+    let confirmation_manager = CodeWebModeConfirmationProvider::new(
+        &settings.permission_mode,
+        confirmation_policy_for_mode(&settings.permission_mode),
+    );
     let mut options = SessionOptions::new()
         .with_session_store(state.session_repository.core_store())
         .with_workspace_backend(
@@ -111,11 +118,14 @@ pub(in crate::api::code_web) async fn code_web_session_options(
         .with_max_tool_rounds(budget.max_tool_rounds)
         .with_max_parallel_tasks(budget.max_parallel_tasks)
         .with_max_continuation_turns(budget.max_continuation_turns)
-        .with_confirmation_policy(confirmation_policy_for_mode(&settings.permission_mode))
+        .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy)
         .with_permission_checker(Arc::new(permission_checker))
         .with_planning_mode(effective_planning_mode(controls, settings))
         .with_goal_tracking(effective_goal_tracking(controls, settings));
+    if let Some(sandbox) = sandbox {
+        options = options.with_sandbox_handle(sandbox);
+    }
 
     let session_id = session_id
         .map(ToOwned::to_owned)
@@ -279,7 +289,7 @@ fn effective_planning_mode(
     controls: &CodeWebSessionControls,
     settings: &CodeWebSessionSettings,
 ) -> PlanningMode {
-    if controls.goal.is_some() {
+    if controls.goal.is_some() || settings.permission_mode == "plan" {
         return PlanningMode::Enabled;
     }
     planning_mode(settings.planning_mode.as_deref())
@@ -623,6 +633,23 @@ mod tests {
         assert_eq!(
             effective_planning_mode(&controls, &settings),
             PlanningMode::Disabled
+        );
+        assert!(!effective_goal_tracking(&controls, &settings));
+    }
+
+    #[test]
+    fn plan_execution_mode_forces_planning_without_enabling_goal_tracking() {
+        let controls = CodeWebSessionControls::default();
+        let settings = CodeWebSessionSettings {
+            permission_mode: "plan".to_string(),
+            planning_mode: Some("disabled".to_string()),
+            goal_tracking: Some(false),
+            ..CodeWebSessionSettings::default()
+        };
+
+        assert_eq!(
+            effective_planning_mode(&controls, &settings),
+            PlanningMode::Enabled
         );
         assert!(!effective_goal_tracking(&controls, &settings));
     }

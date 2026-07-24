@@ -35,12 +35,13 @@ pub(super) fn controls_json(
         budget::budget_plan_for_profile(profile, context_limit, BudgetWorkload::Interactive);
     plan.auto_compact_threshold = auto_compact_threshold;
     let goal_active = controls.goal.is_some();
+    let planning_forced = goal_active || settings.permission_mode == "plan";
     json!({
         "sessionId": session_id,
         "effort": profile.id,
         "goal": controls.goal.clone(),
         "goalState": controls.goal_run.clone(),
-        "planningMode": if goal_active {
+        "planningMode": if planning_forced {
             "enabled"
         } else {
             settings.planning_mode.as_deref().unwrap_or("auto")
@@ -204,5 +205,26 @@ mod tests {
             value["budget"]["maxParallelTasks"].as_u64(),
             Some(budget.max_parallel_tasks as u64)
         );
+    }
+
+    #[test]
+    fn controls_json_reports_planning_enabled_for_plan_execution_mode() {
+        let controls = CodeWebSessionControls::default();
+        let settings = CodeWebSessionSettings {
+            permission_mode: "plan".to_string(),
+            planning_mode: Some("disabled".to_string()),
+            ..CodeWebSessionSettings::default()
+        };
+        let value = controls_json(
+            "session-plan",
+            &controls,
+            &settings,
+            &CodeWebContextUsage::default(),
+            None,
+            0.85,
+        );
+
+        assert_eq!(value["planningMode"], "enabled");
+        assert_eq!(value["goalTracking"], false);
     }
 }
