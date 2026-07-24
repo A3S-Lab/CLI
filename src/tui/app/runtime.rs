@@ -12,6 +12,7 @@ struct DeepResearchTerminalJournalRequest<'a> {
     workflow_metadata: Option<&'a serde_json::Value>,
     outcome: ResearchOutcome,
     artifacts: Option<&'a ResearchReportArtifacts>,
+    artifact_authority: Option<DeepResearchTerminalArtifactAuthority>,
 }
 
 struct StreamStartRequest {
@@ -50,16 +51,35 @@ async fn finalize_deep_research_terminal_journal(
         workflow_metadata,
         outcome,
         artifacts,
+        artifact_authority,
     } = request;
     let evidence_first = match query {
         Some(query) => {
-            deep_research_evidence_first_published_report(workspace, query, workflow_output)?
+            match resolve_deep_research_run_publication(workspace, query, run_id, workflow_output) {
+                Ok(publication) => publication,
+                Err(_)
+                    if outcome == ResearchOutcome::Degraded
+                        && artifacts.is_some()
+                        && artifact_authority
+                            == Some(DeepResearchTerminalArtifactAuthority::VerifiedRecovery) =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            }
         }
         None => None,
     };
     if let Some(published) = evidence_first {
+        if artifact_authority != Some(DeepResearchTerminalArtifactAuthority::ValidatedPublication) {
+            return Err(
+                "a validated evidence-first publication was mislabeled as a recovery artifact"
+                    .to_string(),
+            );
+        }
         let published_outcome = match published.publication {
             DeepResearchEvidenceFirstPublication::Synthesized => ResearchOutcome::Completed,
+            DeepResearchEvidenceFirstPublication::Qualified => ResearchOutcome::Qualified,
             DeepResearchEvidenceFirstPublication::SourceBacked => ResearchOutcome::Degraded,
             DeepResearchEvidenceFirstPublication::NoEvidence => ResearchOutcome::Degraded,
         };
@@ -84,6 +104,14 @@ async fn finalize_deep_research_terminal_journal(
         .await
         .map_err(|error| error.to_string());
     } else {
+        if artifact_authority == Some(DeepResearchTerminalArtifactAuthority::VerifiedRecovery)
+            && outcome != ResearchOutcome::Degraded
+        {
+            return Err(
+                "a verified DeepResearch recovery artifact cannot settle a successful outcome"
+                    .to_string(),
+            );
+        }
         let successful_report = matches!(
             outcome,
             ResearchOutcome::Completed | ResearchOutcome::Qualified
@@ -608,7 +636,6 @@ impl App {
             state.started_at.elapsed() >= Duration::from_millis(DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS)
         }) {
             self.loop_remaining = 0;
-            self.pending_deep_research_report_resume = false;
         }
         let degraded_deep_research = self.deep_research_loop.is_some()
             && matches!(self.deep_research_outcome, DeepResearchRunOutcome::Degraded);
@@ -680,28 +707,10 @@ impl App {
     /// DeepResearch starts `tool_with_events` synchronously, while normal model
     /// streams start when their returned command is polled.
     pub(super) fn continue_completed_turn(&mut self) -> Option<Cmd<Msg>> {
-        // Do not interleave queued turns between DeepResearch retrieval,
-        // report generation, its one durable resume, and terminal journaling.
+        // Do not interleave queued turns before DeepResearch terminal
+        // journaling has settled.
         if self.deep_research_loop.is_none() && self.has_queued_turn() {
             return self.drain_queue();
-        }
-        if self.loop_remaining > 0 && self.pending_deep_research_report_resume {
-            self.pending_deep_research_report_resume = false;
-            self.loop_remaining -= 1;
-            let n = self.loop_remaining;
-            self.push_line(&Style::new().fg(TN_GRAY).render(&format!(
-                "  ↻ deep research report resume ({n} left · Esc to stop)"
-            )));
-            self.loop_continuation = true;
-            let query = self
-                .deep_research_loop
-                .as_ref()
-                .map(|state| state.query.clone())
-                .unwrap_or_else(|| "report".to_string());
-            return self.start_deep_research_report_generation(
-                format!("✦\u{200A}resume report {query}"),
-                DeepResearchReportGenerationPhase::Resume,
-            );
         }
         // Required runtime evidence is a deliverable, not just a warning. In
         // autonomous runs, spend the next loop turn on a targeted correction
@@ -722,8 +731,7 @@ impl App {
             }
         }
         // /loop: auto-continue until the agent says DONE, the cap is hit, or Esc.
-        // DeepResearch may reach this point only for its explicit one-shot
-        // report resume above; it never receives a hidden continuation.
+        // DeepResearch never receives a hidden continuation.
         if self.loop_remaining > 0 {
             if self.deep_research_loop.is_some() {
                 self.loop_remaining = 0;
@@ -831,7 +839,11 @@ impl App {
         if let (Some(run_id), Some(outcome)) = (run_id, outcome) {
             self.deep_research_journal_finalization_inflight = true;
             let workspace = PathBuf::from(&self.cwd);
-            let artifacts = self.deep_research_terminal_artifacts.clone();
+            let terminal_artifacts = self.deep_research_terminal_artifacts.clone();
+            let artifacts = terminal_artifacts
+                .as_ref()
+                .map(|(artifacts, _)| artifacts.clone());
+            let artifact_authority = terminal_artifacts.as_ref().map(|(_, authority)| *authority);
             let workflow_output = self
                 .deep_research_workflow
                 .output
@@ -849,6 +861,7 @@ impl App {
                         workflow_metadata: workflow_metadata.as_ref(),
                         outcome,
                         artifacts: artifacts.as_ref(),
+                        artifact_authority,
                     })
                     .await;
                 Msg::DeepResearchJournalFinalized {
@@ -941,14 +954,12 @@ impl App {
             self.goal = goal;
             self.goal_since = goal_since;
         }
-        self.deep_research_report_resume_used = false;
         self.deep_research_workflow.clear();
         self.deep_research_outcome = DeepResearchRunOutcome::Active;
         self.deep_research_journal_finalization_inflight = false;
         self.deep_research_terminal_artifacts = None;
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
-        self.pending_deep_research_report_resume = false;
         self.pending_deep_research_report_view = None;
         self.deep_research_report_tool_gate.reset();
         self.deep_research_subagent_settlement_inflight = false;
@@ -1133,9 +1144,90 @@ mod evidence_first_journal_tests {
                 workflow_metadata: None,
                 outcome: ResearchOutcome::Degraded,
                 artifacts: Some(&artifacts),
+                artifact_authority: Some(
+                    DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+                ),
             })
             .await
             .expect("settle evidence-first publication without Inquiry state");
+
+        assert_eq!(projection.outcome, ResearchOutcome::Degraded);
+        assert!(projection.active_steps.is_empty());
+        assert!(projection.active_children.is_empty());
+        assert!(projection.artifact_evidence_head.is_some());
+    }
+
+    #[tokio::test]
+    async fn invalid_publication_settles_only_with_verified_recovery_artifacts() {
+        let workspace = tempfile::tempdir().expect("create recovery journal workspace");
+        let query = "Assess the current Nimbus support policy";
+        let run_id = "invalid-publication-recovery-settlement";
+        let workflow_output = serde_json::json!({
+            "query": query,
+            "mode": "evidence_first_report",
+            "publication": {}
+        })
+        .to_string();
+        let artifacts = materialize_deep_research_recovery_report(
+            workspace.path(),
+            query,
+            "the Host publication envelope was invalid",
+            &workflow_output,
+            None,
+        )
+        .expect("materialize verified recovery artifacts");
+        let args = serde_json::json!({
+            "run_id": run_id,
+            "input": {
+                "query": query,
+                "current_date": "2026-07-23",
+                "evidence_scope": "web_and_workspace",
+                "inquiry_host_managed": true
+            }
+        });
+        record_deep_research_workflow_started(
+            workspace.path(),
+            run_id,
+            deep_research_evidence_first_research_spec(&args),
+        )
+        .await
+        .expect("start invalid-publication journal");
+        record_deep_research_workflow_completed(workspace.path(), run_id, true)
+            .await
+            .expect("close invalid-publication workflow track");
+
+        let rejected =
+            finalize_deep_research_terminal_journal(DeepResearchTerminalJournalRequest {
+                workspace: workspace.path(),
+                run_id,
+                query: Some(query),
+                host_managed_inquiry: true,
+                workflow_output: &workflow_output,
+                workflow_metadata: None,
+                outcome: ResearchOutcome::Degraded,
+                artifacts: Some(&artifacts),
+                artifact_authority: Some(
+                    DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+                ),
+            })
+            .await
+            .expect_err("an invalid publication must fail closed without recovery authority");
+        assert!(rejected.contains("omitted its status"), "{rejected}");
+
+        let projection =
+            finalize_deep_research_terminal_journal(DeepResearchTerminalJournalRequest {
+                workspace: workspace.path(),
+                run_id,
+                query: Some(query),
+                host_managed_inquiry: true,
+                workflow_output: &workflow_output,
+                workflow_metadata: None,
+                outcome: ResearchOutcome::Degraded,
+                artifacts: Some(&artifacts),
+                artifact_authority: Some(DeepResearchTerminalArtifactAuthority::VerifiedRecovery),
+            })
+            .await
+            .expect("verified recovery must close the degraded transaction");
 
         assert_eq!(projection.outcome, ResearchOutcome::Degraded);
         assert!(projection.active_steps.is_empty());
@@ -1159,6 +1251,7 @@ mod evidence_first_journal_tests {
                 ],
                 claim_eligible: true,
                 semantically_admitted: true,
+                relevant_track_ids: vec!["request.primary".to_string()],
                 coverage: Vec::new(),
             }],
             omitted_source_count: 0,
@@ -1168,6 +1261,14 @@ mod evidence_first_journal_tests {
             query,
             &catalog,
             serde_json::json!({
+                "labels": {
+                    "answer": "Direct Answer",
+                    "findings": "Findings",
+                    "recommendations": "Recommendations",
+                    "limitations": "Limitations",
+                    "evidence_boundary": "This report publishes no conclusion beyond the fetched evidence.",
+                    "sources": "Sources"
+                },
                 "summary": [{
                     "text": "Nimbus version 2 receives fixes through September 2027.",
                     "source_aliases": ["source-1"],
@@ -1241,6 +1342,9 @@ mod evidence_first_journal_tests {
                 workflow_metadata: None,
                 outcome: ResearchOutcome::Completed,
                 artifacts: Some(&artifacts),
+                artifact_authority: Some(
+                    DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+                ),
             })
             .await
             .expect("settle synthesized publication");

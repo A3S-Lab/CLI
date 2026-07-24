@@ -31,12 +31,6 @@ pub(crate) struct BriefDimension {
     pub(crate) material: bool,
 }
 
-impl BriefDimension {
-    pub(crate) fn request_scope(&self) -> String {
-        self.request_basis.join(" … ")
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct BriefPlanningGap {
     pub(crate) dimension_id: String,
@@ -399,9 +393,7 @@ fn normalize_queries(
             let preferred_sources =
                 normalize_preferences(object.get("preferred_sources"), transport, id, notes);
             let text = match transport {
-                AcquisitionTransport::Web => {
-                    normalize_web_query(text, &preferred_sources, &input.query, id, notes)?
-                }
+                AcquisitionTransport::Web => validate_web_query(text, id, notes)?,
                 AcquisitionTransport::Workspace => text.to_string(),
             };
             Some(AcquisitionQuery {
@@ -419,94 +411,12 @@ fn normalize_queries(
         .collect()
 }
 
-fn normalize_web_query(
-    text: &str,
-    preferences: &[SourcePreference],
-    request: &str,
-    query_id: &str,
-    notes: &mut Vec<String>,
-) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    if ["(?", ".*", "\\b", "{0,", "[a-z", "[0-9"]
-        .iter()
-        .any(|marker| lower.contains(marker))
-    {
-        notes.push(format!("Host dropped regex-like web query `{query_id}`"));
+fn validate_web_query(text: &str, query_id: &str, notes: &mut Vec<String>) -> Option<String> {
+    if text.trim().is_empty() {
+        notes.push(format!("Host dropped empty web query `{query_id}`"));
         return None;
     }
-    let normalized = text
-        .split_whitespace()
-        .filter(|token| !token.eq_ignore_ascii_case("or"))
-        .filter(|token| !token.to_ascii_lowercase().starts_with("site:"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let word_count = normalized
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 2)
-        .count();
-    if word_count < 3 {
-        notes.push(format!(
-            "Host dropped underspecified web query `{query_id}`"
-        ));
-        return None;
-    }
-    let identity_terms = preference_identity_terms(preferences);
-    let normalized_identity = normalize_identity_text(&normalized);
-    if !identity_terms.is_empty()
-        && !identity_terms
-            .iter()
-            .any(|term| normalized_identity.contains(term))
-    {
-        notes.push(format!(
-            "Host dropped web query `{query_id}` that omitted its preferred source identity"
-        ));
-        return None;
-    }
-    let request_terms = request
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|term| term.chars().count() >= 3)
-        .map(normalize_identity_text)
-        .filter(|term| !term.is_empty())
-        .collect::<BTreeSet<_>>();
-    if identity_terms.is_empty()
-        && !request_terms
-            .iter()
-            .any(|term| normalized_identity.contains(term))
-    {
-        notes.push(format!(
-            "Host dropped web query `{query_id}` with no request-subject continuity"
-        ));
-        return None;
-    }
-    if normalized != text {
-        notes.push(format!(
-            "Host removed unsupported web-search operators from query `{query_id}`"
-        ));
-    }
-    Some(normalized)
-}
-
-fn preference_identity_terms(preferences: &[SourcePreference]) -> BTreeSet<String> {
-    preferences
-        .iter()
-        .flat_map(|preference| {
-            preference
-                .value
-                .split(|character: char| !character.is_alphanumeric())
-                .filter(|term| term.chars().count() >= 4)
-                .map(normalize_identity_text)
-                .collect::<Vec<_>>()
-        })
-        .filter(|term| !matches!(term.as_str(), "https" | "github" | "com" | "docs"))
-        .collect()
-}
-
-fn normalize_identity_text(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    Some(text.to_string())
 }
 
 fn normalize_preferences(
@@ -587,7 +497,7 @@ fn fallback_query(input: &PlannerInput, dimension_id: &str) -> AcquisitionQuery 
     };
     let text = match transport {
         AcquisitionTransport::Web => input.query.clone(),
-        AcquisitionTransport::Workspace => super::fallback_workspace_pattern(&input.query),
+        AcquisitionTransport::Workspace => r"\S".to_string(),
     };
     AcquisitionQuery {
         id: "query.fallback".to_string(),
@@ -803,7 +713,7 @@ mod tests {
     }
 
     #[test]
-    fn regex_like_and_identity_free_web_queries_are_dropped_locally() {
+    fn web_query_prose_is_not_interpreted_by_the_host() {
         let proposal = serde_json::json!({
             "dimensions": [{"id": "policy", "question": "What is Alpha policy?", "material": true}],
             "queries": [
@@ -825,16 +735,10 @@ mod tests {
             "planning_gaps": []
         });
         let brief = validate_brief(&proposal, &input(EvidenceScope::Web), false).expect("brief");
-        assert!(brief.queries.is_empty());
-        assert_eq!(brief.planning_gaps.len(), 1);
-        assert!(brief
-            .normalization_notes
-            .iter()
-            .any(|note| note.contains("regex-like")));
-        assert!(brief
-            .normalization_notes
-            .iter()
-            .any(|note| note.contains("preferred source identity")));
+        assert_eq!(brief.queries.len(), 2);
+        assert_eq!(brief.queries[0].text, "(?i)(policy|support).{0,20}");
+        assert_eq!(brief.queries[1].text, "support policy version");
+        assert!(brief.planning_gaps.is_empty());
     }
 
     #[test]

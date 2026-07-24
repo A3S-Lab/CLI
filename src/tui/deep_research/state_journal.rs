@@ -5,8 +5,8 @@
 //! references to those streams into a replayable research-domain graph.
 
 use a3s_code_core::state_graph::{
-    graph_event_head, ExternalEvent, FileGraphEventStore, GraphEvent, GraphEventRecord,
-    GraphEventStore, GraphPatch, GraphRuntime, GraphSaveOutcome, PatchOperation,
+    graph_event_head, ExternalEvent, FileGraphEventStore, GraphEventRecord, GraphEventStore,
+    GraphPatch, GraphRuntime, GraphSaveOutcome, PatchOperation,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,6 @@ const SPEC_OBJECT_TYPE: &str = "deep_research.spec";
 const SOURCE_OBJECT_TYPE: &str = "deep_research.source";
 const EVIDENCE_OBJECT_TYPE: &str = "deep_research.evidence";
 const CLAIM_OBJECT_TYPE: &str = "deep_research.claim";
-const REPORT_EVENT_SOURCE: &str = "deep_research.report";
-const REPORT_STARTED_EVENT_NAME: &str = "research.report.started";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +78,14 @@ pub(crate) struct ResearchRunProjection {
     pub(crate) source_count: usize,
     pub(crate) claim_count: usize,
     #[serde(default)]
+    pub(crate) accepted_relation_count: usize,
+    #[serde(default)]
+    pub(crate) accepted_derivation_count: usize,
+    #[serde(default)]
+    pub(crate) accepted_basis_edge_count: usize,
+    #[serde(default)]
+    pub(crate) accepted_gap_count: usize,
+    #[serde(default)]
     pub(crate) report_cited_source_count: Option<usize>,
 }
 
@@ -98,6 +104,10 @@ impl ResearchRunProjection {
             accepted_evidence_count: 0,
             source_count: 0,
             claim_count: 0,
+            accepted_relation_count: 0,
+            accepted_derivation_count: 0,
+            accepted_basis_edge_count: 0,
+            accepted_gap_count: 0,
             report_cited_source_count: None,
         }
     }
@@ -455,19 +465,6 @@ pub(crate) async fn record_inquiry_state(
     inquiry::record_inquiry_state(workspace, run_id, events, state).await
 }
 
-/// Restore the latest durable typed Inquiry prefix from the run event stream.
-pub(crate) async fn load_inquiry_state(
-    workspace: &Path,
-    run_id: &str,
-) -> Result<
-    Option<(
-        Vec<a3s::research::InquiryEvent>,
-        a3s::research::InquiryState,
-    )>,
-> {
-    inquiry::load_inquiry_state(workspace, run_id).await
-}
-
 /// Return the wall-clock origin of the durable research run.
 ///
 /// A restarted host must continue consuming the original shared deadline
@@ -485,69 +482,6 @@ pub(crate) async fn load_research_run_started_at_ms(
         .events()
         .first()
         .map(|record| record.timestamp_ms))
-}
-
-/// Record and return the immutable wall-clock origin of the completed-report
-/// transaction.
-///
-/// Report generation may resume the durable Inquiry journal, but every attempt
-/// uses this same timestamp and therefore the same bounded synthesis budget.
-pub(crate) async fn record_report_started_at_ms(workspace: &Path, run_id: &str) -> Result<u64> {
-    let event = ResearchDomainEvent {
-        source: REPORT_EVENT_SOURCE.to_string(),
-        source_sequence: 1,
-        source_event_id: format!("{run_id}:report-started"),
-        name: REPORT_STARTED_EVENT_NAME.to_string(),
-        payload: serde_json::json!({"transaction": "completed-report"}),
-    };
-    const MAX_ATTEMPTS: usize = 4;
-    let mut last_error = None;
-    for _ in 0..MAX_ATTEMPTS {
-        let Some(mut journal) = DeepResearchStateJournal::open(workspace, run_id).await? else {
-            anyhow::bail!("DeepResearch run `{run_id}` has no state journal");
-        };
-        if let Some(timestamp_ms) = report_started_at_ms(journal.runtime.events(), run_id) {
-            return Ok(timestamp_ms);
-        }
-        match journal.append(event.clone()).await {
-            Ok(_) => {
-                return report_started_at_ms(journal.runtime.events(), run_id).with_context(|| {
-                    format!(
-                        "DeepResearch run `{run_id}` persisted a report start without its timestamp"
-                    )
-                });
-            }
-            Err(error) => {
-                last_error = Some(error);
-                tokio::task::yield_now().await;
-            }
-        }
-    }
-    let Some(last_error) = last_error else {
-        anyhow::bail!("append DeepResearch report start exhausted without a result");
-    };
-    Err(last_error.context("append DeepResearch report start after concurrent-head retries"))
-}
-
-fn report_started_at_ms(records: &[GraphEventRecord], run_id: &str) -> Option<u64> {
-    let event_id = format!("{run_id}:report-started");
-    records.iter().find_map(|record| match &record.event {
-        GraphEvent::ExternalEventObserved {
-            source,
-            stream_id,
-            sequence: 1,
-            event_id: observed_event_id,
-            name,
-            ..
-        } if source == REPORT_EVENT_SOURCE
-            && stream_id == run_id
-            && observed_event_id == &event_id
-            && name == REPORT_STARTED_EVENT_NAME =>
-        {
-            Some(record.timestamp_ms)
-        }
-        _ => None,
-    })
 }
 
 pub(crate) async fn record_workflow_started(
@@ -670,26 +604,34 @@ pub(crate) async fn record_validated_publication_terminal(
         ResearchOutcome::Completed | ResearchOutcome::Qualified
     ) && (quality.accepted_claim_count == 0
         || quality.cited_source_count == 0
-        || quality.direct_answer_count == 0
-        || quality.finding_count == 0)
+        || quality.direct_answer_count == 0)
     {
         anyhow::bail!(
             "a successful validated publication must contain cited claims and a direct answer"
         );
     }
-    if quality.accepted_claim_count > 0 {
+    if quality.source_count > 0 {
+        let accepted_evidence_count = if quality.accepted_claim_count > 0 {
+            quality.cited_source_count
+        } else {
+            quality.relevant_source_count
+        };
         append_event_with_retry(
             workspace,
             run_id,
             ResearchDomainEvent {
-                source: "evidence".to_string(),
+                source: "publication".to_string(),
                 source_sequence: 1,
-                source_event_id: format!("{run_id}:evidence:publication-quality"),
+                source_event_id: format!("{run_id}:publication:quality"),
                 name: "research.evidence.accepted".to_string(),
                 payload: serde_json::json!({
-                    "accepted_evidence": quality.cited_source_count,
+                    "accepted_evidence": accepted_evidence_count,
                     "sources": quality.source_count,
                     "claims": quality.accepted_claim_count,
+                    "relations": quality.accepted_relation_count,
+                    "derivations": quality.accepted_derivation_count,
+                    "basis_edges": quality.accepted_basis_edge_count,
+                    "gaps": quality.accepted_gap_count,
                 }),
             },
         )
@@ -1060,6 +1002,30 @@ fn apply_domain_event(run: &mut ResearchRunProjection, event: &ResearchDomainEve
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|value| usize::try_from(value).ok())
                 .unwrap_or_default();
+            run.accepted_relation_count = event
+                .payload
+                .get("relations")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default();
+            run.accepted_derivation_count = event
+                .payload
+                .get("derivations")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default();
+            run.accepted_basis_edge_count = event
+                .payload
+                .get("basis_edges")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default();
+            run.accepted_gap_count = event
+                .payload
+                .get("gaps")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or_default();
         }
         _ => {}
     }
@@ -1189,7 +1155,7 @@ mod diagnostics;
 mod inquiry;
 pub(crate) use diagnostics::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run, research_diagnostic,
-    research_diff, ResearchDiagnosticKind,
+    research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition,
 };
 #[cfg(test)]
 use diagnostics::{fork_with_validated_evidence, load_latest_checkpoint};

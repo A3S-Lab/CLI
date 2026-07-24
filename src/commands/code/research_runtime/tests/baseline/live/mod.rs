@@ -187,7 +187,7 @@ async fn run_measurement(
 ) -> Result<JsonValue, String> {
     let run_started = std::time::Instant::now();
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let (session, _) = build_deepresearch_session(
+    let session = build_deepresearch_session(
         workspace.to_string_lossy().as_ref(),
         config.clone(),
         output_dir.join("memory"),

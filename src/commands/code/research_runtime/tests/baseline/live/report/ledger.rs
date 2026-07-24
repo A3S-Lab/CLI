@@ -130,8 +130,7 @@ fn build_document(
     acquisition: &AcquisitionResult,
     ledger: &AtomicLedger,
 ) -> ReportDocument {
-    let chinese = case.report_language.starts_with("zh");
-    let labels = Labels::new(chinese);
+    let labels = Labels::new();
     let item_index = ledger
         .items
         .iter()
@@ -266,7 +265,7 @@ fn build_document(
 
     ReportDocument {
         schema: "a3s/deep-research-report-document/v2",
-        language: if chinese { "zh" } else { "en" }.to_string(),
+        language: "und".to_string(),
         title: case.query.clone(),
         evaluation_date: planning.planner_input.current_date.clone(),
         summary: if ledger.items.is_empty() {
@@ -323,7 +322,7 @@ fn document_source(
 }
 
 fn render_markdown(document: &ReportDocument) -> String {
-    let labels = Labels::new(document.language == "zh");
+    let labels = Labels::new();
     let mut markdown = format!("# {}\n", markdown_text(&document.title));
     let _ = write!(
         markdown,
@@ -440,7 +439,7 @@ fn append_markdown_sources(markdown: &mut String, sources: &[DocumentSource], la
 }
 
 fn render_html(document: &ReportDocument) -> String {
-    let labels = Labels::new(document.language == "zh");
+    let labels = Labels::new();
     let mut navigation = vec![("key-findings", labels.key_findings)];
     if !document.additional_findings.is_empty() {
         navigation.push(("additional-findings", labels.additional_findings));
@@ -663,99 +662,53 @@ struct Labels {
     navigation: &'static str,
     skip_to_content: &'static str,
     footer: &'static str,
-    chinese: bool,
 }
 
 impl Labels {
-    fn new(chinese: bool) -> Self {
-        if chinese {
-            Self {
-                observation_date: "观察日期",
-                key_findings: "关键发现",
-                additional_findings: "更多发现",
-                recommendations: "有条件的建议",
-                boundaries: "证据边界",
-                sources: "引用来源",
-                reviewed_sources: "为开放问题查阅的来源",
-                conditions: "适用条件",
-                captured: "获取于",
-                gap_prefix: "证据缺口：",
-                no_cited_sources: "没有已发布发现引用来源。",
-                summary:
-                    "以下发现来自本次获取并保留的来源。每条陈述独立呈现；未讨论的方面仍未评估。",
-                no_evidence_summary: "本次有界检索没有形成可发布的来源证据，因此不生成研究结论。",
-                no_findings: "没有可发布的来源支持发现。",
-                structural_boundary:
-                    "每条已展示内容仅引用本次保留的来源；这不代表请求的所有方面均已覆盖。",
-                no_capture_boundary: "没有可用的来源获取日期。",
-                captured_on: "来源获取日期为",
-                captured_between: "来源获取日期范围为",
-                finding_count: "发现数",
-                source_count: "来源数",
-                navigation: "报告导航",
-                skip_to_content: "跳到正文",
-                footer: "基于已保留来源的研究报告。",
-                chinese,
-            }
-        } else {
-            Self {
-                observation_date: "Observation date",
-                key_findings: "Key Findings",
-                additional_findings: "Additional Findings",
-                recommendations: "Conditional Recommendations",
-                boundaries: "Evidence Boundaries",
-                sources: "Cited Sources",
-                reviewed_sources: "Sources Reviewed for Open Questions",
-                conditions: "Conditions",
-                captured: "captured",
-                gap_prefix: "Evidence gap: ",
-                no_cited_sources: "No published finding cites a source.",
-                summary: "The findings below use the sources acquired and preserved in this run. Each statement stands independently; aspects not discussed remain unassessed.",
-                no_evidence_summary: "This bounded acquisition produced no publishable source evidence, so no research conclusion is presented.",
-                no_findings: "No source-backed finding is publishable.",
-                structural_boundary: "Every displayed item cites only sources preserved in this run; that does not establish coverage of every part of the request.",
-                no_capture_boundary: "No source capture date is available.",
-                captured_on: "Sources were captured on",
-                captured_between: "Sources were captured between",
-                finding_count: "Findings",
-                source_count: "Sources",
-                navigation: "Report navigation",
-                skip_to_content: "Skip to content",
-                footer: "A research report backed by preserved sources.",
-                chinese,
-            }
+    fn new() -> Self {
+        Self {
+            observation_date: "Observation date",
+            key_findings: "Key Findings",
+            additional_findings: "Additional Findings",
+            recommendations: "Conditional Recommendations",
+            boundaries: "Evidence Boundaries",
+            sources: "Cited Sources",
+            reviewed_sources: "Sources Reviewed for Open Questions",
+            conditions: "Conditions",
+            captured: "captured",
+            gap_prefix: "Evidence gap: ",
+            no_cited_sources: "No published finding cites a source.",
+            summary: "The findings below use the sources acquired and preserved in this run. Each statement stands independently; aspects not discussed remain unassessed.",
+            no_evidence_summary: "This bounded acquisition produced no publishable source evidence, so no research conclusion is presented.",
+            no_findings: "No source-backed finding is publishable.",
+            structural_boundary: "Every displayed item cites only sources preserved in this run; that does not establish coverage of every part of the request.",
+            no_capture_boundary: "No source capture date is available.",
+            captured_on: "Sources were captured on",
+            captured_between: "Sources were captured between",
+            finding_count: "Findings",
+            source_count: "Sources",
+            navigation: "Report navigation",
+            skip_to_content: "Skip to content",
+            footer: "A research report backed by preserved sources.",
         }
     }
 
     fn item_kind(self, kind: AtomicItemKind) -> &'static str {
-        match (self.chinese, kind) {
-            (true, AtomicItemKind::Fact) => "事实",
-            (true, AtomicItemKind::Derivation) => "推论",
-            (true, AtomicItemKind::Recommendation) => "建议",
-            (false, AtomicItemKind::Fact) => "Fact",
-            (false, AtomicItemKind::Derivation) => "Inference",
-            (false, AtomicItemKind::Recommendation) => "Recommendation",
+        match kind {
+            AtomicItemKind::Fact => "Fact",
+            AtomicItemKind::Derivation => "Inference",
+            AtomicItemKind::Recommendation => "Recommendation",
         }
     }
 
     fn failed_searches(self, count: usize) -> String {
-        if self.chinese {
-            format!("本次有 {count} 次检索未形成可用候选目录；已保留的来源不受影响。")
-        } else {
-            format!(
-                "{count} search attempt(s) did not produce a usable candidate catalog; preserved sources remain available."
-            )
-        }
+        format!(
+            "{count} search attempt(s) did not produce a usable candidate catalog; preserved sources remain available."
+        )
     }
 
     fn failed_sources(self, count: usize) -> String {
-        if self.chinese {
-            format!("本次有 {count} 个来源读取未成功；其他已保留来源仍然可用。")
-        } else {
-            format!(
-                "{count} source read(s) did not succeed; other preserved sources remain available."
-            )
-        }
+        format!("{count} source read(s) did not succeed; other preserved sources remain available.")
     }
 
     fn no_evidence_attempts(
@@ -764,15 +717,9 @@ impl Labels {
         workspace_searches: usize,
         source_attempts: usize,
     ) -> String {
-        if self.chinese {
-            format!(
-                "本次尝试了 {web_searches} 次网页检索、{workspace_searches} 次工作区检索和 {source_attempts} 次来源读取；没有来源成功保留。"
-            )
-        } else {
-            format!(
-                "This run attempted {web_searches} web search(es), {workspace_searches} workspace search(es), and {source_attempts} source read(s); no source was successfully preserved."
-            )
-        }
+        format!(
+            "This run attempted {web_searches} web search(es), {workspace_searches} workspace search(es), and {source_attempts} source read(s); no source was successfully preserved."
+        )
     }
 }
 

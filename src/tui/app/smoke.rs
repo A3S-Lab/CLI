@@ -97,6 +97,7 @@ fn deep_research_smoke_bounded_phase_deadline(
     })
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_smoke_exhausted_phase_message(phase: &str) -> String {
     format!(
         "DeepResearch {phase} model call timed out after 0 ms because the bounded execution budget was exhausted before the phase could start."
@@ -151,110 +152,8 @@ pub(super) fn run_deep_research_smoke_artifact_step<T>(
     Ok(result)
 }
 
-pub(super) async fn finalize_deep_research_smoke_journal(
-    workspace: &Path,
-    run_id: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-    requested_outcome: DeepResearchRunOutcome,
-    artifacts: &ResearchReportArtifacts,
-) -> anyhow::Result<DeepResearchRunOutcome> {
-    let successful_report = requested_outcome.report_ready();
-    match inquiry_projection_from_workflow(workflow_output, workflow_metadata) {
-        Ok(Some((events, state))) => {
-            if successful_report && state.phase != a3s::research::InquiryPhase::Completed {
-                anyhow::bail!(
-                    "DeepResearch smoke cannot publish from non-completed Inquiry phase {:?}",
-                    state.phase
-                );
-            }
-            record_deep_research_inquiry_state(workspace, run_id, &events, &state).await?;
-        }
-        Ok(None) if successful_report => {
-            anyhow::bail!(
-                "host-managed DeepResearch smoke cannot publish without an Inquiry projection"
-            )
-        }
-        Err(error) if successful_report => return Err(anyhow::Error::msg(error)),
-        Ok(None) | Err(_) => {
-            // A planner or collection failure can precede the first complete
-            // Inquiry projection. The run journal still has to become terminal
-            // so smoke diagnostics never leave an active workflow behind.
-        }
-    }
-
-    let requested_outcome = match requested_outcome {
-        DeepResearchRunOutcome::Completed => ResearchOutcome::Completed,
-        DeepResearchRunOutcome::Qualified => ResearchOutcome::Qualified,
-        DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
-        DeepResearchRunOutcome::Active => {
-            anyhow::bail!("DeepResearch smoke cannot journal an active terminal outcome")
-        }
-    };
-    let projection =
-        record_deep_research_run_terminal(workspace, run_id, requested_outcome, Some(artifacts))
-            .await?;
-    if !projection.outcome.is_terminal()
-        || !projection.active_steps.is_empty()
-        || !projection.active_children.is_empty()
-    {
-        anyhow::bail!(
-            "DeepResearch smoke journal did not settle: outcome={:?}, active_steps={}, active_children={}",
-            projection.outcome,
-            projection.active_steps.len(),
-            projection.active_children.len()
-        );
-    }
-    Ok(match projection.outcome {
-        ResearchOutcome::Completed => DeepResearchRunOutcome::Completed,
-        ResearchOutcome::Qualified => DeepResearchRunOutcome::Qualified,
-        ResearchOutcome::Degraded | ResearchOutcome::Failed => DeepResearchRunOutcome::Degraded,
-        ResearchOutcome::Active => unreachable!("terminal projection cannot remain active"),
-    })
-}
-
 async fn stream_smoke_prompt(session: &AgentSession, prompt: &str) -> anyhow::Result<String> {
     stream_smoke_prompt_inner(session, prompt, None).await
-}
-
-async fn generate_smoke_sectioned_report(
-    session: &AgentSession,
-    query: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-    run_id: &str,
-    deadline: SmokePhaseDeadline,
-) -> Result<(GeneratedDeepResearchReport, Option<serde_json::Value>), String> {
-    let remaining = deadline.phase_remaining(Instant::now());
-    if remaining.is_zero() {
-        return Err(deadline.timeout_message());
-    }
-    let result = match tokio::time::timeout(
-        remaining,
-        generate_sectioned_report(
-            session,
-            query,
-            workflow_output,
-            workflow_metadata,
-            run_id,
-            deadline.phase_deadline,
-        ),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            let _ = session
-                .cancel_and_settle(
-                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                )
-                .await;
-            return Err(deadline.timeout_message());
-        }
-    };
-    let report = deep_research_report_from_generation(&result.output, result.exit_code)?;
-    Ok((report, result.metadata))
 }
 
 async fn stream_smoke_prompt_inner(
@@ -436,7 +335,7 @@ async fn run_smoke_deep_research(
 ) -> anyhow::Result<()> {
     let run_started_at = Instant::now();
     let run_deadline = deep_research_smoke_run_deadline(run_started_at);
-    let evidence_scope = deep_research_inferred_evidence_scope(&query);
+    let evidence_scope = deep_research_default_evidence_scope();
     deep_research_report_tool_gate.set_workspace(workspace);
     deep_research_report_tool_gate.set_evidence_scope(evidence_scope);
     eprintln!("[smoke] deepresearch workflow: host-managed");
@@ -447,29 +346,14 @@ async fn run_smoke_deep_research(
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("DeepResearch smoke workflow has no run_id"))?
         .to_string();
-    let total_budget_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
     record_deep_research_workflow_started(
         workspace,
         &run_id,
-        ResearchSpec {
-            query: query.clone(),
-            current_date: workflow_args
-                .pointer("/input/current_date")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| chrono::Local::now().date_naive().to_string()),
-            evidence_scope: evidence_scope.label().to_string(),
-            required_claims: Vec::new(),
-            total_budget_ms,
-            retrieval_stage_budget_ms: DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS,
-            question_review_stage_budget_ms: DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS,
-            finalization_reserve_ms: DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS,
-            host_pid: std::process::id(),
-        },
+        deep_research_evidence_first_research_spec(&workflow_args),
     )
     .await?;
     let (mut progress_rx, mut workflow_join) =
-        spawn_deep_research_inquiry(Arc::clone(&session), workflow_args.clone());
+        spawn_deep_research_evidence_first(Arc::clone(&session), workflow_args.clone());
     let workflow_abort = workflow_join.abort_handle();
     let progress_drain = tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
@@ -520,7 +404,7 @@ async fn run_smoke_deep_research(
             }
         }
     });
-    let configured_timeout_ms = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS;
+    let configured_timeout_ms = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
     let workflow_deadline = deep_research_smoke_phase_deadline(
         run_deadline,
         Instant::now(),
@@ -563,213 +447,152 @@ async fn run_smoke_deep_research(
     };
     progress_drain.abort();
 
-    let workflow_succeeded = workflow.is_ok();
-    let (mut workflow_output, exit_code, mut metadata) = match workflow {
+    let (mut workflow_output, exit_code, metadata) = match workflow {
         Ok(result) => (result.output, result.exit_code, result.metadata),
         Err(error) => (error, 1, None),
     };
     workflow_output = deep_research_canonical_workflow_output(&workflow_output, metadata.as_ref());
     eprintln!("[smoke] deepresearch workflow exit: {exit_code}");
-    let accepted_evidence = accepted_evidence_ledger(&workflow_output, metadata.as_ref());
-    record_deep_research_workflow_completed(workspace, &run_id, workflow_succeeded).await?;
-    record_deep_research_evidence_ledger(workspace, &run_id, &accepted_evidence).await?;
-    let inquiry_projection = inquiry_projection_from_workflow(&workflow_output, metadata.as_ref());
-    let convergence = match inquiry_projection.as_ref() {
-        Ok(Some((_, state))) => evaluate_terminal_inquiry_convergence(state),
-        Ok(None) => ConvergenceDecision {
-            action: ConvergenceAction::Degrade,
-            reason: "the DeepResearch smoke run returned without its required Inquiry projection"
-                .to_string(),
-        },
-        Err(error) => ConvergenceDecision {
-            action: ConvergenceAction::Degrade,
-            reason: format!(
-                "the DeepResearch smoke Inquiry projection failed strict replay: {error}"
-            ),
-        },
-    };
-    let evidence_outcome = deep_research_report_outcome_for_workflow(
-        &query,
-        evidence_scope,
-        &workflow_output,
-        metadata.as_ref(),
-    );
-    let sectioned_report_ready = sectioned_report_available(&workflow_output, metadata.as_ref());
-    if accepted_evidence.is_empty()
-        || convergence.action == ConvergenceAction::Degrade
-        || matches!(evidence_outcome, DeepResearchRunOutcome::Degraded)
-        || !sectioned_report_ready
-    {
-        deep_research_report_tool_gate.reset();
-        let artifacts = run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "failed-collection recovery report",
-            || {
-                materialize_deep_research_recovery_report(
-                    workspace,
-                    &query,
-                    &format!(
-                        "Evidence collection ended without a reportable Inquiry. Terminal contract assessment: {}. No second retrieval or synthesis pass was started.",
-                        convergence.reason
-                    ),
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )?
-        .map_err(anyhow::Error::msg)?;
-        eprintln!("[smoke] evidence collection was terminally degraded; skipped model synthesis");
-        eprintln!(
-            "[smoke] recovery report.md: {}",
-            artifacts.markdown.display()
-        );
-        eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
-        let outcome = finalize_deep_research_smoke_journal(
-            workspace,
-            &run_id,
-            &workflow_output,
-            metadata.as_ref(),
-            DeepResearchRunOutcome::Degraded,
-            &artifacts,
-        )
-        .await?;
-        return outcome.ensure_smoke_success(&artifacts);
-    }
-    eprintln!("[smoke] deepresearch synthesis");
-    deep_research_report_tool_gate.set_synthesis_only();
-    let synthesis_timeout_ms = DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS;
-    let mut generated_report = None;
-    let mut final_text = if let Some(synthesis_deadline) = deep_research_smoke_phase_deadline(
-        run_deadline,
-        Instant::now(),
-        Duration::from_millis(synthesis_timeout_ms),
-        "synthesis",
-    ) {
-        let generated = generate_smoke_sectioned_report(
-            session.as_ref(),
-            &query,
-            &workflow_output,
-            metadata.as_ref(),
-            &run_id,
-            synthesis_deadline,
-        )
-        .await;
-        match generated {
-            Ok((report, sectioned_metadata)) => {
-                if !merge_sectioned_inquiry_projection(
-                    &mut workflow_output,
-                    metadata.as_mut(),
-                    sectioned_metadata.as_ref(),
-                )
-                .map_err(anyhow::Error::msg)?
-                {
-                    anyhow::bail!(
-                        "sectioned DeepResearch synthesis did not merge a terminal Inquiry projection"
-                    );
-                }
-                deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref())
-                    .map_err(anyhow::Error::msg)?;
-                let markdown = report.markdown.clone();
-                generated_report = Some(report);
-                markdown
-            }
-            Err(error) => {
-                eprintln!("[smoke] DeepResearch structured synthesis failed: {error}");
-                error
-            }
-        }
-    } else {
-        let status = deep_research_smoke_exhausted_phase_message("synthesis");
-        eprintln!("[smoke] {status}");
-        status
-    };
-    let publication_ready =
-        deep_research_inquiry_publication_outcome(&workflow_output, metadata.as_ref()).is_ok();
-    let mut artifacts = None;
-    if let (true, Some(report)) = (publication_ready, generated_report.as_ref()) {
-        match run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "structured synthesis materialization",
-            || {
-                materialize_deep_research_completed_report_from_generation(
-                    workspace,
-                    &query,
-                    report,
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )? {
-            Ok(generated_artifacts) => artifacts = Some(generated_artifacts),
-            Err(error) => {
-                eprintln!("[smoke] DeepResearch structured synthesis rejected: {error}")
-            }
-        }
-    }
 
-    if let Some(clean_text) = artifacts
-        .as_ref()
-        .and_then(|artifacts| clean_deep_research_final_text_from_artifacts(artifacts, workspace))
-    {
-        final_text = clean_text;
-    }
-    if artifacts.is_none() {
-        let diagnostic = deep_research_report_rejection_diagnostic_from_answer_text(
-            &query,
-            &final_text,
-            &workflow_output,
-            metadata.as_ref(),
-        )
-        .unwrap_or_else(|| "report artifacts were not accepted for an unknown reason".to_string());
-        eprintln!(
-            "[smoke] DeepResearch synthesis report rejected ({} chars): {diagnostic}",
-            final_text.chars().count()
-        );
-    }
-
-    let mut outcome = evidence_outcome;
-    if artifacts.is_none() {
-        eprintln!("[smoke] deepresearch report missing; materializing recovery report");
-        deep_research_report_tool_gate.reset();
-        let recovery_artifacts = run_deep_research_smoke_artifact_step(
-            run_deadline,
-            "recovery artifact fallback",
-            || {
-                materialize_deep_research_recovery_report(
-                    workspace,
-                    &query,
-                    &final_text,
-                    &workflow_output,
-                    metadata.as_ref(),
-                )
-            },
-        )?
-        .map_err(anyhow::Error::msg)?;
-        artifacts = Some(recovery_artifacts);
-        outcome = DeepResearchRunOutcome::Degraded;
-    }
-
-    let artifacts = artifacts.ok_or_else(|| {
-        anyhow::anyhow!(
-            "DeepResearch smoke did not produce the required host-materialized `.a3s/research/<slug>/report.md` and `index.html` artifacts"
-        )
-    })?;
-    deep_research_report_tool_gate.reset();
-    if !final_text.trim().is_empty() && !deep_research_output_has_internal_leak(&final_text) {
-        println!("{final_text}");
-    }
-    eprintln!("[smoke] report.md: {}", artifacts.markdown.display());
-    eprintln!("[smoke] index.html: {}", artifacts.html.display());
-    let outcome = finalize_deep_research_smoke_journal(
+    let published = match resolve_deep_research_run_publication(
         workspace,
+        &query,
         &run_id,
         &workflow_output,
-        metadata.as_ref(),
-        outcome,
-        &artifacts,
-    )
-    .await?;
+    ) {
+        Ok(Some(published)) => published,
+        publication => {
+            let reason = match publication {
+                Ok(None) if exit_code == 0 => {
+                    "the standalone DeepResearch engine returned without its required Host publication"
+                        .to_string()
+                }
+                Ok(None) => workflow_output.clone(),
+                Err(error) => {
+                    format!("the standalone DeepResearch publication failed validation: {error}")
+                }
+                Ok(Some(_)) => unreachable!("validated publication matched the prior arm"),
+            };
+            deep_research_report_tool_gate.reset();
+            let artifacts = run_deep_research_smoke_artifact_step(
+                run_deadline,
+                "failed-engine recovery report",
+                || {
+                    materialize_deep_research_recovery_report(
+                        workspace,
+                        &query,
+                        &reason,
+                        &workflow_output,
+                        metadata.as_ref(),
+                    )
+                },
+            )?
+            .map_err(anyhow::Error::msg)?;
+            eprintln!("[smoke] standalone engine did not publish a validated report: {reason}");
+            eprintln!(
+                "[smoke] recovery report.md: {}",
+                artifacts.markdown.display()
+            );
+            eprintln!("[smoke] recovery index.html: {}", artifacts.html.display());
+            let settled = settle_deep_research_cli_run(DeepResearchCliSettlement {
+                workspace,
+                run_id: &run_id,
+                query: &query,
+                workflow_succeeded: exit_code == 0,
+                workflow_output: &workflow_output,
+                workflow_metadata: metadata.as_ref(),
+                requested_outcome: ResearchOutcome::Degraded,
+                artifacts: &artifacts,
+                artifact_authority: DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+            })
+            .await
+            .map_err(anyhow::Error::msg)?;
+            let outcome = match settled {
+                ResearchOutcome::Completed => DeepResearchRunOutcome::Completed,
+                ResearchOutcome::Qualified => DeepResearchRunOutcome::Qualified,
+                ResearchOutcome::Degraded | ResearchOutcome::Failed => {
+                    DeepResearchRunOutcome::Degraded
+                }
+                ResearchOutcome::Active => {
+                    unreachable!("terminal recovery settlement remained active")
+                }
+            };
+            return outcome.ensure_smoke_success(&artifacts);
+        }
+    };
+
+    let outcome = match published.publication {
+        DeepResearchEvidenceFirstPublication::Synthesized => DeepResearchRunOutcome::Completed,
+        DeepResearchEvidenceFirstPublication::Qualified => DeepResearchRunOutcome::Qualified,
+        DeepResearchEvidenceFirstPublication::SourceBacked
+        | DeepResearchEvidenceFirstPublication::NoEvidence => DeepResearchRunOutcome::Degraded,
+    };
+    let journal_outcome = match outcome {
+        DeepResearchRunOutcome::Completed => ResearchOutcome::Completed,
+        DeepResearchRunOutcome::Qualified => ResearchOutcome::Qualified,
+        DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
+        DeepResearchRunOutcome::Active => {
+            unreachable!("a validated evidence-first publication is terminal")
+        }
+    };
+    let settled = settle_deep_research_cli_run(DeepResearchCliSettlement {
+        workspace,
+        run_id: &run_id,
+        query: &query,
+        workflow_succeeded: exit_code == 0,
+        workflow_output: &workflow_output,
+        workflow_metadata: metadata.as_ref(),
+        requested_outcome: journal_outcome,
+        artifacts: &published.artifacts,
+        artifact_authority: DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+    })
+    .await
+    .map_err(anyhow::Error::msg)?;
+    if settled != journal_outcome {
+        anyhow::bail!(
+            "DeepResearch smoke journal outcome {settled:?} disagrees with publication outcome {journal_outcome:?}"
+        );
+    }
+
+    deep_research_report_tool_gate.reset();
+    let final_text = clean_deep_research_final_text_from_artifacts(&published.artifacts, workspace)
+        .unwrap_or_else(|| {
+            "DeepResearch published a report, but its Markdown preview was unavailable.".to_string()
+        });
+    if !final_text.trim().is_empty() {
+        println!("{final_text}");
+    }
+    match published.publication {
+        DeepResearchEvidenceFirstPublication::Synthesized => {
+            eprintln!(
+                "[smoke] quality-gated report.md: {}",
+                published.artifacts.markdown.display()
+            );
+            eprintln!(
+                "[smoke] quality-gated index.html: {}",
+                published.artifacts.html.display()
+            );
+        }
+        DeepResearchEvidenceFirstPublication::Qualified => {
+            eprintln!(
+                "[smoke] qualified report with explicit evidence boundaries: {}",
+                published.artifacts.html.display()
+            );
+        }
+        DeepResearchEvidenceFirstPublication::SourceBacked => {
+            eprintln!(
+                "[smoke] report synthesis did not pass the quality gate; source-backed report: {}",
+                published.artifacts.html.display()
+            );
+        }
+        DeepResearchEvidenceFirstPublication::NoEvidence => {
+            eprintln!(
+                "[smoke] no safely publishable evidence; boundary report: {}",
+                published.artifacts.html.display()
+            );
+        }
+    }
     run_deep_research_smoke_artifact_step(run_deadline, "final report validation", || {
-        outcome.ensure_smoke_success(&artifacts)
+        outcome.ensure_smoke_success(&published.artifacts)
     })?
 }

@@ -109,6 +109,7 @@ impl DeepResearchStateJournal {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn load_inquiry_state(
     workspace: &Path,
     run_id: &str,
@@ -124,6 +125,7 @@ pub(super) async fn load_inquiry_state(
     decode_inquiry_state(run_id, journal.runtime.events())
 }
 
+#[cfg(test)]
 fn decode_inquiry_state(
     run_id: &str,
     records: &[a3s_code_core::state_graph::GraphEventRecord],

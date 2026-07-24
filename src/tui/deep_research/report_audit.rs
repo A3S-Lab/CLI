@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CitationRequirement {
     AtLeastOne,
+    #[cfg(test)]
     EveryDeclared,
 }
 
@@ -105,6 +106,7 @@ pub(crate) fn audit_report(
                     .map(|source_id| ReportAuditIssue::SourceNotCited { source_id }),
             );
         }
+        #[cfg(test)]
         CitationRequirement::EveryDeclared => {
             issues.extend(
                 catalog
@@ -129,6 +131,7 @@ pub(crate) fn audit_report(
     {
         match requirement {
             CitationRequirement::AtLeastOne => "report cites none of the accepted evidence sources",
+            #[cfg(test)]
             CitationRequirement::EveryDeclared => {
                 "report does not cite every source declared by its closed evidence plan"
             }
@@ -146,10 +149,12 @@ pub(crate) fn audit_report(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn report_citation_targets(markdown: &str, html: &str) -> HashSet<String> {
     extract_citation_targets(markdown, html)
 }
 
+#[cfg(test)]
 pub(crate) fn canonical_citation_target(target: &str) -> Option<String> {
     normalize_citation_target(target)
 }

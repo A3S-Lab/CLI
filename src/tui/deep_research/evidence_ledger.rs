@@ -319,8 +319,7 @@ fn normalize_evidence(
                 return None;
             }
         }
-        let reliability =
-            string_field(source, "reliability").or_else(|| string_field(source, "publisher"));
+        let reliability = string_field(source, "reliability");
         let evidence_excerpts = accepted_source_excerpts(source, &id);
         sources.push(AcceptedSource {
             id,
@@ -350,18 +349,13 @@ fn normalize_evidence(
     let claims = string_array(value.get("key_evidence"), 32)
         .into_iter()
         .map(|text| AcceptedClaim {
-            // Preserve the historical 350-character claim identity while
-            // retaining the longer ledger text for reasoning and reports.
-            id: stable_id(
-                "claim",
-                &super::deep_research_digest_text(&text, 350).to_ascii_lowercase(),
-            ),
+            id: stable_id("claim", &text),
             text,
         })
         .collect::<Vec<_>>();
     let evidence_key = format!(
         "{}|{}",
-        summary.to_ascii_lowercase(),
+        summary,
         sources
             .iter()
             .map(|source| source.id.as_str())
@@ -543,12 +537,7 @@ fn accepted_source_excerpts(
             let quote_or_fact = string_field(excerpt, "quote_or_fact")
                 .or_else(|| string_field(excerpt, "excerpt"))
                 .or_else(|| string_field(excerpt, "fact"))?;
-            let identity = format!(
-                "{}|{}|{}",
-                source_id,
-                focus.to_ascii_lowercase(),
-                quote_or_fact.to_ascii_lowercase()
-            );
+            let identity = format!("{}|{}|{}", source_id, focus, quote_or_fact);
             let id = stable_id("excerpt", &identity);
             seen.insert(id.clone()).then_some(AcceptedSourceExcerpt {
                 id,
@@ -595,7 +584,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn evidence_ledger_preserves_fact_beyond_display_digest_prefix() {
+    fn evidence_ledger_preserves_fact_beyond_summary_prefix() {
         let prefix = "Background context without the decisive result. ".repeat(18);
         let fact = format!(
             "{prefix}The evaluated system improved the benchmark by 25% and broadened coverage by 10%."
@@ -617,9 +606,6 @@ mod tests {
             }
         });
 
-        let display = super::super::deep_research_collect_structured_evidence(&output);
-        assert!(!display[0].to_string().contains("25%"));
-
         let ledger = accepted_evidence_ledger(&output.to_string(), None);
         assert_eq!(ledger.len(), 1);
         assert!(ledger[0].claims[0].text.contains("25%"));
@@ -627,6 +613,58 @@ mod tests {
             .quote_or_fact
             .as_deref()
             .is_some_and(|quote| quote.contains("10%")));
+    }
+
+    #[test]
+    fn claim_identity_uses_the_full_bounded_claim_without_prefix_aliasing() {
+        let shared_prefix = "x".repeat(400);
+        let output = serde_json::json!({
+            "structured": {
+                "summary": "Two distinct claims share a long prefix.",
+                "sources": [{
+                    "title": "Primary evaluation",
+                    "url_or_path": "https://example.org/evaluation",
+                    "quote_or_fact": "Both claims are retained.",
+                    "reliability": "Primary evaluation record"
+                }],
+                "key_evidence": [
+                    format!("{shared_prefix} first ending"),
+                    format!("{shared_prefix} second ending")
+                ],
+                "contradictions": [],
+                "gaps": [],
+                "confidence": "high"
+            }
+        });
+
+        let ledger = accepted_evidence_ledger(&output.to_string(), None);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger[0].claims.len(), 2);
+        assert_ne!(ledger[0].claims[0].id, ledger[0].claims[1].id);
+    }
+
+    #[test]
+    fn structured_evidence_words_are_preserved_without_content_classification() {
+        let literal = "The source documents a3s://tool-output as protocol subject matter.";
+        let output = serde_json::json!({
+            "structured": {
+                "summary": "A protocol reference is documented.",
+                "sources": [{
+                    "title": "Protocol specification",
+                    "url_or_path": "https://example.org/protocol",
+                    "quote_or_fact": literal,
+                    "reliability": "Specification"
+                }],
+                "key_evidence": [literal],
+                "contradictions": [],
+                "gaps": [],
+                "confidence": "high"
+            }
+        });
+
+        let ledger = accepted_evidence_ledger(&output.to_string(), None);
+        assert_eq!(ledger[0].claims[0].text, literal);
+        assert_eq!(ledger[0].sources[0].quote_or_fact.as_deref(), Some(literal));
     }
 
     #[test]
@@ -739,6 +777,27 @@ mod tests {
         let synthesis = synthesis_payload(&first);
         assert!(synthesis.contains("Released on July 12."));
         assert!(synthesis.contains("https://example.gov/releases/1"));
+    }
+
+    #[test]
+    fn provider_metadata_alone_cannot_promote_a_source_into_the_evidence_ledger() {
+        let output = serde_json::json!({
+            "structured": {
+                "summary": "Discovery returned one metadata record.",
+                "sources": [{
+                    "title": "Provider result title",
+                    "url_or_path": "https://example.gov/releases/1",
+                    "publisher": "Provider supplied publisher",
+                    "publication_date": "2026-07-24"
+                }],
+                "key_evidence": ["Metadata must not become a report claim."],
+                "contradictions": [],
+                "gaps": [],
+                "confidence": "unknown"
+            }
+        });
+
+        assert!(accepted_evidence_ledger(&output.to_string(), None).is_empty());
     }
 
     #[test]

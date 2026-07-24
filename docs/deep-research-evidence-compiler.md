@@ -1,11 +1,12 @@
 # DeepResearch Evidence Compiler Contract
 
-Status: rejected as the next runtime architecture after live planner trials.
-This document remains the analysis that established semantic-continuity and
-publication-authority requirements. Its complete source-target and claim graph
-and the later feedback-loop experiment are superseded by the persisted-evidence
-candidate in [`deep-research-evidence-loop.md`](deep-research-evidence-loop.md).
-It does not authorize a production-path switch.
+Status: the typed claim ledger, coverage projection, `ReportDocument`, and
+dual renderer are active in the standalone engine's production report path.
+The earlier proposal to replace the complete retrieval runtime with a
+compiler-owned planner remains rejected after the live planner trials recorded
+below. The persisted-evidence and feedback-loop experiments in
+[`deep-research-evidence-loop.md`](deep-research-evidence-loop.md) remain
+historical evaluator candidates, not production paths.
 
 Product acceptance remains governed by
 [`deep-research-product-validation.md`](deep-research-product-validation.md).
@@ -113,17 +114,19 @@ reconstructs identities that should have been frozen upstream. Search can
 return useful pages and synthesis can produce fluent text, while the Host has
 no state from which to prove that the requested dimensions survived.
 
-Three architectures currently coexist:
+At the time this rejected hypothesis was evaluated, three representations
+coexisted:
 
-1. the legacy event-sourced Inquiry and sectioned-report pipeline;
+1. the now-retired event-sourced Inquiry/report pipeline;
 2. the active evidence-first, one-query, report-block pipeline; and
 3. the test-only evidence-compiler contracts.
 
 Adapters between these shapes preserve transport compatibility while losing
 semantic information. Adding another adapter would increase implementation
 surface without making the requested result more reliable. The compiler
-artifacts must replace the new-run source of truth together; legacy types may
-remain only behind explicit old-journal replay.
+artifacts would have had to replace the new-run source of truth together. The
+retired executors have since been removed; only generic event data remains
+inspectable.
 
 The audit also separates symptom fixes from missing invariants:
 
@@ -742,7 +745,7 @@ provider query. The report must publish an admitted newest-release fact or a
 dimension-specific gap; silently omitting it is invalid even when every other
 LTS fact is correct.
 
-## Candidate Runtime Sequence
+## Original Full-Runtime Candidate Sequence
 
 1. Start the run and persist the original request and Host budget.
 2. Optionally search the original request while one bounded plan proposal is
@@ -760,10 +763,13 @@ LTS fact is correct.
 10. Record product-evaluation artifacts separately from internal terminal
     status.
 
-There is no per-source selector generation, per-question reviewer, per-section
-writer, semantic self-audit, report repair wave, or presentation-model call in
-the candidate path. A later stage must beat this path on the versioned corpus
-before it is admitted.
+The end-to-end planner replacement in this candidate was rejected. Its report
+compiler boundary is now active and still has no per-question reviewer,
+per-section writer, semantic self-audit, report repair wave, or
+presentation-model call. The active path uses complete source-local selector
+windows capped at 32 KiB and an exact-ID per-source reduction so late evidence
+is not lost to a single oversized cross-source packet. See
+[`deep-research-evidence-first-redesign.md`](deep-research-evidence-first-redesign.md).
 
 ## Implementation Minimality
 
@@ -803,10 +809,10 @@ legacy Inquiry shapes.
 | Graph event store, optimistic concurrency, checkpoints, and strict replay | Retain as storage machinery | New runs persist versioned compiler aggregates. Existing Inquiry objects are replayed only for old run versions. |
 | Atomic Markdown/HTML pair publication and safe report paths | Retain | Both byte streams must be rendered from one `ReportDocument` before the existing atomic write. |
 | Responsive CSS and local browser/webview opening | Retain after semantic publication | CSS may style typed document sections; it may not recover structure by parsing Markdown. |
-| Legacy Inquiry tracks, questions, extraction, review, `AcceptedEvidence`, and sectioned-report transactions | Old-journal replay only | They are not adapters or fallbacks for a new compiler run. |
-| Evidence-first report blocks and `Synthesized`/`SourceBacked` status mapping | Replace | They have no dimension, claim-kind, premise, or gap identity. |
-| Markdown-to-HTML semantic composition | Replace | Markdown and HTML consume the same typed document directly. |
-| Generic recovery prose after useful evidence exists | Replace | The staged source-backed `ReportDocument` is the fallback authority. |
+| Historical Inquiry/report event data | Generic graph inspection only | The retired executors are not adapters or fallbacks for a new run. |
+| Evidence-first report blocks and binary `Synthesized`/`SourceBacked` status mapping | Replaced | The active typed graph carries dimension, claim-kind, basis, derivation, relation, and gap identity and adds `Qualified`. |
+| Markdown-to-HTML semantic composition | Replaced | Markdown and HTML consume the same typed document directly. |
+| Generic recovery prose after useful evidence exists | Replaced | The staged source-backed `ReportDocument` is the fallback authority. |
 
 Version dispatch belongs at run loading and creation. There is deliberately no
 converter from a compiler `ResearchContract` to legacy Inquiry tracks, from a
@@ -816,41 +822,27 @@ by discarding the exact identities this design exists to protect.
 
 ### Ownership Boundary
 
-The current active business path lives under `src/tui/deep_research` even
-though both the non-interactive CLI and TUI call it. The compiler must not keep
-that ownership error.
+The ownership correction and report-protocol migration are complete in the
+independent `a3s-deep-research` crate. It owns the compiler contracts, workflow
+assets, source/report admission, and artifact construction.
+`src/commands/code/research_runtime.rs` and the TUI controller own argument
+handling, `AgentSession` adaptation, progress presentation, journal settlement,
+and browser opening only. The rejected part is the former proposal to move the
+entire retrieval planner behind the compiler, not the active claim graph.
 
-- Pure contract types, validation, claim admission, coverage derivation, and
-  document projection belong in the reusable `src/research` domain, with no
-  `AgentSession`, TUI, filesystem, or browser dependency.
-- Search/fetch orchestration, durable aggregate persistence, deadlines, and
-  artifact publication belong in one shared non-UI DeepResearch runtime used
-  by both entrypoints.
-- `src/commands/code/research_runtime.rs` and the TUI research controller own
-  argument handling and presentation only; neither implements a second
-  research pipeline.
-- Browser/webview opening remains a TUI concern after it receives the terminal
-  artifact paths.
-- Existing Inquiry reducers, events, question review, and sectioned reporting
-  remain reachable only through old-run version dispatch until their journals
-  no longer need replay.
+Historical Inquiry events remain readable as generic graph data. There is no
+old-run dispatcher that can execute the former planner or report pipeline.
 
-The production cut switches CLI and TUI new runs to the same shared runtime in
-one migration. Running one entrypoint through the compiler and the other
-through evidence-first or Inquiry would leave product behavior untestable and
-recreate the current active-versus-smoke split.
+## Rejected Acquisition Heuristics
 
-## Unproven Acquisition Hypotheses
+The C01 experiments also generated heuristics that are explicitly not product
+rules:
 
-The C01 live runs generated useful hypotheses, not production rules:
-
-- appending a missing canonical target token to model-authored search text;
-- adding an owner/repository or official-domain seed when search omits it;
-- classifying a requested artifact as maintenance record, documentation, or
-  guidance;
-- preferring one artifact shape over another inside a matched source target;
-  and
-- searching the original request concurrently with focused queries.
+- appending a vocabulary-derived token to model-authored search text;
+- adding owner, repository, publisher, or domain seeds inferred from names;
+- classifying requested artifacts from query words;
+- preferring artifact shapes from URL or title vocabulary; and
+- routing or budgeting from detected topic, language, or script.
 
 Target-first admission itself is an invariant: an unrelated candidate cannot
 consume a slot declared for another target. The mechanisms used to discover
@@ -858,13 +850,9 @@ and rank artifacts inside a target are empirical policies. A repository root
 seed, for example, is a fallback fetch opportunity; it is not proof that the
 root is the best document for the requested artifact.
 
-None of these policies enters production because it repairs one retained C01
-run. Each needs an ablation over multiple source families, including at least
-C01, C02, C03, and C04, under the same search and fetch budget. The evaluator
-records target coverage, successful fetched-target coverage, semantic
-dimension outcomes, and latency separately. A policy is removed when it does
-not improve corpus outcomes or when it merely trades one source-family miss
-for another.
+None enters production. Meaningful expansion and admission belong to bounded
+model contracts over closed packets; deterministic code validates IDs, shape,
+provenance, and budgets only.
 
 The generic compiler core contains no Tokio, async-std, axum, SQLx, SeaORM,
 RustSec, EU, PostgreSQL, pgvector, or Qdrant special case. Named identities
@@ -872,33 +860,29 @@ belong only to versioned corpus fixtures and live planner output.
 
 ## Migration Boundary
 
-Production migration is intentionally delayed until the contract passes the
-pilot. Test-only proof proceeds in this order:
+The report-protocol migration is complete:
 
-1. generic contract, target-policy, ledger-graph, coverage, and document tests
-   using arbitrary fixture identities rather than corpus product names;
-2. frozen F01-F08 replay through claim admission and both renderers;
-3. live acquisition and ablation across C01-C09 under identical budgets;
-4. end-to-end baseline comparison with external dimension scoring; and
-5. production migration only after the candidate beats or matches the simpler
-   baseline on the declared product gates.
+1. `deep_research_typed_claim_graph` replaced report-shaped block proposals;
+2. the compiler admits claims, basis edges, derivations, contradiction
+   relations, and typed gaps independently;
+3. `CoverageMatrix` and `ReportDocument` are Host projections rather than model
+   output;
+4. Markdown and HTML render from the same document;
+5. CLI and TUI settle `Synthesized`, `Qualified`, `SourceBacked`, and
+   `NoEvidence` through receipts and replay while retaining accepted relation,
+   derivation, basis-edge, and gap counts; and
+6. the production F01-F08 engine replay exercises the same wire contract.
 
-When admitted, the smallest production migration order is:
+The original full planner migration remains rejected. Retrieval continues to
+use exact-query bootstrap plus the bounded semantic outline and closed
+source/chunk selection. Live C01-C09 ablation, equal-budget comparison, and
+website inspection remain product validation work, not permission to add
+query-vocabulary heuristics or a parallel runtime.
 
-1. extend new-run state with immutable dimensions, targets, transports, and
-   query modes;
-2. make acquisition consume `QueryPlan` dimension edges and persist source
-   provenance;
-3. replace report-shaped block proposals with the flat `ClaimLedger`;
-4. introduce Host `CoverageMatrix` and `ReportDocument` projections;
-5. make both CLI and TUI settle from the report document outcome;
-6. isolate legacy Inquiry and sectioned-report code behind old-journal replay;
-7. delete new-run wrappers and exports that no longer have a consumer; and
-8. repair citation numbering and complete desktop/mobile website validation.
-
-Do not implement this as adapters around every current representation. The
-compiler artifacts must become the single new-run source of truth; otherwise
-the same semantic drift will survive behind additional conversion code.
+Do not add adapters back to the retired report-block representation. The typed
+claim graph and `ReportDocument` are the single source of truth for a new
+generated report; otherwise the same semantic drift would survive behind
+another conversion layer.
 
 ## Validation Gates Before Production Work
 

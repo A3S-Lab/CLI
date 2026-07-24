@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-deep-research"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "a3s-acl 0.3.0",
  "async-trait",
