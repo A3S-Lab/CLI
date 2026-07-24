@@ -7,12 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-07-25
+
+### Added
+
+- Render successful A3S Web file edits as inline unified diffs with added and
+  deleted counts, old and new line numbers, and full red/green row backgrounds.
+
 ### Changed
 
 - Updated the TUI research adapter to `a3s-deep-research` 0.1.2. Malformed
   bootstrap and planned envelopes now degrade independently through closed
   stage and packet-version state; raw bootstrap bytes remain audit-only, and
   the resulting publication receipt and journal projection stay consistent.
+- Simplified A3S Web settings around one larger dialog and one Provider
+  list/detail flow, removed the connector-specific editor, and removed the
+  redundant framed container from channel details.
+- Added a short fade only to newly streamed Markdown words and changed response
+  following to an interruptible frame-based scroll that stops when the reader
+  moves away and respects reduced-motion preferences.
 
 ### Fixed
 
@@ -23,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   journal replay without inspecting result prose. Receipt quality uses an
   independent publication event stream, so TUI pre-settlement evidence cannot
   collide with terminal projection.
+- Aligned A3S Web execution modes with the Code TUI: Default uses managed SRT
+  for ordinary shell work, Plan remains read-only, and Auto denies unavailable
+  sandbox or host-boundary execution instead of opening a permission prompt.
+- Kept the Web task-progress surface hidden until a real plan or subagent
+  lifecycle exists, repaired compact streamed Markdown tables, stopped
+  inserting the old starter instruction into new Code tasks, and left-aligned
+  Office and Knowledge quick-create menus.
+- Kept the Code TUI transcript following model output smoothly without
+  suppressing a reader's intentional scroll position.
 
 ## [0.10.4] - 2026-07-23
 
