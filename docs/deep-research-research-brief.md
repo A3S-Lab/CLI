@@ -165,10 +165,12 @@ gaps[]
   source_ids[]
 ```
 
-The Host admits or rejects each item independently. It validates identities,
-exact source and chunk membership, attempt provenance, language, unsafe URLs,
-and directly checkable numeric literals. These checks establish structural
-integrity only; they must not be labeled semantic support.
+The historical proposal admitted or rejected each item independently through
+identities, exact source and chunk membership, and attempt provenance. Numeric,
+language, URL, and other prose checks were rejected because they confused text
+shape with semantic support. The active runtime never matches report prose to
+source prose; see
+[`deep-research-evidence-first-redesign.md`](deep-research-evidence-first-redesign.md).
 
 Every material dimension ends with at least one admitted block or one Host
 gap. A rejected item cannot remove an admitted sibling. A gap-only answer is a

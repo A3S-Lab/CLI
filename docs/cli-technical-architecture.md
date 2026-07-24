@@ -368,15 +368,13 @@ Parser types contain no business logic. Command modules orchestrate existing
 domain modules, which return types and errors rather than formatted strings.
 Files split by concern before reaching repository size limits.
 
-Typed asset execution and DeepResearch orchestration live under
-`commands/code`. The Research application module owns workflow source, budgets,
-prompts, evidence normalization, and report artifacts. Report models receive
-only schema-constrained generation calls and no file, shell, retrieval,
-delegation, Runtime, or MCP tools. The host validates the typed report result
-and is the only authority that may atomically materialize the Markdown/HTML
-pair. The TUI imports that module as a presentation adapter; the application
-runtime never imports TUI internals and must not regain a string-based CLI
-router.
+Typed asset execution lives under `commands/code`. DeepResearch itself lives
+in the independent `a3s-deep-research` crate. That crate owns the engine stage
+machine, workflow assets, source admission, report admission, and
+Markdown/HTML construction. `commands/code` and the TUI are product adapters:
+they provide an `AgentSession`, explicit evidence scope, workspace, progress
+sink, and terminal journal. Neither adapter owns a planner or report
+implementation.
 
 Every new TUI or headless run records a transient evidence-first contract with
 `quota.mode = bounded` and `execution.mode = progressively_publishable`. The
@@ -385,21 +383,29 @@ contract travels with durable runtime input but never creates a user-facing
 optional report proposal, and finalization across process restarts; a resumed
 process consumes the remaining budget instead of receiving a fresh one.
 
-`spawn_deep_research_evidence_first` is the new-run entry point. It initializes
-the journal, runs one durable bootstrap acquisition, converts the canonical
-workflow result into a Host-owned source catalog, stages a deterministic report,
-optionally upgrades it with an admitted proposal, and returns one publication
-projection. The TUI and `commands/code` use this same application runtime; no
-string-based CLI router or second report implementation is allowed.
+`spawn_deep_research_evidence_first` is the new-run entry point. It delegates
+one transaction to the standalone engine, runs durable bootstrap acquisition,
+combines the exact query with only the planner's closed supplemental-query
+contract, stages a source-backed or no-evidence report, optionally upgrades it
+with an admitted proposal, and returns one publication projection. There is no
+string router or second report implementation.
 
-Web bootstrap searches the exact query and one deterministic date-aware
-outcome-and-news companion. Candidate discovery metadata enters one closed
-semantic admission call before fetch. A non-empty selection can receive only a
-bounded institutional or accountable-publisher resilience fill; a failed call
-uses the deterministic acquisition fallback, while an explicit empty selection
-remains empty. Only safely fetched, canonicalized, sanitized, and
-query-relevant content enters the source catalog. Provider rank, snippet, date,
-engine, and title remain discovery metadata.
+Web bootstrap always searches the exact query. One optional bounded semantic
+outline may supply zero to three supplemental plain-text queries. The Host
+validates only their shape and exact identity; it does not derive query text
+from topic words, dates, language, publishers, domains, or URL vocabulary.
+If the outline is unavailable or invalid, the Host keeps only the exact query,
+uses one generic track, and selects the conservative `comprehensive` plus
+`freshness_required = true` contract. Planner failure therefore cannot
+authorize an undated synthesized answer.
+Candidate and chunk selectors may return only IDs from the closed packets.
+Transport fallback preserves bounded acquisition opportunities but cannot
+promote bytes into evidence. Provider rank, snippet, date, engine, title,
+hostname, and publisher remain discovery metadata.
+Search output must decode as the declared JSON result shape. Web and workspace
+text is restored only from typed range offsets, returned character or line
+counts, exact source anchors, and artifact truncation metadata. Provider error,
+continuation, or truncation prose is never matched inside tool output.
 
 Search, fetch, and structured-generation effects use stable A3S Flow identities.
 Completed effects replay from their journals. A running effect whose completion
@@ -411,20 +417,37 @@ corruption still fails closed.
 
 The Host builds a source-backed Markdown/HTML pair before report generation can
 become a terminal risk. An empty catalog instead produces the no-evidence pair.
-When claim-eligible sources exist, one closed report proposal may run with at
-most one transient retry. The proposal receives bounded source aliases and text,
-no tools, and no publication authority. Rust admits blocks independently,
-resolves citations to the exact catalog, applies language and structural quality
-gates, rebuilds the source ledger, and atomically replaces both artifacts only
-when the synthesized result passes.
+When claim-eligible sources exist, one typed claim-graph proposal may run with
+at most one transient retry. The proposal receives bounded source and chunk
+IDs, no tools, and no publication authority. Rust independently admits facts,
+inferences, recommendations, relations, and gaps through the evidence
+compiler. It validates exact dimension/source/chunk IDs, basis edges,
+derivation inputs, contradiction endpoints, provenance, and graph bounds. It
+then derives coverage, citations, the source ledger, and both renderings from
+one `ReportDocument`. Invalid graph items cannot erase valid siblings.
 
-The returned status distinguishes `synthesized`, `source_backed`, and
-`no_evidence`; it never equates artifact availability with semantic truth.
+Each attempt uses a schema compiled from the current packet: dimension, source,
+and chunk enums contain only the validated run, and audit-only sources cannot
+be referenced. Opaque IDs are control data only, not reader prose. Reader
+language and semantic quality remain model/evaluator concerns; the Host does
+not detect language or match claim prose to source prose. Larger fetched
+catalogs are divided only by source identity and a 32 KiB UTF-8 packet budget;
+a closed exact-ID reduction retains at most four excerpts per source. Complete
+material coverage publishes `Synthesized`; useful admitted claims with a
+material typed gap publish `Qualified`. A focused report may be structurally
+sufficient with one cited direct-answer claim.
+
+Markdown and HTML publication pairs carry the same versioned artifact marker.
+The Host never infers synthesized, source-backed, no-evidence, recovery, or
+fallback status from titles or body vocabulary.
+
+The returned status distinguishes `synthesized`, `qualified`, `source_backed`,
+and `no_evidence`; it never equates artifact availability with semantic truth.
 Bootstrap metadata is deliberately withheld from the Host-owned terminal tool
-result so legacy workflow canonicalization cannot replace publication output
-with acquisition output. The older typed Inquiry and sectioned-report pipeline
-remains only for existing-journal compatibility and focused migration tests; it
-is not a selectable runtime for new CLI or TUI requests.
+result so workflow canonicalization cannot replace publication output with
+acquisition output. Historical Inquiry events remain readable through the
+generic event journal, but the former sectioned-report executor and report
+resume transaction have been removed. They are not selectable runtime paths.
 
 ## 11. Component Application Layer
 

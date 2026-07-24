@@ -380,7 +380,7 @@ mod tests {
                 "step_outputs": {},
                 "step_failures": {},
                 "input": {
-                    "query": "2026 世界杯\u{1b}[31m 战况",
+                    "query": "Nimbus\u{1b}[31m 支持状态",
                     "evidence_scope": "web_and_workspace",
                     "inquiry_host_managed": true,
                     "loop_contract": {
@@ -395,7 +395,7 @@ mod tests {
         })))
         .unwrap();
 
-        assert!(preview.intent.contains("DeepResearch “2026 世界杯 战况”"));
+        assert!(preview.intent.contains("DeepResearch “Nimbus 支持状态”"));
         assert!(!preview.intent.contains("async function run"));
         assert_eq!(preview.details[0].label, "plan");
         assert_eq!(

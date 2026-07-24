@@ -7,40 +7,7 @@ const MAX_DEEP_RESEARCH_TRACKS: usize = 4;
 /// PTC source used by the `?` DeepResearch workflow. The workflow function is
 /// deterministic and only schedules work; side effects live in Flow steps.
 pub(super) fn deep_research_workflow_source() -> &'static str {
-    static SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    SOURCE.get_or_init(|| {
-        compact_workflow_source(concat!(
-            include_str!("workflow/retrieval_foundation.js"),
-            include_str!("workflow/retrieval_web_source_quality.js"),
-            include_str!("workflow/retrieval_web.js"),
-            include_str!("workflow/retrieval_selection.js"),
-            include_str!("workflow/retrieval_reduction.js"),
-            include_str!("workflow/retrieval_materialization.js"),
-            include_str!("workflow/retrieval_loop.js"),
-            include_str!("workflow/retrieval_local.js"),
-            include_str!("workflow/retrieval_local_collection.js"),
-            include_str!("workflow/retrieval_execution.js"),
-        ))
-    })
-}
-
-fn compact_workflow_source(source: &str) -> String {
-    let mut compact = String::with_capacity(source.len());
-    for line in source.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("//") {
-            continue;
-        }
-        compact.push_str(line);
-        // These punctuators unambiguously separate JavaScript tokens, so a
-        // newline after them carries no ASI meaning. Preserve every other
-        // newline to keep `return`, postfix operators, regex literals, and
-        // future workflow edits safe without depending on an opaque minifier.
-        if !matches!(line.as_bytes().last(), Some(b';' | b',' | b'{')) {
-            compact.push('\n');
-        }
-    }
-    compact
+    a3s_deep_research::workflow::retrieval_workflow_source()
 }
 
 pub(crate) fn deep_research_default_budget() -> BudgetPlan {
@@ -87,7 +54,6 @@ impl DeepResearchEvidenceScope {
 
 pub(super) fn deep_research_evidence_scope_from_args(
     args: &serde_json::Value,
-    query: &str,
 ) -> DeepResearchEvidenceScope {
     match args
         .pointer("/input/evidence_scope")
@@ -95,14 +61,14 @@ pub(super) fn deep_research_evidence_scope_from_args(
     {
         Some("local_only") => DeepResearchEvidenceScope::LocalOnly,
         Some("web_and_workspace") => DeepResearchEvidenceScope::WebAndWorkspace,
-        _ => deep_research_inferred_evidence_scope(query),
+        _ => deep_research_default_evidence_scope(),
     }
 }
 
 #[cfg(test)]
 pub(super) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
     let mut args =
-        deep_research_workflow_args_with_scope(query, deep_research_inferred_evidence_scope(query));
+        deep_research_workflow_args_with_scope(query, deep_research_default_evidence_scope());
     let tracks = serde_json::json!([{
         "id": "fixture.facts",
         "title": "Fixture facts",
@@ -128,6 +94,7 @@ pub(super) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
     }]);
     args["input"]["research_plan"] = serde_json::json!({
         "report_title": "Fixture Research Report",
+        "research_scope": "focused",
         "freshness_required": false,
         "workspace_evidence_required": false,
         "tracks": tracks,
@@ -243,7 +210,7 @@ pub(super) fn deep_research_workflow_args_for_budget(
         .as_millis()
         .min(u128::from(u64::MAX)) as u64;
     let safety = deep_research_safety_envelope(evidence_scope, budget);
-    let loop_contract = loop_engineering::deep_research_loop_contract(
+    let loop_contract = a3s_deep_research::planner::deep_research_loop_contract(
         query,
         &current_date,
         evidence_scope.label(),
@@ -272,9 +239,6 @@ pub(super) fn deep_research_workflow_args_for_budget(
     })
 }
 
-pub(super) const DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT: usize = 1200;
-#[cfg(test)]
-pub(super) const DEEP_RESEARCH_PROMPT_TEXT_LIMIT: usize = 12_000;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_EVIDENCE: usize = 18;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_SOURCES: usize = 12;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_STRINGS: usize = 12;

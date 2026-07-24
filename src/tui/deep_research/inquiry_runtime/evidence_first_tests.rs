@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a3s_code_core::llm::{
-    LlmClient, LlmResponse, Message, StreamEvent, TokenUsage, ToolDefinition,
+    structured::NativeStructuredSupport, LlmClient, LlmResponse, Message, StreamEvent, TokenUsage,
+    ToolDefinition,
 };
 use a3s_code_core::tools::{Tool, ToolContext, ToolOutput};
 use a3s_code_core::{Agent, SessionOptions};
@@ -14,7 +15,73 @@ use super::*;
 
 const FETCHED_SENTENCE: &str =
     "The official Nimbus record states that version 2 receives fixes through September 2027.";
-const FETCHED_OUTCOME: &str = "世界杯冠军西班牙队击败阿根廷队。阿根廷主帅表示西班牙队配得上胜利。国际足联正在调查世界杯决赛赛后冲突。";
+
+fn generated_schema_tool(tools: &[ToolDefinition]) -> anyhow::Result<&ToolDefinition> {
+    anyhow::ensure!(
+        tools.len() == 1,
+        "fixture expected one forced structured-output tool"
+    );
+    Ok(&tools[0])
+}
+
+fn first_schema_enum_string<'a>(schema: &'a Value, pointer: &str) -> anyhow::Result<&'a str> {
+    schema
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("fixture schema omitted enum at {pointer}"))
+}
+
+fn schema_boolean_choice(schema: &Value, pointer: &str) -> bool {
+    schema
+        .pointer(pointer)
+        .and_then(Value::as_array)
+        .is_none_or(|values| values.iter().any(|value| value == &Value::Bool(true)))
+}
+
+fn evidence_selection_from_schema(schema: &Value) -> anyhow::Result<Value> {
+    let chunk_id = first_schema_enum_string(schema, "/properties/chunk_ids/items/enum")?;
+    let coverage = schema
+        .pointer("/properties/source_coverage/items/oneOf/0/properties")
+        .ok_or_else(|| anyhow::anyhow!("fixture schema omitted source coverage properties"))?;
+    let relevance = schema
+        .pointer("/properties/source_relevance/items/oneOf/0/properties")
+        .ok_or_else(|| anyhow::anyhow!("fixture schema omitted source relevance properties"))?;
+    let source_id = first_schema_enum_string(coverage, "/source_id/enum")?;
+    let obligation_id = first_schema_enum_string(coverage, "/obligation_id/enum")?;
+    let criterion_indexes = coverage
+        .pointer("/completion_criterion_indexes/items/enum")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("fixture schema omitted criterion indexes"))?;
+    anyhow::ensure!(
+        first_schema_enum_string(relevance, "/source_id/enum")? == source_id
+            && first_schema_enum_string(relevance, "/obligation_id/enum")? == obligation_id,
+        "fixture schema carried inconsistent coverage and relevance identities"
+    );
+
+    Ok(serde_json::json!({
+        "chunk_ids": [chunk_id],
+        "source_coverage": [{
+            "source_id": source_id,
+            "obligation_id": obligation_id,
+            "completion_criterion_indexes": criterion_indexes,
+            "roles": {
+                "supporting": true,
+                "primary": schema_boolean_choice(coverage, "/roles/properties/primary/enum"),
+                "independent": schema_boolean_choice(
+                    coverage,
+                    "/roles/properties/independent/enum"
+                )
+            }
+        }],
+        "source_relevance": [{
+            "source_id": source_id,
+            "obligation_id": obligation_id
+        }]
+    }))
+}
 
 struct EvidenceFirstSearch {
     return_source: bool,
@@ -70,61 +137,19 @@ impl Tool for EvidenceFirstFetch {
                 == Some("https://docs.rs/nimbus/latest/nimbus/support"),
             "unexpected evidence-first fixture URL"
         );
-        Ok(ToolOutput::success(FETCHED_SENTENCE))
-    }
-}
-
-struct EvidenceFirstOutcomeSearch;
-
-#[async_trait::async_trait]
-impl Tool for EvidenceFirstOutcomeSearch {
-    fn name(&self) -> &str {
-        "evidence_first_fixture_search"
-    }
-
-    fn description(&self) -> &str {
-        "Returns one accountable event-outcome source."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type": "object"})
-    }
-
-    async fn execute(&self, _args: &Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        Ok(ToolOutput::success(
-            serde_json::json!([{
-                "title": "世界杯决赛赛果",
-                "url": "https://www.news.cn/sports/world-cup-final",
-                "engines": ["fixture"]
-            }])
-            .to_string(),
-        ))
-    }
-}
-
-struct EvidenceFirstOutcomeFetch;
-
-#[async_trait::async_trait]
-impl Tool for EvidenceFirstOutcomeFetch {
-    fn name(&self) -> &str {
-        "evidence_first_fixture_fetch"
-    }
-
-    fn description(&self) -> &str {
-        "Returns one accountable event-outcome record."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({"type": "object"})
-    }
-
-    async fn execute(&self, args: &Value, _ctx: &ToolContext) -> anyhow::Result<ToolOutput> {
-        anyhow::ensure!(
-            args.get("url").and_then(Value::as_str)
-                == Some("https://www.news.cn/sports/world-cup-final"),
-            "unexpected outcome fixture URL"
-        );
-        Ok(ToolOutput::success(FETCHED_OUTCOME))
+        Ok(
+            ToolOutput::success(FETCHED_SENTENCE).with_metadata(serde_json::json!({
+                "source_anchors": ["https://docs.rs/nimbus/latest/nimbus/support"],
+                "document_kind": "html",
+                "content_type": "text/html",
+                "range": {
+                    "offset": 0,
+                    "returned_chars": FETCHED_SENTENCE.chars().count(),
+                    "next_offset": null,
+                    "eof": true
+                }
+            })),
+        )
     }
 }
 
@@ -133,6 +158,7 @@ enum ProposalBehavior {
     Slow,
     Invalid,
     FailOnceThenValid,
+    Qualified,
 }
 
 struct EvidenceFirstProposal {
@@ -143,55 +169,169 @@ struct EvidenceFirstProposal {
 }
 
 impl EvidenceFirstProposal {
-    async fn proposal(&self, messages: &[Message]) -> anyhow::Result<Value> {
-        let prompt = messages
-            .iter()
-            .map(Message::text)
-            .collect::<Vec<_>>()
-            .join("\n");
-        if prompt.contains("CLOSED_WEB_DISCOVERY_PACKET=") {
-            return Ok(serde_json::json!({
-                "candidate_ids": ["web-candidate-1"]
-            }));
-        }
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        anyhow::ensure!(
-            prompt.contains("CLOSED_REPORT_PACKET="),
-            "unexpected evidence-first proposal prompt"
-        );
-        let staged = std::fs::read_to_string(&self.report_path)?;
-        anyhow::ensure!(
-            staged.contains(FETCHED_SENTENCE),
-            "the model proposal started before the source-backed report was staged"
-        );
-        self.saw_staged_report.store(true, Ordering::SeqCst);
-
-        match self.behavior {
-            ProposalBehavior::Slow => std::future::pending::<anyhow::Result<Value>>().await,
-            ProposalBehavior::Invalid => Ok(serde_json::json!({
-                "summary": [{
-                    "text": "A fabricated source claims support through 2099.",
-                    "source_aliases": ["source-99"]
+    async fn proposal(&self, tools: &[ToolDefinition]) -> anyhow::Result<Value> {
+        let tool = generated_schema_tool(tools)?;
+        match tool.name.as_str() {
+            "emit_deep_research_semantic_outline" => Ok(serde_json::json!({
+                "report_title": "Nimbus support research",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "support.boundary",
+                    "title": "Support boundary",
+                    "focus": "Establish the supported Nimbus release and maintenance boundary.",
+                    "material": true,
+                    "completion_criteria": [
+                        "A traceable source identifies the release and support boundary."
+                    ],
+                    "evidence_requirements": {
+                        "primary_source_required": true,
+                        "independent_corroboration_required": false
+                    }
                 }],
-                "findings": [],
-                "recommendations": [],
-                "limitations": []
+                "supplemental_queries": []
             })),
-            ProposalBehavior::FailOnceThenValid if self.calls.load(Ordering::SeqCst) == 1 => {
-                anyhow::bail!("simulated transient streaming failure")
+            "emit_deep_research_web_source_selection" => Ok(serde_json::json!({
+                "candidate_ids": [
+                    first_schema_enum_string(
+                        &tool.parameters,
+                        "/properties/candidate_ids/items/enum"
+                    )?
+                ]
+            })),
+            "emit_deep_research_evidence_selection"
+            | "emit_deep_research_evidence_shard_selection"
+            | "emit_deep_research_evidence_source_reduction" => {
+                evidence_selection_from_schema(&tool.parameters)
             }
-            ProposalBehavior::FailOnceThenValid => Ok(serde_json::json!({
-                "summary": [{
-                    "text": "Nimbus version 2 receives fixes through September 2027.",
-                    "source_aliases": ["source-1"]
-                }],
-                "findings": [{
-                    "text": "The official Nimbus record identifies version 2 and September 2027 as the support boundary.",
-                    "source_aliases": ["source-1"]
-                }],
-                "recommendations": [],
-                "limitations": []
-            })),
+            "emit_deep_research_typed_claim_graph" => {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let staged = std::fs::read_to_string(&self.report_path)?;
+                anyhow::ensure!(
+                    staged.contains(FETCHED_SENTENCE),
+                    "the model proposal started before the source-backed report was staged"
+                );
+                self.saw_staged_report.store(true, Ordering::SeqCst);
+
+                match self.behavior {
+                    ProposalBehavior::Slow => std::future::pending::<anyhow::Result<Value>>().await,
+                    ProposalBehavior::Invalid => Ok(serde_json::json!({
+                        "report_language": "en",
+                        "labels": {
+                            "answer": "Direct Answer",
+                            "findings": "Findings",
+                            "recommendations": "Evidence-Based Recommendations",
+                            "limitations": "Limitations",
+                            "evidence_boundary": "This report publishes no conclusion beyond the fetched evidence.",
+                            "sources": "Sources",
+                            "contradiction": "Contradiction",
+                            "inference": "Inference",
+                            "basis": "Basis",
+                            "derivation": "Derivation"
+                        },
+                        "claims": [{
+                            "id": "fabricated-answer",
+                            "dimension_id": "support.boundary",
+                            "placement": "direct_answer",
+                            "kind": "fact",
+                            "text": "A fabricated source claims support through 2099.",
+                            "evidence_refs": [{
+                                "source_id": "source-99",
+                                "chunk_ids": ["source-99:chunk:1"]
+                            }],
+                            "basis_claim_ids": [],
+                            "derivation": null
+                        }],
+                        "relations": [],
+                        "gaps": []
+                    })),
+                    ProposalBehavior::FailOnceThenValid
+                        if self.calls.load(Ordering::SeqCst) == 1 =>
+                    {
+                        anyhow::bail!("simulated transient streaming failure")
+                    }
+                    ProposalBehavior::FailOnceThenValid => Ok(serde_json::json!({
+                        "report_language": "en",
+                        "labels": {
+                            "answer": "Direct Answer",
+                            "findings": "Findings",
+                            "recommendations": "Evidence-Based Recommendations",
+                            "limitations": "Limitations",
+                            "evidence_boundary": "This report publishes no conclusion beyond the fetched evidence.",
+                            "sources": "Sources",
+                            "contradiction": "Contradiction",
+                            "inference": "Inference",
+                            "basis": "Basis",
+                            "derivation": "Derivation"
+                        },
+                        "claims": [{
+                            "id": "nimbus-answer",
+                            "dimension_id": "support.boundary",
+                            "placement": "direct_answer",
+                            "kind": "fact",
+                            "text": "Nimbus version 2 receives fixes through September 2027.",
+                            "evidence_refs": [{
+                                "source_id": "source-1",
+                                "chunk_ids": ["source-1:chunk:1"]
+                            }],
+                            "basis_claim_ids": [],
+                            "derivation": null
+                        }, {
+                            "id": "nimbus-boundary",
+                            "dimension_id": "support.boundary",
+                            "placement": "finding",
+                            "kind": "fact",
+                            "text": "The official Nimbus record identifies version 2 and September 2027 as the support boundary.",
+                            "evidence_refs": [{
+                                "source_id": "source-1",
+                                "chunk_ids": ["source-1:chunk:1"]
+                            }],
+                            "basis_claim_ids": [],
+                            "derivation": null
+                        }],
+                        "relations": [],
+                        "gaps": []
+                    })),
+                    ProposalBehavior::Qualified => Ok(serde_json::json!({
+                        "report_language": "en",
+                        "labels": {
+                            "answer": "Direct Answer",
+                            "findings": "Findings",
+                            "recommendations": "Evidence-Based Recommendations",
+                            "limitations": "Limitations",
+                            "evidence_boundary": "This report publishes no conclusion beyond the fetched evidence.",
+                            "sources": "Sources",
+                            "contradiction": "Contradiction",
+                            "inference": "Inference",
+                            "basis": "Basis",
+                            "derivation": "Derivation"
+                        },
+                        "claims": [{
+                            "id": "nimbus-qualified-answer",
+                            "dimension_id": "support.boundary",
+                            "placement": "direct_answer",
+                            "kind": "fact",
+                            "text": "Nimbus version 2 receives fixes through September 2027.",
+                            "evidence_refs": [{
+                                "source_id": "source-1",
+                                "chunk_ids": ["source-1:chunk:1"]
+                            }],
+                            "basis_claim_ids": [],
+                            "derivation": null
+                        }],
+                        "relations": [],
+                        "gaps": [{
+                            "id": "nimbus-unresolved-boundary",
+                            "dimension_id": "support.boundary",
+                            "text": "The reviewed record does not establish support conditions beyond the stated maintenance date."
+                        }]
+                    })),
+                }
+            }
+            unexpected => {
+                anyhow::bail!("unexpected evidence-first structured schema tool `{unexpected}`")
+            }
         }
     }
 
@@ -208,23 +348,27 @@ impl EvidenceFirstProposal {
 
 #[async_trait::async_trait]
 impl LlmClient for EvidenceFirstProposal {
+    fn native_structured_support(&self) -> NativeStructuredSupport {
+        NativeStructuredSupport::ForcedTool
+    }
+
     async fn complete(
         &self,
-        messages: &[Message],
+        _messages: &[Message],
         _system: Option<&str>,
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
-        self.proposal(messages).await.map(Self::response)
+        self.proposal(tools).await.map(Self::response)
     }
 
     async fn complete_streaming(
         &self,
-        messages: &[Message],
+        _messages: &[Message],
         _system: Option<&str>,
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
-        let response = Self::response(self.proposal(messages).await?);
+        let response = Self::response(self.proposal(tools).await?);
         let text = response.message.text();
         let (tx, rx) = mpsc::channel(4);
         tokio::spawn(async move {
@@ -241,12 +385,37 @@ struct UnexpectedProposal {
 
 #[async_trait::async_trait]
 impl LlmClient for UnexpectedProposal {
+    fn native_structured_support(&self) -> NativeStructuredSupport {
+        NativeStructuredSupport::ForcedTool
+    }
+
     async fn complete(
         &self,
         _messages: &[Message],
         _system: Option<&str>,
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
     ) -> anyhow::Result<LlmResponse> {
+        let tool = generated_schema_tool(tools)?;
+        if tool.name == "emit_deep_research_semantic_outline" {
+            return Ok(EvidenceFirstProposal::response(serde_json::json!({
+                "report_title": "Nimbus evidence check",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "request.primary",
+                    "title": "Requested evidence",
+                    "focus": "Establish the requested answer.",
+                    "material": true,
+                    "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "evidence_requirements": {
+                        "primary_source_required": false,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "supplemental_queries": []
+            })));
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
         anyhow::bail!("no-evidence publication must not invoke report generation")
     }
@@ -255,9 +424,37 @@ impl LlmClient for UnexpectedProposal {
         &self,
         _messages: &[Message],
         _system: Option<&str>,
-        _tools: &[ToolDefinition],
+        tools: &[ToolDefinition],
         _cancel_token: CancellationToken,
     ) -> anyhow::Result<mpsc::Receiver<StreamEvent>> {
+        let tool = generated_schema_tool(tools)?;
+        if tool.name == "emit_deep_research_semantic_outline" {
+            let response = EvidenceFirstProposal::response(serde_json::json!({
+                "report_title": "Nimbus evidence check",
+                "research_scope": "focused",
+                "freshness_required": false,
+                "workspace_evidence_required": false,
+                "tracks": [{
+                    "id": "request.primary",
+                    "title": "Requested evidence",
+                    "focus": "Establish the requested answer.",
+                    "material": true,
+                    "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "evidence_requirements": {
+                        "primary_source_required": false,
+                        "independent_corroboration_required": false
+                    }
+                }],
+                "supplemental_queries": []
+            }));
+            let text = response.message.text();
+            let (tx, rx) = mpsc::channel(4);
+            tokio::spawn(async move {
+                tx.send(StreamEvent::TextDelta(text)).await.ok();
+                tx.send(StreamEvent::Done(response)).await.ok();
+            });
+            return Ok(rx);
+        }
         self.calls.fetch_add(1, Ordering::SeqCst);
         anyhow::bail!("no-evidence publication must not invoke report generation")
     }
@@ -310,6 +507,7 @@ async fn proposal_timeout_preserves_the_already_staged_source_report() {
 async fn transient_report_stream_failure_retries_and_publishes_a_real_report() {
     let workspace = tempfile::tempdir().expect("create retry workspace");
     let query = "Which Nimbus release is supported?";
+    let run_id = "evidence-first-proposal-retry";
     let calls = Arc::new(AtomicUsize::new(0));
     let saw_staged_report = Arc::new(AtomicBool::new(false));
     let report_path = report_markdown_path(workspace.path(), query);
@@ -324,7 +522,7 @@ async fn transient_report_stream_failure_retries_and_publishes_a_real_report() {
         }),
     )
     .await;
-    let args = evidence_first_args(query, "evidence-first-proposal-retry");
+    let args = evidence_first_args(query, run_id);
 
     let result = execute_fixture_runtime(session, args, 5_000)
         .await
@@ -346,6 +544,65 @@ async fn transient_report_stream_failure_retries_and_publishes_a_real_report() {
         !markdown.contains("Preserved Source Evidence"),
         "{markdown}"
     );
+    let recovered =
+        super::super::deep_research_artifacts::recover_deep_research_publication_receipt(
+            workspace.path(),
+            query,
+            run_id,
+        )
+        .expect("read the run-scoped publication receipt")
+        .expect("recover the completed publication before terminal settlement");
+    assert_eq!(
+        recovered.publication,
+        super::super::deep_research_artifacts::DeepResearchEvidenceFirstPublication::Synthesized
+    );
+    assert_eq!(recovered.quality.accepted_claim_count, 2);
+    assert_eq!(recovered.quality.cited_source_count, 1);
+}
+
+#[tokio::test]
+async fn qualified_claim_graph_survives_publication_and_receipt_recovery() {
+    let workspace = tempfile::tempdir().expect("create qualified workspace");
+    let query = "Which Nimbus release is supported?";
+    let run_id = "evidence-first-qualified-report";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let saw_staged_report = Arc::new(AtomicBool::new(false));
+    let report_path = report_markdown_path(workspace.path(), query);
+    let (_agent, session) = fixture_session(
+        workspace.path(),
+        true,
+        Arc::new(EvidenceFirstProposal {
+            behavior: ProposalBehavior::Qualified,
+            report_path,
+            calls: Arc::clone(&calls),
+            saw_staged_report: Arc::clone(&saw_staged_report),
+        }),
+    )
+    .await;
+    let result = execute_fixture_runtime(session, evidence_first_args(query, run_id), 5_000)
+        .await
+        .expect("qualified report execution");
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(saw_staged_report.load(Ordering::SeqCst));
+    let output: Value = serde_json::from_str(&result.output).expect("decode qualified output");
+    assert_eq!(output["publication"]["status"], "qualified");
+    assert_eq!(output["research"]["status"], "partial_success");
+    assert_eq!(output["publication"]["quality"]["accepted_claim_count"], 1);
+    assert_eq!(output["publication"]["quality"]["accepted_gap_count"], 1);
+    let recovered =
+        super::super::deep_research_artifacts::recover_deep_research_publication_receipt(
+            workspace.path(),
+            query,
+            run_id,
+        )
+        .expect("read qualified publication receipt")
+        .expect("recover qualified publication");
+    assert_eq!(
+        recovered.publication,
+        super::super::deep_research_artifacts::DeepResearchEvidenceFirstPublication::Qualified
+    );
+    assert_eq!(recovered.quality.accepted_gap_count, 1);
 }
 
 #[tokio::test]
@@ -371,7 +628,12 @@ async fn invalid_proposal_preserves_valid_fetched_evidence() {
     let result = execute_fixture_runtime(session, args, 2_000)
         .await
         .expect("invalid proposal must fall back instead of failing the run");
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "{}", result.output);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "the per-run schema rejects the unknown alias and the durable port uses only its one bounded retry: {}",
+        result.output
+    );
     assert!(saw_staged_report.load(Ordering::SeqCst));
     assert_source_backed_result(workspace.path(), query, &result);
     let markdown = std::fs::read_to_string(report_markdown_path(workspace.path(), query))
@@ -420,50 +682,6 @@ async fn empty_acquisition_publishes_honest_artifacts_without_a_model_call() {
     );
 }
 
-#[tokio::test]
-async fn accountable_event_outcome_publishes_without_waiting_for_report_generation() {
-    let workspace = tempfile::tempdir().expect("create deterministic outcome workspace");
-    let query = "世界杯战况";
-    let calls = Arc::new(AtomicUsize::new(0));
-    let saw_staged_report = Arc::new(AtomicBool::new(false));
-    let report_path = report_markdown_path(workspace.path(), query);
-    let (_agent, session) = outcome_fixture_session(
-        workspace.path(),
-        Arc::new(EvidenceFirstProposal {
-            behavior: ProposalBehavior::Slow,
-            report_path,
-            calls: Arc::clone(&calls),
-            saw_staged_report,
-        }),
-    )
-    .await;
-    let args = evidence_first_args(query, "evidence-first-deterministic-outcome");
-
-    let result = execute_fixture_runtime(session, args, 2_000)
-        .await
-        .expect("accountable outcome evidence should publish without a report-model call");
-
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "{}", result.output);
-    let output: Value = serde_json::from_str(&result.output).expect("decode outcome output");
-    assert_eq!(output["publication"]["status"], "synthesized");
-    assert_eq!(output["research"]["status"], "success");
-    assert_eq!(
-        output["research"]["metadata"]["synthesis_mode"],
-        "deterministic_outcome_extract"
-    );
-    assert_eq!(
-        output["research"]["metadata"]["required_model_generation_count"],
-        0
-    );
-    assert_eq!(output["research"]["metadata"]["model_generation_count"], 0);
-    let markdown = std::fs::read_to_string(report_markdown_path(workspace.path(), query))
-        .expect("read deterministic outcome report");
-    assert!(markdown.contains("## 直接回答"), "{markdown}");
-    assert!(markdown.contains("世界杯冠军西班牙队击败阿根廷队"));
-    assert!(markdown.contains("## 研究发现"), "{markdown}");
-    assert!(!markdown.contains("已保留的来源证据"), "{markdown}");
-}
-
 async fn fixture_session(
     workspace: &Path,
     return_source: bool,
@@ -505,44 +723,18 @@ async fn fixture_session(
     (agent, session)
 }
 
-async fn outcome_fixture_session(
-    workspace: &Path,
-    proposal: Arc<dyn LlmClient>,
-) -> (Agent, AgentSession) {
-    let config = workspace.join("outcome-config.acl");
-    std::fs::write(
-        &config,
-        "default_model = \"openai/x\"\n\
-         providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
-         models \"x\" { name = \"x\" }\n}\n",
+pub(super) async fn product_adapter_fixture_session(workspace: &Path) -> (Agent, AgentSession) {
+    fixture_session(
+        workspace,
+        false,
+        Arc::new(EvidenceFirstProposal {
+            behavior: ProposalBehavior::Invalid,
+            report_path: report_markdown_path(workspace, "unused product adapter fixture"),
+            calls: Arc::new(AtomicUsize::new(0)),
+            saw_staged_report: Arc::new(AtomicBool::new(false)),
+        }),
     )
-    .expect("write outcome fixture config");
-    let agent = Agent::new(config.to_string_lossy().to_string())
-        .await
-        .expect("create outcome fixture agent");
-    let options = SessionOptions::new()
-        .with_session_id(format!(
-            "evidence-first-outcome-fixture-{}-{}",
-            std::process::id(),
-            rand::random::<u64>()
-        ))
-        .with_llm_client(proposal)
-        .with_auto_save(false)
-        .with_tool_timeout(5_000);
-    let session = agent
-        .session_async(workspace.to_string_lossy().to_string(), Some(options))
-        .await
-        .expect("create outcome fixture session");
-    session
-        .register_dynamic_workflow_runtime()
-        .expect("register outcome workflow runtime");
-    session
-        .register_dynamic_tool(Arc::new(EvidenceFirstOutcomeSearch))
-        .expect("register outcome search");
-    session
-        .register_dynamic_tool(Arc::new(EvidenceFirstOutcomeFetch))
-        .expect("register outcome fetch");
-    (agent, session)
+    .await
 }
 
 fn evidence_first_args(query: &str, run_id: &str) -> Value {
@@ -587,6 +779,7 @@ async fn execute_fixture_runtime(
         progress_tx,
         EvidenceFirstRuntimeLimits {
             bootstrap_stage_timeout_ms: 5_000,
+            planned_retrieval_stage_timeout_ms: 5_000,
             report_proposal_attempt_timeout_ms: proposal_stage_timeout_ms
                 .saturating_sub(200)
                 .max(1_000),

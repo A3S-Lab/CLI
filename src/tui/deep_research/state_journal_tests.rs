@@ -65,48 +65,6 @@ async fn duplicate_external_event_is_idempotent() {
 }
 
 #[tokio::test]
-async fn report_start_is_idempotent_and_keeps_its_original_timestamp() {
-    let temp = tempfile::tempdir().unwrap();
-    let run_id = "run-report-start";
-    record_workflow_started(temp.path(), run_id, spec())
-        .await
-        .unwrap();
-
-    let first = record_report_started_at_ms(temp.path(), run_id)
-        .await
-        .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-    let resumed = record_report_started_at_ms(temp.path(), run_id)
-        .await
-        .unwrap();
-
-    assert_eq!(resumed, first);
-    let journal = DeepResearchStateJournal::open(temp.path(), run_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let report_starts = journal
-        .runtime
-        .events()
-        .iter()
-        .filter(|record| {
-            matches!(
-                &record.event,
-                GraphEvent::ExternalEventObserved {
-                    source,
-                    stream_id,
-                    name,
-                    ..
-                } if source == REPORT_EVENT_SOURCE
-                    && stream_id == run_id
-                    && name == REPORT_STARTED_EVENT_NAME
-            )
-        })
-        .count();
-    assert_eq!(report_starts, 1);
-}
-
-#[tokio::test]
 async fn reopening_workflow_requires_the_same_research_spec_identity() {
     let temp = tempfile::tempdir().unwrap();
     let run_id = "run-spec-identity";
@@ -672,6 +630,10 @@ async fn restart_reconciliation_cancels_live_children_and_terminalizes_orphans()
         .unwrap();
     assert_eq!(recovery.cancel_children, ["child-live"]);
     assert_eq!(recovery.orphaned_children, ["child-orphan"]);
+    assert_eq!(
+        recovery.disposition,
+        ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition
+    );
     let projection = DeepResearchStateJournal::open(temp.path(), "run-restart")
         .await
         .unwrap()
@@ -685,6 +647,297 @@ async fn restart_reconciliation_cancels_live_children_and_terminalizes_orphans()
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn restart_reconciliation_treats_missing_journal_as_typed_absence() {
+    let temp = tempfile::tempdir().unwrap();
+
+    assert!(
+        reconcile_interrupted_latest_run(temp.path(), &HashSet::new())
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn restart_reconciliation_preserves_exact_receipt_backed_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-publication-recovery";
+    let query = "Assess the current Nimbus support boundary";
+    let mut interrupted_spec = spec();
+    interrupted_spec.query = query.to_string();
+    interrupted_spec.host_pid = u32::MAX;
+    record_workflow_started(temp.path(), run_id, interrupted_spec)
+        .await
+        .unwrap();
+    let report = super::super::deep_research_artifacts::AdmittedDeepResearchReport {
+        markdown: "# Nimbus support boundary\n\n## Direct Answer\n\nNimbus version 2 remains supported through the stated maintenance boundary, according to the exact published record.[Source](https://records.example/nimbus)\n\n## Findings\n\nThe same record establishes the current maintenance cutoff and provides the traceable basis for this bounded conclusion.[Source](https://records.example/nimbus)\n\n## Sources\n\n1. [Nimbus support record](https://records.example/nimbus)\n".to_string(),
+        rendered_html: None,
+        thesis: "Nimbus version 2 remains within the stated support boundary.".to_string(),
+        publication:
+            super::super::deep_research_artifacts::DeepResearchEvidenceFirstPublication::Synthesized,
+        accepted_block_count: 2,
+        rejected_block_count: 0,
+        direct_answer_block_count: 1,
+        finding_block_count: 1,
+        accepted_claim_count: 2,
+        accepted_relation_count: 1,
+        accepted_derivation_count: 1,
+        accepted_basis_edge_count: 2,
+        accepted_gap_count: 0,
+        cited_source_count: 1,
+        substantive_character_count: 240,
+    };
+    let artifacts =
+        super::super::deep_research_artifacts::materialize_deep_research_admitted_report(
+            temp.path(),
+            query,
+            &report,
+        )
+        .expect("materialize completed publication before interruption");
+    let quality = super::super::deep_research_artifacts::DeepResearchPublicationQuality {
+        research_scope: super::super::deep_research_artifacts::DeepResearchReportScope::Focused,
+        direct_answer_count: 1,
+        finding_count: 1,
+        accepted_claim_count: 2,
+        accepted_relation_count: 1,
+        accepted_derivation_count: 1,
+        accepted_basis_edge_count: 2,
+        accepted_gap_count: 0,
+        cited_source_count: 1,
+        substantive_character_count: 240,
+        relevant_source_count: 1,
+        source_count: 1,
+    };
+    super::super::deep_research_artifacts::record_deep_research_publication_receipt(
+        temp.path(),
+        query,
+        run_id,
+        super::super::deep_research_artifacts::DeepResearchEvidenceFirstPublication::Synthesized,
+        quality,
+        &artifacts,
+    )
+    .expect("persist exact publication receipt before terminal journal event");
+
+    let recovery = reconcile_interrupted_latest_run(temp.path(), &HashSet::new())
+        .await
+        .unwrap()
+        .unwrap();
+
+    let ResearchRecoveryDisposition::PublicationPreserved {
+        artifacts: recovered_artifacts,
+        outcome,
+    } = recovery.disposition
+    else {
+        panic!("the exact receipt-backed publication should outrank raw acquisition recovery");
+    };
+    assert_eq!(recovered_artifacts, artifacts);
+    assert_eq!(outcome, ResearchOutcome::Completed);
+    let projection = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .projection()
+        .unwrap();
+    assert_eq!(projection.outcome, ResearchOutcome::Completed);
+    assert_eq!(projection.accepted_evidence_count, 1);
+    assert_eq!(projection.source_count, 1);
+    assert_eq!(projection.claim_count, 2);
+    assert_eq!(projection.accepted_relation_count, 1);
+    assert_eq!(projection.accepted_derivation_count, 1);
+    assert_eq!(projection.accepted_basis_edge_count, 2);
+    assert_eq!(projection.accepted_gap_count, 0);
+    assert_eq!(projection.report_cited_source_count, Some(1));
+    assert!(projection.artifact_evidence_head.is_some());
+    assert!(projection.active_steps.is_empty());
+}
+
+#[tokio::test]
+async fn focused_direct_answer_without_findings_settles_as_completed() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-focused-direct-answer";
+    let query = "Establish one bounded answer";
+    let mut focused_spec = spec();
+    focused_spec.query = query.to_string();
+    record_workflow_started(temp.path(), run_id, focused_spec)
+        .await
+        .unwrap();
+    let report = super::super::deep_research_artifacts::AdmittedDeepResearchReport {
+        markdown: "# Bounded answer\n\n## Direct Answer\n\nThe bounded answer is established by the cited record.[Source](https://records.example/bounded)\n\n## Sources\n\n1. [Bounded record](https://records.example/bounded)\n".to_string(),
+        rendered_html: None,
+        thesis: "The bounded answer is established.".to_string(),
+        publication:
+            super::super::deep_research_artifacts::DeepResearchEvidenceFirstPublication::Synthesized,
+        accepted_block_count: 1,
+        rejected_block_count: 0,
+        direct_answer_block_count: 1,
+        finding_block_count: 0,
+        accepted_claim_count: 1,
+        accepted_relation_count: 0,
+        accepted_derivation_count: 0,
+        accepted_basis_edge_count: 0,
+        accepted_gap_count: 0,
+        cited_source_count: 1,
+        substantive_character_count: 120,
+    };
+    let artifacts =
+        super::super::deep_research_artifacts::materialize_deep_research_admitted_report(
+            temp.path(),
+            query,
+            &report,
+        )
+        .expect("materialize focused report");
+    let quality = super::super::deep_research_artifacts::DeepResearchPublicationQuality {
+        research_scope: super::super::deep_research_artifacts::DeepResearchReportScope::Focused,
+        direct_answer_count: 1,
+        finding_count: 0,
+        accepted_claim_count: 1,
+        accepted_relation_count: 0,
+        accepted_derivation_count: 0,
+        accepted_basis_edge_count: 0,
+        accepted_gap_count: 0,
+        cited_source_count: 1,
+        substantive_character_count: 120,
+        relevant_source_count: 1,
+        source_count: 1,
+    };
+
+    let projection = record_validated_publication_terminal(
+        temp.path(),
+        run_id,
+        ResearchOutcome::Completed,
+        &artifacts,
+        &quality,
+    )
+    .await
+    .expect("focused publication should settle without a redundant finding requirement");
+
+    assert_eq!(projection.outcome, ResearchOutcome::Completed);
+    assert_eq!(projection.claim_count, 1);
+}
+
+#[tokio::test]
+async fn restart_reconciliation_preserves_exact_bootstrap_checkpoint_without_replaying_effects() {
+    let temp = tempfile::tempdir().unwrap();
+    let run_id = "run-bootstrap-recovery";
+    let query = "Compare two storage engines";
+    let mut interrupted_spec = spec();
+    interrupted_spec.query = query.to_string();
+    interrupted_spec.host_pid = u32::MAX;
+    record_workflow_started(temp.path(), run_id, interrupted_spec)
+        .await
+        .unwrap();
+
+    let bootstrap_run_id = format!("{run_id}-bootstrap");
+    let store = a3s_code_core::dynamic_workflow_store_path(temp.path());
+    std::fs::create_dir_all(&store).unwrap();
+    let bootstrap_output = serde_json::json!({
+        "query": query,
+        "mode": "bootstrap_acquisition",
+        "acquisition": {
+            "status": "success",
+            "packet": {
+                "version": 1,
+                "sources": [{
+                    "source_id": "bootstrap-source-1",
+                    "title": "Fetched comparison record",
+                    "url_or_path": "https://records.example/storage",
+                    "chunks": [{
+                        "chunk_id": "bootstrap-source-1:chunk:1",
+                        "text": "Fetched material that still requires closed semantic review."
+                    }]
+                }]
+            },
+            "errors": [],
+            "metadata": {}
+        },
+        "execution": {
+            "mode": "acquire_only",
+            "terminal_authority": "host_inquiry_reducer"
+        }
+    });
+    let lines = [
+        serde_json::json!({
+            "run_id": bootstrap_run_id,
+            "sequence": 1,
+            "event": {
+                "type": "run_created",
+                "spec": {"version": "source-hash"},
+                "input": {"query": query}
+            }
+        }),
+        serde_json::json!({
+            "run_id": bootstrap_run_id,
+            "sequence": 2,
+            "event": {"type": "run_started"}
+        }),
+        serde_json::json!({
+            "run_id": bootstrap_run_id,
+            "sequence": 3,
+            "event": {
+                "type": "step_created",
+                "step_id": "checkpoint_bootstrap_acquisition",
+                "step_name": "checkpoint_bootstrap_acquisition",
+                "input": bootstrap_output.clone()
+            }
+        }),
+        serde_json::json!({
+            "run_id": bootstrap_run_id,
+            "sequence": 4,
+            "event": {
+                "type": "step_started",
+                "step_id": "checkpoint_bootstrap_acquisition",
+                "attempt": 1
+            }
+        }),
+        serde_json::json!({
+            "run_id": bootstrap_run_id,
+            "sequence": 5,
+            "event": {
+                "type": "step_completed",
+                "step_id": "checkpoint_bootstrap_acquisition",
+                "output": bootstrap_output
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|line| serde_json::to_string(&line).unwrap())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let workflow_log = store.join(format!("{bootstrap_run_id}.jsonl"));
+    std::fs::write(&workflow_log, format!("{lines}\n")).unwrap();
+    let events_before = std::fs::read_to_string(&workflow_log).unwrap();
+
+    let recovery = reconcile_interrupted_latest_run(temp.path(), &HashSet::new())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&workflow_log).unwrap(),
+        events_before
+    );
+    let ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } = recovery.disposition
+    else {
+        panic!("completed acquisition checkpoint should be preserved");
+    };
+    let markdown = std::fs::read_to_string(artifacts.markdown).unwrap();
+    assert!(markdown.contains("Fetched comparison record"), "{markdown}");
+    assert!(
+        markdown.contains("not eligible for conclusions"),
+        "{markdown}"
+    );
+    let projection = DeepResearchStateJournal::open(temp.path(), run_id)
+        .await
+        .unwrap()
+        .unwrap()
+        .projection()
+        .unwrap();
+    assert_eq!(projection.outcome, ResearchOutcome::Degraded);
+    assert_eq!(projection.accepted_evidence_count, 0);
+    assert_eq!(projection.claim_count, 0);
 }
 
 #[tokio::test]

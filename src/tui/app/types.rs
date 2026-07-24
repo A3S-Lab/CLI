@@ -480,14 +480,6 @@ pub(super) enum Msg {
         convergence: ConvergenceDecision,
         accepted_evidence: Vec<AcceptedEvidence>,
     },
-    /// Host-owned structured report generation completed. DeepResearch uses
-    /// this closed-evidence path instead of reopening a general agent stream.
-    DeepResearchReportGenerated {
-        token: u64,
-        query: String,
-        phase: DeepResearchReportGenerationPhase,
-        result: Result<ToolCallResult, String>,
-    },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),
     /// OS login completed.
@@ -652,18 +644,6 @@ pub(super) struct DeepResearchSubagentSettlement {
     pub(super) output: String,
     pub(super) outcome: SubagentOutcome,
     pub(super) finished_ms: u64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DeepResearchReportGenerationPhase {
-    Synthesis,
-    Resume,
-}
-
-impl DeepResearchReportGenerationPhase {
-    pub(super) fn is_resume(self) -> bool {
-        matches!(self, Self::Resume)
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

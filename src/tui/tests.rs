@@ -665,9 +665,8 @@ fn deep_research_smoke_remaining_budget_is_absolute() {
 }
 
 #[test]
-fn deep_research_hard_fuse_covers_one_durable_report_transaction() {
-    let required = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
-        + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+fn deep_research_hard_fuse_covers_the_standalone_engine_transaction() {
+    let required = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS
         + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
         + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
 
@@ -685,7 +684,7 @@ fn deep_research_smoke_phase_deadlines_reserve_finalization_budget() {
         finalization_reserve
     );
 
-    for phase in ["workflow", "synthesis"] {
+    for phase in ["workflow", "artifact validation"] {
         let deadline = deep_research_smoke_phase_deadline(
             run_deadline,
             started_at,
@@ -705,33 +704,33 @@ fn deep_research_smoke_phase_deadlines_reserve_finalization_budget() {
     let workflow = deep_research_smoke_phase_deadline(
         run_deadline,
         started_at,
-        Duration::from_secs(40),
+        Duration::from_millis(DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS),
         "workflow",
     )
     .expect("workflow has run budget");
-    assert_eq!(workflow.selected_timeout, Duration::from_secs(40));
+    assert_eq!(
+        workflow.selected_timeout,
+        Duration::from_millis(DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS)
+    );
 
-    let synthesis_started = started_at + Duration::from_secs(90);
-    let synthesis = deep_research_smoke_phase_deadline(
+    let delayed_start = started_at + Duration::from_secs(90);
+    let delayed_workflow = deep_research_smoke_phase_deadline(
         run_deadline,
-        synthesis_started,
-        Duration::from_millis(DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS),
-        "synthesis",
+        delayed_start,
+        Duration::from_millis(DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS),
+        "workflow",
     )
-    .expect("synthesis has the remaining run budget");
+    .expect("workflow has the remaining run budget");
     assert_eq!(
-        synthesis.selected_timeout,
-        Duration::from_millis(DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS)
+        delayed_workflow.selected_timeout,
+        execution_deadline.saturating_duration_since(delayed_start)
     );
-    assert_eq!(
-        synthesis.phase_deadline,
-        synthesis_started + Duration::from_millis(DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS)
-    );
+    assert_eq!(delayed_workflow.phase_deadline, execution_deadline);
     assert!(deep_research_smoke_phase_deadline(
         run_deadline,
         run_deadline,
-        Duration::from_millis(DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS),
-        "synthesis",
+        Duration::from_millis(DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS),
+        "workflow",
     )
     .is_none());
 
@@ -798,129 +797,6 @@ fn deep_research_smoke_reserved_budget_can_publish_degraded_artifacts() {
     let _ = std::fs::remove_dir_all(workspace);
 }
 
-#[tokio::test]
-async fn deep_research_smoke_terminalization_closes_the_event_journal() {
-    let workspace = tempfile::tempdir().expect("create smoke journal workspace");
-    let run_id = "smoke-terminal-journal";
-    let events = vec![
-        a3s::research::InquiryEvent::StrategySelected {
-            method: a3s::research::ResearchMethod::Focused,
-        },
-        a3s::research::InquiryEvent::BudgetExhausted {
-            reason: "the bounded smoke fixture intentionally stopped before synthesis".to_string(),
-        },
-    ];
-    let state = a3s::research::replay(&events, &a3s::research::InquiryLimits::default())
-        .expect("replay terminal smoke Inquiry");
-    assert!(state.phase.is_terminal());
-    let workflow_output = serde_json::json!({
-        "inquiry": {
-            "events": events,
-            "state": state,
-        }
-    })
-    .to_string();
-    let markdown = workspace.path().join("report.md");
-    let html = workspace.path().join("index.html");
-    std::fs::write(&markdown, "# Bounded smoke report").expect("write smoke Markdown");
-    std::fs::write(&html, "<!doctype html><h1>Bounded smoke report</h1>")
-        .expect("write smoke HTML");
-    let artifacts = ResearchReportArtifacts { markdown, html };
-
-    record_deep_research_workflow_started(
-        workspace.path(),
-        run_id,
-        ResearchSpec {
-            query: "bounded smoke fixture".to_string(),
-            current_date: "2026-07-17".to_string(),
-            evidence_scope: "web_and_workspace".to_string(),
-            required_claims: Vec::new(),
-            total_budget_ms: 60_000,
-            retrieval_stage_budget_ms: 30_000,
-            question_review_stage_budget_ms: 15_000,
-            finalization_reserve_ms: 9_000,
-            host_pid: std::process::id(),
-        },
-    )
-    .await
-    .expect("start smoke journal");
-    record_deep_research_workflow_completed(workspace.path(), run_id, false)
-        .await
-        .expect("close smoke evidence track");
-
-    let outcome = finalize_deep_research_smoke_journal(
-        workspace.path(),
-        run_id,
-        &workflow_output,
-        None,
-        DeepResearchRunOutcome::Degraded,
-        &artifacts,
-    )
-    .await
-    .expect("terminalize smoke journal");
-    assert_eq!(outcome, DeepResearchRunOutcome::Degraded);
-
-    let journal =
-        deep_research_state_journal::DeepResearchStateJournal::open(workspace.path(), run_id)
-            .await
-            .expect("open smoke journal")
-            .expect("smoke journal exists");
-    let projection = journal.projection().expect("project smoke journal");
-    assert_eq!(projection.outcome, ResearchOutcome::Degraded);
-    assert!(projection.active_steps.is_empty());
-    assert!(projection.active_children.is_empty());
-}
-
-#[tokio::test]
-async fn failed_smoke_terminalizes_before_an_inquiry_projection_exists() {
-    let workspace = tempfile::tempdir().expect("create failed smoke journal workspace");
-    let run_id = "smoke-planner-failure";
-    let markdown = workspace.path().join("report.md");
-    let html = workspace.path().join("index.html");
-    std::fs::write(&markdown, "# Planner failure recovery").expect("write recovery Markdown");
-    std::fs::write(&html, "<!doctype html><h1>Planner failure recovery</h1>")
-        .expect("write recovery HTML");
-    let artifacts = ResearchReportArtifacts { markdown, html };
-    let spec = ResearchSpec {
-        query: "planner failure fixture".to_string(),
-        current_date: "2026-07-17".to_string(),
-        evidence_scope: "web_and_workspace".to_string(),
-        required_claims: Vec::new(),
-        total_budget_ms: 60_000,
-        retrieval_stage_budget_ms: 30_000,
-        question_review_stage_budget_ms: 15_000,
-        finalization_reserve_ms: 9_000,
-        host_pid: std::process::id(),
-    };
-    record_deep_research_workflow_started(workspace.path(), run_id, spec)
-        .await
-        .expect("start failed smoke journal");
-    record_deep_research_workflow_completed(workspace.path(), run_id, false)
-        .await
-        .expect("close failed smoke evidence track");
-
-    let outcome = finalize_deep_research_smoke_journal(
-        workspace.path(),
-        run_id,
-        "planner failed before producing structured output",
-        None,
-        DeepResearchRunOutcome::Degraded,
-        &artifacts,
-    )
-    .await
-    .expect("terminalize failed smoke journal");
-    assert_eq!(outcome, DeepResearchRunOutcome::Degraded);
-
-    let journal =
-        deep_research_state_journal::DeepResearchStateJournal::open(workspace.path(), run_id)
-            .await
-            .expect("open failed smoke journal")
-            .expect("failed smoke journal exists");
-    let projection = journal.projection().expect("project failed smoke journal");
-    assert_eq!(projection.outcome, ResearchOutcome::Degraded);
-    assert!(projection.active_steps.is_empty());
-    assert!(projection.active_children.is_empty());
-}
 
 #[test]
 fn dynamic_workflow_event_and_completion_share_one_terminal_card() {
@@ -928,7 +804,7 @@ fn dynamic_workflow_event_and_completion_share_one_terminal_card() {
     let start_args = serde_json::json!({"run_id": "research-42"});
     let complete_args = serde_json::json!({
         "run_id": "research-42",
-        "query": "World Cup standings",
+        "query": "Nimbus support status",
         "local_max_steps": 12
     });
     let start = AgentEvent::ToolExecutionStart {
@@ -2070,10 +1946,18 @@ fn write_completed_deep_research_test_artifacts(
     markdown: &str,
     html_markdown: &str,
 ) {
-    std::fs::write(report_dir.join("report.md"), markdown).unwrap();
+    const MARKER: &str = "<!-- A3S_DEEP_RESEARCH_ARTIFACT:synthesized:v1 -->";
+    std::fs::write(
+        report_dir.join("report.md"),
+        format!("{markdown}\n\n{MARKER}\n"),
+    )
+    .unwrap();
     std::fs::write(
         report_dir.join("index.html"),
-        deep_research_completed_report_html_for_test(query, html_markdown),
+        format!(
+            "{MARKER}\n{}",
+            deep_research_completed_report_html_for_test(query, html_markdown)
+        ),
     )
     .unwrap();
 }
@@ -2183,29 +2067,23 @@ fn research_report_marker_requires_workspace_index_html_and_markdown_pair() {
         "fallback draft artifacts must not be accepted as completed report markers"
     );
 
-    let dirty_dir = root.join(".a3s/research/dirty");
-    std::fs::create_dir_all(&dirty_dir).unwrap();
-    std::fs::write(
-            dirty_dir.join("index.html"),
-            "<!doctype html><html><body><h1>Dirty Report</h1><section><h2>Findings</h2><p>The analysis has enough apparent substance but contains leaked transcript output.</p><pre>● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]</pre></section><section><h2>Sources</h2><p>Evidence source: https://example.com/dirty. Confidence is low because leaked logs were detected.</p></section></body></html>",
-        )
-        .unwrap();
-    std::fs::write(
-            dirty_dir.join("report.md"),
-            "# Dirty Report\n\n## Findings\n\nThe analysis has enough apparent substance but contains leaked transcript output.\n\n● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]\n\n## Sources\n\n- https://example.com/dirty\n\n## Confidence\n\nConfidence is low because leaked logs were detected.\n",
-        )
-        .unwrap();
-    assert!(
-        research_report_view_spec("A3S_RESEARCH_VIEW: .a3s/research/dirty/index.html", &root,)
-            .is_none(),
-        "DeepResearch report markers must reject artifacts that contain internal tool logs"
+    let protocol_words_dir = root.join(".a3s/research/protocol-words");
+    std::fs::create_dir_all(&protocol_words_dir).unwrap();
+    let protocol_words_markdown = "# Protocol Words Report\n\n## Findings\n\nThe cited source documents the literal phrase DynamicWorkflowRuntime output and the path .a3s/workflow/run-123.jsonl as ordinary subject matter. These words do not act as Host control data.\n\n## Sources\n\n- https://example.com/protocol-words\n\n## Confidence\n\nConfidence is bounded by the cited source and its explicit scope.\n";
+    write_completed_deep_research_test_artifacts(
+        &protocol_words_dir,
+        "protocol words",
+        protocol_words_markdown,
+        protocol_words_markdown,
     );
-    assert!(deep_research_output_has_internal_leak(
-        "DynamicWorkflowRuntime output: internal payload"
-    ));
-    assert!(deep_research_output_has_internal_leak(
-        "DynamicWorkflowRuntime metadata: internal payload"
-    ));
+    assert!(
+        research_report_view_spec(
+            "A3S_RESEARCH_VIEW: .a3s/research/protocol-words/index.html",
+            &root,
+        )
+        .is_some(),
+        "reader prose must not act as the artifact-classification protocol"
+    );
 
     assert!(research_report_view_spec(
         "A3S_RESEARCH_VIEW: .a3s/research/rust-async/report.md",
@@ -2455,10 +2333,9 @@ fn deep_research_clean_final_text_can_reuse_valid_report_artifacts() {
         }
     })
     .to_string();
-    let dirty_output = "DynamicWorkflowRuntime output: internal transport details withheld.\nA3S_RESEARCH_VIEW: .a3s/research/clean-final/index.html";
-    assert!(deep_research_output_has_internal_leak(dirty_output));
+    let transport_output = "DynamicWorkflowRuntime output: internal transport details withheld.\nA3S_RESEARCH_VIEW: .a3s/research/clean-final/index.html";
     let artifacts = deep_research_report_artifacts_from_output_for_query(
-        dirty_output,
+        transport_output,
         &root,
         "clean final",
         &workflow_output,
@@ -2467,7 +2344,6 @@ fn deep_research_clean_final_text_can_reuse_valid_report_artifacts() {
     .expect("valid report files should still be discoverable from a dirty final marker");
     let clean = clean_deep_research_final_text_from_artifacts(&artifacts, &root)
         .expect("host should be able to rebuild clean final text from report.md");
-    assert!(!deep_research_output_has_internal_leak(&clean), "{clean}");
     assert!(clean.contains("A3S_RESEARCH_VIEW: .a3s/research/clean-final/index.html"));
 
     let _ = std::fs::remove_dir_all(&root);
@@ -2705,7 +2581,7 @@ fn deep_research_workflow_timeout_recovers_evidence_without_bypassing_review() {
 }
 
 #[test]
-fn deep_research_fallback_draft_materializes_valid_artifacts_without_marker() {
+fn deep_research_fallback_draft_uses_only_typed_workflow_projection() {
     let root = std::env::temp_dir().join(format!(
         "a3s-research-fallback-{}-{}",
         std::process::id(),
@@ -2735,10 +2611,11 @@ fn deep_research_fallback_draft_materializes_valid_artifacts_without_marker() {
     assert!(markdown.contains("not a completed DeepResearch report"));
     assert!(markdown.contains("collection_status"));
     assert!(!markdown.contains("local_parallel_task"));
+    assert!(!markdown.contains("unsafe"));
     assert!(!markdown.contains(RESEARCH_VIEW_MARKER));
     let html = std::fs::read_to_string(&artifacts.html).unwrap();
     assert!(html.contains("DeepResearch Fallback Draft"));
-    assert!(html.contains("&lt;unsafe&gt;"));
+    assert!(!html.contains("unsafe"));
     assert!(!html.contains(RESEARCH_VIEW_MARKER));
 
     let timeout_artifacts = materialize_deep_research_fallback_draft(
@@ -2754,19 +2631,18 @@ fn deep_research_fallback_draft_materializes_valid_artifacts_without_marker() {
         .next()
         .unwrap_or_default();
     assert!(answer_section.contains("captured 4/4 delegated research tasks"));
-    assert!(answer_section.contains("README.md"));
+    assert!(!answer_section.contains("README.md"));
     assert!(
         !answer_section.contains("timed out after 480000 ms"),
         "{answer_section}"
     );
-    assert!(timeout_markdown.contains(
-        "Model synthesis status: DeepResearch synthesis model call timed out after 480000 ms."
-    ));
+    assert!(timeout_markdown.contains("typed publication contract"));
+    assert!(!timeout_markdown.contains("Model synthesis status"));
 
     let dirty_artifacts = materialize_deep_research_fallback_draft(
             &root,
             "Dirty fallback report",
-            "● Searched web fifa results\n⎿ [tool output truncated: showing first bytes]",
+            "● Searched web example results\n⎿ [tool output truncated: showing first bytes]",
             r#"{"mode":"local_parallel_task","research":{"metadata":{"success_count":1,"task_count":1},"output":"● Searched web\n⎿ [tool output truncated]"}}"#,
         )
         .expect("dirty fallback draft should be written with sanitized content");
@@ -2776,14 +2652,8 @@ fn deep_research_fallback_draft_materializes_valid_artifacts_without_marker() {
         dirty_markdown.contains("sanitized evidence digest"),
         "{dirty_markdown}"
     );
-    assert!(
-        !deep_research_output_has_internal_leak(&dirty_markdown),
-        "{dirty_markdown}"
-    );
-    assert!(
-        !deep_research_output_has_internal_leak(&dirty_html),
-        "{dirty_html}"
-    );
+    assert!(!dirty_markdown.contains("[tool output truncated]"));
+    assert!(!dirty_html.contains("[tool output truncated]"));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -2837,119 +2707,29 @@ fn deep_research_fallback_slug_handles_long_and_non_ascii_queries() {
 }
 
 #[test]
-fn deep_research_safe_source_anchor_preserves_safe_identity_query() {
-    let (_, kbs) = deep_research_safe_source_anchor(
-        "https://world.kbs.co.kr/service/news_view.htm?lang=e&Seq_Code=155851",
+fn deep_research_safe_source_anchor_preserves_query_without_key_vocabulary() {
+    let first = deep_research_safe_source_anchor(
+        "https://example.test/resource?view=complete&Revision=7#selected-fragment",
     )
-    .expect("the KBS article identity should remain traceable");
+    .expect("the source identity should remain traceable");
     assert_eq!(
-        kbs,
-        "https://world.kbs.co.kr/service/news_view.htm?lang=e&seq_code=155851"
+        first,
+        "https://example.test/resource?view=complete&Revision=7"
     );
 
-    let (_, sanitized) = deep_research_safe_source_anchor(
-            "https://user:password@example.com/article?utm_source=campaign&token=secret&id=article-1&secret=hidden&lang=zh#section",
-        )
-        .expect("safe identity parameters should survive sanitization");
+    let second = deep_research_safe_source_anchor(
+        "https://user:password@example.com/resource?beta=two&Alpha=one#section",
+    )
+    .expect("bounded source parameters should survive sanitization");
     assert_eq!(
-        sanitized,
-        "https://example.com/article?id=article-1&lang=zh"
+        second,
+        "https://example.com/resource?beta=two&Alpha=one"
     );
-    for removed in ["user", "password", "utm_", "token", "secret", "section"] {
-        assert!(!sanitized.contains(removed), "{sanitized}");
+    for removed in ["user", "password", "section"] {
+        assert!(!second.contains(removed), "{second}");
     }
 }
 
-#[test]
-fn deep_research_recovery_anchor_matching_normalizes_lines_and_sanitizes_urls() {
-    let result = serde_json::json!({
-        "source_anchors": [{
-            "tool": "read",
-            "url_or_path": "src/Secrets.md"
-        }]
-    });
-    let structured = serde_json::json!({
-        "summary": "Recovered evidence from https://user:password@example.com/private?token=secret#fragment.",
-        "sources": [{
-            "title": "Workspace source",
-            "url_or_path": "./src/Secrets.md:42#section",
-            "quote_or_fact": "See https://user:password@example.com/private?token=secret#fragment for context."
-        }],
-        "key_evidence": ["https://user:password@example.com/private?token=secret#fragment"],
-        "contradictions": [],
-        "confidence": "high",
-        "gaps": []
-    });
-
-    let verified = deep_research_verified_structured_evidence(&result, &structured)
-        .expect("line-qualified form of an observed local source should match");
-    assert_eq!(verified["sources"][0]["url_or_path"], "src/Secrets.md");
-    let serialized = serde_json::to_string(&verified).unwrap();
-    assert!(!serialized.contains("password"), "{serialized}");
-    assert!(!serialized.contains("token=secret"), "{serialized}");
-    assert!(serialized.contains("https://example.com/private"));
-}
-
-#[test]
-fn deep_research_recovery_anchor_matching_preserves_resource_path_case() {
-    for (observed, reported) in [
-        ("https://example.com/Allowed", "https://example.com/allowed"),
-        (
-            "https://example.com/Allowed/",
-            "https://example.com/Allowed",
-        ),
-        ("docs/Secrets.md", "docs/secrets.md"),
-        ("docs/a&amp;b.md", "docs/a&b.md"),
-        ("docs/c&d.md", "docs/c&amp;d.md"),
-    ] {
-        let result = serde_json::json!({
-            "source_anchors": [{
-                "tool": "read",
-                "url_or_path": observed
-            }]
-        });
-        let structured = serde_json::json!({
-            "summary": "Self-reported evidence",
-            "sources": [{
-                "title": "Differently cased source",
-                "url_or_path": reported,
-                "quote_or_fact": "The path case does not match the observed resource."
-            }],
-            "key_evidence": ["unverified"],
-            "contradictions": [],
-            "confidence": "unsupported",
-            "gaps": []
-        });
-
-        assert!(
-            deep_research_verified_structured_evidence(&result, &structured).is_none(),
-            "observed {observed:?} must not authorize differently cased {reported:?}"
-        );
-    }
-
-    let unsupported = serde_json::json!({
-        "source_anchors": [{
-            "tool": "bash",
-            "url_or_path": "https://example.com/not-a-source-tool"
-        }]
-    });
-    let structured = serde_json::json!({
-        "summary": "Unsupported provenance",
-        "sources": [{
-            "title": "Unsupported source",
-            "url_or_path": "https://example.com/not-a-source-tool",
-            "quote_or_fact": "A generic command must not attest research evidence."
-        }],
-        "key_evidence": ["unsupported"],
-        "contradictions": [],
-        "confidence": "none",
-        "gaps": []
-    });
-    assert!(
-        deep_research_verified_structured_evidence(&unsupported, &structured).is_none(),
-        "only successful built-in research tools may authorize evidence"
-    );
-}
 
 #[test]
 fn deep_research_workflow_args_are_minimal_and_scope_is_explicit() {
@@ -3060,483 +2840,6 @@ fn deep_research_workflow_args_are_minimal_and_scope_is_explicit() {
     }
 }
 
-#[test]
-fn deep_research_collection_status_follows_research_outcome() {
-    let failed = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": { "status": "failed", "results": [] }
-    });
-    assert_eq!(deep_research_collection_status(&failed), "failed");
-    assert!(deep_research_workflow_needs_recovery_report(
-        &failed.to_string()
-    ));
-
-    let partial = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": { "status": "partial_success", "results": [] }
-    });
-    assert_eq!(deep_research_collection_status(&partial), "degraded");
-
-    let partial_with_evidence = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "status": "partial_success",
-            "results": [{
-                "success": true,
-                "structured": {
-                    "summary": "A source-backed partial result is still usable.",
-                    "sources": [{
-                        "url_or_path": "https://example.com/evidence",
-                        "quote_or_fact": "Traceable evidence from the completed task."
-                    }],
-                    "confidence": "medium"
-                }
-            }]
-        }
-    });
-    assert_eq!(
-        deep_research_collection_status(&partial_with_evidence),
-        "degraded"
-    );
-    assert!(deep_research_workflow_needs_recovery_report(
-        &partial_with_evidence.to_string()
-    ));
-
-    let checker_degraded = serde_json::json!({
-        "mode": "direct_web_degraded",
-        "checker": {
-            "decision": "degrade",
-            "coverage_summary": "Traceable evidence is useful, but one planned comparison remains unresolved."
-        },
-        "research": partial_with_evidence["research"].clone()
-    });
-    assert_eq!(
-        deep_research_collection_status(&checker_degraded),
-        "degraded"
-    );
-    assert!(!deep_research_workflow_needs_recovery_report(
-        &checker_degraded.to_string()
-    ));
-    assert_eq!(
-        deep_research_report_outcome_for_workflow(
-            "Compare the options",
-            DeepResearchEvidenceScope::WebAndWorkspace,
-            &checker_degraded.to_string(),
-            None,
-        ),
-        DeepResearchRunOutcome::Qualified,
-    );
-
-    let checker_degraded_with_truncated_output = serde_json::json!({
-        "mode": "hybrid_direct_web_parallel_degraded",
-        "checker": {
-            "decision": "degrade",
-            "coverage_summary": "One planned track remains unresolved."
-        },
-        "research": {
-            "status": "partial_success",
-            "results": [{
-                "success": true,
-                "truncated_for_context": true,
-                "structured": null
-            }]
-        }
-    });
-    let full_evidence_metadata = serde_json::json!({
-        "dynamic_workflow": {
-            "snapshot": {
-                "steps": {
-                    "local_research": {
-                        "output": {
-                            "metadata": {
-                                "results": [{
-                                    "success": true,
-                                    "structured": {
-                                        "summary": "The full event metadata retained useful evidence.",
-                                        "sources": [{
-                                            "title": "Official evidence",
-                                            "url_or_path": "https://example.com/full-evidence",
-                                            "quote_or_fact": "The source-backed finding survived output truncation.",
-                                            "reliability": "Official source"
-                                        }],
-                                        "key_evidence": ["The finding is source-backed."],
-                                        "contradictions": [],
-                                        "confidence": "medium",
-                                        "gaps": []
-                                    }
-                                }]
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    });
-    assert!(deep_research_workflow_needs_recovery_report(
-        &checker_degraded_with_truncated_output.to_string()
-    ));
-    assert!(
-        !deep_research_workflow_needs_recovery_report_with_metadata(
-            &checker_degraded_with_truncated_output.to_string(),
-            Some(&full_evidence_metadata),
-        ),
-        "metadata-retained evidence must produce a qualified report instead of generic recovery"
-    );
-    assert_eq!(
-        deep_research_report_outcome_for_workflow(
-            "Compare the options",
-            DeepResearchEvidenceScope::WebAndWorkspace,
-            &checker_degraded_with_truncated_output.to_string(),
-            Some(&full_evidence_metadata),
-        ),
-        DeepResearchRunOutcome::Qualified,
-    );
-
-    let finalized_partial = serde_json::json!({
-        "mode": "direct_web",
-        "checker": {
-            "decision": "finalize",
-            "coverage_summary": "The retained sources support a useful answer with explicit limitations."
-        },
-        "research": partial_with_evidence["research"].clone()
-    });
-    assert_eq!(
-        deep_research_collection_status(&finalized_partial),
-        "completed"
-    );
-    assert!(!deep_research_workflow_needs_recovery_report(
-        &finalized_partial.to_string()
-    ));
-
-    let empty_success = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": { "status": "success", "results": [] }
-    });
-    assert_eq!(deep_research_collection_status(&empty_success), "degraded");
-    assert!(deep_research_workflow_needs_recovery_report(
-        &empty_success.to_string()
-    ));
-
-    let incomplete_success = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "status": "success",
-            "results": [{
-                "success": true,
-                "structured": {
-                    "summary": "A summary without traceable evidence must not complete.",
-                    "sources": [],
-                    "confidence": "low"
-                }
-            }]
-        }
-    });
-    assert_eq!(
-        deep_research_collection_status(&incomplete_success),
-        "degraded"
-    );
-    assert!(deep_research_workflow_needs_recovery_report(
-        &incomplete_success.to_string()
-    ));
-
-    let completed = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "status": "success",
-            "results": [{
-                "success": true,
-                "structured": {
-                    "summary": "The completed result is backed by traceable evidence.",
-                    "sources": [{
-                        "url_or_path": "https://example.com/completed",
-                        "quote_or_fact": "The cited source supports the completed result."
-                    }],
-                    "confidence": "medium"
-                }
-            }]
-        }
-    });
-    assert_eq!(deep_research_collection_status(&completed), "completed");
-    assert!(!deep_research_workflow_needs_recovery_report(
-        &completed.to_string()
-    ));
-}
-
-#[test]
-fn deep_research_completed_status_requires_full_evidence_contract() {
-    let source = serde_json::json!({
-        "url_or_path": "https://example.com/evidence",
-        "quote_or_fact": "Traceable evidence for the result."
-    });
-    let incomplete_results = [
-        serde_json::json!({
-            "success": true,
-            "structured": {
-                "summary": "",
-                "sources": [source.clone()],
-                "confidence": "medium"
-            }
-        }),
-        serde_json::json!({
-            "success": true,
-            "structured": {
-                "summary": "Source-backed summary.",
-                "sources": [source],
-                "confidence": ""
-            }
-        }),
-        serde_json::json!({
-            "success": true,
-            "structured": {
-                "summary": "Source-backed summary.",
-                "sources": [{ "url_or_path": "https://example.com/evidence" }],
-                "confidence": "medium"
-            }
-        }),
-        serde_json::json!({
-            "success": false,
-            "structured": {
-                "summary": "A failed task must not complete the collection.",
-                "sources": [{
-                    "url_or_path": "https://example.com/evidence",
-                    "quote_or_fact": "Traceable but returned by a failed task."
-                }],
-                "confidence": "medium"
-            }
-        }),
-    ];
-
-    for result in incomplete_results {
-        let output = serde_json::json!({
-            "mode": "local_parallel_task",
-            "research": { "status": "success", "results": [result] }
-        });
-        assert_eq!(
-            deep_research_collection_status(&output),
-            "degraded",
-            "{output}"
-        );
-        assert!(deep_research_workflow_needs_recovery_report(
-            &output.to_string()
-        ));
-    }
-
-    let mixed_success = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "status": "success",
-            "results": [{
-                "success": true,
-                "structured": {
-                    "summary": "Valid evidence from one completed task.",
-                    "sources": [{
-                        "url_or_path": "https://example.com/valid",
-                        "quote_or_fact": "Traceable evidence for the valid task."
-                    }],
-                    "confidence": "medium"
-                }
-            }, {
-                "success": true,
-                "structured": {
-                    "summary": "The second result lacks evidence.",
-                    "sources": [],
-                    "confidence": "low"
-                }
-            }]
-        }
-    });
-    assert_eq!(deep_research_collection_status(&mixed_success), "degraded");
-}
-
-#[test]
-fn deep_research_evidence_digest_normalizes_source_alias_fields() {
-    let workflow_output = serde_json::json!({
-            "mode": "local_parallel_task",
-            "research": {
-                "results": [{
-                    "structured": {
-                        "summary": "Alias source fields should survive digest compaction.",
-                        "sources": [{
-                            "title": "Alias Source",
-                            "url": "https://example.com/alias-source",
-                            "publication_date": "2026-07-09",
-                            "evidence": "The source used url/publication_date/evidence/publisher aliases.",
-                            "publisher": "deterministic fixture"
-                        }],
-                        "key_evidence": ["Alias source fields were returned by a child task."],
-                        "contradictions": [],
-                        "confidence": "high",
-                        "gaps": []
-                    }
-                }]
-            }
-        })
-        .to_string();
-
-    let digest = deep_research_prompt_workflow_output(&workflow_output);
-
-    assert!(
-        digest.contains("\"url_or_path\": \"https://example.com/alias-source\""),
-        "{digest}"
-    );
-    assert!(digest.contains("\"date\": \"2026-07-09\""), "{digest}");
-    assert!(
-            digest.contains("\"quote_or_fact\": \"The source used url/publication_date/evidence/publisher aliases.\""),
-            "{digest}"
-        );
-    assert!(
-        digest.contains("\"reliability\": \"deterministic fixture\""),
-        "{digest}"
-    );
-}
-
-#[test]
-fn deep_research_evidence_digest_preserves_direct_web_coverage_counts() {
-    let workflow_output = serde_json::json!({
-        "mode": "direct_web",
-        "research": {
-            "status": "success",
-            "metadata": {
-                "search_count": 2,
-                "result_count": 4,
-                "source_count": 3,
-                "host_count": 2,
-                "freshness_required": true,
-                "dated_source_count": 2,
-                "candidate_count": 4,
-                "evidence_excerpt_count": 3,
-                "evidence_excerpt_char_count": 1200,
-                "evidence_selection_mode": "semantic_chunk_ids",
-                "fetch_count": 2,
-                "fetched_count": 1,
-                "fetched_host_count": 1,
-                "task_count": 1,
-                "success_count": 1,
-                "failed_count": 0,
-                "all_success": true,
-                "partial_failure": false
-            },
-            "results": [{
-                "structured": {
-                    "summary": "Direct web coverage metadata should reach synthesis.",
-                    "sources": [{
-                        "title": "Coverage Source",
-                        "url_or_path": "https://example.com/coverage",
-                        "quote_or_fact": "Coverage count propagation is deterministic."
-                    }],
-                    "confidence": "high"
-                }
-            }]
-        }
-    })
-    .to_string();
-
-    let digest = deep_research_prompt_workflow_output(&workflow_output);
-
-    for expected in [
-        "\"search_count\": 2",
-        "\"result_count\": 4",
-        "\"source_count\": 3",
-        "\"host_count\": 2",
-        "\"freshness_required\": true",
-        "\"dated_source_count\": 2",
-        "\"candidate_count\": 4",
-        "\"evidence_excerpt_count\": 3",
-        "\"evidence_excerpt_char_count\": 1200",
-        "\"evidence_selection_mode\": \"semantic_chunk_ids\"",
-        "\"fetch_count\": 2",
-        "\"fetched_count\": 1",
-        "\"fetched_host_count\": 1",
-    ] {
-        assert!(digest.contains(expected), "missing {expected}: {digest}");
-    }
-}
-
-#[test]
-fn deep_research_evidence_digest_filters_before_bounding_and_sanitizes_urls() {
-    let mut sources = (0..DEEP_RESEARCH_MAX_DIGEST_SOURCES)
-        .map(|index| {
-            serde_json::json!({
-                "title": format!("Invalid source {index}"),
-                "url_or_path": format!("javascript:invalid-{index}"),
-                "quote_or_fact": "This unsupported scheme must not occupy a digest slot."
-            })
-        })
-        .collect::<Vec<_>>();
-    sources.push(serde_json::json!({
-        "title": "Valid source after invalid entries",
-        "url_or_path": "https://user:password@example.com/valid?token=secret#section",
-        "quote_or_fact": "The valid source must survive filtering and use a safe projection."
-    }));
-    let workflow_output = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "results": [{
-                "structured": {
-                    "summary": "Only traceable sources should consume bounded digest slots.",
-                    "sources": sources,
-                    "confidence": "high"
-                }
-            }]
-        }
-    })
-    .to_string();
-
-    let digest = deep_research_prompt_workflow_output(&workflow_output);
-
-    assert!(digest.contains("https://example.com/valid"), "{digest}");
-    for secret in ["user:password", "token=secret", "#section", "javascript:"] {
-        assert!(!digest.contains(secret), "{digest}");
-    }
-    assert!(!digest.contains("sources_omitted"), "{digest}");
-}
-
-#[test]
-fn deep_research_evidence_dedupe_uses_first_traceable_source() {
-    let result = |anchor: &str| {
-        serde_json::json!({
-            "round": 1,
-            "structured": {
-                "summary": "The same track summary can cover distinct verified resources.",
-                "sources": [
-                    {
-                        "title": "Invalid leading source",
-                        "url_or_path": "javascript:invalid-leading-source",
-                        "quote_or_fact": "This entry must not determine evidence identity."
-                    },
-                    {
-                        "title": "Distinct verified source",
-                        "url_or_path": anchor,
-                        "quote_or_fact": "This traceable source determines evidence identity."
-                    }
-                ],
-                "confidence": "high"
-            }
-        })
-    };
-    let workflow_output = serde_json::json!({
-        "mode": "local_parallel_task",
-        "research": {
-            "results": [
-                result("https://example.com/verified-a"),
-                result("https://example.com/verified-b")
-            ]
-        }
-    })
-    .to_string();
-
-    let digest = deep_research_prompt_workflow_output(&workflow_output);
-
-    assert!(
-        digest.contains("https://example.com/verified-a"),
-        "{digest}"
-    );
-    assert!(
-        digest.contains("https://example.com/verified-b"),
-        "{digest}"
-    );
-    assert!(!digest.contains("javascript:"), "{digest}");
-}
 
 #[test]
 fn deep_research_goal_is_a_research_north_star_with_query() {
@@ -5680,7 +4983,7 @@ fn workflow_doc_captures_semantic_intent_without_copying_program_source() {
             "  const boilerplate = true;\n".repeat(1_601)
         ),
         "input": {
-            "query": "2026 World Cup status",
+            "query": "Nimbus support status",
             "evidence_scope": "web_and_workspace",
             "inquiry_host_managed": true,
             "loop_contract": {
@@ -5700,7 +5003,7 @@ fn workflow_doc_captures_semantic_intent_without_copying_program_source() {
     );
     assert!(!label.contains("/flow"), "{label}");
     assert!(
-        doc.contains("DeepResearch “2026 World Cup status”"),
+        doc.contains("DeepResearch “Nimbus support status”"),
         "{doc}"
     );
     assert!(

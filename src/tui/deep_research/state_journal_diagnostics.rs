@@ -1,3 +1,9 @@
+use super::super::deep_research_artifacts::{
+    materialize_deep_research_acquisition_recovery_report,
+    recover_deep_research_publication_receipt, DeepResearchEvidenceFirstPublication,
+    ResearchReportArtifacts,
+};
+use super::super::deep_research_workflow_store::recover_deep_research_bootstrap_acquisition_from_store;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,7 +25,9 @@ pub(crate) async fn research_diagnostic(
         let projection = journal.projection()?;
         (journal.runtime, projection)
     } else {
-        load_latest_journal(workspace).await?
+        load_latest_journal(workspace)
+            .await?
+            .context("no DeepResearch event journal was found")?
     };
     let head = graph_event_head(runtime.events()).unwrap_or("none");
     let cited_sources = projection
@@ -27,12 +35,16 @@ pub(crate) async fn research_diagnostic(
         .map(|count| count.to_string())
         .unwrap_or_else(|| "not audited".to_string());
     let common = format!(
-        "DeepResearch run {}\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\nactive: {} steps · {} children\ncited sources: {}",
+        "DeepResearch run {}\noutcome: {}\nevidence: {} accepted · {} sources · {} claims\ntyped graph: {} relations · {} derivations · {} basis edges · {} gaps\nactive: {} steps · {} children\ncited sources: {}",
         projection.run_id,
         outcome_name(projection.outcome),
         projection.accepted_evidence_count,
         projection.source_count,
         projection.claim_count,
+        projection.accepted_relation_count,
+        projection.accepted_derivation_count,
+        projection.accepted_basis_edge_count,
+        projection.accepted_gap_count,
         projection.active_steps.len(),
         projection.active_children.len(),
         cited_sources,
@@ -229,35 +241,41 @@ fn summarize_relation_diff(diff: &a3s_code_core::state_graph::GraphDiff) -> Stri
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ResearchRecoveryDisposition {
+    PublicationPreserved {
+        artifacts: ResearchReportArtifacts,
+        outcome: ResearchOutcome,
+    },
+    AcquisitionPreserved {
+        artifacts: ResearchReportArtifacts,
+    },
+    FailedWithoutRecoverableAcquisition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResearchRecoverySummary {
     pub(crate) run_id: String,
     pub(crate) cancel_children: Vec<String>,
     pub(crate) orphaned_children: Vec<String>,
+    pub(crate) disposition: ResearchRecoveryDisposition,
 }
 
 pub(crate) async fn reconcile_interrupted_latest_run(
     workspace: &Path,
     running_tracker_children: &HashSet<String>,
 ) -> Result<Option<ResearchRecoverySummary>> {
-    let (runtime, projection) = match load_latest_journal(workspace).await {
-        Ok(value) => value,
-        Err(error)
-            if error.to_string().contains("no DeepResearch event journal")
-                || error
-                    .to_string()
-                    .contains("no DeepResearch event journal was found") =>
-        {
-            return Ok(None)
-        }
-        Err(error) => return Err(error),
+    let Some((runtime, projection)) = load_latest_journal(workspace).await? else {
+        return Ok(None);
     };
     if projection.outcome.is_terminal() {
         return Ok(None);
     }
-    let host_pid = runtime
+    let persisted_spec = runtime
         .graph()
         .object(&spec_object_id(&projection.run_id))
-        .and_then(|object| serde_json::from_value::<ResearchSpec>(object.data.clone()).ok())
+        .and_then(|object| serde_json::from_value::<ResearchSpec>(object.data.clone()).ok());
+    let host_pid = persisted_spec
+        .as_ref()
         .map(|spec| spec.host_pid)
         .unwrap_or_default();
     if host_pid > 0 && process_is_alive(host_pid) {
@@ -278,6 +296,23 @@ pub(crate) async fn reconcile_interrupted_latest_run(
     cancel_children.sort();
     orphaned_children.sort();
     let run_id = projection.run_id;
+    let recovered_publication = persisted_spec
+        .as_ref()
+        .map(|spec| recover_deep_research_publication_receipt(workspace, &spec.query, &run_id))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .flatten();
+    let preserved_acquisition = if recovered_publication.is_none() {
+        persisted_spec
+            .as_ref()
+            .map(|spec| preserve_interrupted_bootstrap_acquisition(workspace, &run_id, &spec.query))
+            .transpose()?
+            .flatten()
+    } else {
+        None
+    };
+    let publication_preserved = recovered_publication.is_some();
+    let bootstrap_acquisition_preserved = preserved_acquisition.is_some();
     append_event_with_retry(
         workspace,
         &run_id,
@@ -290,30 +325,79 @@ pub(crate) async fn reconcile_interrupted_latest_run(
                 "cancelled_children": cancel_children,
                 "orphaned_children": orphaned_children,
                 "reason": "host restarted without a valid parent operation lease",
+                "publication_preserved": publication_preserved,
+                "bootstrap_acquisition_preserved": bootstrap_acquisition_preserved,
             }),
         },
     )
     .await?;
-    append_event_with_retry(
-        workspace,
-        &run_id,
-        ResearchDomainEvent {
-            source: "recovery".to_string(),
-            source_sequence: 2,
-            source_event_id: format!("{run_id}:recovery:failed"),
-            name: "research.run.failed".to_string(),
-            payload: serde_json::json!({
-                "outcome": "failed",
-                "reason": "host restarted without a valid parent operation lease",
-            }),
-        },
-    )
-    .await?;
+    let disposition = if let Some(publication) = recovered_publication {
+        let outcome = match publication.publication {
+            DeepResearchEvidenceFirstPublication::Synthesized => ResearchOutcome::Completed,
+            DeepResearchEvidenceFirstPublication::Qualified => ResearchOutcome::Qualified,
+            DeepResearchEvidenceFirstPublication::SourceBacked
+            | DeepResearchEvidenceFirstPublication::NoEvidence => ResearchOutcome::Degraded,
+        };
+        record_validated_publication_terminal(
+            workspace,
+            &run_id,
+            outcome,
+            &publication.artifacts,
+            &publication.quality,
+        )
+        .await?;
+        ResearchRecoveryDisposition::PublicationPreserved {
+            artifacts: publication.artifacts,
+            outcome,
+        }
+    } else if let Some(artifacts) = preserved_acquisition {
+        record_run_terminal(
+            workspace,
+            &run_id,
+            ResearchOutcome::Degraded,
+            Some(&artifacts),
+        )
+        .await?;
+        ResearchRecoveryDisposition::AcquisitionPreserved { artifacts }
+    } else {
+        record_run_terminal(workspace, &run_id, ResearchOutcome::Failed, None).await?;
+        ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition
+    };
     Ok(Some(ResearchRecoverySummary {
         run_id,
         cancel_children,
         orphaned_children,
+        disposition,
     }))
+}
+
+fn preserve_interrupted_bootstrap_acquisition(
+    workspace: &Path,
+    root_run_id: &str,
+    query: &str,
+) -> Result<Option<ResearchReportArtifacts>> {
+    let bootstrap_run_id = format!("{root_run_id}-bootstrap");
+    let args = serde_json::json!({
+        "run_id": bootstrap_run_id,
+        "input": {
+            "query": query,
+        },
+    });
+    let Some(recovered) = recover_deep_research_bootstrap_acquisition_from_store(workspace, &args)
+    else {
+        return Ok(None);
+    };
+    let Some(output) = recovered.output.as_deref() else {
+        return Ok(None);
+    };
+    materialize_deep_research_acquisition_recovery_report(
+        workspace,
+        query,
+        root_run_id,
+        output,
+        Some(&recovered.metadata),
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 fn process_is_alive(pid: u32) -> bool {
@@ -336,7 +420,9 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
-async fn load_latest_journal(workspace: &Path) -> Result<(GraphRuntime, ResearchRunProjection)> {
+async fn load_latest_journal(
+    workspace: &Path,
+) -> Result<Option<(GraphRuntime, ResearchRunProjection)>> {
     if let Some(checkpoint) = load_latest_checkpoint(workspace).await {
         if let Some(journal) = DeepResearchStateJournal::open(workspace, &checkpoint.run_id).await?
         {
@@ -345,17 +431,19 @@ async fn load_latest_journal(workspace: &Path) -> Result<(GraphRuntime, Research
                 && journal.runtime.events().len() == checkpoint.event_count
                 && journal.projection()? == checkpoint.projection
             {
-                return Ok((journal.runtime, checkpoint.projection));
+                return Ok(Some((journal.runtime, checkpoint.projection)));
             }
         }
     }
     let root = store_root(workspace);
-    let mut entries = tokio::fs::read_dir(&root).await.with_context(|| {
-        format!(
-            "no DeepResearch event journal found under `{}`",
-            root.display()
-        )
-    })?;
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read DeepResearch journal root `{}`", root.display()))
+        }
+    };
     let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
@@ -374,7 +462,9 @@ async fn load_latest_journal(workspace: &Path) -> Result<(GraphRuntime, Research
             latest = Some((modified, path));
         }
     }
-    let (_, path) = latest.context("no DeepResearch event journal was found")?;
+    let Some((_, path)) = latest else {
+        return Ok(None);
+    };
     let bytes = tokio::fs::read(&path).await?;
     let events: Vec<GraphEventRecord> =
         serde_json::from_slice(&bytes).with_context(|| format!("decode `{}`", path.display()))?;
@@ -386,7 +476,7 @@ async fn load_latest_journal(workspace: &Path) -> Result<(GraphRuntime, Research
         .find(|object| object.object_type == RUN_OBJECT_TYPE)
         .context("latest DeepResearch graph has no run projection")?;
     let projection = serde_json::from_value(object.data.clone())?;
-    Ok((runtime, projection))
+    Ok(Some((runtime, projection)))
 }
 
 pub(super) async fn load_latest_checkpoint(workspace: &Path) -> Option<ResearchCheckpoint> {
