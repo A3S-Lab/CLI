@@ -163,7 +163,10 @@ mod tests {
             .body_json::<serde_json::Value>()
             .expect("decode target snapshot");
         assert_eq!(targets["schemaVersion"], 1);
-        assert_eq!(targets["items"], serde_json::json!([]));
+        assert!(
+            targets["items"].is_array(),
+            "system-agent discovery is host-dependent but must return an item array"
+        );
         assert_eq!(targets["warnings"], serde_json::json!([]));
 
         app.shutdown().await.expect("shutdown Code Web application");

@@ -209,40 +209,6 @@ pub(super) async fn acquire(
             }
         }
     }
-    if matches!(
-        planning.strategy,
-        EvaluationStrategy::Minimal | EvaluationStrategy::Brief
-    ) && selected_candidates.len() < budget.max_acquired_sources
-    {
-        let remaining = budget
-            .max_acquired_sources
-            .saturating_sub(selected_candidates.len());
-        let follow_candidates = github_readme_follow_candidates(&sources, &selected_candidates)
-            .into_iter()
-            .take(remaining)
-            .collect::<Vec<_>>();
-        let first_source_ordinal = selected_candidates.len().saturating_add(1);
-        selected_candidates.extend(follow_candidates.iter().cloned());
-        let followed = join_all(follow_candidates.into_iter().enumerate().map(
-            |(offset, selected)| {
-                fetch_selected(
-                    session,
-                    selected,
-                    budget,
-                    format!("source-{}", first_source_ordinal.saturating_add(offset)),
-                    output_dir,
-                    run_started,
-                )
-            },
-        ))
-        .await;
-        for followed in followed {
-            match followed {
-                Ok(source) => sources.push(source),
-                Err(failure) => failures.push(failure),
-            }
-        }
-    }
     let source_elapsed_ms =
         bootstrap_source_elapsed_ms.saturating_add(source_started.elapsed().as_millis() as u64);
     sources.sort_by_key(|source| source.fetch_completed_ms);
@@ -295,29 +261,8 @@ fn attach_preferred_candidates(discoveries: &mut [QueryDiscovery]) {
                 .preferred_sources
                 .iter()
                 .filter(|preference| preference.kind == PreferredSourceKind::Repository)
-                .filter_map(|preference| {
-                    let (owner, repository) = preference.value.split_once('/')?;
-                    github_blob_anchor(owner, repository, "HEAD", "README.md")
-                }),
+                .filter_map(|preference| github_repository_anchor(&preference.value)),
         );
-        if discovery
-            .query
-            .text
-            .split(|character: char| !character.is_alphanumeric())
-            .any(|term| matches!(term.to_ascii_lowercase().as_str(), "release" | "releases"))
-        {
-            preferred_urls.extend(
-                discovery
-                    .query
-                    .preferred_sources
-                    .iter()
-                    .filter(|preference| preference.kind == PreferredSourceKind::Repository)
-                    .filter_map(|preference| {
-                        let (owner, repository) = preference.value.split_once('/')?;
-                        github_releases_anchor(owner, repository)
-                    }),
-            );
-        }
         let mut known = discovery
             .candidates
             .iter()
@@ -328,9 +273,9 @@ fn attach_preferred_candidates(discoveries: &mut [QueryDiscovery]) {
                 continue;
             }
             discovery.candidates.push(SourceCandidate {
-                title: preferred_url_title(&anchor),
+                title: anchor.clone(),
                 anchor,
-                preview: discovery.query.text.clone(),
+                preview: String::new(),
                 provider_score: 0.0,
                 transport: AcquisitionTransport::Web,
             });
@@ -338,107 +283,15 @@ fn attach_preferred_candidates(discoveries: &mut [QueryDiscovery]) {
     }
 }
 
-fn preferred_url_title(anchor: &str) -> String {
-    reqwest::Url::parse(anchor)
-        .ok()
-        .and_then(|url| {
-            url.path_segments()?
-                .rfind(|segment| !segment.is_empty())
-                .map(str::to_string)
-        })
-        .filter(|title| !title.is_empty())
-        .unwrap_or_else(|| anchor.to_string())
-}
-
-fn github_readme_follow_candidates(
-    sources: &[AcquiredSource],
-    selected: &[SelectedCandidate],
-) -> Vec<SelectedCandidate> {
-    let mut known = selected
-        .iter()
-        .map(|selected| canonical_anchor_key(&selected.candidate.anchor))
-        .collect::<BTreeSet<_>>();
-    sources
-        .iter()
-        .filter_map(|source| {
-            let (owner, repository) = github_repository_root(&source.canonical_anchor)
-                .or_else(|| github_repository_root(&source.requested_anchor))?;
-            let content = source.content();
-            if !content.contains("README.md") {
-                return None;
-            }
-            let default_branch = extract_json_string(&content, "\"refInfo\":{\"name\":\"")?;
-            let anchor = github_blob_anchor(&owner, &repository, &default_branch, "README.md")?;
-            if !known.insert(canonical_anchor_key(&anchor)) {
-                return None;
-            }
-            Some(SelectedCandidate {
-                candidate: SourceCandidate {
-                    title: "README.md".to_string(),
-                    anchor,
-                    preview:
-                        "Repository README followed from the fetched canonical repository root"
-                            .to_string(),
-                    provider_score: 0.0,
-                    transport: AcquisitionTransport::Web,
-                },
-                edges: source.provenance.clone(),
-            })
-        })
-        .collect()
-}
-
-fn github_repository_root(anchor: &str) -> Option<(String, String)> {
-    let url = reqwest::Url::parse(anchor).ok()?;
-    if url.host_str()? != "github.com" {
+fn github_repository_anchor(value: &str) -> Option<String> {
+    let mut identity = value.split('/');
+    let owner = identity.next()?;
+    let repository = identity.next()?;
+    if owner.is_empty() || repository.is_empty() || identity.next().is_some() {
         return None;
     }
-    let segments = url
-        .path_segments()?
-        .filter(|segment| !segment.is_empty())
-        .collect::<Vec<_>>();
-    match segments.as_slice() {
-        [owner, repository] => Some((owner.to_string(), repository.to_string())),
-        _ => None,
-    }
-}
-
-fn extract_json_string(content: &str, marker: &str) -> Option<String> {
-    let remainder = content.split_once(marker)?.1;
-    let value = remainder.split_once('"')?.0;
-    (!value.is_empty()
-        && value.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-' | '/')
-        }))
-    .then(|| value.to_string())
-}
-
-fn github_blob_anchor(
-    owner: &str,
-    repository: &str,
-    reference: &str,
-    path: &str,
-) -> Option<String> {
     let mut url = reqwest::Url::parse("https://github.com").ok()?;
-    url.path_segments_mut()
-        .ok()?
-        .push(owner)
-        .push(repository)
-        .push("blob")
-        .push(reference);
-    for segment in path.split('/').filter(|segment| !segment.is_empty()) {
-        url.path_segments_mut().ok()?.push(segment);
-    }
-    Some(url.to_string())
-}
-
-fn github_releases_anchor(owner: &str, repository: &str) -> Option<String> {
-    let mut url = reqwest::Url::parse("https://github.com").ok()?;
-    url.path_segments_mut()
-        .ok()?
-        .push(owner)
-        .push(repository)
-        .push("releases");
+    url.path_segments_mut().ok()?.push(owner).push(repository);
     Some(url.to_string())
 }
 
@@ -579,136 +432,19 @@ fn bootstrap_query(input: &PlannerInput) -> AcquisitionQuery {
     };
     let text = match transport {
         AcquisitionTransport::Web => input.query.clone(),
-        AcquisitionTransport::Workspace => workspace_bootstrap_pattern(&input.query),
-    };
-    let (path, glob) = if transport == AcquisitionTransport::Workspace
-        && workspace_code_ownership_request(&input.query)
-    {
-        ("src".to_string(), "*.rs".to_string())
-    } else {
-        (String::new(), String::new())
+        AcquisitionTransport::Workspace => r"\S".to_string(),
     };
     AcquisitionQuery {
         id: "query.bootstrap".to_string(),
         text,
         transport,
-        path,
-        glob,
+        path: String::new(),
+        glob: String::new(),
         dimension_ids: Vec::new(),
         source_target_ids: Vec::new(),
         preferred_sources: Vec::new(),
         fetch_slots: 0,
     }
-}
-
-fn workspace_code_ownership_request(request: &str) -> bool {
-    let lower = request.to_ascii_lowercase();
-    let repository_scope = lower.contains("repository")
-        || lower.contains("codebase")
-        || request.contains("仓库")
-        || request.contains("代码库");
-    let code_signal = [
-        "cli",
-        "tui",
-        "call site",
-        "call path",
-        "entrypoint",
-        "handler",
-        "runtime",
-        "local files",
-    ]
-    .into_iter()
-    .any(|term| lower.contains(term))
-        || ["调用", "入口", "实现", "源码"]
-            .into_iter()
-            .any(|term| request.contains(term));
-    repository_scope && code_signal
-}
-
-fn workspace_bootstrap_pattern(request: &str) -> String {
-    const GENERIC: &[&str] = &[
-        "and",
-        "are",
-        "cite",
-        "does",
-        "for",
-        "its",
-        "the",
-        "this",
-        "that",
-        "from",
-        "through",
-        "with",
-        "into",
-        "repository",
-        "trace",
-        "active",
-        "path",
-        "paths",
-        "local",
-        "file",
-        "files",
-        "own",
-        "owns",
-        "each",
-        "every",
-        "transition",
-        "transitions",
-        "identify",
-        "which",
-        "where",
-        "what",
-        "when",
-        "code",
-    ];
-    let mut seen = BTreeSet::new();
-    let terms = request
-        .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .filter_map(|term| {
-            let normalized = term.trim_matches('_');
-            if normalized.chars().count() < 3
-                || GENERIC.contains(&normalized.to_ascii_lowercase().as_str())
-            {
-                return None;
-            }
-            let pattern = camel_case_pattern(normalized);
-            seen.insert(pattern.clone()).then_some(pattern)
-        })
-        .take(24)
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        ".+".to_string()
-    } else {
-        terms.join("|")
-    }
-}
-
-fn camel_case_pattern(value: &str) -> String {
-    let mut words = Vec::new();
-    let mut current = String::new();
-    let mut previous_lowercase = false;
-    for character in value.chars() {
-        if character == '_' || character == '-' {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            previous_lowercase = false;
-            continue;
-        }
-        if character.is_uppercase() && previous_lowercase && !current.is_empty() {
-            words.push(std::mem::take(&mut current));
-        }
-        previous_lowercase = character.is_lowercase();
-        current.push(character.to_ascii_lowercase());
-    }
-    if !current.is_empty() {
-        words.push(current);
-    }
-    words
-        .iter()
-        .map(|word| regex::escape(word))
-        .collect::<Vec<_>>()
-        .join("[_-]?")
 }
 
 async fn discover_query(
@@ -926,42 +662,7 @@ async fn discover_workspace(
 }
 
 fn workspace_content_search_patterns(pattern: &str) -> Vec<String> {
-    if workspace_code_trace_pattern(pattern) {
-        return [
-            "SubmissionIntent|parse_deep_research_tui_query|execute_deepresearch|parse_deepresearch_args",
-            "start_deep_research_workflow|run_deepresearch_inquiry|spawn_deep_research|deep_research_workflow",
-            "bootstrap_acquisition|inquiry_runtime|retrieval|accepted_evidence|admit.*evidence|evidence_ledger",
-            "report_generation|sectioned_report|materialize.*report|generate.*report",
-            "publication|publish|write_research_report|replace_staged",
-            "stage_deep_research_report|open_pending_deep_research_report_view|open_remote_view|open_window_with|local_file_view",
-            "LegacyCheckedLoop|legacy|compatibility|replay",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect();
-    }
-    vec![focused_workspace_search_pattern(pattern)]
-}
-
-fn workspace_code_trace_pattern(pattern: &str) -> bool {
-    const SIGNALS: &[&str] = &[
-        "submission",
-        "acquisition",
-        "evidence",
-        "report",
-        "publication",
-        "browser",
-        "legacy",
-    ];
-    let alternatives = top_level_regex_alternatives(pattern)
-        .into_iter()
-        .map(normalize_workspace_pattern)
-        .collect::<BTreeSet<_>>();
-    SIGNALS
-        .iter()
-        .filter(|signal| alternatives.contains(**signal))
-        .count()
-        >= 5
+    vec![pattern.to_string()]
 }
 
 fn merge_workspace_candidate_preview(existing: &mut String, additional: &str) {
@@ -975,126 +676,6 @@ fn merge_workspace_candidate_preview(existing: &mut String, additional: &str) {
         }
     }
     *existing = lines.join("\n").chars().take(1_000).collect::<String>();
-}
-
-fn focused_workspace_search_pattern(pattern: &str) -> String {
-    let alternatives = top_level_regex_alternatives(pattern);
-    const BOUNDARY_PRIORITY: &[&str] = &[
-        "legacy",
-        "inactive",
-        "deprecated",
-        "compatibility",
-        "browser",
-        "opening",
-        "publication",
-        "publish",
-        "submission",
-        "settlement",
-        "settle",
-    ];
-    let boundaries = BOUNDARY_PRIORITY
-        .iter()
-        .filter_map(|boundary| {
-            alternatives
-                .iter()
-                .find(|alternative| normalize_workspace_pattern(alternative) == *boundary)
-                .copied()
-        })
-        .take(6)
-        .collect::<Vec<_>>();
-    if boundaries.len() >= 2 {
-        return boundaries.join("|");
-    }
-
-    let identifiers = alternatives
-        .iter()
-        .filter(|alternative| {
-            alternative.contains("[_-]?") || alternative.contains('_') || alternative.contains('-')
-        })
-        .map(|alternative| normalize_workspace_pattern(alternative))
-        .collect::<BTreeSet<_>>();
-    if !identifiers.is_empty() {
-        let selected = alternatives
-            .iter()
-            .filter(|alternative| identifiers.contains(&normalize_workspace_pattern(alternative)))
-            .copied()
-            .collect::<Vec<_>>();
-        if !selected.is_empty() {
-            return selected.join("|");
-        }
-    }
-
-    const GENERIC: &[&str] = &[
-        "active",
-        "cli",
-        "code",
-        "evidence",
-        "file",
-        "files",
-        "generation",
-        "handling",
-        "inactive",
-        "legacy",
-        "open",
-        "report",
-        "research",
-        "source",
-        "sources",
-        "submission",
-        "tui",
-    ];
-    let focused = alternatives
-        .iter()
-        .copied()
-        .filter(|alternative| !GENERIC.contains(&normalize_workspace_pattern(alternative).as_str()))
-        .collect::<Vec<_>>();
-    if focused.is_empty() {
-        pattern.to_string()
-    } else {
-        focused.join("|")
-    }
-}
-
-fn top_level_regex_alternatives(pattern: &str) -> Vec<&str> {
-    let mut alternatives = Vec::new();
-    let mut start = 0usize;
-    let mut parenthesis_depth = 0usize;
-    let mut in_character_class = false;
-    let mut escaped = false;
-    for (index, character) in pattern.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            '[' => in_character_class = true,
-            ']' => in_character_class = false,
-            '(' if !in_character_class => parenthesis_depth += 1,
-            ')' if !in_character_class => parenthesis_depth = parenthesis_depth.saturating_sub(1),
-            '|' if !in_character_class && parenthesis_depth == 0 => {
-                let alternative = pattern[start..index].trim();
-                if !alternative.is_empty() {
-                    alternatives.push(alternative);
-                }
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let alternative = pattern[start..].trim();
-    if !alternative.is_empty() {
-        alternatives.push(alternative);
-    }
-    alternatives
-}
-
-fn normalize_workspace_pattern(pattern: &str) -> String {
-    pattern
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|character| character.to_ascii_lowercase())
-        .collect()
 }
 
 fn workspace_inventory_pattern(glob: &str) -> String {
@@ -1490,29 +1071,12 @@ fn source_chunks(content: &str) -> Vec<JsonValue> {
 mod brief_workspace_tests {
     use super::{
         attach_preferred_candidates, bootstrap_query, fetched_source_content,
-        focused_workspace_search_pattern, github_raw_blob_anchor, github_readme_follow_candidates,
-        source_chunks, top_level_regex_alternatives, workspace_bootstrap_pattern,
-        workspace_candidate_preview, workspace_code_trace_pattern,
+        github_raw_blob_anchor, source_chunks, workspace_candidate_preview,
         workspace_content_search_patterns, workspace_inventory_paths, workspace_inventory_pattern,
-        workspace_inventory_request, AcquiredSource, AcquisitionQuery, AcquisitionTransport,
-        EvidenceScope, PlannerInput, PreferredSourceKind, QueryDiscovery, SelectedCandidate,
-        SelectionEdge, SourceCandidate, SourcePreference,
+        workspace_inventory_request, AcquisitionQuery, AcquisitionTransport, EvidenceScope,
+        PlannerInput, PreferredSourceKind, QueryDiscovery, SourceCandidate, SourcePreference,
     };
     use crate::commands::code::research_runtime::tests::baseline::live::corpus::PlannerBudget;
-
-    #[test]
-    fn workspace_bootstrap_keeps_late_ownership_terms_and_normalizes_camel_case() {
-        let pattern = workspace_bootstrap_pattern(
-            "In this repository, trace the active DeepResearch path from CLI or TUI submission through acquisition, evidence handling, report generation, artifact publication, browser opening, and inactive legacy paths.",
-        );
-        assert!(pattern.contains("deep[_-]?research"), "{pattern}");
-        assert!(pattern.contains("acquisition"), "{pattern}");
-        assert!(pattern.contains("publication"), "{pattern}");
-        assert!(pattern.contains("browser"), "{pattern}");
-        assert!(pattern.contains("legacy"), "{pattern}");
-        assert!(!pattern.contains("repository"), "{pattern}");
-        assert!(!pattern.contains("|this|"), "{pattern}");
-    }
 
     #[test]
     fn workspace_preview_retains_only_the_candidate_match_context() {
@@ -1564,69 +1128,9 @@ mod brief_workspace_tests {
     }
 
     #[test]
-    fn focused_workspace_pattern_preserves_grouped_alternation() {
+    fn workspace_search_uses_the_validated_pattern_without_interpreting_it() {
         let pattern = "evidence|acqui(sition|re)|admit";
-        assert_eq!(
-            top_level_regex_alternatives(pattern),
-            vec!["evidence", "acqui(sition|re)", "admit"]
-        );
-        assert_eq!(
-            focused_workspace_search_pattern(pattern),
-            "acqui(sition|re)|admit"
-        );
-    }
-
-    #[test]
-    fn focused_workspace_pattern_prioritizes_rare_transition_boundaries() {
-        assert_eq!(
-            focused_workspace_search_pattern(
-                "deep[_-]?research|submission|acquisition|publication|browser|opening|inactive|legacy"
-            ),
-            "legacy|inactive|browser|opening|publication|submission"
-        );
-    }
-
-    #[test]
-    fn focused_workspace_pattern_keeps_identifiers_without_multiple_boundaries() {
-        assert_eq!(
-            focused_workspace_search_pattern(
-                "parse_deep_research_tui_query|start_deep_research_workflow|submit|launch"
-            ),
-            "parse_deep_research_tui_query|start_deep_research_workflow"
-        );
-    }
-
-    #[test]
-    fn workspace_code_trace_searches_each_owner_role_independently() {
-        let pattern = "deep[_-]?research|cli|tui|submission|acquisition|evidence|report|artifact|publication|browser|opening|inactive|legacy";
-        assert!(workspace_code_trace_pattern(pattern));
-        assert_eq!(
-            workspace_content_search_patterns(pattern),
-            vec![
-                "SubmissionIntent|parse_deep_research_tui_query|execute_deepresearch|parse_deepresearch_args",
-                "start_deep_research_workflow|run_deepresearch_inquiry|spawn_deep_research|deep_research_workflow",
-                "bootstrap_acquisition|inquiry_runtime|retrieval|accepted_evidence|admit.*evidence|evidence_ledger",
-                "report_generation|sectioned_report|materialize.*report|generate.*report",
-                "publication|publish|write_research_report|replace_staged",
-                "stage_deep_research_report|open_pending_deep_research_report_view|open_remote_view|open_window_with|local_file_view",
-                "LegacyCheckedLoop|legacy|compatibility|replay",
-            ]
-        );
-        assert!(!workspace_code_trace_pattern(
-            "report|artifact|publish|browser|open"
-        ));
-    }
-
-    #[test]
-    fn focused_workspace_pattern_drops_only_high_volume_generic_terms() {
-        assert_eq!(
-            focused_workspace_search_pattern("report|artifact|publish|browser|open"),
-            "browser|publish"
-        );
-        assert_eq!(
-            focused_workspace_search_pattern("evidence|acqui(sition|re)|admit"),
-            "acqui(sition|re)|admit"
-        );
+        assert_eq!(workspace_content_search_patterns(pattern), [pattern]);
     }
 
     #[test]
@@ -1660,10 +1164,10 @@ mod brief_workspace_tests {
     }
 
     #[test]
-    fn workspace_code_bootstrap_inventories_only_production_rust_sources() {
-        let query = bootstrap_query(&PlannerInput {
+    fn workspace_bootstrap_is_independent_of_request_prose() {
+        let input = |query: &str| PlannerInput {
             schema: "test".to_string(),
-            query: "In this repository, trace the active DeepResearch path from CLI or TUI submission through acquisition, evidence handling, report generation, artifact publication, and browser opening.".to_string(),
+            query: query.to_string(),
             report_language: "en".to_string(),
             current_date: "2026-07-22".to_string(),
             display_utc_offset: "+08:00".to_string(),
@@ -1672,11 +1176,14 @@ mod brief_workspace_tests {
                 max_queries: 4,
                 max_acquired_sources: 8,
             },
-        });
-        assert_eq!(query.transport, AcquisitionTransport::Workspace);
-        assert_eq!(query.path, "src");
-        assert_eq!(query.glob, "*.rs");
-        assert!(query.text.contains("deep[_-]?research"), "{}", query.text);
+        };
+        let first = bootstrap_query(&input("trace one implementation"));
+        let second = bootstrap_query(&input("完全不同的本地研究请求"));
+        assert_eq!(first.transport, AcquisitionTransport::Workspace);
+        assert_eq!(first.text, r"\S");
+        assert_eq!(first.text, second.text);
+        assert!(first.path.is_empty());
+        assert!(first.glob.is_empty());
     }
 
     #[test]
@@ -1709,11 +1216,11 @@ mod brief_workspace_tests {
     }
 
     #[test]
-    fn repository_identity_gets_a_bounded_default_readme_candidate() {
-        let mut discoveries = vec![QueryDiscovery {
+    fn repository_identity_gets_one_exact_typed_root_candidate() {
+        let discovery = |text: &str| QueryDiscovery {
             query: AcquisitionQuery {
                 id: "q1".to_string(),
-                text: "Tokio canonical security policy".to_string(),
+                text: text.to_string(),
                 transport: AcquisitionTransport::Web,
                 path: String::new(),
                 glob: String::new(),
@@ -1728,41 +1235,23 @@ mod brief_workspace_tests {
             candidates: Vec::new(),
             error: None,
             elapsed_ms: 1,
-        }];
+        };
+        let mut discoveries = vec![
+            discovery("release words must remain inert"),
+            discovery("完全不同的查询正文"),
+        ];
         attach_preferred_candidates(&mut discoveries);
-        assert_eq!(discoveries[0].candidates.len(), 1);
+        assert!(discoveries
+            .iter()
+            .all(|discovery| discovery.candidates.len() == 1));
         assert_eq!(
             discoveries[0].candidates[0].anchor,
-            "https://github.com/tokio-rs/tokio/blob/HEAD/README.md"
+            "https://github.com/tokio-rs/tokio"
         );
-    }
-
-    #[test]
-    fn release_query_with_repository_identity_gets_a_releases_candidate() {
-        let mut discoveries = vec![QueryDiscovery {
-            query: AcquisitionQuery {
-                id: "q1".to_string(),
-                text: "Tokio newest release version".to_string(),
-                transport: AcquisitionTransport::Web,
-                path: String::new(),
-                glob: String::new(),
-                dimension_ids: vec!["release".to_string()],
-                source_target_ids: Vec::new(),
-                preferred_sources: vec![SourcePreference {
-                    kind: PreferredSourceKind::Repository,
-                    value: "tokio-rs/tokio".to_string(),
-                }],
-                fetch_slots: 0,
-            },
-            candidates: Vec::new(),
-            error: Some("search unavailable".to_string()),
-            elapsed_ms: 1,
-        }];
-        attach_preferred_candidates(&mut discoveries);
-        assert!(discoveries[0]
-            .candidates
-            .iter()
-            .any(|candidate| candidate.anchor == "https://github.com/tokio-rs/tokio/releases"));
+        assert_eq!(
+            discoveries[0].candidates[0].anchor,
+            discoveries[1].candidates[0].anchor
+        );
     }
 
     #[test]
@@ -1773,47 +1262,6 @@ mod brief_workspace_tests {
             )
             .as_deref(),
             Some("https://raw.githubusercontent.com/tokio-rs/tokio/tokio-1.47.x/tokio/Cargo.toml")
-        );
-    }
-
-    #[test]
-    fn fetched_repository_root_yields_default_branch_readme_follow() {
-        let root = "https://github.com/tokio-rs/tokio";
-        let edge = SelectionEdge {
-            query_id: "q1".to_string(),
-            source_target_id: None,
-            match_score: 1,
-        };
-        let sources = vec![AcquiredSource {
-            id: String::new(),
-            title: "Tokio".to_string(),
-            requested_anchor: root.to_string(),
-            canonical_anchor: root.to_string(),
-            transport: AcquisitionTransport::Web,
-            captured_at: "2026-07-22T00:00:00Z".to_string(),
-            provenance: vec![edge.clone()],
-            chunks: vec![serde_json::json!({
-                "id": "pending",
-                "text": "{\"refInfo\":{\"name\":\"master\"},\"path\":\"README.md\"}"
-            })],
-            fetch_completed_ms: 1,
-            persisted_ms: Some(2),
-        }];
-        let selected = vec![SelectedCandidate {
-            candidate: SourceCandidate {
-                title: "Tokio".to_string(),
-                anchor: root.to_string(),
-                preview: String::new(),
-                provider_score: 1.0,
-                transport: AcquisitionTransport::Web,
-            },
-            edges: vec![edge],
-        }];
-        let follows = github_readme_follow_candidates(&sources, &selected);
-        assert_eq!(follows.len(), 1);
-        assert_eq!(
-            follows[0].candidate.anchor,
-            "https://github.com/tokio-rs/tokio/blob/master/README.md"
         );
     }
 }

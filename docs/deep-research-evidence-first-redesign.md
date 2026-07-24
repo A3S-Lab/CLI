@@ -23,7 +23,8 @@ The terminal-authority rule remains central: report-generation failure must not
 erase fetched evidence, and the Host must own publication. Candidate selection
 controls bounded fetch opportunities, but claim evidence is admitted only by a
 closed semantic selection over fetched chunks. The Host then validates exact
-IDs, typed coverage, source roles, and publication provenance.
+IDs, track-relevance edges, completion-criterion coverage, source roles, and
+publication provenance.
 
 ## Implementation Boundary
 
@@ -42,8 +43,9 @@ The CLI owns only the A3S product adapter. `A3sDeepResearchRuntime` implements
 the engine's structured-generation, workflow-execution, publication, and
 progress ports by calling the existing AgentSession, Flow-backed workflow, and
 workspace artifact surfaces. A new evidence-first run crosses this boundary
-through one `DeepResearchEngine::execute` call. Compatibility-only Inquiry
-journal and sectioned-report code is not an alternate authority for that path.
+through one `DeepResearchEngine::execute` call. Typed Inquiry events may still
+be projected into the generic run journal for diagnostics; the former
+sectioned-report executor and report-resume transaction have been removed.
 
 ## Decision
 
@@ -52,10 +54,12 @@ calls. Once semantically admitted fetched text exists, the Host can publish a
 traceable degraded Markdown report and equivalent HTML site without waiting
 for a report writer, reviewer, repairer, or presentation model. Web acquisition
 uses one closed semantic candidate decision before fetch and one closed
-semantic evidence decision over fetched chunks. A failed candidate decision
-may choose bounded fallback URLs for transport resilience, but that fallback
-text remains audit-only unless the fetched-text selector admits its exact chunk
-IDs. Provider metadata never becomes evidence.
+semantic evidence protocol over fetched chunks. Small catalogs use one direct
+selector. Larger catalogs use complete source-local JSON windows capped at
+32 KiB and an exact-ID per-source reduction capped at four excerpts. A failed
+candidate decision may choose bounded fallback URLs for transport resilience,
+but that fallback text remains audit-only unless the fetched-text selector
+admits its exact chunk IDs. Provider metadata never becomes evidence.
 
 Source admission has no publisher allowlist, protected-host table,
 query-token-overlap score, language/script routing, or topic-specific branch.
@@ -67,16 +71,19 @@ that a completion criterion is closed.
 The normal path may make at most two attempts at one structured report proposal
 over a closed, Host-owned source packet: an initial attempt and one retry for a
 transient generation failure. This is an optional quality upgrade, not a
-terminal dependency. It receives no tools and no source URLs. The Host resolves
-source aliases, admits safe cited blocks, rebuilds the source ledger, and
-renders both artifacts. Exhausted attempts or invalid output select the
-deterministic source-backed report already prepared from the source catalog.
+terminal dependency. It receives no tools and no source URLs. The active
+`deep_research_typed_claim_graph` protocol proposes fact, inference, and
+recommendation claims; exact source/chunk support; basis and derivation edges;
+contradiction relations; and typed gaps. The Host compiles that graph into one
+`ReportDocument`, source ledger, and pair of renderings. Exhausted attempts or
+invalid output select the deterministic source-backed report already prepared
+from the source catalog.
 
 The following stages are not admitted to the active path:
 
 - model-authored planning before the original query is searched;
 - mandatory model evidence extraction;
-- per-source selection or per-question review generations;
+- open-ended per-source extraction or per-question review generations;
 - per-section writing;
 - model semantic self-audit;
 - model report repair, open-ended retries, or replay of a completed attempt; and
@@ -128,13 +135,13 @@ renderer branch. It was an authority error across the former control flow:
    but also starts an optional semantic planner and then commits the resulting
    plan into the required Inquiry contract.
 2. A valid raw acquisition packet is persisted, but publication cannot consume
-   that packet directly. The active path next requires one batched model
+   that packet directly. The former path next required one batched model
    extraction to convert raw source text into accepted evidence.
 3. When extraction fails, `extraction_workflow_output` correctly preserves the
    raw acquisition, but produces no accepted evidence. The TUI interprets an
    empty accepted-evidence ledger as terminal degradation, while the CLI
    rejects any output without a reportable Outlining Inquiry.
-4. When extraction succeeds, publication still requires the legacy sectioned
+4. When extraction succeeds, publication still required the legacy sectioned
    report transaction. That transaction fans out through section writing,
    revision, editorial/guidance/presentation framing, semantic audit, and
    repair or resume paths before the Markdown/HTML pair becomes publishable.
@@ -164,8 +171,8 @@ durable fetched source text
   -> publishable Markdown/HTML
 
 optional model proposal
-  -> Host admission
-  -> replace selected report blocks only when valid
+  -> typed claim-graph admission
+  -> replace the staged document only with an admitted graph
 ```
 
 This audit rejects the following as root-cause fixes:
@@ -199,10 +206,10 @@ merge bootstrap + supplemental evidence under Host budgets
 durable Host source catalog
   |
   |-- stage deterministic extractive Markdown + HTML
-  `-- optional closed report proposal (initial attempt + one retry)
+  `-- optional typed claim graph (initial attempt + one retry)
           |-- failed or timed out ---------------------------|
-          |-- invalid blocks removed by Host ----------------|
-          `-- valid cited blocks retained                    |
+          |-- invalid graph items removed by Host ------------|
+          `-- valid claims, relations, and gaps retained -----|
                                                               v
 Host-owned report document + source ledger
   |
@@ -233,7 +240,10 @@ The planner cannot return URLs, seed sites, facts, answers, stop conditions, or
 budgets. The Host prepends the unchanged exact query, rejects blank,
 duplicate, whitespace-mutated, or URL-shaped supplements, and caps the complete
 query set at four. Planning failure produces one generic track and the exact
-query only. That fallback deliberately performs no topic inference.
+query only. Unknown semantic breadth and temporal intent select the stronger
+publication contract: the fallback is always `comprehensive` and
+`freshness_required = true`. That fallback deliberately performs no topic or
+freshness inference from query text.
 
 Planned retrieval reuses the durable bootstrap packet. If bootstrap retained
 web evidence, the planned pass skips the exact query and searches only the
@@ -260,15 +270,18 @@ edges. Fallback web text remains audit-only unless this selector admits it.
 Partial relevance may retain a useful chunk without manufacturing complete
 criterion coverage. PDF extraction may use three trusted ranges; ordinary HTML
 uses the initial range plus at most one trusted continuation so hydration and
-navigation tails cannot consume the closed chunk catalog.
+navigation tails cannot consume the closed chunk catalog. When a selector
+packet would exceed 32 KiB, the Host partitions it only by source identity and
+UTF-8 byte budget. Every source-local window is semantically considered, and a
+closed exact-ID reduction chooses at most four retained excerpts for that
+source.
 
 Provider result titles, snippets, ranks, engine names, and dates remain
-acquisition metadata. Only safely fetched, sanitized, semantically admitted
-text becomes report evidence. Script/style/noscript payloads, JavaScript
-placeholder pages, navigation piles, escaped hydration data, high-density
-serialized application state, template expressions, image syntax, and inline
-transport URLs are removed before publication while visible source-link labels
-survive. Sources that lack closed semantic-selection provenance remain
+acquisition metadata. Only safely fetched, structurally bounded, semantically
+admitted text becomes report evidence. Sanitization removes element blocks,
+markup, control characters, and inline transport targets through structural
+parsing and fixed byte limits; it does not classify visible text by
+vocabulary. Sources that lack closed semantic-selection provenance remain
 auditable but cannot support conclusions. The Rust publication boundary
 revalidates exact selection mode, source IDs, chunk IDs, criterion indexes, and
 the durable source-role wire shape. Every source record owns:
@@ -278,15 +291,16 @@ the durable source-role wire shape. Every source record owns:
 - reader-facing title;
 - capture time and acquisition provenance;
 - bounded immutable text chunks; and
-- typed obligation and source-role coverage; and
+- typed obligation relevance plus separate completion-criterion and source-role
+  coverage; and
 - a content digest.
 
 Successful siblings survive search or fetch failures. Source persistence is
-not conditional on a later model assigning a semantic role or producing an
-accepted claim. Community and streaming hosts, plus self-publishing pages whose
-disclaimer assigns views only to the author or describes the platform as
-storage, remain visible as bounded evidence when useful but are ineligible to
-support report conclusions.
+not conditional on a later report proposal. Eligibility and source roles come
+only from the closed semantic selection: exact obligation-relevance edges admit
+atomic claims, while separate criterion-scoped coverage edges carry completion
+and role information. Host, publisher, title, path, and provider vocabulary
+carry no authority.
 
 The Host has no query keyword table, domain classifier, named-entity branch, or
 topic-specific retrieval template. Topic meaning belongs to the bounded
@@ -298,10 +312,10 @@ For every non-empty fetched source catalog, the Host stages a complete report
 without model output. It contains:
 
 - the user query as the bounded title or subject;
-- a localized explanation that synthesis did not complete when fallback is
-  selected;
-- source-grouped verbatim excerpts selected by query overlap and document
-  position;
+- a protocol-defined explanation that synthesis did not complete when fallback
+  is selected;
+- source-grouped excerpts admitted by exact chunk IDs and retained in source
+  order;
 - exact canonical source links;
 - explicit acquisition and evidence limitations; and
 - a deduplicated source ledger.
@@ -323,22 +337,23 @@ not to claim that excerpts are equivalent to analysis.
 
 ## 3. Optional Closed Report Generation
 
-One structured report proposal receives:
+One `deep_research_typed_claim_graph` proposal receives:
 
-- the exact query and query language;
-- the planner-declared, Host-validated `focused` or `comprehensive` scope;
-- the validated evidence tracks and their completion criteria;
-- bounded titles and as many as four highest-ranked readable chunks from each
-  source that passed closed semantic evidence selection;
-- explicit Host-owned minimum-quality metrics and evidence-coverage targets for
-  comprehensive requests;
-- the count, but not the content, of excluded ineligible sources;
-- opaque source aliases, but no URLs; and
-- a small report contract.
+- the exact query, current date, and validated report scope;
+- the frozen material dimensions;
+- bounded titles and at most four exact admitted chunks from each source that
+  passed closed semantic evidence selection;
+- opaque dimension, source, and chunk IDs, but no publication authority; and
+- the closed fact, inference, recommendation, relation, derivation, and gap
+  schema.
 
 It receives no tools. Source content is explicitly untrusted evidence data.
-The model may cite only exact Host aliases in structured `source_aliases`
-arrays and may not author a source ledger URL.
+The Host compiles the schema for the current packet: dimension, source, and
+chunk enums contain only exact IDs from the validated run, and audit-only
+sources are not addressable by the proposal. Claim IDs may be referenced only
+by `basis_claim_ids`, derivation input IDs, and contradiction endpoints. The
+model cannot author a source URL, citation number, artifact path, or new
+dimension.
 
 Each attempt has a 90-second active bound. A transient stream or generation
 failure may retry once under the same closed evidence and durable workflow
@@ -352,57 +367,48 @@ already staged.
 The Host treats the model response as an untrusted proposal. It applies these
 rules without another model call:
 
-1. Reject every model-authored URL and unknown alias.
-2. Reject a raw alias appearing outside an exact citation token.
-3. Ignore the model's source ledger and rebuild it from cited catalog entries.
-4. Require every model-authored prose paragraph and list item to contain at
-   least one valid source token; remove an uncited block instead of rejecting
-   valid siblings.
-5. Resolve adjacent aliases to separated numeric citations and one deduplicated
-   source ledger.
-6. Reject internal terminology, prompt text, runtime diagnostics, and control
-   characters from reader-facing content.
-7. Enforce the query language for prose and select Host-owned localized labels.
-8. Reject a new date or numerical literal absent from the cited excerpts. For
-   Summary and Findings, every individual cited source must contain every date
-   and number in the atomic block; several partial sources cannot be stitched
-   into one claim.
-9. Require each core Summary or Findings block to have a semantically admitted
-   source that establishes the complete block. Enforce planner-declared primary
-   and independent-source requirements from typed coverage edges; do not infer
-   either role from publisher or hostname patterns, and do not add an unrelated
-   citation merely to increase source count.
-10. When the validated plan requires freshness, reject a temporal snapshot
-    that is more than seven days behind the freshest eligible retained source.
-11. For a comprehensive request, require at least one direct Summary, four
-    distinct Findings, five admitted claim blocks, two cited eligible sources,
-    and 480 substantive non-whitespace characters across Summary and Findings
-    for a Han query or 1,000 for another query. Repetition, recommendations, and
-    unrelated citations do not satisfy this gate.
-12. Use a fixed Host section structure when the model omits or damages Markdown
-    headings. Model formatting never controls website navigation or evidence
-    counts.
+1. Decode one closed object with no unknown fields and enforce graph,
+   cardinality, character, and control-character bounds.
+2. Resolve every dimension, source, chunk, claim, relation, and gap reference
+   by exact ID membership. Reject only a malformed item while retaining valid
+   siblings.
+3. Admit facts only from exact cited chunks whose source provenance reaches the
+   claim dimension. Inferences and recommendations must name admitted basis
+   claims; a derivation must retain its method and exact admitted inputs.
+4. Admit a contradiction only between two admitted claims in the same
+   dimension. Preserve both claims and both citation paths.
+5. Derive material coverage from the admitted graph. Complete material
+   coverage yields `Synthesized`; useful admitted claims with a material
+   typed gap yield `Qualified`; no admitted generated graph retains the staged
+   `SourceBacked` artifact.
+6. Apply fixed scope metrics. Focused reports require one cited direct-answer
+   claim, at least one admitted claim, and one cited eligible source.
+   Comprehensive reports additionally require four findings, five admitted
+   claims, two cited sources, and 480 substantive characters.
+7. Accept reader-facing labels by closed schema and budget only. Escape labels,
+   claim text, titles, and excerpts as inert Markdown or HTML data.
+8. Build numeric citations and one deduplicated source ledger from exact
+   admitted support. Model prose cannot author ledger identity, citation
+   numbering, or artifact paths.
+9. Classify the Markdown/HTML pair only through matching exact versioned
+   artifact markers and persist the closed publication enum in the receipt.
 
-If no useful model block survives, the Host publishes the staged extractive
-report. If some blocks survive, it combines only those blocks with Host-owned
-limitations and the source ledger. It does not ask the same model to audit or
-repair itself.
+If the complete proposal does not satisfy this closed structural and typed
+coverage contract, the Host retains the source-backed artifact staged before
+generation. It does not ask the same model to audit or repair itself.
 
-A focused synthesized publication requires at least one direct answer block,
-one distinct Findings block, two admitted cited claim blocks, one cited
-eligible source, and closed citations for every admitted claim. A
-comprehensive publication must also pass the stronger breadth,
-independent-source, and substantive-character thresholds above. The runtime
-records `substantive_character_count` beside the existing publication metrics
-so this decision remains auditable. An ineligible source retained for audit
-cannot support a claim, but its presence does not poison valid claims from
-eligible sources. Source titles do not count as Findings. A failure at this
-final Host gate cannot be relabeled as qualified success; it remains the
-explicitly degraded source-backed artifact.
+An ineligible source retained for audit cannot support a claim, but its presence
+does not poison valid claims from eligible sources. A focused report is not
+forced to invent a second finding when one cited direct answer is structurally
+sufficient. `Qualified` is not a synonym for report failure: it requires at
+least one useful admitted claim and an explicit material gap, and it survives
+the publication receipt and restart projection.
 
-Claim entailment cannot be proved by token presence. Corpus evaluation remains
-the release authority for semantic citation precision. Production self-review
-is not admitted merely to create the appearance of semantic certainty.
+Atomic entailment, freshness, quantitative scope, and source-role meaning are
+bounded semantic model contracts, not string predicates in deterministic Host
+code. Corpus evaluation remains the release authority for semantic citation
+precision. Production self-review is not admitted merely to create the
+appearance of semantic certainty.
 
 ## 5. Deterministic Website
 
@@ -450,14 +456,14 @@ persistence, fallback readiness, and terminal publication are timed separately.
 | --- | --- |
 | Semantic outline fails or is invalid | Use one generic track and only the unchanged exact query; record the fallback mode. |
 | Bootstrap acquisition fails | Preserve the error and let bounded planned retrieval retain or retry the exact query as needed. |
-| Every configured search provider fails | Publish an honest localized no-evidence artifact. |
+| Every configured search provider fails | Publish an honest no-evidence boundary artifact. |
 | Web candidate selection fails or times out | Fetch only the bounded cross-query fallback set, record fallback provenance, and keep its web text audit-only unless closed semantic chunk selection admits it. |
 | Fetched-text semantic selection fails or returns invalid IDs | Promote none of that failed selection's web text; preserve valid sibling sources and publish the honest degraded boundary when necessary. |
 | One search or fetch sibling fails | Preserve successful sources and continue. |
 | First report attempt fails transiently | Retry once with the same closed evidence and durable identity. |
 | Second report attempt fails, times out, or is invalid | Publish the explicitly degraded staged source-backed report. |
-| One report block is uncited or malformed | Remove that block and retain valid siblings. |
-| All report blocks are invalid | Publish the staged extractive report. |
+| One graph item has an invalid reference or shape | Remove that item and retain valid siblings. |
+| No generated claim graph passes publication gates | Publish the staged extractive report. |
 | HTML enhancement fails | Publish the same report through a deterministic minimal HTML document. |
 | Publication is interrupted | Recover the atomic pair from staged state without repeating external effects. |
 
@@ -470,16 +476,16 @@ authority.
 
 New runs need only record:
 
-- run identity, query, language, budgets, and start time;
+- run identity, exact query, explicit evidence scope, budgets, and start time;
 - the validated semantic outline or exact-query fallback mode;
 - search and fetch attempts;
 - immutable source records and failure siblings;
 - at most two report attempts and their bounded terminal reasons;
-- admitted report blocks and cited source identities; and
+- admitted typed claims, relations, gaps, and cited source identities; and
 - staged and committed Markdown/HTML artifacts.
 
-Legacy Inquiry journals remain readable for recovery. Their event vocabulary
-does not justify keeping the legacy pipeline active for new runs.
+Historical Inquiry events remain readable through strict graph replay. Their
+event vocabulary cannot resume or authorize the retired report pipeline.
 
 ## Active Path And Compatibility
 
@@ -490,7 +496,7 @@ Retain:
 - exact source/excerpt restoration;
 - atomic artifact-pair publication;
 - CLI/TUI result handoff and browser opening; and
-- legacy journal replay needed for already-created runs.
+- generic event-journal replay needed for diagnostics.
 
 The new-run control flow no longer uses:
 
@@ -499,33 +505,33 @@ The new-run control flow no longer uses:
 - section generation and section revision;
 - editorial, guidance, and presentation-frame generations;
 - semantic-audit waves and model repair waves;
-- report resume that repeats the same provider risk; and
+- a resumable legacy report transaction; and
 - generic recovery prose when fetched source text exists.
 
-Do not delete compatibility code before old-journal tests identify what replay
-still needs. Legacy replay must remain explicitly isolated; dead wrappers can
-be removed only when their recovery contracts are no longer exercised.
+The old planner, extraction, section writer, reviewer, repair, and report-resume
+executors have no consumers and are removed. Compatibility is data replay, not
+executable business logic.
 
-The active seam is the persisted bootstrap source catalog. New-run control flow
-parses that catalog into a Host-owned report document before invoking the
-report model. CLI and TUI settlement consume the resulting artifact outcome
-directly; they do not infer artifact availability from Inquiry convergence or
-an accepted-evidence count. Legacy Inquiry state remains an input only when
-replaying an already-created journal.
+The active seam is the standalone engine publication envelope. CLI and TUI
+settlement validate its exact query, status, artifact paths, artifact content,
+and typed quality metrics. A failed envelope can settle only as degraded with a
+Host-materialized verified recovery pair; it cannot be reclassified through
+Inquiry convergence or an accepted-evidence count.
 
 ## Next Decision Gates
 
 Before release promotion:
 
 1. run the live corpus for C01, C02, C05, C07, and C08 with persisted failures;
-2. verify F01, F02, F04, F05, F06, and F08 against the current Host admission
-   and source-backed degradation rules;
+2. preserve the current active-entry F01-F08 outcomes and graph semantics:
+   F01/F02/F04/F05/F07/F08 synthesized, F03 qualified, and the F06 typed
+   timeout source-backed;
 3. measure direct-answer, Findings, citation, source-relevance, and latency
    gates from the terminal artifact rather than workflow completion;
 4. compare exact-only bootstrap with bounded semantic supplements across
    unrelated domains, including planner failure and misleading-query cases; and
 5. pass real desktop and 390-pixel website inspection for synthesized,
-   source-backed, and no-evidence artifacts.
+   qualified, source-backed, and no-evidence artifacts.
 
 The production architecture is selected; release readiness remains governed
 by the corpus and visual gates above.

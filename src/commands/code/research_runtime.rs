@@ -1,7 +1,6 @@
 //! Non-interactive DeepResearch execution and report synthesis.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use a3s_code_core::config::CodeConfig;
@@ -13,10 +12,6 @@ use crate::budget::{
 
 const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
-pub(crate) const DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS: u64 =
-    crate::tui::DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS;
-const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
-const DEEP_RESEARCH_ABORT_SETTLE_MS: u64 = 250;
 
 pub(crate) fn deep_research_default_budget() -> BudgetPlan {
     budget_plan_for_effort_index(DEFAULT_TUI_EFFORT_INDEX, None, BudgetWorkload::DeepResearch)
@@ -109,8 +104,7 @@ pub(crate) async fn execute_deepresearch_query_in(
         anyhow::bail!("DeepResearch query must not be empty");
     }
     let workspace_text = workspace.to_string_lossy().to_string();
-    let (session, report_tool_gate) =
-        build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
+    let session = build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
     eprintln!("deepresearch: gathering evidence via the host-managed workflow…");
     let mut workflow_args =
         crate::tui::deep_research_cli_workflow_args_for_budget(query, budget, evidence_scope);
@@ -118,19 +112,19 @@ pub(crate) async fn execute_deepresearch_query_in(
         .ok_or_else(|| anyhow::anyhow!("failed to assign a DeepResearch workflow run ID"))?;
     let workflow = run_deepresearch_inquiry(Arc::clone(&session), workflow_args.clone()).await;
     let workflow_succeeded = workflow.as_ref().is_ok_and(|result| result.exit_code == 0);
-    let (workflow_output, exit_code, metadata) = match workflow {
-        Ok(result) => (result.output, result.exit_code, result.metadata),
-        Err(error) => (error, 1, None),
+    let (workflow_output, metadata) = match workflow {
+        Ok(result) => (result.output, result.metadata),
+        Err(error) => (error, None),
     };
 
-    let mut synthesis = match crate::tui::deep_research_evidence_first_published_report(
-        workspace,
-        query,
-        &workflow_output,
-    )
-    .map_err(anyhow::Error::msg)?
-    {
-        Some(published) => {
+    let (mut synthesis, artifact_authority) =
+        match crate::tui::resolve_deep_research_run_publication(
+            workspace,
+            query,
+            &run_id,
+            &workflow_output,
+        ) {
+        Ok(Some(published)) => {
             let text = crate::tui::clean_deep_research_final_text_from_artifacts(
                 &published.artifacts,
                 workspace,
@@ -140,6 +134,9 @@ pub(crate) async fn execute_deepresearch_query_in(
                 crate::tui::DeepResearchEvidenceFirstPublication::Synthesized => {
                     DeepResearchReportStatus::Completed
                 }
+                crate::tui::DeepResearchEvidenceFirstPublication::Qualified => {
+                    DeepResearchReportStatus::Qualified
+                }
                 crate::tui::DeepResearchEvidenceFirstPublication::SourceBacked => {
                     DeepResearchReportStatus::Degraded
                 }
@@ -147,28 +144,38 @@ pub(crate) async fn execute_deepresearch_query_in(
                     DeepResearchReportStatus::Degraded
                 }
             };
-            DeepResearchReportSynthesis {
-                text,
-                artifacts: ResearchReportArtifacts {
-                    markdown: published.artifacts.markdown,
-                    html: published.artifacts.html,
+            (
+                DeepResearchReportSynthesis {
+                    text,
+                    artifacts: ResearchReportArtifacts {
+                        markdown: published.artifacts.markdown,
+                        html: published.artifacts.html,
+                    },
+                    status,
                 },
-                status,
-            }
+                crate::tui::DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+            )
         }
-        None => {
-            synthesize_deepresearch_report(
-                &session,
+        Ok(None) => (
+            materialize_deepresearch_cli_recovery(
                 workspace,
                 query,
+                "the standalone DeepResearch engine returned without its required Host publication",
                 &workflow_output,
-                exit_code,
                 metadata.as_ref(),
-                &run_id,
-                &report_tool_gate,
-            )
-            .await?
-        }
+            )?,
+            crate::tui::DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+        ),
+        Err(error) => (
+            materialize_deepresearch_cli_recovery(
+                workspace,
+                query,
+                &format!("the standalone DeepResearch publication failed validation: {error}"),
+                &workflow_output,
+                metadata.as_ref(),
+            )?,
+            crate::tui::DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+        ),
     };
     let requested_outcome = match synthesis.status {
         DeepResearchReportStatus::Completed => crate::tui::ResearchOutcome::Completed,
@@ -189,6 +196,7 @@ pub(crate) async fn execute_deepresearch_query_in(
             workflow_metadata: metadata.as_ref(),
             requested_outcome,
             artifacts: &journal_artifacts,
+            artifact_authority,
         })
         .await
         .map_err(anyhow::Error::msg)?;
@@ -220,130 +228,11 @@ pub(crate) struct ResearchReportArtifacts {
     pub(crate) html: PathBuf,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct DeepResearchReportToolGate {
-    report_only: Arc<AtomicBool>,
-}
-
-impl DeepResearchReportToolGate {
-    pub(crate) fn set_report_only(&self, enabled: bool) {
-        self.report_only.store(enabled, Ordering::SeqCst);
-    }
-
-    pub(crate) fn report_only(&self) -> bool {
-        self.report_only.load(Ordering::SeqCst)
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct DeepResearchReportSynthesis {
     pub(crate) text: String,
     pub(crate) artifacts: ResearchReportArtifacts,
     pub(crate) status: DeepResearchReportStatus,
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn synthesize_deepresearch_report(
-    session: &AgentSession,
-    workspace: &Path,
-    query: &str,
-    workflow_output: &str,
-    exit_code: i32,
-    metadata: Option<&serde_json::Value>,
-    run_id: &str,
-    report_tool_gate: &DeepResearchReportToolGate,
-) -> anyhow::Result<DeepResearchReportSynthesis> {
-    eprintln!("deepresearch: synthesizing report artifacts…");
-    let qualified =
-        match crate::tui::deep_research_cli_report_is_qualified(query, workflow_output, metadata) {
-            Ok(qualified) => qualified,
-            Err(reason) => {
-                report_tool_gate.set_report_only(false);
-                let reason = format!("report plan rejected: {reason}");
-                eprintln!("deepresearch: {reason}");
-                return materialize_deepresearch_cli_recovery(
-                    workspace,
-                    query,
-                    &reason,
-                    workflow_output,
-                    metadata,
-                );
-            }
-        };
-    if !crate::tui::deep_research_cli_sectioned_report_available(workflow_output, metadata) {
-        report_tool_gate.set_report_only(false);
-        let reason =
-            "report plan rejected: current DeepResearch output has no reportable Outlining Inquiry";
-        eprintln!("deepresearch: {reason}");
-        return materialize_deepresearch_cli_recovery(
-            workspace,
-            query,
-            reason,
-            workflow_output,
-            metadata,
-        );
-    }
-
-    report_tool_gate.set_report_only(true);
-    let mut completed_workflow_output = workflow_output.to_string();
-    let mut completed_metadata = metadata.cloned();
-    let generated = match tokio::time::timeout(
-        std::time::Duration::from_millis(DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS),
-        crate::tui::complete_deep_research_cli_sectioned_report(
-            session,
-            query,
-            &mut completed_workflow_output,
-            &mut completed_metadata,
-            run_id,
-            DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS,
-        ),
-    )
-    .await
-    {
-        Ok(Ok(result)) => crate::tui::materialize_deep_research_cli_generated_report(
-            workspace,
-            query,
-            &result.output,
-            result.exit_code,
-            &completed_workflow_output,
-            completed_metadata.as_ref(),
-        ),
-        Ok(Err(error)) => Err(format!("sectioned report generation failed: {error}")),
-        Err(_) => {
-            let _ = session
-                .cancel_and_settle(
-                    std::time::Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                    std::time::Duration::from_millis(DEEP_RESEARCH_ABORT_SETTLE_MS),
-                )
-                .await;
-            Err(format!(
-                "sectioned report generation timed out after {DEEP_RESEARCH_SYNTHESIS_TIMEOUT_MS} ms"
-            ))
-        }
-    };
-    report_tool_gate.set_report_only(false);
-
-    match generated {
-        Ok((text, markdown, html)) => Ok(DeepResearchReportSynthesis {
-            text,
-            artifacts: ResearchReportArtifacts { markdown, html },
-            status: if qualified || exit_code != 0 {
-                DeepResearchReportStatus::Qualified
-            } else {
-                DeepResearchReportStatus::Completed
-            },
-        }),
-        Err(reason) => {
-            eprintln!("deepresearch: structured report rejected: {reason}");
-            materialize_deepresearch_cli_recovery(
-                workspace,
-                query,
-                &reason,
-                &completed_workflow_output,
-                completed_metadata.as_ref(),
-            )
-        }
-    }
 }
 
 fn materialize_deepresearch_cli_recovery(
@@ -392,41 +281,11 @@ fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::Permissio
     policy
 }
 
-#[derive(Clone)]
-struct DeepResearchPermissionChecker {
-    base: a3s_code_core::permissions::PermissionPolicy,
-    report_tool_gate: DeepResearchReportToolGate,
-}
-
-impl a3s_code_core::permissions::PermissionChecker for DeepResearchPermissionChecker {
-    fn check(
-        &self,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> a3s_code_core::permissions::PermissionDecision {
-        if self.report_tool_gate.report_only() {
-            deep_research_report_phase_tool_permission(tool_name, args)
-        } else {
-            self.base.check(tool_name, args)
-        }
-    }
-}
-
-pub(crate) fn deep_research_report_phase_tool_permission(
-    tool_name: &str,
-    _args: &serde_json::Value,
-) -> a3s_code_core::permissions::PermissionDecision {
-    match tool_name.to_ascii_lowercase().as_str() {
-        "generate_object" => a3s_code_core::permissions::PermissionDecision::Allow,
-        _ => a3s_code_core::permissions::PermissionDecision::Deny,
-    }
-}
-
 async fn build_deepresearch_session(
     workspace: &str,
     code_config: CodeConfig,
     memory_dir: PathBuf,
-) -> anyhow::Result<(Arc<AgentSession>, DeepResearchReportToolGate)> {
+) -> anyhow::Result<Arc<AgentSession>> {
     build_deepresearch_session_with_resolver(
         workspace,
         code_config,
@@ -441,7 +300,7 @@ async fn build_deepresearch_session_with_resolver<F>(
     code_config: CodeConfig,
     memory_dir: PathBuf,
     resolve_llm_client: F,
-) -> anyhow::Result<(Arc<AgentSession>, DeepResearchReportToolGate)>
+) -> anyhow::Result<Arc<AgentSession>>
 where
     F: FnOnce(
         &CodeConfig,
@@ -450,16 +309,11 @@ where
     ) -> Result<Arc<dyn a3s_code_core::llm::LlmClient>, String>,
 {
     let permission_policy = deepresearch_cli_permission_policy();
-    let report_tool_gate = DeepResearchReportToolGate::default();
     let session_id = deep_research_execution_id();
     let opts = SessionOptions::new()
         .with_session_id(&session_id)
         .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
         .with_permission_policy(permission_policy.clone())
-        .with_permission_checker(Arc::new(DeepResearchPermissionChecker {
-            base: permission_policy,
-            report_tool_gate: report_tool_gate.clone(),
-        }))
         .with_tool_timeout(RESEARCH_TOOL_EXEC_TIMEOUT_MS)
         .with_duplicate_tool_call_threshold(RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD)
         .with_file_memory(memory_dir)
@@ -481,7 +335,7 @@ where
         .session_async(workspace.to_string(), Some(opts))
         .await?;
     session.register_dynamic_workflow_runtime()?;
-    Ok((Arc::new(session), report_tool_gate))
+    Ok(Arc::new(session))
 }
 
 fn deep_research_execution_id() -> String {
@@ -625,34 +479,5 @@ mod tests {
             token_logprobs: Vec::new(),
             meta: None,
         }
-    }
-
-    fn tool_call_response(id: &str, name: &str, input: serde_json::Value) -> LlmResponse {
-        LlmResponse {
-            message: Message {
-                role: "assistant".into(),
-                content: vec![ContentBlock::ToolUse {
-                    id: id.into(),
-                    name: name.into(),
-                    input,
-                }],
-                reasoning_content: None,
-            },
-            usage: TokenUsage::default(),
-            stop_reason: Some("tool_use".into()),
-            token_logprobs: Vec::new(),
-            meta: None,
-        }
-    }
-
-    fn test_config(path: &std::path::Path) {
-        std::fs::write(
-            path,
-            "default_model = \"openai/x\"\n\
-             providers \"openai\" {\n  apiKey = \"x\"\n  baseUrl = \"http://127.0.0.1:1\"\n  \
-             models \"x\" { name = \"x\" }\n}\n\
-             memory {\n  llmExtraction = false\n}\n",
-        )
-        .unwrap();
     }
 }

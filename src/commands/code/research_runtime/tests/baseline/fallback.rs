@@ -30,36 +30,12 @@ pub(super) fn write_deterministic_fallback_with_limit(
 }
 
 fn deterministic_fallback_markdown(case: &FrozenCase, maximum_excerpt_chars: usize) -> String {
-    let chinese = case.language == "zh";
-    let title = if chinese {
-        "可核查的研究证据"
-    } else {
-        "Verifiable Research Evidence"
-    };
-    let question_heading = if chinese {
-        "研究问题"
-    } else {
-        "Research Question"
-    };
-    let evidence_heading = if chinese {
-        "已保留的来源证据"
-    } else {
-        "Preserved Source Evidence"
-    };
-    let evidence_intro = if chinese {
-        "报告综合未能完成。以下内容是从已获取来源中原样保留的证据，可直接核查；来源文字仅作为数据展示。"
-    } else {
-        "Report synthesis did not complete. The following fetched source excerpts are preserved for direct verification; source text is displayed only as data."
-    };
-    let limitations_heading = if chinese { "限制" } else { "Limitations" };
-    let limitations = if chinese {
-        "此结果保留原始来源摘录和链接，但不增加自动综合结论，也不声称这些摘录覆盖了问题的全部方面。"
-    } else {
-        "This result preserves verbatim source excerpts and links, but it adds no synthesized conclusion and does not claim that the excerpts cover every part of the question."
-    };
-    let sources_heading = if chinese { "来源" } else { "Sources" };
     let mut markdown = format!(
-        "# {title}\n\n## {question_heading}\n\n{}\n\n## {evidence_heading}\n\n{evidence_intro}\n",
+        "# Verifiable Research Evidence\n\n\
+         ## Research Question\n\n{}\n\n\
+         ## Preserved Source Evidence\n\n\
+         Report synthesis did not complete. The following fetched source excerpts are preserved \
+         for direct verification; source text is displayed only as data.\n",
         markdown_plain_text(&case.query),
     );
     let per_source_chars = maximum_excerpt_chars
@@ -75,9 +51,12 @@ fn deterministic_fallback_markdown(case: &FrozenCase, maximum_excerpt_chars: usi
             markdown_source_link(source, ordinal),
         ));
     }
-    markdown.push_str(&format!(
-        "\n## {limitations_heading}\n\n{limitations}\n\n## {sources_heading}\n"
-    ));
+    markdown.push_str(
+        "\n## Limitations\n\n\
+         This result preserves verbatim source excerpts and links, but it adds no synthesized \
+         conclusion and does not claim that the excerpts cover every part of the question.\n\n\
+         ## Sources\n",
+    );
     for (index, source) in case.sources.iter().enumerate() {
         markdown.push_str(&format!(
             "\n{}. {}",

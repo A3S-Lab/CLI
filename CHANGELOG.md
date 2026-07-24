@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the TUI research adapter to `a3s-deep-research` 0.1.2. Malformed
+  bootstrap and planned envelopes now degrade independently through closed
+  stage and packet-version state; raw bootstrap bytes remain audit-only, and
+  the resulting publication receipt and journal projection stay consistent.
+
+### Fixed
+
+- Recover an exact run-scoped DeepResearch publication immediately when the
+  publication port committed its artifacts and receipt before returning an
+  error. CLI, TUI, smoke, convergence, and terminal settlement now share the
+  same receipt-backed resolver, and source-backed quality metrics survive
+  journal replay without inspecting result prose. Receipt quality uses an
+  independent publication event stream, so TUI pre-settlement evidence cannot
+  collide with terminal projection.
+
 ## [0.10.1] - 2026-07-23
 
 ### Added

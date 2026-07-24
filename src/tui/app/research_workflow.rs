@@ -28,7 +28,6 @@ impl App {
             evidence_scope,
             started_at: run_started_at,
         });
-        self.deep_research_report_resume_used = false;
         self.deep_research_workflow.reset_for_run();
         self.deep_research_outcome = DeepResearchRunOutcome::Active;
         self.deep_research_subagent_settlement_inflight = false;
@@ -36,7 +35,6 @@ impl App {
         self.deep_research_terminal_artifacts = None;
         self.deep_research_agent_event_sequence = 0;
         self.deep_research_projection = None;
-        self.pending_deep_research_report_resume = false;
         self.pending_deep_research_report_view = None;
         self.deep_research_report_tool_gate
             .set_workspace(Path::new(&self.cwd));
@@ -141,10 +139,11 @@ impl App {
                     Ok(result) => (result.output.as_str(), result.metadata.as_ref()),
                     Err(error) => (error.as_str(), None),
                 };
-                let published = result.as_ref().ok().map(|_| {
-                    deep_research_evidence_first_published_report(
+                let published = journal_run_id.as_deref().map(|run_id| {
+                    resolve_deep_research_run_publication(
                         &workflow_workspace,
                         &query,
+                        run_id,
                         workflow_output,
                     )
                 });
@@ -303,16 +302,23 @@ impl App {
         if let Some(spec) = self.find_remote_view_spec(&output) {
             self.remember_remote_view(spec);
         }
-        let evidence_scope = deep_research_evidence_scope_from_args(&args, &query);
         if let Some(status) = deep_research_plan_status(&output) {
             self.push_line(&Style::new().fg(TN_GRAY).render(&status));
         }
 
-        match deep_research_evidence_first_published_report(Path::new(&self.cwd), &query, &output) {
+        let publication_failure = match resolve_deep_research_run_publication(
+            Path::new(&self.cwd),
+            &query,
+            completed_run_id.expect("validated DeepResearch completion requires a run ID"),
+            &output,
+        ) {
             Ok(Some(published)) => {
                 let outcome = match published.publication {
                     DeepResearchEvidenceFirstPublication::Synthesized => {
                         DeepResearchRunOutcome::Completed
+                    }
+                    DeepResearchEvidenceFirstPublication::Qualified => {
+                        DeepResearchRunOutcome::Qualified
                     }
                     DeepResearchEvidenceFirstPublication::SourceBacked => {
                         DeepResearchRunOutcome::Degraded
@@ -330,7 +336,11 @@ impl App {
                         .to_string()
                 });
                 self.loop_remaining = 0;
-                self.stage_deep_research_report(&published.artifacts, outcome);
+                self.stage_deep_research_report(
+                    &published.artifacts,
+                    outcome,
+                    DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+                );
                 self.mark_assistant_text(&final_text);
                 self.turn_text.clear();
                 self.turn_text.push_str(&final_text);
@@ -340,6 +350,12 @@ impl App {
                     DeepResearchEvidenceFirstPublication::Synthesized => {
                         self.push_line(&Style::new().fg(TN_GREEN).render(&format!(
                             "  ✓ DeepResearch published a quality-gated report at {}",
+                            published.artifacts.html.display()
+                        )));
+                    }
+                    DeepResearchEvidenceFirstPublication::Qualified => {
+                        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
+                            "  ◐ DeepResearch published a qualified report with explicit evidence boundaries at {}",
                             published.artifacts.html.display()
                         )));
                     }
@@ -359,70 +375,56 @@ impl App {
                 self.rebuild_viewport();
                 return self.complete_turn();
             }
-            Ok(None) => {}
-            Err(error) => {
-                self.push_line(&Style::new().fg(TN_YELLOW).render(&format!(
-                    "  ⚠ evidence-first report validation failed: {error}"
-                )));
+            Ok(None) => {
+                "the standalone DeepResearch engine returned without its required Host publication"
+                    .to_string()
             }
-        }
+            Err(error) => format!("the Host publication failed validation: {error}"),
+        };
 
-        let report_outcome = deep_research_report_outcome_for_workflow(
+        self.loop_remaining = 0;
+        self.deep_research_outcome = DeepResearchRunOutcome::Degraded;
+        let evidence_note = if accepted_evidence.is_empty() {
+            "No accepted evidence was journaled.".to_string()
+        } else {
+            format!(
+                "{} accepted evidence record(s) remain available in the run journal.",
+                accepted_evidence.len()
+            )
+        };
+        let recovery_reason = format!(
+            "{publication_failure}. Terminal contract assessment: {}. {evidence_note}",
+            convergence.reason
+        );
+        let status = match materialize_deep_research_recovery_report(
+            Path::new(&self.cwd),
             &query,
-            evidence_scope,
+            &recovery_reason,
             &output,
             metadata.as_ref(),
-        );
-        if accepted_evidence.is_empty()
-            || convergence.action == ConvergenceAction::Degrade
-            || matches!(report_outcome, DeepResearchRunOutcome::Degraded)
-        {
-            self.loop_remaining = 0;
-            self.deep_research_outcome = DeepResearchRunOutcome::Degraded;
-            let status = match materialize_deep_research_recovery_report(
-                Path::new(&self.cwd),
-                &query,
-                &format!(
-                    "Evidence collection ended without a validated evidence package. Terminal contract assessment: {}.",
-                    convergence.reason
-                ),
-                &output,
-                metadata.as_ref(),
-            ) {
-                Ok(artifacts) => {
-                    self.stage_deep_research_report(
-                        &artifacts,
-                        DeepResearchRunOutcome::Degraded,
-                    );
-                    format!(
-                        "DeepResearch stopped after bounded evidence collection because {}. A low-confidence recovery report was written to `{}`.",
-                        convergence.reason,
-                        artifacts.html.display()
-                    )
-                }
-                Err(error) => format!(
-                    "DeepResearch stopped after bounded evidence collection and could not write its recovery report: {error}"
-                ),
-            };
-            self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {status}")));
-            self.mark_assistant_text(&status);
-            self.turn_text.clear();
-            self.turn_text.push_str(&status);
-            self.messages
-                .push(TranscriptEntry::assistant_markdown(status));
-            self.rebuild_viewport();
-            return self.complete_turn();
-        }
-
-        self.push_line(
-            &Style::new()
-                .fg(TN_GRAY)
-                .render("  ⇉ evidence gathered · synthesizing source-backed report…"),
-        );
-        self.deep_research_report_tool_gate.set_synthesis_only();
-        self.start_deep_research_report_generation(
-            format!("✦\u{200A}synthesize {query}"),
-            DeepResearchReportGenerationPhase::Synthesis,
-        )
+        ) {
+            Ok(artifacts) => {
+                self.stage_deep_research_report(
+                    &artifacts,
+                    DeepResearchRunOutcome::Degraded,
+                    DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+                );
+                format!(
+                    "DeepResearch did not produce a validated standalone-engine publication. A low-confidence recovery report was written to `{}`.",
+                    artifacts.html.display()
+                )
+            }
+            Err(error) => format!(
+                "DeepResearch did not produce a validated standalone-engine publication and could not write its recovery report: {error}"
+            ),
+        };
+        self.push_line(&Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {status}")));
+        self.mark_assistant_text(&status);
+        self.turn_text.clear();
+        self.turn_text.push_str(&status);
+        self.messages
+            .push(TranscriptEntry::assistant_markdown(status));
+        self.rebuild_viewport();
+        self.complete_turn()
     }
 }

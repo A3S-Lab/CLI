@@ -4055,7 +4055,7 @@ mod tests {
                     "step_outputs": {},
                     "step_failures": {},
                     "input": {
-                        "query": "2026 世界杯战况",
+                        "query": "Nimbus 支持状态",
                         "evidence_scope": "web_and_workspace",
                         "inquiry_host_managed": true,
                         "loop_contract": {
@@ -4077,7 +4077,7 @@ mod tests {
 
         assert!(plain.contains("• Running program script"), "{plain}");
         assert!(plain.contains("intent"), "{plain}");
-        assert!(plain.contains("DeepResearch “2026 世界杯战况”"), "{plain}");
+        assert!(plain.contains("DeepResearch “Nimbus 支持状态”"), "{plain}");
         assert!(
             plain.contains("web + workspace · ≤2 typed-coverage passes · ≤4 searches · ≤8 fetches"),
             "{plain}"

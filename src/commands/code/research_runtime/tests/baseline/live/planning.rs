@@ -181,7 +181,7 @@ fn host_fallback_proposal(
     };
     let query_text = match transport {
         AcquisitionTransport::Web => input.query.clone(),
-        AcquisitionTransport::Workspace => fallback_workspace_pattern(&input.query),
+        AcquisitionTransport::Workspace => r"\S".to_string(),
     };
     let diagnostic = serde_json::json!({
         "reason": reason.chars().take(1_000).collect::<String>()
@@ -535,20 +535,6 @@ fn strip_minimal_query_fields(query: &JsonValue) -> JsonValue {
         "dimension_ids": [],
         "source_target_ids": [],
     })
-}
-
-fn fallback_workspace_pattern(query: &str) -> String {
-    let terms = query
-        .split(|character: char| !character.is_alphanumeric() && character != '_')
-        .filter(|term| term.chars().count() >= 4)
-        .take(8)
-        .map(regex::escape)
-        .collect::<Vec<_>>();
-    if terms.is_empty() {
-        ".+".to_string()
-    } else {
-        terms.join("|")
-    }
 }
 
 fn compiler_contract(
@@ -949,6 +935,34 @@ mod tests {
         assert_eq!(brief_contract.dimensions.len(), 1);
         assert_eq!(brief_contract.dimensions[0].request_basis, [input.query]);
         assert!(brief.queries.is_empty());
+    }
+
+    #[test]
+    fn workspace_planner_fallback_is_independent_of_query_text() {
+        let mut first = input();
+        first.evidence_scope = EvidenceScope::Workspace;
+        first.query = "alpha release status".to_string();
+        let mut second = first.clone();
+        second.query = "完全不同的研究请求".to_string();
+
+        let first = host_fallback_proposal(
+            &first,
+            EvaluationStrategy::Minimal,
+            false,
+            "typed planner failure",
+        );
+        let second = host_fallback_proposal(
+            &second,
+            EvaluationStrategy::Minimal,
+            false,
+            "typed planner failure",
+        );
+
+        assert_eq!(first["queries"][0]["text"], r"\S");
+        assert_eq!(
+            first["queries"][0]["text"], second["queries"][0]["text"],
+            "fallback search control must not depend on query prose"
+        );
     }
 
     #[test]

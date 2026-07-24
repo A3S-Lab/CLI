@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(super) fn deep_research_inferred_evidence_scope(_query: &str) -> DeepResearchEvidenceScope {
+pub(super) fn deep_research_default_evidence_scope() -> DeepResearchEvidenceScope {
     // Scope is a typed caller decision. Free-form query text is never routed
     // through a language-specific phrase or keyword table.
     DeepResearchEvidenceScope::WebAndWorkspace
@@ -25,7 +25,7 @@ pub(super) fn parse_deep_research_tui_query(
         ),
         _ => (
             raw_query.to_string(),
-            deep_research_inferred_evidence_scope(raw_query),
+            deep_research_default_evidence_scope(),
         ),
     }
 }

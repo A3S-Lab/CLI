@@ -54,7 +54,6 @@ impl DeepResearchEvidenceScope {
 
 pub(super) fn deep_research_evidence_scope_from_args(
     args: &serde_json::Value,
-    query: &str,
 ) -> DeepResearchEvidenceScope {
     match args
         .pointer("/input/evidence_scope")
@@ -62,14 +61,14 @@ pub(super) fn deep_research_evidence_scope_from_args(
     {
         Some("local_only") => DeepResearchEvidenceScope::LocalOnly,
         Some("web_and_workspace") => DeepResearchEvidenceScope::WebAndWorkspace,
-        _ => deep_research_inferred_evidence_scope(query),
+        _ => deep_research_default_evidence_scope(),
     }
 }
 
 #[cfg(test)]
 pub(super) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
     let mut args =
-        deep_research_workflow_args_with_scope(query, deep_research_inferred_evidence_scope(query));
+        deep_research_workflow_args_with_scope(query, deep_research_default_evidence_scope());
     let tracks = serde_json::json!([{
         "id": "fixture.facts",
         "title": "Fixture facts",
@@ -240,10 +239,6 @@ pub(super) fn deep_research_workflow_args_for_budget(
     })
 }
 
-#[cfg(test)]
-pub(super) const DEEP_RESEARCH_PROMPT_SUCCESS_OUTPUT_LIMIT: usize = 1200;
-#[cfg(test)]
-pub(super) const DEEP_RESEARCH_PROMPT_TEXT_LIMIT: usize = 12_000;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_EVIDENCE: usize = 18;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_SOURCES: usize = 12;
 pub(super) const DEEP_RESEARCH_MAX_DIGEST_STRINGS: usize = 12;

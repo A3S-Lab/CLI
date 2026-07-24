@@ -1,6 +1,7 @@
 # DeepResearch Product Validation Contract
 
-Status: sole product decision gate before further active-path implementation.
+Status: product decision ledger and remaining release gates for the active
+standalone-engine path.
 
 This document defines what DeepResearch must prove as a product. It is
 intentionally independent of the current planner, Inquiry state machine,
@@ -8,13 +9,14 @@ Dynamic Workflow implementation, report pipeline, and evaluator candidates.
 An internal phase, status, schema, or test is not product evidence unless it
 measures an outcome defined here.
 
-No evaluator-only architecture is currently admitted for production. The
+No evaluator-only architecture is admitted as production authority. The
 feedback-loop experiment in
 [`deep-research-evidence-loop.md`](deep-research-evidence-loop.md) remains
 historical design evidence while the candidate is reset around the trust and
-measurement boundaries below. The active production path remains unchanged
-until one frozen candidate passes the equal-budget replay, live, fault,
-latency, and website gates in this document.
+measurement boundaries below. New CLI and TUI runs now use the standalone
+`a3s-deep-research` engine, but architecture integration is not product
+acceptance. Equal-budget replay, representative live evaluation, fault,
+latency, source-quality, and website gates remain the release authority.
 
 ## Decision
 
@@ -25,8 +27,8 @@ that meets the product gates. A more complex stage is admitted only when the
 same corpus shows that it materially improves an outcome and does not violate
 the latency or graceful-degradation gates.
 
-The first validation round changes no production behavior. Its purpose is to
-separate three questions that the current implementation conflates:
+The first validation round changed no production behavior. Its purpose was to
+separate three questions that the former implementation conflated:
 
 1. Did the system find the evidence needed to answer the request?
 2. Did the report use that evidence correctly and helpfully?
@@ -402,16 +404,131 @@ The deterministic suite covers at least:
 - one fetch fails after other sources are persisted;
 - the process stops after one source fetch succeeds but before any semantic
   generation begins;
-- the process stops while later sources are still being fetched;
+- the process stops while later sources are still being fetched, with completed
+  and ambiguous-running source effects distinguished by exact step state;
 - optional query decomposition times out;
 - one evidence item or dimension is invalid;
 - report generation times out;
+- a provider or child returns untyped prose containing timeout, quota,
+  rate-limit, credential, or availability words;
+- AnySearch returns each typed HTTP, JSON-RPC, tool-error, and exact quota
+  discriminator class while another engine remains available;
+- an unknown A3S Use Browser diagnostic contains transient-looking prose but
+  no recognized error code;
 - artifact publication is interrupted between Markdown and HTML staging; and
-- the process restarts after source persistence and after report generation.
+- the process restarts after source persistence and after report publication
+  but before its terminal journal event.
 
 For every case, the fixture declares the expected retained source count,
 supported-dimension count, terminal artifact shape, and whether retrying an
 already completed external effect is forbidden.
+
+Retry and degradation assertions inspect only closed error enums, HTTP status,
+numeric protocol codes, exact protocol discriminators, and durable step state.
+The fixture must vary query, title, source, publisher, domain, path, language,
+and diagnostic prose while keeping that typed state fixed and prove identical
+control flow. It must also vary typed state while keeping prose fixed and prove
+the expected control-flow change. Keyword blacklists are not acceptable
+evidence for this gate.
+
+The active standalone-engine path now has deterministic coverage for the
+Markdown/HTML publication boundary. Both formats and bounded copies of the
+previous generation are staged before a closed transaction journal is
+installed. Restart recovery commits only when both complete-file SHA-256
+digests match the journal; a one-file replacement restores the previous pair,
+and an interrupted first generation is removed. The same recovery runs through
+normal artifact resolution, so opening a report cannot validate a cross-
+generation Markdown/HTML pair. This closes the pair-publication interruption
+case.
+
+The engine now also covers an error returned after the synthesized report pair
+has already replaced the staged source-backed pair. It records report
+generation as complete, records final publication as degraded, and explicitly
+re-publishes the same closed source catalog. A real-file regression first
+writes the synthesized pair, injects the post-write error, and then verifies
+that artifact discovery accepts only the restored source-backed marker and
+zero-claim quality envelope. If that deterministic restoration also fails, the
+engine returns a publication error rather than describing an unverified
+artifact generation as safe. This closes the final-publication write-error case
+without inspecting error prose.
+
+The active TUI path also covers the later crash window in which a validated
+Markdown/HTML pair has been published but the terminal research event has not
+yet been appended. The publication adapter persists a run-scoped receipt before
+returning success. Startup accepts that receipt only when its exact run and
+query digests, closed publication enum, closed quality metrics, and both full
+artifact digests validate. It then reconstructs the terminal outcome and
+quality projection without republishing or degrading a completed synthesized
+report to a bootstrap recovery artifact. Receipt absence or any identity or
+digest mismatch fails closed. Query prose, report prose, source text, titles,
+publishers, languages, domains, TLDs, and URL path vocabulary do not
+participate in this decision. The regression interrupts the run at this exact
+boundary and verifies the terminal outcome, evidence head, source count, claim
+count, accepted relation count, derivation count, basis-edge count, gap count,
+citation count, and cleared active steps after restart. Receipt schema version
+2 persists those graph metrics; version-1 receipts default them to zero for
+compatible synthesized/source-boundary recovery, while `Qualified` still
+requires a nonzero typed gap.
+
+The TUI adapter also covers interruption after bootstrap search/fetch has
+completed and before closed semantic selection begins. Startup recovery reads
+only the exact `<root-run-id>-bootstrap` Flow checkpoint and its exact persisted
+query identity. It does not append to that Flow log or replay search/fetch.
+When a completed raw acquisition exists, the adapter writes a separate
+audit-only source report, records zero accepted claims, and terminalizes the
+research run as degraded. Every retained source remains explicitly ineligible
+for conclusions. Missing journal state is represented as typed absence rather
+than inferred from error text. Query vocabulary, source text, titles, domains,
+publishers, languages, path words, and file modification times do not
+participate in any recovery decision. This closes the post-bootstrap process
+interruption case.
+
+The standalone retrieval workflow separately covers interruption while sibling
+sources are still being fetched. Each selected bootstrap, planned, or
+supplemental candidate has its own durable Flow step. Flow persists every
+sibling `StepCreated` record before starting external effects and writes a
+separate `StepCompleted` record as soon as that source succeeds. Restart reuses
+a completed sibling without fetching it again. A sibling left in `Running` at
+the crash boundary is ambiguous and is redelivered with the same attempt under
+at-least-once semantics. Aggregation reads outputs by stable candidate index
+rather than completion order. The regression waits for the first exact source
+step to become durable, interrupts the process while the second source is
+running, and proves one call for the completed source and two calls for the
+ambiguous source after restart. Exact run, candidate, source, and step
+identities plus typed state are the only recovery inputs; query or source
+vocabulary is not inspected. This closes the later-sibling-fetch interruption
+case. The other fault-matrix entries remain independent release gates.
+
+The active engine and persisted product adapter now also cover malformed
+retrieval envelopes independently at the bootstrap and planned stages. The
+fixture changes only the closed workflow-stage enum and packet schema version:
+a malformed bootstrap packet cannot enter planned retrieval when the planned
+projection is otherwise valid; a malformed planned packet cannot promote the
+raw audit-only bootstrap packet into evidence; and two malformed packets
+publish a no-evidence boundary. The valid-planned case remains synthesized,
+while the latter two cases carry zero sources and zero claim-graph metrics in
+the final receipt and strictly reopened journal. Query, title, source text,
+language, domain, path, and diagnostic prose do not participate in any branch.
+This closes the malformed-envelope product-path case.
+
+The persisted product adapter now also covers nine publication transaction
+scenarios across the closed initial-source, final-report, recovery-source, and
+no-evidence request stages. Each stage is faulted independently before commit
+or after the real adapter has written the artifact pair and exact run receipt.
+The engine either returns its verified terminal generation, restores the
+source-backed generation, or returns an error while leaving the last committed
+receipt intact. Immediate CLI/TUI resolution accepts that last generation only
+when the run identity, query digest, publication enum, quality metrics, and
+both artifact digests validate. If a valid workflow envelope is also present,
+it must agree exactly with the receipt. A missing commit produces a separately
+marked recovery artifact instead. Settlement and strict journal reopen preserve
+the resulting outcome and source/claim counts, including a source-backed
+publication with zero synthesized claims. The matrix also writes the same
+pre-settlement evidence event as the TUI before terminalization; receipt-backed
+quality uses a separate publication event stream, so the two exact event
+identities cannot collide. The matrix varies only request enums, call ordinals,
+fault boundaries, and envelope validity; query, report, source, path, language,
+domain, publisher, and error vocabulary do not control any branch.
 
 ## Website Gate
 
@@ -447,6 +564,28 @@ If a stage does not beat the baseline on its declared outcome, remove it from
 the active path. Passing unit tests for the stage is not sufficient.
 
 ## Current-State Evidence
+
+The 2026-07-24 structural-control regression passed the active standalone path:
+
+- Search passed `cargo test --all-targets --all-features --locked` and Clippy
+  with typed AnySearch, Browser, Google, Bing, and generic fallback cases;
+- Code Core passed 2,540 library tests with 14 ignored and Clippy, including
+  typed model/fetch transport projection and no prose-driven task replay;
+- standalone DeepResearch 0.1.2 passed 274 unit and 5 integration tests,
+  Clippy, and package verification, including content-isomorphism, exact-ID
+  admission, publication recovery, typed fetch retry, and position-only
+  presentation binding;
+- the embedded retrieval JavaScript passed syntax checks and its executable
+  discovery smoke against the exact current batch envelope, accepting
+  structured search JSON while failing closed on unstructured output; and
+- the CLI/TUI integration passed all 153 DeepResearch-filtered unit and
+  integration tests and Clippy against the standalone crate, including the
+  persisted F01-F08 product adapter replay, malformed-envelope matrix, and
+  publication transaction matrix.
+
+This evidence establishes the covered deterministic runtime invariants. It
+does not establish live acquisition recall, report usefulness, citation
+entailment, latency, or the Website Gate.
 
 The currently retained Tokio versus async-std artifact is useful as failure
 evidence, not as a release success:
@@ -630,10 +769,10 @@ evidence of a valid report.
 
 ### F06 — deterministic report-timeout fallback prototype
 
-The frozen measurement wrapper now prepares a deterministic source-backed
-fallback and persists a structured failure result before propagating a real
-model failure. This change is test-only; it does not yet alter the production
-CLI or TUI path.
+The frozen measurement wrapper prepared a deterministic source-backed fallback
+and persisted a structured failure result before propagating a real model
+failure. At the time of this measurement, the change was test-only and did not
+alter the production CLI or TUI path.
 
 The hermetic F06 test forces the fallback path without calling a model. It
 proved that the generated Markdown and HTML both retain the exact source
@@ -650,77 +789,112 @@ cargo test frozen_f06_timeout_fallback_preserves_source_backed_value -- --nocapt
 cargo test deterministic_fallback_renders_source_instructions_as_inert_text -- --nocapture
 ```
 
-This proves that useful deterministic publication from a closed source catalog
-is feasible. It does not yet pass the production F06 gate: the active runtime
-still makes accepted evidence and completed publication depend on the legacy
-inquiry/report path, and the shared renderer still requires multilingual and
-visual correction.
+This proved that useful deterministic publication from a closed source catalog
+was feasible. The active CLI and TUI now call the standalone engine, stage the
+source-backed artifact before synthesis, and do not execute the former
+inquiry/sectioned-report transaction. That integration removes the dependency
+identified by the prototype, but it does not by itself pass F06. The complete
+interruption, persistence, model-timeout, artifact-write, and provider-failure
+matrix still requires frozen production-path evidence.
 
 ### Host admission and deterministic renderer evidence
 
 The frozen measurement path now applies stricter Host-owned admission without
 another model call. Focused tests prove that it:
 
-- rejects model-authored URLs, unknown aliases, and raw aliases outside exact
-  citation tokens;
-- requires semantic H2 content sections and a semantic H2 source-ledger
-  boundary;
-- detects uncited reader-facing lines;
-- replaces adjacent aliases with visibly separated numeric citations; and
-- discards the model-authored source ledger and rebuilds one deduplicated ledger
-  from the closed catalog.
+- rejects unknown dimension, source, chunk, claim, relation, and gap IDs while
+  retaining valid sibling graph items;
+- requires exact typed source/chunk provenance for facts and exact admitted
+  basis edges for inferences and recommendations;
+- preserves reproducible derivations and both supported sides of a typed
+  contradiction;
+- derives complete, partial, and bounded material coverage from the admitted
+  graph;
+- produces `Qualified` only when useful claims coexist with a material typed
+  gap; and
+- builds one citation sequence and deduplicated source ledger from exact
+  admitted support.
 
-The actual F04 false-green shape now fails admission for its missing semantic
-headings, raw `platform-policy` identity, and uncited reader prose. An F01-shaped
-valid proposal retains both conflicting sources, receives separated numeric
-citations, and produces exactly one ledger entry per source.
+The actual F04 false-green shape now fails only for closed-contract defects such
+as missing required claims, invalid graph references, or unresolved material
+coverage. Reader prose such as `platform-policy`, a URL, a number, or transport
+vocabulary is inert data and cannot change admission. F01 retains both
+conflicting claims and their separate citations; F02 keeps the derivation
+method and inputs; F08 keeps the recommendation's premise edges.
 
-The shared deterministic HTML renderer now infers Chinese versus English from
-the query, localizes all Host-owned chrome and narrow-table hints, reports a
-content-section count when no typed key findings exist, and estimates reading
-time from visible rendered text rather than URL target length. All 20 focused
-renderer tests pass.
+The shared deterministic HTML renderer consumes reader-facing labels from the
+closed report contract, reports counts from admitted claims and citations,
+and estimates reading time from visible rendered text rather than URL target
+length. It does not detect the query language or route through localized
+keyword tables.
 
 Commands passed:
 
 ```text
-cargo test host_admission_ -- --nocapture
-cargo test deep_research_artifacts::html::tests -- --nocapture
+cargo test --locked research::compiler
+cargo test --locked typed_report
+cargo test --locked frozen_corpus_reaches_the_active_engine
 ```
 
-These are necessary contract corrections, not production acceptance. The
-admission implementation still lives in the frozen measurement harness, the
-active CLI/TUI path still uses the sectioned transaction, and real 1440-pixel
-and 390-pixel visual inspection remains unavailable. Static HTML inspection is
-not counted as a Website Gate pass.
+These were necessary contract corrections, not production acceptance. The
+closed admission contract and deterministic renderer now live in the
+standalone engine used by the active CLI and TUI. One live synthesized artifact
+has been inspected at 1440 pixels and 390 pixels and through a real four-page
+print render; the resulting print-width and ordered-list-marker defects now
+have renderer regressions. A single artifact is not a Website Gate pass for the
+representative corpus.
 
 ## Current Decision Point
 
 Completed evidence now includes the versioned F01-F08 fixture manifest, a
 failure-persisting measurement wrapper, deterministic F05/F06 fallback tests,
-stricter frozen-report admission, and localized renderer tests. This is enough
-to reject the current multi-model authority chain, but not enough to promote
-the reset candidate.
+closed exact-ID relevance and criterion-coverage admission, the standalone
+engine integration, a hermetic replay of every frozen case through
+`DeepResearchEngine::execute`, a replay of every frozen case through the real
+TUI publication port and CLI settlement boundary, one successful live
+synthesis, and desktop, mobile, and print inspection of that artifact.
 
-Before changing new-run production control flow:
+The persisted product-adapter replay stages the source-backed and final
+artifacts, records and recovers the v2 publication receipt, settles the CLI
+outcome, strictly reopens the journal, and compares the recovered claim,
+relation, derivation, basis-edge, and gap counts with both engine output and
+the closed fixture graph. It also verifies that admitted fixture claims remain
+in the Markdown artifact and forbidden claims do not appear. Its evaluator
+clock starts before journal creation and bootstrap, so the persisted
+measurement does not discard adapter startup time.
 
-1. make evaluator wall time originate before bootstrap and distinguish fetch
-   completion from durable source persistence;
-2. persist each accepted source and a bounded preliminary artifact before any
-   dependent synthesis generation;
-3. remove runtime semantic-complete projection from the reset candidate and
-   prove that omitted gaps or one surviving claim cannot recreate it;
-4. replay all frozen fixtures and run the persistence, interruption, synthesis,
-   and artifact fault matrix;
-5. freeze code and configuration, then run C01, C02, C05, C07, and C08 three
-   times each for both the minimal path and reset candidate under the same
-   resource envelope;
-6. retain and externally score every result without per-case code changes or
-   success-only reruns;
-7. choose the simpler winning path and only then switch shared CLI/TUI
-   settlement; and
-8. complete real desktop, mobile, and print inspection before expanding to the
-   full corpus and production release.
+The active report protocol is now `deep_research_typed_claim_graph`. It carries
+fact, inference, and recommendation claims; exact source/chunk support;
+premise/basis edges; reproducible derivations; contradiction relations; and
+typed gaps into the evidence compiler. `Qualified` is a first-class publication
+state and survives publication receipts, CLI/TUI projection, and restart
+recovery together with its accepted relation, derivation, basis-edge, and gap
+counts. A focused report may publish one structurally sufficient cited claim;
+the TUI settlement layer does not impose an unrelated finding requirement.
+
+The active-entry replay now produces F01 `Synthesized`, F02 `Synthesized`, F03
+`Qualified`, F04 `Synthesized`, F05 `Synthesized`, F06 `SourceBacked` after the
+typed report timeout, F07 `Synthesized`, and F08 `Synthesized`. This closes the
+previous wire-format defects without adding topic, entity, language, domain,
+publisher, path, or error-message rules. It is enough to retire the former
+multi-model authority chain and the flat report-block protocol. It is not
+enough to claim that DeepResearch consistently produces a high-quality
+research report.
+
+Before claiming release-quality product acceptance:
+
+1. run the remaining persistence, interruption, artifact-write, quota, and
+   provider-failure combinations through the frozen product path;
+2. freeze code and configuration, then run C01, C02, C05, C07, and C08 three
+   times each under the same resource envelope;
+3. externally score citation precision, source authority, coverage, synthesis
+   value, and calibration without domain-specific code changes or success-only
+   reruns;
+4. enforce the declared latency gates from exact-query submission through
+   durable source persistence and final artifact publication; and
+5. inspect representative focused, comprehensive, qualified, degraded,
+   multilingual, and long-source artifacts on desktop, mobile, and print
+   surfaces.
 
 This decision point authorizes deletion as readily as addition. The goal is a
 reliable research product, not preservation of the current architecture.

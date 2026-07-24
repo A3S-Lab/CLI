@@ -1,136 +1,12 @@
-#[derive(Clone, Debug)]
-#[cfg(test)]
-pub(super) struct PreparedQuestionEvidencePacket {
-    pub(super) allowed_evidence_ids: BTreeSet<String>,
-    pub(super) payload: String,
-}
-
-/// Build one identity-closed resolver packet from the complete selected
-/// evidence set. Accepted claims are the review's single fact catalog; source
-/// identities remain attached for traceability, while the fuller source
-/// excerpts stay in the durable ledger used by report generation. This avoids
-/// a second text representation without lexical matching or sampling. A
-/// selector result that exceeds the closed review budget fails closed.
-#[cfg(test)]
-pub(super) fn prepare_question_evidence_packet(
-    evidence: &[AcceptedEvidence],
-    maximum_items: usize,
-    maximum_chars: usize,
-) -> Result<PreparedQuestionEvidencePacket, String> {
-    if maximum_items == 0 || maximum_chars == 0 {
-        return Err("question evidence packet budget must be positive".to_string());
-    }
-    if evidence.is_empty() {
-        return Err("question evidence packet contains no addressable evidence".to_string());
-    }
-    if evidence.len() > maximum_items {
-        return Err(format!(
-            "closed-evidence question packet contains {} accepted evidence items; the limit is {maximum_items}",
-            evidence.len()
-        ));
-    }
-    let payload = compact_question_evidence_payload(evidence)?;
-    let payload_chars = payload.chars().count();
-    if payload_chars > maximum_chars {
-        return Err(format!(
-            "closed-evidence question packet uses {payload_chars} characters; it exceeds the {maximum_chars}-character limit"
-        ));
-    }
-    let decoded = serde_json::from_str::<Value>(&payload)
-        .map_err(|error| format!("question evidence packet is not valid JSON: {error}"))?;
-    let serialized_ids = decoded
-        .get("evidence_items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("evidence_id").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect::<BTreeSet<_>>();
-    let allowed_evidence_ids = accepted_evidence_ids(evidence);
-    if serialized_ids != allowed_evidence_ids {
-        return Err(
-            "question evidence packet IDs differ from its allowed evidence catalog".to_string(),
-        );
-    }
-    Ok(PreparedQuestionEvidencePacket {
-        allowed_evidence_ids,
-        payload,
-    })
-}
-
-#[cfg(test)]
-fn compact_question_evidence_payload(evidence: &[AcceptedEvidence]) -> Result<String, String> {
-    let evidence_items = evidence
-        .iter()
-        .map(|item| {
-            serde_json::json!({
-                "evidence_id": item.id,
-                "claims": item.claims,
-                "sources": item.sources.iter().map(|source| serde_json::json!({
-                    "source_id": source.id,
-                    "title": source.title,
-                    "url_or_path": source.anchor,
-                    "date": source.date,
-                })).collect::<Vec<_>>(),
-                "source_coverage": item.source_coverage,
-                "relevant_obligation_ids": item.relevant_obligation_ids,
-                "contradictions": item.contradictions,
-                "gaps": item.gaps,
-            })
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string(&serde_json::json!({
-        "evidence_items": evidence_items,
-    }))
-    .map_err(|error| format!("encode compact question evidence packet: {error}"))
-}
-
-/// Route source-local evidence to one obligation review without lexical
-/// matching. Newly selected evidence carries exact relevance edges; legacy or
-/// non-selector evidence remains unscoped and is conservatively available to
-/// every group.
-#[cfg(test)]
-pub(super) fn question_group_evidence(
-    evidence: &[AcceptedEvidence],
-    questions: &[Question],
-) -> Vec<AcceptedEvidence> {
-    let obligation_ids = questions
-        .iter()
-        .flat_map(|question| question.obligation_ids.iter().cloned())
-        .collect::<BTreeSet<_>>();
-    evidence
-        .iter()
-        .filter(|item| {
-            item.relevant_obligation_ids.is_empty()
-                || item
-                    .relevant_obligation_ids
-                    .iter()
-                    .any(|obligation_id| obligation_ids.contains(obligation_id))
-        })
-        .cloned()
-        .collect()
-}
-
 pub(super) async fn call_generation_with_progress(
     session: &AgentSession,
     generation_args: Value,
     progress_tx: &mpsc::Sender<AgentEvent>,
-    checkpoint: Option<&InquiryCheckpointWriter>,
+    run_clock: &EvidenceFirstRunClock,
     stage_label: &str,
     execution_timeout_ms: u64,
     max_attempts: u8,
 ) -> Result<ToolCallResult, String> {
-    let Some(checkpoint) = checkpoint else {
-        return call_tool_with_progress(
-            session,
-            "generate_object",
-            generation_args,
-            progress_tx,
-            false,
-        )
-        .await;
-    };
-
     if !(1..=2).contains(&max_attempts) {
         return Err(format!(
             "durable {stage_label} generation requires one or two attempts"
@@ -146,7 +22,7 @@ pub(super) async fn call_generation_with_progress(
     digest.update(&encoded);
     let digest = format!("{:x}", digest.finalize());
     let label = stable_generation_label(stage_label);
-    let workflow_run_id = format!("{}-{label}-{}", checkpoint.run_id(), &digest[..16]);
+    let workflow_run_id = format!("{}-{label}-{}", run_clock.run_id(), &digest[..16]);
     let workflow_args = serde_json::json!({
         "source": DURABLE_GENERATION_WORKFLOW_SOURCE,
         "input": durable_input,
@@ -181,32 +57,7 @@ pub(super) async fn call_generation_with_progress(
         .get("result")
         .ok_or_else(|| format!("durable {stage_label} workflow omitted its generation result"))?;
     let result = tool_result_from_durable_generation(result, stage_label)?;
-    #[cfg(test)]
-    pause_after_durable_generation_for_process_test(session, stage_label).await;
     Ok(result)
-}
-
-#[cfg(test)]
-async fn pause_after_durable_generation_for_process_test(
-    session: &AgentSession,
-    stage_label: &str,
-) {
-    const PAUSE_ENV: &str = "A3S_INQUIRY_PROCESS_PAUSE_AFTER_STAGE";
-    if std::env::var(PAUSE_ENV).as_deref() != Ok(stage_label) {
-        return;
-    }
-    let marker = session
-        .workspace()
-        .join(".a3s/inquiry-process-effect-completed");
-    tokio::fs::write(&marker, stage_label)
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "write durable generation process-test marker {}: {error}",
-                marker.display()
-            )
-        });
-    std::future::pending::<()>().await;
 }
 
 fn stable_generation_label(label: &str) -> String {
@@ -281,7 +132,7 @@ pub(super) async fn run_bootstrap_acquisition_stage(
     timeout_ms: u64,
 ) -> Result<ToolCallResult, String> {
     let recovery_args = args.clone();
-    let result = within_inquiry_stage_timeout(
+    let result = within_inquiry_stage_timeout_typed(
         run_dynamic_workflow(session, args, progress_tx),
         timeout_ms,
         "bootstrap acquisition",
@@ -289,12 +140,11 @@ pub(super) async fn run_bootstrap_acquisition_stage(
     .await;
     match result {
         Ok(result) => Ok(result),
-        Err(error)
-            if error.starts_with("DeepResearch bootstrap acquisition stage timed out after ") =>
-        {
-            recover_bootstrap_acquisition_after_timeout(session, &recovery_args).ok_or(error)
+        Err(error @ InquiryStageError::TimedOut { .. }) => {
+            recover_bootstrap_acquisition_after_timeout(session, &recovery_args)
+                .ok_or_else(|| error.to_string())
         }
-        Err(error) => Err(error),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -314,15 +164,6 @@ fn recover_bootstrap_acquisition_after_timeout(
         metadata: Some(recovered.metadata),
         error_kind: None,
     })
-}
-
-pub(super) fn bootstrap_acquisition_from_result(
-    result: &ToolCallResult,
-    expected_query: &str,
-) -> Option<Value> {
-    let canonical =
-        deep_research_canonical_workflow_output(&result.output, result.metadata.as_ref());
-    bootstrap_acquisition_value(&canonical, expected_query)
 }
 
 fn bootstrap_acquisition_value(output: &str, expected_query: &str) -> Option<Value> {
@@ -378,32 +219,43 @@ pub(super) async fn within_inquiry_stage_timeout<T, F>(
 where
     F: std::future::Future<Output = Result<T, String>>,
 {
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), future).await {
-        Ok(result) => result,
-        Err(_) => Err(format!(
-            "DeepResearch {stage} stage timed out after {timeout_ms} ms"
-        )),
+    within_inquiry_stage_timeout_typed(future, timeout_ms, stage)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum InquiryStageError {
+    Operation(String),
+    TimedOut { stage: String, timeout_ms: u64 },
+}
+
+impl std::fmt::Display for InquiryStageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Operation(error) => formatter.write_str(error),
+            Self::TimedOut { stage, timeout_ms } => write!(
+                formatter,
+                "DeepResearch {stage} stage timed out after {timeout_ms} ms"
+            ),
+        }
     }
 }
 
-#[cfg(test)]
-pub(super) async fn collect_inquiry_stage_results<S>(
-    stream: S,
+async fn within_inquiry_stage_timeout_typed<T, F>(
+    future: F,
     timeout_ms: u64,
-) -> (Vec<S::Item>, bool)
+    stage: &str,
+) -> Result<T, InquiryStageError>
 where
-    S: futures::Stream,
+    F: std::future::Future<Output = Result<T, String>>,
 {
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    let mut results = Vec::new();
-    futures::pin_mut!(stream);
-    loop {
-        match tokio::time::timeout_at(deadline, stream.next()).await {
-            Ok(Some(result)) => results.push(result),
-            Ok(None) => return (results, false),
-            Err(_) => return (results, true),
-        }
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), future).await {
+        Ok(result) => result.map_err(InquiryStageError::Operation),
+        Err(_) => Err(InquiryStageError::TimedOut {
+            stage: stage.to_string(),
+            timeout_ms,
+        }),
     }
 }
 
@@ -506,4 +358,25 @@ pub(super) fn generated_object<T: DeserializeOwned>(result: &ToolCallResult) -> 
         .ok_or_else(|| "structured generation response omitted object".to_string())?;
     serde_json::from_value(object)
         .map_err(|error| format!("structured generation object violated its contract: {error}"))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::{within_inquiry_stage_timeout_typed, InquiryStageError};
+
+    #[tokio::test]
+    async fn operation_text_cannot_impersonate_a_typed_timeout() {
+        let result = within_inquiry_stage_timeout_typed(
+            async {
+                Err::<(), _>(
+                    "DeepResearch bootstrap acquisition stage timed out after 1 ms".to_string(),
+                )
+            },
+            1_000,
+            "bootstrap acquisition",
+        )
+        .await;
+
+        assert!(matches!(result, Err(InquiryStageError::Operation(_))));
+    }
 }

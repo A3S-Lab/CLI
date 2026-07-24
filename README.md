@@ -876,7 +876,7 @@ input prefixes:
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
 | Local and remote parallelism | Local subagent fan-out uses the host-side `parallel_task` tool. QuickJS/PTC scripts do not call `parallel_task` directly; dynamic workflows schedule a Flow step named `parallel_task`, and the host executes it natively. After `/login`, the signed-in `runtime` tool is available to workflow steps and model turns for OS Runtime batch execution. |
-| Deep research | Prefix a prompt with `?` to run the evidence-first Host path. Exact-query bootstrap retrieval and one bounded semantic outline run concurrently. The outline declares `focused` or `comprehensive` scope, freshness and workspace needs, one to four evidence tracks, and at most three supplemental plain-text queries. The Host preserves the exact query, rejects URLs and duplicates, enforces transport budgets, merges bootstrap and supplemental evidence, and applies generic source and publication gates; it contains no topic dictionary or domain-specific fast path. Planning failure degrades to the exact query and one generic track. Search inherits the active `config.acl` engine policy; without an override it uses DuckDuckGo and Wikipedia, while AnySearch remains opt-in. Provider metadata is never report evidence. A deterministic source-backed artifact is staged before one closed report proposal with at most one transient retry. Focused reports require a direct answer, distinct Findings, cited claims, and closed citations. Comprehensive reports additionally require four distinct Findings, five admitted claim blocks, two cited sources, and a script-adjusted substantive-length floor. Final citations are numbered densely in first-citation order, and the Host rebuilds the source ledger from sources actually used. If synthesis does not pass, fetched evidence remains visible in an explicitly degraded source snapshot; if no safe evidence exists, the Host publishes an honest no-evidence boundary report. |
+| Deep research | Prefix a prompt with `?` to run the evidence-first Host path. Exact-query bootstrap retrieval and one bounded semantic outline run concurrently. The outline declares `focused` or `comprehensive` scope, freshness and workspace needs, one to four evidence tracks, and at most three supplemental plain-text queries. The Host preserves the exact query, rejects URLs and duplicates, enforces transport budgets, merges bootstrap and supplemental evidence, and applies generic source and publication gates; it contains no topic dictionary or domain-specific fast path. Planning failure degrades to the exact query and one generic track. Search inherits the active `config.acl` engine policy; without an override it uses DuckDuckGo and Wikipedia, while AnySearch remains opt-in. Provider metadata is never report evidence. A deterministic source-backed artifact is staged before one `deep_research_typed_claim_graph` proposal with at most one transient retry. The evidence compiler validates exact dimension/source/chunk IDs, fact/inference/recommendation kinds, basis and derivation edges, contradiction relations, and typed gaps, then renders Markdown and HTML from one document. Focused reports may publish one sufficient cited direct-answer claim; comprehensive reports require four findings, five admitted claims, two cited sources, and the substantive-length floor. Complete material coverage publishes synthesized success, while useful admitted claims with a material gap publish qualified success. If no generated graph passes, fetched evidence remains visible in an explicitly degraded source snapshot; if no safe evidence exists, the Host publishes an honest no-evidence boundary report. |
 | Context and memory | The bottom status bar is the single context-fill indicator. Auto-compaction uses the active model's real window, runs before an overflowing request, and re-arms after every cycle so long sessions continue through repeated compactions. `/history` or `Ctrl+R` fuzzy-searches prompts in the current session without changing the draft; `/ctx` searches past sessions, `/ctx <n>` attaches a previous transcript window, `/ctx save <n>` promotes it to memory, `/sleep` consolidates the day, and `/memory` browses durable memories as an event/entity graph with aliases, tiers, relations, conflicts, and forget candidates. |
 | Knowledge | `/kb` manages a local personal knowledge vault for notes, imports, search, browsing, and shared-confirm deletion. `/okf` manages shareable OKF knowledge-package assets under the visible `okf/` package root and publishes them to the OS Knowledge service when signed in. |
 | Asset development | `/agent`, `/mcp`, `/skill`, and `/okf` enter local development modes with an active asset, review commands, clone/draft flows, and publish/deploy/status surfaces. `/flow` works differently: it selects or drafts workflow DAG assets and sends them to OS Workflow as a Service, without entering a persistent local dev mode. |
@@ -909,9 +909,12 @@ web evidence, it does not search the exact query again; it searches only the
 validated supplements and merges both packets before source and chunk
 selection. If planning fails or returns an invalid contract, the fallback is
 the exact query and one generic evidence track, with no inferred topic and no
-query expansion. One typed coverage-gap pass may run within the existing
-retrieval and fetch caps. No product domain, named entity, keyword family, or
-language-specific topic template changes this control flow.
+query expansion. Unknown breadth and temporal intent fail toward the stronger
+contract: the fallback is always `comprehensive` and
+`freshness_required = true`, so an undated synthesized answer is never
+authorized by planner failure. One typed coverage-gap pass may run within the
+existing retrieval and fetch caps. No product domain, named entity, keyword
+family, or language-specific topic template changes this control flow.
 
 Discovery candidates first pass one bounded semantic selection over closed
 candidate IDs. If that selection fails, the retrieval workflow may fetch a
@@ -921,57 +924,64 @@ including fallback material, must then pass the same closed semantic evidence
 selector before it can support a report. The selector returns exact chunk IDs,
 obligation-relevance edges, completion-criterion coverage, and typed
 `supporting`, `primary`, and `independent` roles. Partial evidence can remain
-visible without falsely closing a criterion.
+visible and support an atomic claim through an exact relevance edge without
+falsely closing a criterion. Only the separate completion-criterion edges and
+their criterion-scoped roles can close a track. Small catalogs use one
+selector; larger catalogs use complete source-local JSON windows capped at
+32 KiB and a second exact-ID reduction capped at four excerpts per source.
+Window boundaries are byte budgets and never inspect punctuation, language,
+topic, or URL text.
 
 Search rank, query-token overlap, language or script detection, publisher
-names, hostnames, TLDs, and maintained site allowlists never promote a source
-into claim evidence. Search-provider metadata only identifies retrieval
-opportunities and remains visible as audit metadata. Source admission is a
-semantic judgment over the closed fetched packet, while the Host validates all
-returned IDs, criterion indexes, role shapes, and provenance before
-publication. One typed coverage-gap pass may retrieve missing evidence without
-opening an unbounded search loop.
+names, hostnames, TLDs, URL path vocabulary, workspace path shape, and
+maintained site lists never promote a source into claim evidence.
+Search-provider metadata only identifies retrieval opportunities and remains
+visible as audit metadata. The Host-projected inquiry collection is the sole
+semantic admission authority for both web and workspace sources. The Host
+validates exact source/chunk IDs, criterion indexes, role shapes, and
+provenance before publication. One typed coverage-gap pass may retrieve missing
+evidence without opening an unbounded search loop.
 
-Only admitted, canonicalized source text enters the report catalog. Script,
-style, navigation, escaped hydration data, serialized application state,
-JavaScript placeholders, template expressions, and inline transport URLs are
-discarded while visible source-link labels are retained. A failed, malformed,
-or irrelevant source cannot erase valid siblings, and fetched fallback text
-that lacks semantic-selection provenance is never upgraded into report
-evidence.
+The report catalog preserves structurally valid source text without classifying
+its vocabulary. Sanitization removes script/style/noscript element blocks,
+HTML markup, control characters, and inline transport targets under fixed
+bounds; visible text remains available to the closed semantic review even when
+it resembles application state or JavaScript. A failed or malformed source
+cannot erase valid siblings, and raw web or workspace acquisition that lacks
+inquiry-projection provenance remains audit-only.
 
 Once at least one source survives, the Host atomically stages `report.md` and
 `index.html` before report synthesis becomes terminal. That source-backed
 artifact is intentionally classified as `degraded`: it reports zero synthesized
 claims and makes the evidence limitation explicit instead of presenting source
-excerpts as a finished answer. With no safely publishable source, the same Host
-path writes a localized no-evidence boundary artifact.
+excerpts as a finished answer. With no semantically admitted source, the same
+Host path writes a versioned no-evidence boundary artifact.
 
-The optional report proposal is a closed structured generation over source
-aliases, bounded excerpts, and the validated semantic tracks. A transient
-generation failure may retry once; there is no reviewer, repair wave, section
-fan-out, topic-specific compiler, or hidden continuation. The Host
-independently rejects unknown source aliases, unknown track IDs, unsupported
-numbers or dates, source instructions, and malformed blocks while keeping
-valid siblings. Summary and Findings are admitted as atomic claims: every
-cited source must support the entire block, including every date and number, so
-separate sources cannot be stitched into one apparent fact. Strong support is
-derived from closed semantic admission and typed source coverage, not a
-publisher list. When the plan requires a primary source or independent
-corroboration, the report must use the corresponding typed coverage edges;
-unrelated citations never satisfy breadth.
+The optional report proposal is a closed typed claim graph over bounded
+excerpts and the validated semantic dimensions. A transient generation failure
+may retry once; there is no reviewer, repair wave, section fan-out,
+topic-specific compiler, or hidden continuation. The Host builds the schema
+for that exact attempt: dimension, source, and chunk enums contain only IDs
+from the closed packet, while audit-only sources are absent. Claims are typed
+as facts, inferences, or recommendations. Inferences and recommendations name
+admitted basis claims; derived claims keep their method and exact input IDs;
+contradictions name two admitted claims in one dimension. The compiler rejects
+malformed items while keeping valid siblings and derives citations, coverage,
+the source ledger, and both renderings from the admitted graph. It never
+compares query, claim, or source prose and never promotes evidence by publisher,
+domain, path, language, token, or error wording.
 
-When the planner marks freshness as required, stale temporal snapshots cannot
-support the current answer. Focused publication requires a direct answer, a
-distinct Findings section, at least two cited claim blocks, and at least one
-cited eligible source. Comprehensive publication additionally requires four
-distinct Findings, five admitted claim blocks, two cited sources, and the
-script-adjusted substantive-length floor. It must also cover every material
-research track, all declared completion criteria, and the planner's typed
-source-role requirements. Audit-only sources do not poison an otherwise valid
-proposal, but they cannot strengthen a conclusion. Website metrics are derived
-from admitted Findings and citations, never from source headings or provider
-metadata.
+Focused publication requires one cited direct-answer claim, at least one
+admitted claim, and one cited eligible source. Comprehensive publication
+additionally requires four findings, five admitted claims, two cited sources,
+and 480 substantive characters. Complete material coverage publishes
+`synthesized`; useful admitted claims with an explicit material gap publish
+`qualified`. Audit-only sources do not poison an otherwise valid proposal, but
+they cannot strengthen a conclusion. Reader-facing labels and evidence-boundary
+prose come from the closed proposal; the Host does not choose templates by
+detected language. Website metrics are derived from admitted typed claims and
+citations, never from source headings or provider metadata. Markdown and HTML
+use matching versioned artifact markers rather than title-word classification.
 
 `a3s code research` (including its aliases) and the TUI `?` path call this same
 evidence-first runtime; there is no second CLI implementation. Durable search,
@@ -1724,7 +1734,7 @@ the skill matcher for the current request.
 | `/okf review` | Review the selected local OKF package. If no package is active, A3S Code opens the OKF selection panel first and enters OKF-development mode. |
 | `/okf publish` / `/okf deploy` | Publish the selected OKF package as an OS `knowledge` asset, sync Knowledge service runtime-binding intent, then deploy through progressive knowledge-service capabilities or open the Knowledge service view. Without OS, A3S Code performs local validation and reports blocked deployment inputs. |
 | `/okf status` | Check the existing OS knowledge asset and runtime-binding status without mutating the selected package. |
-| `? <question>` | Starts the evidence-first DeepResearch path described above. Exact-query bootstrap and one bounded semantic outline run concurrently. The Host validates up to three semantic supplemental queries, searches only supplements not already covered by bootstrap, and merges the evidence under fixed transport budgets. Invalid or unavailable planning falls back to the unchanged exact query and one generic track. The runtime contains no topic-specific query routing or report shortcut. Fetched web text becomes claim evidence only through closed semantic chunk IDs and typed obligation/source-role coverage; publisher names, hosts, language, and query-token rules cannot promote it. The Host stages a degraded source snapshot before attempting one closed report proposal, retries a transient proposal failure at most once, and publishes synthesized success only after scope-appropriate direct-answer, Findings, cited-claim, citation, language, atomic-fact, typed-coverage, and depth gates pass. Resume reuses completed durable effects and cannot promote a source snapshot into synthesized success. |
+| `? <question>` | Starts the evidence-first DeepResearch path described above. Exact-query bootstrap and one bounded semantic outline run concurrently. The Host validates up to three semantic supplemental queries, searches only supplements not already covered by bootstrap, and merges the evidence under fixed transport budgets. Invalid or unavailable planning falls back to the unchanged exact query and one generic track. The runtime contains no topic-specific query routing or report shortcut. Web and workspace text becomes claim evidence only through closed source/chunk IDs and exact provenance edges; publisher names, hosts, paths, language, and query-token rules cannot promote it. The Host stages a degraded source snapshot before attempting one typed claim graph, retries a transient proposal failure at most once, and publishes `synthesized` for complete material coverage or `qualified` for useful claims with an explicit material gap. Resume reuses completed durable effects and cannot promote a source snapshot without the matching closed publication receipt. |
 | `/loop` | Opens the engineered-loop dashboard for persisted loops under `.a3s/loops/`. |
 | `/loop init [name] [pattern]` | Creates a durable loop spec, `STATE.md`, `RUN_LOG.md`, budget file, skills, and reports folder. Built-in patterns include `daily-triage`, `ci-sweeper`, `pr-babysitter`, `dependency-sweeper`, `changelog-drafter`, and `agent-dev`. |
 | `/loop run <name>` | Runs a loop with maker/checker separation. With OS signed in and `os_runtime = true`, normal workspace loops require Runtime/parallel fan-out, Markdown/HTML reports, RemoteUI report view data, and asset-scoped Runtime activity visibility. Inside `/agent` mode, the same command stays local and targets the active agent package. |

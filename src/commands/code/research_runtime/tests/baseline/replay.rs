@@ -46,7 +46,7 @@ fn recorded_f04_is_rejected_and_replaced_without_a_model() {
     assert!(
         violations
             .iter()
-            .any(|violation| violation.contains("semantic H2 Sources")),
+            .any(|violation| violation.contains("exact H2 Sources protocol")),
         "{violations:#?}"
     );
     assert!(
@@ -69,13 +69,11 @@ fn recorded_f04_is_rejected_and_replaced_without_a_model() {
     let html = std::fs::read_to_string(directory.path().join("index.html"))
         .expect("read replacement HTML");
 
-    assert!(markdown.contains("# 可核查的研究证据"));
+    assert!(markdown.contains("# Verifiable Research Evidence"));
     assert!(markdown.contains("Northwind SDK 3.0 supports Linux and macOS."));
     assert!(markdown.contains("https://docs.example.test/northwind/3/platforms"));
     assert!(!markdown.contains("platform-policy"));
-    assert!(html.contains("<html lang=\"zh-CN\">"));
-    assert!(html.contains("证据概况"));
-    assert!(!html.contains("Evidence profile"));
+    assert!(html.contains("Evidence profile"));
 }
 
 fn recorded_raw_output(case_id: &str) -> String {

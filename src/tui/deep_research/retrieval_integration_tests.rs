@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use a3s_code_core::tools::{Tool, ToolContext, ToolErrorKind, ToolExecutor, ToolOutput};
+use tokio::sync::Notify;
 
 struct SearchFixture {
     queries: Arc<Mutex<Vec<String>>>,
@@ -55,14 +57,29 @@ struct PaginatedHtmlFixture {
 }
 
 struct TransientFetchFixture {
-    calls: Arc<AtomicUsize>,
+    calls: Arc<Mutex<Vec<String>>>,
 }
 
 struct UntypedFetchFailureFixture {
     calls: Arc<AtomicUsize>,
 }
 
+struct InterruptedSiblingFetchFixture {
+    calls: Arc<Mutex<Vec<String>>>,
+    blocked_url: String,
+    blocked_started: Arc<Notify>,
+}
+
 struct LocalEvidenceFixture;
+
+const PDF_RANGE_ONE: &str =
+    "第一段记录了双阶段检索方法以及证据保留边界，内容足够构成一个结构化文本块。";
+const PDF_RANGE_TWO: &str = "第二段报告消融实验使引用完整率下降十七个百分点，并给出明确测量条件。";
+const PDF_RANGE_THREE: &str =
+    "第三段说明评测只覆盖英语技术主题，因此其他语言和领域仍然属于证据缺口。";
+const HTML_RANGE_ONE: &str = "项目记录前段说明了阶段一背景和参与方，并提示后续还有完整进展记录。";
+const HTML_RANGE_TWO: &str = "项目记录后段说明了阶段二进展，并确认阶段三结论、最终指标和发布日期。";
+const HTML_RANGE_THREE: &str = "项目记录末段确认阶段三结论、最终指标和发布日期，构成完整事实记录。";
 
 #[async_trait::async_trait]
 impl Tool for SearchFixture {
@@ -218,7 +235,104 @@ impl Tool for TextFetchFixture {
             .bodies
             .get(&url)
             .ok_or_else(|| anyhow::anyhow!("unexpected fixture URL: {url}"))?;
-        Ok(ToolOutput::success(body.clone()))
+        let offset = args
+            .get("offset")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0);
+        let maximum = args
+            .get("max_chars")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(50_000);
+        let total_chars = body.chars().count();
+        if offset > total_chars {
+            return Ok(ToolOutput::error("fixture offset exceeds body"));
+        }
+        let content = body.chars().skip(offset).take(maximum).collect::<String>();
+        let returned_chars = content.chars().count();
+        let next_offset =
+            (offset + returned_chars < total_chars).then_some(offset + returned_chars);
+        let mut output = content;
+        if let Some(next_offset) = next_offset {
+            output.push_str(&format!(
+                "\n\n... (fixture continuation; offset={next_offset})\n"
+            ));
+        }
+        Ok(
+            ToolOutput::success(output).with_metadata(serde_json::json!({
+                "source_anchors": [url],
+                "document_kind": "html",
+                "content_type": "text/html",
+                "range": {
+                    "offset": offset,
+                    "requested_max_chars": maximum,
+                    "applied_max_chars": maximum,
+                    "returned_chars": returned_chars,
+                    "total_chars": total_chars,
+                    "next_offset": next_offset,
+                    "eof": next_offset.is_none(),
+                    "limit_clamped": false
+                }
+            })),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for InterruptedSiblingFetchFixture {
+    fn name(&self) -> &str {
+        "fixture_interrupted_sibling_web_fetch"
+    }
+
+    fn description(&self) -> &str {
+        "Completes one source while holding the first attempt for another source."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        let url = args
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let attempt = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(url.clone());
+            calls.iter().filter(|observed| *observed == &url).count()
+        };
+        if url == self.blocked_url && attempt == 1 {
+            self.blocked_started.notify_one();
+            std::future::pending::<()>().await;
+        }
+        let output = format!(
+            "Durable source material for {url} remains independently recoverable after interruption."
+        );
+        let returned_chars = output.chars().count();
+        Ok(
+            ToolOutput::success(output).with_metadata(serde_json::json!({
+                "source_anchors": [url],
+                "document_kind": "html",
+                "content_type": "text/html",
+                "range": {
+                    "offset": 0,
+                    "requested_max_chars": 50_000,
+                    "applied_max_chars": 50_000,
+                    "returned_chars": returned_chars,
+                    "total_chars": returned_chars,
+                    "next_offset": null,
+                    "eof": true,
+                    "limit_clamped": false
+                }
+            })),
+        )
     }
 }
 
@@ -579,19 +693,12 @@ impl Tool for PaginatedPdfFixture {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
         self.offsets.lock().unwrap().push(offset);
+        let second_offset = PDF_RANGE_ONE.chars().count() as u64;
+        let third_offset = second_offset + PDF_RANGE_TWO.chars().count() as u64;
         let (body, next_offset) = match offset {
-            0 => (
-                "第一段记录了双阶段检索方法以及证据保留边界，内容足够构成一个结构化文本块。",
-                Some(100),
-            ),
-            100 => (
-                "第二段报告消融实验使引用完整率下降十七个百分点，并给出明确测量条件。",
-                Some(200),
-            ),
-            200 => (
-                "第三段说明评测只覆盖英语技术主题，因此其他语言和领域仍然属于证据缺口。",
-                None,
-            ),
+            0 => (PDF_RANGE_ONE, Some(second_offset)),
+            value if value == second_offset => (PDF_RANGE_TWO, Some(third_offset)),
+            value if value == third_offset => (PDF_RANGE_THREE, None),
             _ => return Ok(ToolOutput::error("unexpected PDF range offset")),
         };
         Ok(ToolOutput::success(body).with_metadata(serde_json::json!({
@@ -599,6 +706,7 @@ impl Tool for PaginatedPdfFixture {
             "content_type": "application/pdf",
             "range": {
                 "offset": offset,
+                "returned_chars": body.chars().count(),
                 "next_offset": next_offset,
                 "eof": next_offset.is_none()
             }
@@ -630,19 +738,12 @@ impl Tool for PaginatedHtmlFixture {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or_default();
         self.offsets.lock().unwrap().push(offset);
+        let second_offset = HTML_RANGE_ONE.chars().count() as u64;
+        let third_offset = second_offset + HTML_RANGE_TWO.chars().count() as u64;
         let (body, next_offset) = match offset {
-            0 => (
-                "赛事页面前段记录了小组赛背景和参赛队伍，并提示后续还有完整淘汰赛结果。",
-                Some(100),
-            ),
-            100 => (
-                "赛事页面后段记录了半决赛晋级过程，并确认决赛冠军、最终比分和颁奖日期。",
-                Some(200),
-            ),
-            200 => (
-                "赛事页面末段确认决赛冠军、最终比分和颁奖日期，构成当前战况的完整事实记录。",
-                None,
-            ),
+            0 => (HTML_RANGE_ONE, Some(second_offset)),
+            value if value == second_offset => (HTML_RANGE_TWO, Some(third_offset)),
+            value if value == third_offset => (HTML_RANGE_THREE, None),
             _ => return Ok(ToolOutput::error("unexpected HTML range offset")),
         };
         Ok(ToolOutput::success(body).with_metadata(serde_json::json!({
@@ -650,6 +751,7 @@ impl Tool for PaginatedHtmlFixture {
             "content_type": "text/html; charset=utf-8",
             "range": {
                 "offset": offset,
+                "returned_chars": body.chars().count(),
                 "next_offset": next_offset,
                 "eof": next_offset.is_none()
             }
@@ -676,24 +778,40 @@ impl Tool for TransientFetchFixture {
         args: &serde_json::Value,
         _ctx: &ToolContext,
     ) -> anyhow::Result<ToolOutput> {
-        let call = self.calls.fetch_add(1, Ordering::SeqCst);
-        if call < 2 {
+        let url = args
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let attempt = {
+            let mut calls = self.calls.lock().unwrap();
+            calls.push(url.clone());
+            calls.iter().filter(|observed| *observed == &url).count()
+        };
+        if attempt == 1 {
             return Ok(
-                ToolOutput::error("typed transport timeout").with_error_kind(
-                    ToolErrorKind::Timeout {
+                ToolOutput::error("typed transport failure").with_error_kind(
+                    ToolErrorKind::Transport {
                         op: "fixture fetch".to_string(),
-                        duration_ms: 20_000,
                     },
                 ),
             );
         }
-        let url = args
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        Ok(ToolOutput::success(format!(
-            "The bounded retry fetched substantive authoritative evidence from {url}."
-        )))
+        let output =
+            format!("The bounded retry fetched substantive authoritative evidence from {url}.");
+        Ok(
+            ToolOutput::success(output.clone()).with_metadata(serde_json::json!({
+                "source_anchors": [url],
+                "document_kind": "html",
+                "content_type": "text/html",
+                "range": {
+                    "offset": 0,
+                    "returned_chars": output.chars().count(),
+                    "next_offset": null,
+                    "eof": true
+                }
+            })),
+        )
     }
 }
 
@@ -844,8 +962,146 @@ async fn execute(executor: &ToolExecutor, args: &serde_json::Value) -> serde_jso
     serde_json::from_str(&result.output).expect("retrieval output")
 }
 
+fn assert_exact_calls_in_any_order(observed: &[String], expected: &[&str]) {
+    let mut observed = observed.to_vec();
+    observed.sort();
+    let mut expected = expected
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(observed, expected);
+}
+
+fn research_source_urls(output: &serde_json::Value) -> Vec<String> {
+    output["research"]["results"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|result| {
+            result["structured"]["sources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|source| source["url_or_path"].as_str().map(str::to_string))
+        .collect()
+}
+
 #[tokio::test]
-async fn bootstrap_acquisition_fetches_only_semantically_selected_candidates() {
+async fn process_interruption_persists_completed_source_without_replaying_its_fetch() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = Arc::new(ToolExecutor::new(
+        workspace.path().to_string_lossy().to_string(),
+    ));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let blocked_started = Arc::new(Notify::new());
+    let first_url = "https://durable-effects.example/first";
+    let second_url = "https://durable-effects.example/second";
+    executor.register_dynamic_tool(Arc::new(InterruptedSiblingFetchFixture {
+        calls: Arc::clone(&calls),
+        blocked_url: second_url.to_string(),
+        blocked_started: Arc::clone(&blocked_started),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "Compare two independently acquired records";
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "records.comparison",
+            "Independent records",
+            "Compare the two acquired records"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([first_url, second_url]),
+    );
+    plan["budget"]["direct_searches"] = serde_json::json!(0);
+    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    let mut args = workflow_args(
+        query,
+        super::DeepResearchEvidenceScope::WebAndWorkspace,
+        plan,
+        "unused_fixture_web_search",
+        "fixture_interrupted_sibling_web_fetch",
+    );
+    args["run_id"] = serde_json::json!("deepresearch-independent-source-effects");
+    a3s_code_core::tools::register_dynamic_workflow(executor.registry());
+
+    let first_execution = {
+        let executor = Arc::clone(&executor);
+        let args = args.clone();
+        tokio::spawn(async move { executor.execute("dynamic_workflow", &args).await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), blocked_started.notified())
+        .await
+        .expect("the second source fetch should enter its first attempt");
+
+    let workflow_log = workspace
+        .path()
+        .join(".a3s/workflow/deepresearch-independent-source-effects.jsonl");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let completed = tokio::fs::read_to_string(&workflow_log)
+                .await
+                .ok()
+                .is_some_and(|history| {
+                    history.lines().any(|line| {
+                        serde_json::from_str::<serde_json::Value>(line)
+                            .ok()
+                            .is_some_and(|event| {
+                                event["event"]["type"] == "step_completed"
+                                    && event["event"]["step_id"] == "retrieve_web_source_1"
+                            })
+                    })
+                });
+            if completed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the completed sibling source must be durable before the batch finishes");
+    first_execution.abort();
+    let _ = first_execution.await;
+
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(10),
+        executor.execute("dynamic_workflow", &args),
+    )
+    .await
+    .expect("the exact interrupted run should resume")
+    .expect("resumed retrieval workflow");
+    assert_eq!(resumed.exit_code, 0, "{}", resumed.output);
+    let output: serde_json::Value =
+        serde_json::from_str(&resumed.output).expect("resumed workflow output");
+    assert_eq!(
+        output["research"]["metadata"]["source_count"],
+        2,
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap()
+    );
+    let calls = calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().filter(|url| url.as_str() == first_url).count(),
+        1,
+        "a durably completed source fetch must not be replayed"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|url| url.as_str() == second_url)
+            .count(),
+        2,
+        "the ambiguous running source attempt must be redelivered"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_acquisition_preserves_visible_text_and_drops_a_structural_payload_prefix() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -866,16 +1122,26 @@ async fn bootstrap_acquisition_fetches_only_semantically_selected_candidates() {
             "engines": ["fixture"]
         }]),
     }));
+    let serialized_state = serde_json::json!({
+        "state": "HIDDEN_STRUCTURAL_PAYLOAD".repeat(80)
+    })
+    .to_string();
+    let encoded_markup_state = format!(
+        r#"{{"transport":"{}","content":"\\u003carticle\\u003e\\u003cp\\u003eThe structurally decoded excerpt remains visible.\\u003c/p\\u003e\\u003c/article\\u003e""#,
+        "HIDDEN_TRUNCATED_SERIALIZED_STATE".repeat(40)
+    );
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([
             (
                 "https://bootstrap.example/first".to_string(),
-                "Your current User-Agent string appears to be from an automated process.\n\
-                 <script>window.__BOOTSTRAP__ = true;</script>\n\
-                 The first fetched source contains substantive traceable bootstrap evidence.\n\
-                 Toggle the table of contents 164 languages [Afrikaans](https://example.test/af)"
-                    .to_string(),
+                format!(
+                    "{serialized_state} The first fetched source contains substantive traceable bootstrap evidence.\n\
+                     {encoded_markup_state}\n\
+                     Your current User-Agent string appears to be from an automated process.\n\
+                     <script>window.__BOOTSTRAP__ = true;</script>\n\
+                     Toggle the table of contents 164 languages [Afrikaans](https://example.test/af)"
+                ),
             ),
             (
                 "https://www.reuters.com/bootstrap/second".to_string(),
@@ -885,7 +1151,13 @@ async fn bootstrap_acquisition_fetches_only_semantically_selected_candidates() {
         ]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
-        preferred_fragments: vec!["First ranked source".to_string()],
+        preferred_fragments: vec![
+            "First ranked source".to_string(),
+            "HIDDEN_STRUCTURAL_PAYLOAD".to_string(),
+            "HIDDEN_TRUNCATED_SERIALIZED_STATE".to_string(),
+            "substantive traceable bootstrap evidence".to_string(),
+            "structurally decoded excerpt remains visible".to_string(),
+        ],
         fail: false,
         invalid_selection: false,
     }));
@@ -926,9 +1198,21 @@ async fn bootstrap_acquisition_fetches_only_semantically_selected_candidates() {
         .collect::<Vec<_>>()
         .join(" ");
     assert!(retained_text.contains("substantive traceable bootstrap evidence"));
-    assert!(!retained_text.contains("User-Agent"), "{retained_text}");
+    assert!(retained_text.contains("User-Agent"), "{retained_text}");
     assert!(!retained_text.contains("__BOOTSTRAP__"), "{retained_text}");
-    assert!(!retained_text.contains("164 languages"), "{retained_text}");
+    assert!(
+        !retained_text.contains("HIDDEN_STRUCTURAL_PAYLOAD"),
+        "{retained_text}"
+    );
+    assert!(
+        !retained_text.contains("HIDDEN_TRUNCATED_SERIALIZED_STATE"),
+        "{retained_text}"
+    );
+    assert!(
+        retained_text.contains("structurally decoded excerpt remains visible"),
+        "{retained_text}"
+    );
+    assert!(retained_text.contains("164 languages"), "{retained_text}");
     assert_eq!(
         output["acquisition"]["metadata"]["source_selection_mode"],
         "semantic_candidate_ids"
@@ -1006,12 +1290,12 @@ async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() 
     let output = execute(&executor, &args).await;
 
     assert_eq!(*queries.lock().unwrap(), [query]);
-    assert_eq!(
-        *urls.lock().unwrap(),
-        [
+    assert_exact_calls_in_any_order(
+        &urls.lock().unwrap(),
+        &[
             "https://bootstrap-fallback-one.example/record",
-            "https://bootstrap-fallback-two.example/record"
-        ]
+            "https://bootstrap-fallback-two.example/record",
+        ],
     );
     assert_eq!(
         output["acquisition"]["metadata"]["source_selection_mode"],
@@ -1022,6 +1306,18 @@ async fn bootstrap_source_admission_failure_still_acquires_bounded_candidates() 
             .as_array()
             .map(Vec::len),
         Some(2)
+    );
+    assert_eq!(
+        output["acquisition"]["packet"]["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|source| source["url_or_path"].as_str())
+            .collect::<Vec<_>>(),
+        [
+            "https://bootstrap-fallback-one.example/record",
+            "https://bootstrap-fallback-two.example/record",
+        ]
     );
     assert!(output
         .to_string()
@@ -1368,7 +1664,7 @@ async fn provider_publication_date_remains_discovery_metadata() {
 }
 
 #[tokio::test]
-async fn github_release_catalog_fetches_the_official_atom_feed() {
+async fn seed_urls_are_fetched_without_publisher_specific_rewrites() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
@@ -1379,7 +1675,7 @@ async fn github_release_catalog_fetches_the_official_atom_feed() {
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
-            "https://github.com/example/runtime/releases.atom".to_string(),
+            "https://github.com/example/runtime/releases".to_string(),
             atom_feed,
         )]),
     }));
@@ -1411,7 +1707,7 @@ async fn github_release_catalog_fetches_the_official_atom_feed() {
 
     assert_eq!(
         *urls.lock().unwrap(),
-        ["https://github.com/example/runtime/releases.atom"]
+        ["https://github.com/example/runtime/releases"]
     );
     assert_eq!(
         output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
@@ -1425,7 +1721,7 @@ async fn github_release_catalog_fetches_the_official_atom_feed() {
 }
 
 #[tokio::test]
-async fn truncated_batch_child_is_refetched_without_losing_later_sources() {
+async fn independent_source_effects_avoid_cross_source_batch_truncation() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
@@ -1458,9 +1754,9 @@ async fn truncated_batch_child_is_refetched_without_losing_later_sources() {
     }));
     let mut plan = minimal_plan(
         serde_json::json!([track(
-            "batch.recovery",
-            "Batch recovery",
-            "Retain every fetched source after aggregate output truncation"
+            "source.effects",
+            "Independent source effects",
+            "Retain every independently completed source effect"
         )]),
         serde_json::json!([]),
         serde_json::json!(source_urls),
@@ -1468,7 +1764,7 @@ async fn truncated_batch_child_is_refetched_without_losing_later_sources() {
     plan["budget"]["direct_searches"] = serde_json::json!(0);
     plan["budget"]["direct_fetches"] = serde_json::json!(3);
     let args = workflow_args(
-        "Recover a truncated child from a large fetch batch",
+        "Retain all independently completed source effects",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "unused_fixture_web_search",
@@ -1477,24 +1773,24 @@ async fn truncated_batch_child_is_refetched_without_losing_later_sources() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(output["research"]["metadata"]["source_count"], 3);
-    assert!(
-        output["research"]["metadata"]["web"]["batch_output_recovery_count"]
-            .as_u64()
-            .is_some_and(|count| count >= 1),
-        "large batch output should exercise the per-child recovery path: {}",
-        output["research"]["metadata"]
+    assert_eq!(
+        output["research"]["metadata"]["source_count"],
+        3,
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap()
     );
-    let observed = urls.lock().unwrap();
-    assert!(
-        source_urls
-            .iter()
-            .all(|url| observed.iter().any(|seen| seen == url)),
-        "every selected source must be fetched: {observed:?}"
+    assert_eq!(
+        output["research"]["metadata"]["web"]["completed_source_effect_count"],
+        3
     );
-    assert!(
-        observed.len() > source_urls.len(),
-        "at least one truncated batch child must be refetched independently"
+    assert_eq!(
+        output["research"]["metadata"]["web"]["batch_output_recovery_count"],
+        0
+    );
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &source_urls);
+    assert_eq!(
+        research_source_urls(&output),
+        source_urls.map(str::to_string)
     );
 }
 
@@ -1654,14 +1950,16 @@ async fn plan_seed_does_not_displace_semantically_selected_source_portfolio() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(
-        *urls.lock().unwrap(),
-        [
-            "https://official.example/canonical",
-            "https://selection.example/independent"
-        ]
-    );
+    let expected_urls = [
+        "https://official.example/canonical",
+        "https://selection.example/independent",
+    ];
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &expected_urls);
     assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    assert_eq!(
+        research_source_urls(&output),
+        expected_urls.map(str::to_string)
+    );
     let structured = output["research"]["results"]
         .as_array()
         .unwrap()
@@ -1890,13 +2188,13 @@ async fn failed_initial_fetch_uses_bounded_supplemental_replacement() {
 }
 
 #[tokio::test]
-async fn supplemental_replacement_avoids_a_failed_transport_surface() {
+async fn supplemental_replacement_keeps_the_full_closed_candidate_catalog() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
     let unavailable = "https://registry.example/items/unavailable";
-    let same_surface = "https://registry.example/items/alternate";
-    let diversified = "https://official.example/releases/current";
+    let same_authority = "https://registry.example/items/alternate";
+    let different_authority = "https://official.example/releases/current";
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::new(Mutex::new(Vec::new())),
         results: serde_json::json!([{
@@ -1905,45 +2203,52 @@ async fn supplemental_replacement_avoids_a_failed_transport_surface() {
             "content": "A promising registry record that retains no fetched text.",
             "engines": ["fixture"]
         }, {
-            "title": "Another page on the failed registry surface",
-            "url": same_surface,
-            "content": "A near-identical registry transport opportunity.",
+            "title": "Replacement candidate B",
+            "url": same_authority,
+            "content": "A replacement candidate with an exact closed identity.",
             "engines": ["fixture"]
         }, {
-            "title": "Diversified official release record",
-            "url": diversified,
-            "content": "A first-party release record on a distinct transport surface.",
+            "title": "Replacement candidate C",
+            "url": different_authority,
+            "content": "Another replacement candidate with an exact closed identity.",
             "engines": ["fixture"]
         }]),
     }));
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
-        bodies: BTreeMap::from([(
-            diversified.to_string(),
-            "The first-party release record directly establishes the planned finding.".to_string(),
-        )]),
+        bodies: BTreeMap::from([
+            (
+                same_authority.to_string(),
+                "The selected replacement directly establishes the planned finding.".to_string(),
+            ),
+            (
+                different_authority.to_string(),
+                "The second selected replacement independently establishes the planned finding."
+                    .to_string(),
+            ),
+        ]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
         preferred_fragments: vec![
             "Initially selected unavailable registry page".to_string(),
-            "Another page on the failed registry surface".to_string(),
-            "Diversified official release record".to_string(),
+            "Replacement candidate B".to_string(),
+            "Replacement candidate C".to_string(),
         ],
         fail: false,
         invalid_selection: false,
     }));
     let mut plan = minimal_plan(
         serde_json::json!([track(
-            "replacement.surface",
-            "Replacement surface",
-            "Recover traceable evidence through a distinct transport surface"
+            "replacement.identity",
+            "Replacement identity",
+            "Recover traceable evidence through a closed supplemental candidate"
         )]),
         serde_json::json!(["release evidence"]),
         serde_json::json!([]),
     );
     plan["budget"]["direct_fetches"] = serde_json::json!(1);
     let args = workflow_args(
-        "Recover a failed fetch without repeating its transport surface",
+        "Recover a failed fetch from the closed supplemental catalog",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "fixture_web_search",
@@ -1952,13 +2257,19 @@ async fn supplemental_replacement_avoids_a_failed_transport_surface() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(*urls.lock().unwrap(), [unavailable, diversified]);
-    assert!(!urls.lock().unwrap().iter().any(|url| url == same_surface));
+    assert_exact_calls_in_any_order(
+        &urls.lock().unwrap(),
+        &[unavailable, same_authority, different_authority],
+    );
     assert_eq!(
-        output["research"]["metadata"]["supplemental"]["web"]["failed_transport_surface_count"],
+        output["research"]["metadata"]["supplemental"]["web"]["failed_candidate_count"],
         1
     );
-    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    assert_eq!(
+        research_source_urls(&output),
+        [same_authority.to_string(), different_authority.to_string()]
+    );
 }
 
 #[tokio::test]
@@ -2044,7 +2355,8 @@ async fn transient_web_source_selector_failure_replays_only_source_admission() {
     assert_eq!(steps.len(), 5);
     assert_eq!(steps["discover_web_sources"]["attempt"], 1);
     assert_eq!(steps["select_web_sources"]["attempt"], 2);
-    assert_eq!(steps["retrieve_web"]["attempt"], 1);
+    assert_eq!(steps["retrieve_web_source_1"]["attempt"], 1);
+    assert!(!steps.contains_key("retrieve_web"));
     assert_eq!(steps["select_evidence_chunks"]["attempt"], 1);
     assert_eq!(steps["checkpoint_initial_retrieval"]["attempt"], 1);
 }
@@ -2128,62 +2440,53 @@ async fn fetch_candidates_preserve_query_and_provider_result_order() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(
-        *queries.lock().unwrap(),
-        [first_query.to_string(), second_query.to_string()]
-    );
-    assert_eq!(
-        *urls.lock().unwrap(),
-        [
-            first_urls[0].to_string(),
-            first_urls[1].to_string(),
-            first_urls[2].to_string(),
-            second_urls[0].to_string(),
-        ]
-    );
+    assert_exact_calls_in_any_order(&queries.lock().unwrap(), &[first_query, second_query]);
+    let expected_urls = [first_urls[0], first_urls[1], first_urls[2], second_urls[0]];
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &expected_urls);
     assert_eq!(output["research"]["metadata"]["source_count"], 4);
+    assert_eq!(
+        research_source_urls(&output),
+        expected_urls.map(str::to_string)
+    );
 }
 
 #[tokio::test]
 async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    let source_urls = (1..=8)
+        .map(|index| format!("https://overflow.example/evidence-{index}"))
+        .collect::<Vec<_>>();
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::new(Mutex::new(Vec::new())),
-        results: serde_json::json!([
-            {
-                "title": "Oversized source one",
-                "url": "https://overflow.example/evidence-one",
+        results: serde_json::json!(source_urls
+            .iter()
+            .map(|url| serde_json::json!({
+                "title": url,
+                "url": url,
                 "engines": ["fixture"]
-            },
-            {
-                "title": "Oversized source two",
-                "url": "https://overflow.example/evidence-two",
-                "engines": ["fixture"]
-            }
-        ]),
+            }))
+            .collect::<Vec<_>>()),
     }));
-    let oversized = (0..210)
-        .map(|index| {
-            format!(
-                "OVERFLOW_SECRET_EVIDENCE_{index:03} {}",
-                "bounded-source-content ".repeat(18)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::new(Mutex::new(Vec::new())),
-        bodies: BTreeMap::from([
-            (
-                "https://overflow.example/evidence-one".to_string(),
-                oversized.clone(),
-            ),
-            (
-                "https://overflow.example/evidence-two".to_string(),
-                oversized,
-            ),
-        ]),
+        bodies: source_urls
+            .iter()
+            .enumerate()
+            .map(|(source_index, url)| {
+                let body = (0..82)
+                    .map(|chunk_index| {
+                        format!(
+                            "OVERFLOW_SECRET_EVIDENCE_{}_{chunk_index:03} {}",
+                            source_index + 1,
+                            "bounded-source-content ".repeat(15)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (url.clone(), body)
+            })
+            .collect(),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
         preferred_fragments: Vec::new(),
@@ -2199,7 +2502,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
         serde_json::json!(["oversized evidence catalog"]),
         serde_json::json!([]),
     );
-    plan["budget"]["direct_fetches"] = serde_json::json!(2);
+    plan["budget"]["direct_fetches"] = serde_json::json!(8);
     let args = workflow_args(
         "Retain a complete bounded catalog",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
@@ -2216,7 +2519,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
         .as_u64()
         .unwrap_or_default();
     assert!(
-        catalog_chunk_count > 384,
+        catalog_chunk_count > 640,
         "fixture produced only {catalog_chunk_count} chunks"
     );
     assert!(output.to_string().contains("closed catalog limit"));
@@ -2301,18 +2604,21 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
 
     assert_eq!(result.exit_code, 0, "{}", result.output);
     assert_eq!(queries.lock().unwrap().len(), 1);
-    assert_eq!(
-        urls.lock().unwrap().iter().collect::<BTreeSet<_>>().len(),
-        8,
-        "isolated batch-output recovery may refetch a URL but must preserve all eight identities"
-    );
+    let expected_urls = source_urls.iter().map(String::as_str).collect::<Vec<_>>();
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &expected_urls);
     let output: serde_json::Value =
         serde_json::from_str(&result.output).expect("sharded retrieval output");
-    assert_eq!(output["research"]["status"], "success");
+    assert_eq!(
+        output["research"]["status"],
+        "success",
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap()
+    );
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_shard_count"],
         8
     );
+    assert_eq!(research_source_urls(&output), source_urls);
     assert!(
         output["research"]["metadata"]["catalog_chunk_count"]
             .as_u64()
@@ -2360,7 +2666,10 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
         .and_then(|metadata| metadata["dynamic_workflow"]["snapshot"]["steps"].as_object())
         .expect("source-local durable workflow steps");
     assert_eq!(steps["discover_web_sources"]["attempt"], 1);
-    assert_eq!(steps["retrieve_web"]["attempt"], 1);
+    for index in 1..=8 {
+        assert_eq!(steps[&format!("retrieve_web_source_{index}")]["attempt"], 1);
+    }
+    assert!(!steps.contains_key("retrieve_web"));
     assert!(!steps.contains_key("select_evidence_chunks"));
     let mut shard_attempts = (1..=8)
         .map(|index| {
@@ -2521,7 +2830,7 @@ async fn failed_source_local_selection_drops_only_that_source() {
 }
 
 #[tokio::test]
-async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
+async fn large_source_is_structurally_windowed_then_semantically_reduced() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -2535,7 +2844,7 @@ async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
             "engines": ["fixture"]
         }]),
     }));
-    let body = (1..=40)
+    let body = (1..=70)
         .map(|chunk_index| {
             format!(
                 "SOURCE_REDUCER_TARGET_{chunk_index} {}",
@@ -2549,7 +2858,7 @@ async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
         bodies: BTreeMap::from([(source_url.to_string(), body)]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
-        preferred_fragments: [40, 35, 25, 15, 10, 5]
+        preferred_fragments: [70, 60, 50, 35, 20, 1]
             .into_iter()
             .map(|index| format!("SOURCE_REDUCER_TARGET_{index}"))
             .collect(),
@@ -2582,17 +2891,28 @@ async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
 
     assert_eq!(result.exit_code, 0, "{}", result.output);
     assert_eq!(queries.lock().unwrap().len(), 1);
-    assert_eq!(*urls.lock().unwrap(), [source_url]);
+    let fetched_urls = urls.lock().unwrap();
+    assert!(
+        !fetched_urls.is_empty() && fetched_urls.iter().all(|url| url == source_url),
+        "batch-output recovery may repeat only the exact closed URL: {fetched_urls:?}"
+    );
+    drop(fetched_urls);
     let output: serde_json::Value =
         serde_json::from_str(&result.output).expect("source-reduction output");
-    assert_eq!(output["research"]["status"], "success");
     assert_eq!(
-        output["research"]["metadata"]["semantic_selection_shard_count"],
-        1
+        output["research"]["status"],
+        "success",
+        "{}",
+        serde_json::to_string_pretty(&output).unwrap()
+    );
+    assert!(
+        output["research"]["metadata"]["semantic_selection_shard_count"]
+            .as_u64()
+            .is_some_and(|count| count > 1)
     );
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_source_reduction_count"],
-        0
+        1
     );
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_materialized_count"],
@@ -2605,7 +2925,7 @@ async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
     assert_eq!(excerpts.len(), 4);
     assert!(excerpts.iter().any(|excerpt| excerpt["quote_or_fact"]
         .as_str()
-        .is_some_and(|text| text.contains("SOURCE_REDUCER_TARGET_40"))));
+        .is_some_and(|text| text.contains("SOURCE_REDUCER_TARGET_70"))));
 
     let steps = result
         .metadata
@@ -2613,8 +2933,8 @@ async fn large_source_is_semantically_reduced_in_one_source_local_unit() {
         .and_then(|metadata| metadata["dynamic_workflow"]["snapshot"]["steps"].as_object())
         .expect("source-reduction durable steps");
     assert_eq!(steps["select_evidence_chunks_shard_1"]["attempt"], 1);
-    assert!(!steps.contains_key("select_evidence_chunks_shard_2"));
-    assert!(!steps.contains_key("select_evidence_chunks_source_1"));
+    assert_eq!(steps["select_evidence_chunks_shard_2"]["attempt"], 1);
+    assert_eq!(steps["select_evidence_chunks_source_1"]["attempt"], 1);
     assert!(!steps.contains_key("select_evidence_chunks"));
 }
 
@@ -2692,7 +3012,8 @@ async fn transient_selector_failure_retries_only_the_durable_selection_step() {
     assert_eq!(steps.len(), 5);
     assert_eq!(steps["discover_web_sources"]["attempt"], 1);
     assert_eq!(steps["select_web_sources"]["attempt"], 1);
-    assert_eq!(steps["retrieve_web"]["attempt"], 1);
+    assert_eq!(steps["retrieve_web_source_1"]["attempt"], 1);
+    assert!(!steps.contains_key("retrieve_web"));
     assert_eq!(steps["select_evidence_chunks"]["attempt"], 2);
     assert_eq!(steps["checkpoint_initial_retrieval"]["attempt"], 1);
 }
@@ -2758,18 +3079,20 @@ async fn source_admission_failure_uses_bounded_discovery_fallback_before_chunk_r
     let output = execute(&executor, &args).await;
 
     assert_eq!(queries.lock().unwrap().len(), 1);
-    assert_eq!(
-        *urls.lock().unwrap(),
-        [
-            "https://fallback-one.example/record",
-            "https://fallback-two.example/record"
-        ]
-    );
+    let expected_urls = [
+        "https://fallback-one.example/record",
+        "https://fallback-two.example/record",
+    ];
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &expected_urls);
     assert_eq!(
         output["research"]["metadata"]["web"]["source_selection_mode"],
         "bounded_discovery_fallback"
     );
     assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    assert_eq!(
+        research_source_urls(&output),
+        expected_urls.map(str::to_string)
+    );
     assert!(output.to_string().contains("verified fallback evidence"));
     assert!(output
         .to_string()
@@ -2913,7 +3236,9 @@ async fn pdf_additional_ranges_remain_one_source_in_one_retrieval_pass() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(*offsets.lock().unwrap(), [0, 100, 200]);
+    let second_offset = PDF_RANGE_ONE.chars().count() as u64;
+    let third_offset = second_offset + PDF_RANGE_TWO.chars().count() as u64;
+    assert_eq!(*offsets.lock().unwrap(), [0, second_offset, third_offset]);
     assert_eq!(
         output["research"]["metadata"]["web"]["document_range_count"],
         3
@@ -2938,24 +3263,24 @@ async fn html_additional_ranges_reach_late_article_evidence() {
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
         preferred_fragments: vec![
-            "小组赛背景".to_string(),
-            "半决赛晋级".to_string(),
-            "决赛冠军".to_string(),
+            "阶段一背景".to_string(),
+            "阶段二进展".to_string(),
+            "阶段三结论".to_string(),
         ],
         fail: false,
         invalid_selection: false,
     }));
     let plan = minimal_plan(
         serde_json::json!([
-            track("background", "背景", "小组赛背景"),
-            track("semifinal", "半决赛", "半决赛晋级"),
-            track("final", "决赛", "决赛冠军")
+            track("stage-one", "阶段一", "阶段一背景"),
+            track("stage-two", "阶段二", "阶段二进展"),
+            track("stage-three", "阶段三", "阶段三结论")
         ]),
         serde_json::json!([]),
-        serde_json::json!(["https://news.example/world-cup.html"]),
+        serde_json::json!(["https://records.example/multi-stage.html"]),
     );
     let args = workflow_args(
-        "分析赛事从小组赛到决赛的完整战况",
+        "分析项目从阶段一到阶段三的完整记录",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "fixture_web_search",
@@ -2964,7 +3289,10 @@ async fn html_additional_ranges_reach_late_article_evidence() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(*offsets.lock().unwrap(), [0, 100]);
+    assert_eq!(
+        *offsets.lock().unwrap(),
+        [0, HTML_RANGE_ONE.chars().count() as u64]
+    );
     assert_eq!(
         output["research"]["metadata"]["web"]["document_range_count"],
         2
@@ -2983,35 +3311,35 @@ async fn html_additional_ranges_reach_late_article_evidence() {
         .flatten()
         .any(|excerpt| excerpt["quote_or_fact"]
             .as_str()
-            .is_some_and(|text| text.contains("决赛冠军"))));
+            .is_some_and(|text| text.contains("阶段三结论"))));
 }
 
 #[tokio::test]
-async fn embedded_constructor_script_tail_is_removed_before_selection() {
+async fn visible_constructor_like_text_is_not_removed_by_vocabulary() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
-    let source_url = "https://sports.example.test/world-cup";
+    let source_url = "https://records.example.test/generic-project";
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             source_url.to_string(),
-            "赛事机构公布了世界杯决赛的最终赛果。[完整赛果](https://sports.example.test/final) var swiper\\_results = new Swiper(\"#results .swiper\", { navigation: { nextEl: \".next\" } });"
+            "项目机构公布了第三阶段的最终记录。[完整记录](https://records.example.test/final) var swiper\\_results = new Swiper(\"#results .swiper\", { navigation: { nextEl: \".next\" } });"
                 .to_string(),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
-        preferred_fragments: vec!["世界杯决赛的最终赛果".to_string()],
+        preferred_fragments: vec!["第三阶段的最终记录".to_string()],
         fail: false,
         invalid_selection: false,
     }));
     let plan = minimal_plan(
-        serde_json::json!([track("final", "决赛", "世界杯决赛的最终赛果")]),
+        serde_json::json!([track("stage-three", "阶段三", "第三阶段的最终记录")]),
         serde_json::json!([]),
         serde_json::json!([source_url]),
     );
     let args = workflow_args(
-        "世界杯战况",
+        "项目状态记录",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "fixture_web_search",
@@ -3021,37 +3349,37 @@ async fn embedded_constructor_script_tail_is_removed_before_selection() {
     let output = execute(&executor, &args).await;
 
     assert_eq!(*urls.lock().unwrap(), [source_url]);
-    assert!(output.to_string().contains("世界杯决赛的最终赛果"));
-    assert!(!output.to_string().contains("Swiper"));
-    assert!(!output.to_string().contains("swiper\\\\_results"));
+    assert!(output.to_string().contains("第三阶段的最终记录"));
+    assert!(output.to_string().contains("Swiper"));
+    assert!(output.to_string().contains("swiper\\\\_results"));
 }
 
 #[tokio::test]
-async fn embedded_serialized_configuration_tail_is_removed_before_chunking() {
+async fn visible_serialized_text_is_not_removed_by_vocabulary() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
-    let source_url = "https://sports.example.test/world-cup";
+    let source_url = "https://records.example.test/generic-project";
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
         bodies: BTreeMap::from([(
             source_url.to_string(),
-            r#"赛事机构公布了世界杯决赛的最终赛果。 },{\"type\":\"keyValue\",\"key\":\"ddna_timeout\",\"value\":\"5000\"},{\"type\":\"keyValue\",\"key\":\"enabletracking\",\"value\":true}"#
+            r#"项目机构公布了第三阶段的最终记录。 },{\"type\":\"keyValue\",\"key\":\"ddna_timeout\",\"value\":\"5000\"},{\"type\":\"keyValue\",\"key\":\"enabletracking\",\"value\":true}"#
                 .to_string(),
         )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
-        preferred_fragments: vec!["世界杯决赛的最终赛果".to_string()],
+        preferred_fragments: vec!["第三阶段的最终记录".to_string()],
         fail: false,
         invalid_selection: false,
     }));
     let plan = minimal_plan(
-        serde_json::json!([track("final", "决赛", "世界杯决赛的最终赛果")]),
+        serde_json::json!([track("stage-three", "阶段三", "第三阶段的最终记录")]),
         serde_json::json!([]),
         serde_json::json!([source_url]),
     );
     let args = workflow_args(
-        "世界杯战况",
+        "项目状态记录",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
         "fixture_web_search",
@@ -3062,10 +3390,10 @@ async fn embedded_serialized_configuration_tail_is_removed_before_chunking() {
     let rendered = output.to_string();
 
     assert_eq!(*urls.lock().unwrap(), [source_url]);
-    assert!(rendered.contains("世界杯决赛的最终赛果"), "{rendered}");
-    assert!(!rendered.contains("keyValue"), "{rendered}");
-    assert!(!rendered.contains("ddna_"), "{rendered}");
-    assert!(!rendered.contains("enabletracking"), "{rendered}");
+    assert!(rendered.contains("第三阶段的最终记录"), "{rendered}");
+    assert!(rendered.contains("keyValue"), "{rendered}");
+    assert!(rendered.contains("ddna_"), "{rendered}");
+    assert!(rendered.contains("enabletracking"), "{rendered}");
 }
 
 #[tokio::test]
@@ -3173,7 +3501,7 @@ async fn local_text_is_not_promoted_when_closed_chunk_selection_fails() {
 }
 
 #[tokio::test]
-async fn non_document_urls_are_filtered_before_fetch() {
+async fn url_path_vocabulary_does_not_preclassify_fetchability() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
@@ -3195,11 +3523,23 @@ async fn non_document_urls_are_filtered_before_fetch() {
     }));
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
-        bodies: BTreeMap::from([(
-            "https://valid.example/evidence".to_string(),
-            "The valid document contains substantive traceable evidence for the requested focus."
-                .to_string(),
-        )]),
+        bodies: BTreeMap::from([
+            (
+                "https://cdn.example/avatar.png".to_string(),
+                "The first endpoint returns substantive traceable evidence for the requested focus."
+                    .to_string(),
+            ),
+            (
+                "https://downloads.example/research.zip".to_string(),
+                "The second endpoint returns separate traceable evidence for the requested focus."
+                    .to_string(),
+            ),
+            (
+                "https://valid.example/evidence".to_string(),
+                "The third endpoint returns additional traceable evidence for the requested focus."
+                    .to_string(),
+            ),
+        ]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
         preferred_fragments: Vec::new(),
@@ -3221,15 +3561,24 @@ async fn non_document_urls_are_filtered_before_fetch() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(*urls.lock().unwrap(), ["https://valid.example/evidence"]);
-    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    let expected_urls = [
+        "https://cdn.example/avatar.png",
+        "https://downloads.example/research.zip",
+        "https://valid.example/evidence",
+    ];
+    assert_exact_calls_in_any_order(&urls.lock().unwrap(), &expected_urls);
+    assert_eq!(output["research"]["metadata"]["source_count"], 3);
+    assert_eq!(
+        research_source_urls(&output),
+        expected_urls.map(str::to_string)
+    );
 }
 
 #[tokio::test]
 async fn transient_fetches_receive_exactly_one_retry() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
-    let calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(Mutex::new(Vec::new()));
     executor.register_dynamic_tool(Arc::new(SearchFixture {
         queries: Arc::new(Mutex::new(Vec::new())),
         results: serde_json::json!([{
@@ -3265,8 +3614,24 @@ async fn transient_fetches_receive_exactly_one_retry() {
 
     let output = execute(&executor, &args).await;
 
-    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_exact_calls_in_any_order(
+        &calls.lock().unwrap(),
+        &[
+            "https://first.example/evidence",
+            "https://first.example/evidence",
+            "https://second.example/evidence",
+            "https://second.example/evidence",
+        ],
+    );
     assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    assert_eq!(
+        output["research"]["metadata"]["web"]["transport_retry_count"],
+        2
+    );
+    assert_eq!(
+        output["research"]["metadata"]["web"]["transport_retry_success_count"],
+        2
+    );
 }
 
 #[tokio::test]

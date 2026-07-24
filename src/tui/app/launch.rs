@@ -1016,10 +1016,8 @@ pub(crate) async fn run_in(
         last_view: None,
         pending_deep_research_report_view: None,
         deep_research_loop: None,
-        deep_research_report_resume_used: false,
         deep_research_workflow: DeepResearchWorkflowSnapshot::default(),
         deep_research_outcome: DeepResearchRunOutcome::Active,
-        pending_deep_research_report_resume: false,
         deep_research_stream_timeout_token: 0,
         stream_start_token: 0,
         interrupted_stream_start_token: None,
@@ -1194,15 +1192,32 @@ pub(crate) async fn run_in(
 
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
+            let disposition = match &recovery.disposition {
+                ResearchRecoveryDisposition::PublicationPreserved { artifacts, outcome } => {
+                    format!(
+                        "preserved the exact receipt-backed publication at {} with {:?} outcome",
+                        artifacts.html.display(),
+                        outcome
+                    )
+                }
+                ResearchRecoveryDisposition::AcquisitionPreserved { artifacts } => format!(
+                    "preserved the completed acquisition checkpoint as an audit-only report at {}",
+                    artifacts.html.display()
+                ),
+                ResearchRecoveryDisposition::FailedWithoutRecoverableAcquisition => {
+                    "no completed acquisition checkpoint was available".to_string()
+                }
+            };
             app.messages.push(TranscriptEntry::preformatted(gutter(
                 TN_YELLOW,
                 &format!(
-                    "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{}",
+                    "⚠ recovered interrupted DeepResearch run {} · cancelled {} live child{} · reconciled {} orphan{} · {}",
                     recovery.run_id,
                     recovery.cancel_children.len(),
                     if recovery.cancel_children.len() == 1 { "" } else { "ren" },
                     recovery.orphaned_children.len(),
                     if recovery.orphaned_children.len() == 1 { "" } else { "s" },
+                    disposition,
                 ),
             )));
             app.rebuild_viewport();

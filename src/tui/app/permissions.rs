@@ -442,6 +442,7 @@ impl DeepResearchReportToolGate {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn set_synthesis_only(&self) {
         self.phase.store(Self::SYNTHESIS, Ordering::SeqCst);
     }

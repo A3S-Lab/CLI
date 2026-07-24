@@ -370,13 +370,6 @@ impl App {
                 )
             }
 
-            Msg::DeepResearchReportGenerated {
-                token,
-                query,
-                phase,
-                result,
-            } => return self.on_deep_research_report_generated(token, query, phase, result),
-
             Msg::UpdatePlan(latest) => {
                 self.updating = None;
                 self.relayout();

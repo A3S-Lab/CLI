@@ -64,8 +64,6 @@ mod deep_research_convergence;
 mod deep_research_evidence_ledger;
 #[path = "deep_research/host_digest.rs"]
 mod deep_research_host_digest;
-#[path = "deep_research/host_evidence.rs"]
-mod deep_research_host_evidence;
 #[path = "deep_research/host_metadata.rs"]
 mod deep_research_host_metadata;
 #[path = "deep_research/host_prompt.rs"]
@@ -78,27 +76,18 @@ mod deep_research_host_workflow;
 mod deep_research_inquiry_runtime;
 #[path = "deep_research/report_audit.rs"]
 mod deep_research_report_audit;
-#[path = "deep_research/report_generation.rs"]
-mod deep_research_report_generation;
-#[cfg(test)]
-#[path = "deep_research/report_pipeline_tests.rs"]
-mod deep_research_report_pipeline_tests;
 #[cfg(test)]
 #[path = "deep_research/retrieval_contract_tests.rs"]
 mod deep_research_retrieval_contract_tests;
 #[cfg(test)]
 #[path = "deep_research/retrieval_integration_tests.rs"]
 mod deep_research_retrieval_integration_tests;
-#[path = "deep_research/sectioned_report.rs"]
-mod deep_research_sectioned_report;
 #[path = "deep_research/state_journal.rs"]
 mod deep_research_state_journal;
 #[path = "deep_research/workflow_store.rs"]
 mod deep_research_workflow_store;
 #[cfg(test)]
 pub(crate) use deep_research_artifacts::deep_research_completed_report_html_for_test;
-#[cfg(test)]
-pub(crate) use deep_research_artifacts::deep_research_workflow_needs_recovery_report;
 #[cfg(test)]
 pub(crate) use deep_research_artifacts::deep_research_write_report_pair_for_test;
 #[cfg(test)]
@@ -108,29 +97,22 @@ pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
 pub(crate) use deep_research_artifacts::{
-    clean_deep_research_final_text_from_artifacts, deep_research_evidence_first_published_report,
-    deep_research_output_has_internal_leak,
-    deep_research_report_rejection_diagnostic_from_answer_text,
-    deep_research_workflow_needs_recovery_report_with_metadata,
-    materialize_deep_research_completed_report_from_generation,
-    materialize_deep_research_recovery_report, research_report_artifacts_from_output,
+    clean_deep_research_final_text_from_artifacts, materialize_deep_research_recovery_report,
+    research_report_artifacts_from_output, resolve_deep_research_run_publication,
     DeepResearchEvidenceFirstPublication, ResearchReportArtifacts,
 };
 #[cfg(test)]
 use deep_research_artifacts::{
-    deep_research_contains_workflow_store_reference,
     deep_research_report_artifacts_from_output_for_query, deep_research_report_slug,
-    parse_embedded_structured_evidence_json,
 };
 use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
 use deep_research_convergence::{
-    evaluate_terminal_inquiry_convergence, inquiry_terminal_outcome, validated_inquiry_projection,
+    evaluate_terminal_inquiry_convergence, validated_inquiry_projection,
     validated_inquiry_publication_outcome, ConvergenceAction, ConvergenceDecision,
     InquiryTerminalOutcome, ValidatedInquiryProjection,
 };
 use deep_research_evidence_ledger::{accepted_evidence_ledger, AcceptedEvidence};
 use deep_research_host_digest::*;
-use deep_research_host_evidence::*;
 use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
 use deep_research_host_report::*;
@@ -139,17 +121,8 @@ use deep_research_host_workflow::*;
 use deep_research_inquiry_runtime::inquiry_projection_from_workflow;
 pub(crate) use deep_research_inquiry_runtime::{
     deep_research_evidence_first_research_spec, spawn_deep_research_evidence_first,
-    spawn_deep_research_inquiry, DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
-    DEEP_RESEARCH_INQUIRY_FINALIZATION_RESERVE_MS, DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS,
-    DEEP_RESEARCH_QUESTION_REVIEW_STAGE_TIMEOUT_MS, DEEP_RESEARCH_RETRIEVAL_STAGE_TIMEOUT_MS,
+    DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
 };
-use deep_research_report_generation::*;
-use deep_research_sectioned_report::{
-    generate_sectioned_report, merge_sectioned_inquiry_projection, sectioned_report_available,
-    SECTIONED_REPORT_BUDGET_MS,
-};
-#[cfg(test)]
-pub(crate) use deep_research_state_journal::load_inquiry_state as deep_research_test_load_inquiry_state;
 pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
     fork_current_for_contradiction_review, reconcile_interrupted_latest_run,
@@ -161,12 +134,7 @@ use deep_research_state_journal::{
     record_validated_publication_terminal as record_deep_research_validated_publication_terminal,
     record_workflow_completed as record_deep_research_workflow_completed,
     record_workflow_started as record_deep_research_workflow_started, research_diagnostic,
-    research_diff, ResearchDiagnosticKind, ResearchRunProjection, ResearchSpec,
-};
-#[cfg(test)]
-pub(crate) use deep_research_state_journal::{
-    record_workflow_started as deep_research_test_record_workflow_started,
-    ResearchSpec as DeepResearchTestResearchSpec,
+    research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition, ResearchRunProjection,
 };
 pub(crate) use deep_research_workflow_store::{
     ensure_deep_research_workflow_run_id, recover_deep_research_bootstrap_acquisition_from_store,
@@ -181,45 +149,8 @@ pub(crate) fn deep_research_cli_workflow_args_for_budget(
     budget: BudgetPlan,
     evidence_scope: Option<DeepResearchEvidenceScope>,
 ) -> serde_json::Value {
-    let evidence_scope =
-        evidence_scope.unwrap_or_else(|| deep_research_inferred_evidence_scope(query));
+    let evidence_scope = evidence_scope.unwrap_or_else(deep_research_default_evidence_scope);
     deep_research_workflow_args_for_budget(query, evidence_scope, budget)
-}
-
-/// Validate the closed evidence boundary for non-interactive report
-/// generation. The returned flag records whether the replayed research
-/// contract is qualified instead of fully satisfied; unsupported evidence
-/// never reaches synthesis.
-pub(crate) fn deep_research_cli_report_is_qualified(
-    query: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Result<bool, String> {
-    let canonical_output =
-        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
-    let evidence_scope = deep_research_inferred_evidence_scope(query);
-    let outcome = deep_research_report_outcome_for_workflow(
-        query,
-        evidence_scope,
-        &canonical_output,
-        workflow_metadata,
-    );
-    if matches!(outcome, DeepResearchRunOutcome::Degraded) {
-        return Err("evidence collection did not produce a reportable package".to_string());
-    }
-    let accepted = accepted_evidence_ledger(&canonical_output, workflow_metadata);
-    if accepted.is_empty() {
-        return Err("evidence collection produced no accepted evidence".to_string());
-    }
-    Ok(matches!(outcome, DeepResearchRunOutcome::Qualified))
-}
-
-#[cfg(test)]
-pub(crate) fn deep_research_test_accepted_evidence_ledger(
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Vec<AcceptedEvidence> {
-    accepted_evidence_ledger(workflow_output, workflow_metadata)
 }
 
 pub(crate) fn deep_research_cli_canonical_workflow_output(
@@ -238,6 +169,13 @@ pub(crate) struct DeepResearchCliSettlement<'a> {
     pub(crate) workflow_metadata: Option<&'a serde_json::Value>,
     pub(crate) requested_outcome: ResearchOutcome,
     pub(crate) artifacts: &'a ResearchReportArtifacts,
+    pub(crate) artifact_authority: DeepResearchTerminalArtifactAuthority,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeepResearchTerminalArtifactAuthority {
+    ValidatedPublication,
+    VerifiedRecovery,
 }
 
 pub(crate) async fn settle_deep_research_cli_run(
@@ -252,16 +190,35 @@ pub(crate) async fn settle_deep_research_cli_run(
         workflow_metadata,
         requested_outcome,
         artifacts,
+        artifact_authority,
     } = settlement;
     record_deep_research_workflow_completed(workspace, run_id, workflow_succeeded)
         .await
         .map_err(|error| format!("record DeepResearch CLI workflow completion: {error:#}"))?;
     let publication =
-        deep_research_evidence_first_published_report(workspace, query, workflow_output)
-            .map_err(|error| format!("validate DeepResearch CLI publication: {error}"))?;
-    let projection = if let Some(publication) = publication {
+        resolve_deep_research_run_publication(workspace, query, run_id, workflow_output);
+    let projection = if let Some(publication) = match publication {
+        Ok(publication) => publication,
+        Err(_)
+            if requested_outcome == ResearchOutcome::Degraded
+                && artifact_authority
+                    == DeepResearchTerminalArtifactAuthority::VerifiedRecovery =>
+        {
+            None
+        }
+        Err(error) => {
+            return Err(format!("validate DeepResearch CLI publication: {error}"));
+        }
+    } {
+        if artifact_authority != DeepResearchTerminalArtifactAuthority::ValidatedPublication {
+            return Err(
+                "a validated DeepResearch publication was mislabeled as a recovery artifact"
+                    .to_string(),
+            );
+        }
         let publication_outcome = match publication.publication {
             DeepResearchEvidenceFirstPublication::Synthesized => ResearchOutcome::Completed,
+            DeepResearchEvidenceFirstPublication::Qualified => ResearchOutcome::Qualified,
             DeepResearchEvidenceFirstPublication::SourceBacked => ResearchOutcome::Degraded,
             DeepResearchEvidenceFirstPublication::NoEvidence => ResearchOutcome::Degraded,
         };
@@ -286,6 +243,14 @@ pub(crate) async fn settle_deep_research_cli_run(
         .await
         .map_err(|error| format!("record DeepResearch CLI terminal publication: {error:#}"))?
     } else {
+        if artifact_authority == DeepResearchTerminalArtifactAuthority::VerifiedRecovery
+            && requested_outcome != ResearchOutcome::Degraded
+        {
+            return Err(
+                "a verified DeepResearch recovery artifact cannot settle a successful outcome"
+                    .to_string(),
+            );
+        }
         let canonical = deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
         let evidence = accepted_evidence_ledger(&canonical, workflow_metadata);
         record_deep_research_evidence_ledger(workspace, run_id, &evidence)
@@ -310,99 +275,75 @@ pub(crate) async fn settle_deep_research_cli_run(
 }
 
 #[cfg(test)]
-pub(crate) async fn deep_research_test_run_status(
-    workspace: &std::path::Path,
-    run_id: &str,
-) -> Result<String, String> {
-    research_diagnostic(workspace, Some(run_id), ResearchDiagnosticKind::Status)
+mod deep_research_cli_settlement_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_publication_requires_verified_recovery_authority() {
+        let workspace = tempfile::tempdir().expect("create CLI recovery workspace");
+        let query = "Assess the current Nimbus support policy";
+        let run_id = "invalid-cli-publication-recovery";
+        let workflow_output = serde_json::json!({
+            "query": query,
+            "mode": "evidence_first_report",
+            "publication": {}
+        })
+        .to_string();
+        let artifacts = materialize_deep_research_recovery_report(
+            workspace.path(),
+            query,
+            "the Host publication envelope was invalid",
+            &workflow_output,
+            None,
+        )
+        .expect("materialize verified CLI recovery artifacts");
+        let args = serde_json::json!({
+            "run_id": run_id,
+            "input": {
+                "query": query,
+                "current_date": "2026-07-23",
+                "evidence_scope": "web_and_workspace",
+                "inquiry_host_managed": true
+            }
+        });
+        record_deep_research_workflow_started(
+            workspace.path(),
+            run_id,
+            deep_research_evidence_first_research_spec(&args),
+        )
         .await
-        .map_err(|error| error.to_string())
-}
+        .expect("start CLI recovery journal");
 
-pub(crate) fn deep_research_cli_sectioned_report_available(
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> bool {
-    sectioned_report_available(workflow_output, workflow_metadata)
-}
+        let rejected = settle_deep_research_cli_run(DeepResearchCliSettlement {
+            workspace: workspace.path(),
+            run_id,
+            query,
+            workflow_succeeded: true,
+            workflow_output: &workflow_output,
+            workflow_metadata: None,
+            requested_outcome: ResearchOutcome::Degraded,
+            artifacts: &artifacts,
+            artifact_authority: DeepResearchTerminalArtifactAuthority::ValidatedPublication,
+        })
+        .await
+        .expect_err("invalid publication must fail closed without recovery authority");
+        assert!(rejected.contains("omitted its status"), "{rejected}");
 
-/// Run the same replayable report pipeline used by the TUI and atomically
-/// replace the CLI workflow projection only after it reaches a publishable
-/// terminal state.
-pub(crate) async fn complete_deep_research_cli_sectioned_report(
-    session: &AgentSession,
-    query: &str,
-    workflow_output: &mut String,
-    workflow_metadata: &mut Option<serde_json::Value>,
-    run_id: &str,
-    timeout_ms: u64,
-) -> Result<ToolCallResult, String> {
-    if !sectioned_report_available(workflow_output, workflow_metadata.as_ref()) {
-        return Err(
-            "DeepResearch CLI report synthesis requires an Inquiry in Outlining".to_string(),
-        );
+        let outcome = settle_deep_research_cli_run(DeepResearchCliSettlement {
+            workspace: workspace.path(),
+            run_id,
+            query,
+            workflow_succeeded: true,
+            workflow_output: &workflow_output,
+            workflow_metadata: None,
+            requested_outcome: ResearchOutcome::Degraded,
+            artifacts: &artifacts,
+            artifact_authority: DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
+        })
+        .await
+        .expect("verified recovery must close the CLI transaction");
+        assert_eq!(outcome, ResearchOutcome::Degraded);
     }
-    let report_deadline = Instant::now()
-        .checked_add(Duration::from_millis(timeout_ms))
-        .ok_or_else(|| "DeepResearch CLI report deadline overflowed".to_string())?;
-    let generated = generate_sectioned_report(
-        session,
-        query,
-        workflow_output,
-        workflow_metadata.as_ref(),
-        run_id,
-        report_deadline,
-    )
-    .await?;
-
-    let mut merged_output = workflow_output.clone();
-    let mut merged_metadata = workflow_metadata.clone();
-    merge_sectioned_inquiry_projection(
-        &mut merged_output,
-        merged_metadata.as_mut(),
-        generated.metadata.as_ref(),
-    )?;
-    match deep_research_inquiry_publication_outcome(&merged_output, merged_metadata.as_ref())? {
-        Some(DeepResearchRunOutcome::Completed | DeepResearchRunOutcome::Qualified) => {}
-        Some(outcome) => {
-            return Err(format!(
-                "DeepResearch CLI report pipeline ended with non-publishable outcome {outcome:?}"
-            ));
-        }
-        None => {
-            return Err(
-                "DeepResearch CLI report pipeline omitted terminal Inquiry publication authority"
-                    .to_string(),
-            );
-        }
-    }
-
-    *workflow_output = merged_output;
-    *workflow_metadata = merged_metadata;
-    Ok(generated)
-}
-
-/// Parse a schema-validated report object and write the Markdown/HTML pair in
-/// one host-side operation. The model never writes either long artifact.
-pub(crate) fn materialize_deep_research_cli_generated_report(
-    workspace: &Path,
-    query: &str,
-    output: &str,
-    exit_code: i32,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Result<(String, PathBuf, PathBuf), String> {
-    let report = deep_research_report_from_generation(output, exit_code)?;
-    let artifacts = materialize_deep_research_completed_report_from_generation(
-        workspace,
-        query,
-        &report,
-        workflow_output,
-        workflow_metadata,
-    )?;
-    let text = clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
-        .unwrap_or(report.markdown);
-    Ok((text, artifacts.markdown, artifacts.html))
 }
 
 pub(crate) fn materialize_deep_research_cli_recovery_report(
@@ -475,8 +416,6 @@ mod app_permission_rules;
 mod app_permissions;
 #[path = "app/projections.rs"]
 mod app_projections;
-#[path = "app/research.rs"]
-mod app_research;
 #[path = "app/research_workflow.rs"]
 mod app_research_workflow;
 #[path = "app/rewind.rs"]
@@ -493,6 +432,8 @@ mod app_session_state;
 mod app_smoke;
 #[path = "app/submit.rs"]
 mod app_submit;
+#[path = "app/synthesis.rs"]
+mod app_synthesis;
 #[path = "app/types.rs"]
 mod app_types;
 #[path = "app/update.rs"]
@@ -561,7 +502,7 @@ use app_smoke::{
     deep_research_smoke_execution_deadline, deep_research_smoke_exhausted_phase_message,
     deep_research_smoke_finalization_phase_deadline, deep_research_smoke_phase_deadline,
     deep_research_smoke_remaining_budget, deep_research_smoke_run_deadline,
-    finalize_deep_research_smoke_journal, run_deep_research_smoke_artifact_step,
+    run_deep_research_smoke_artifact_step,
 };
 use app_types::*;
 use app_update::*;
@@ -601,14 +542,12 @@ const BACKGROUND_CONFIRM_TIMEOUT_MS: u64 = 500;
 const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
-pub(crate) const DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS: u64 = SECTIONED_REPORT_BUDGET_MS;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
-// Planning/retrieval/closed-evidence assessment and the one durable completed-
-// report transaction keep independent active-work clocks. A report resume
-// consumes the original transaction deadline rather than adding another
-// sectioned-report budget.
-const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_INQUIRY_HOST_TIMEOUT_MS
-    + DEEP_RESEARCH_SECTIONED_SYNTHESIS_TIMEOUT_MS
+// The standalone engine owns acquisition, semantic admission, and its one
+// bounded report proposal. Smoke and interactive execution therefore share
+// one absolute Host budget instead of adding the legacy sectioned-synthesis
+// transaction.
+const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS
     + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
     + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
 const STREAM_START_TIMEOUT_MS: u64 = 10_000;
@@ -717,9 +656,6 @@ struct App {
     pending_deep_research_report_view: Option<remote_ui::ViewSpec>,
     /// Transient state for the active coverage-driven DeepResearch run.
     deep_research_loop: Option<DeepResearchLoop>,
-    /// One durable resume of the same sectioned report transaction is allowed
-    /// after a pre-publication pipeline failure.
-    deep_research_report_resume_used: bool,
     /// Transient host hand-off data. Event-derived lifecycle and quality state
     /// deliberately remain outside this snapshot.
     deep_research_workflow: DeepResearchWorkflowSnapshot,
@@ -727,9 +663,6 @@ struct App {
     /// artifacts are useful diagnostics but must never be counted as a
     /// completed report.
     deep_research_outcome: DeepResearchRunOutcome,
-    /// One-shot durable report resume after the sectioned pipeline fails
-    /// before publication. It has priority over generic `/loop` continuation.
-    pending_deep_research_report_resume: bool,
     /// Monotonic guard for DeepResearch stream watchdogs; stale timeout ticks
     /// must not affect later turns.
     deep_research_stream_timeout_token: u64,
@@ -873,8 +806,11 @@ struct App {
     /// Prevent duplicate terminal journal writes while the final projection is
     /// being persisted before the TUI clears its DeepResearch state.
     deep_research_journal_finalization_inflight: bool,
-    /// Validated report pair staged for the terminal journal event.
-    deep_research_terminal_artifacts: Option<ResearchReportArtifacts>,
+    /// Validated report pair and the Host authority that admitted it.
+    deep_research_terminal_artifacts: Option<(
+        ResearchReportArtifacts,
+        DeepResearchTerminalArtifactAuthority,
+    )>,
     /// Monotonic cursor for normalized `AgentEvent` projections.
     deep_research_agent_event_sequence: u64,
     /// Latest replayable DeepResearch view used by pinned TUI projections.

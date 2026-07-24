@@ -10,18 +10,6 @@ pub(super) fn research_report_view_spec(
     remote_ui::local_file_view(&artifacts.html).ok()
 }
 
-pub(super) fn arm_deep_research_report_resume(
-    loop_remaining: &mut usize,
-    resume_used: &mut bool,
-) -> bool {
-    if *resume_used {
-        return false;
-    }
-    *resume_used = true;
-    *loop_remaining = (*loop_remaining).max(1);
-    true
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum DeepResearchRunOutcome {
     #[default]
@@ -59,7 +47,6 @@ pub(super) struct DeepResearchWorkflowSnapshot {
     pub(super) output: Option<String>,
     pub(super) metadata: Option<serde_json::Value>,
     pub(super) args: Option<serde_json::Value>,
-    pub(super) last_synthesis_text: Option<String>,
 }
 
 impl DeepResearchWorkflowSnapshot {
@@ -69,164 +56,6 @@ impl DeepResearchWorkflowSnapshot {
 
     pub(super) fn clear(&mut self) {
         *self = Self::default();
-    }
-}
-
-pub(super) fn deep_research_evidence_package_is_complete_for_query(
-    query: &str,
-    evidence_scope: DeepResearchEvidenceScope,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> bool {
-    let canonical_output =
-        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) else {
-        return false;
-    };
-    match validated_inquiry_projection(&value) {
-        Ok(ValidatedInquiryProjection::Inquiry { ref state, .. }) => {
-            inquiry_terminal_outcome(state) == Some(InquiryTerminalOutcome::Completed)
-        }
-        Err(_) => false,
-        Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => {
-            let _ = (query, evidence_scope);
-            legacy_checked_loop_evidence_package_is_complete(
-                &value,
-                &canonical_output,
-                workflow_metadata,
-            )
-        }
-    }
-}
-
-/// Historical checked-loop output compatibility only. Current runs never use
-/// checker fields or source-family budgets as terminal authority.
-fn legacy_checked_loop_evidence_package_is_complete(
-    value: &serde_json::Value,
-    canonical_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> bool {
-    if deep_research_workflow_needs_recovery_report_with_metadata(
-        canonical_output,
-        workflow_metadata,
-    ) {
-        return false;
-    }
-    if value.get("plan").is_some() {
-        if value
-            .pointer("/checker/decision")
-            .and_then(serde_json::Value::as_str)
-            != Some("finalize")
-        {
-            return false;
-        }
-        let evidence = deep_research_collect_structured_evidence(value);
-        let source_families = evidence
-            .iter()
-            .flat_map(|item| item.get("sources").and_then(serde_json::Value::as_array))
-            .flatten()
-            .filter_map(deep_research_traceable_source_anchor)
-            .filter_map(|anchor| {
-                reqwest::Url::parse(&anchor)
-                    .ok()
-                    .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
-                    .or_else(|| {
-                        Path::new(&anchor)
-                            .components()
-                            .next()
-                            .map(|component| component.as_os_str().to_string_lossy().to_string())
-                    })
-            })
-            .collect::<HashSet<_>>()
-            .len();
-        let required_families = value
-            .pointer("/plan/budget/min_source_families")
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|count| usize::try_from(count).ok())
-            .unwrap_or(1)
-            .clamp(1, 5);
-        return !evidence.is_empty() && source_families >= required_families;
-    }
-    let evidence = deep_research_collect_structured_evidence(value);
-    !evidence.is_empty()
-}
-
-pub(super) fn deep_research_report_outcome_for_workflow(
-    query: &str,
-    evidence_scope: DeepResearchEvidenceScope,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> DeepResearchRunOutcome {
-    let canonical_output =
-        deep_research_canonical_workflow_output(workflow_output, workflow_metadata);
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&canonical_output) else {
-        return DeepResearchRunOutcome::Degraded;
-    };
-    match validated_inquiry_projection(&value) {
-        Ok(ValidatedInquiryProjection::Inquiry { ref state, .. }) => {
-            let Some(outcome) = inquiry_terminal_outcome(state) else {
-                return DeepResearchRunOutcome::Degraded;
-            };
-            match outcome {
-                InquiryTerminalOutcome::Completed => DeepResearchRunOutcome::Completed,
-                InquiryTerminalOutcome::Qualified => DeepResearchRunOutcome::Qualified,
-                InquiryTerminalOutcome::Exhausted => DeepResearchRunOutcome::Degraded,
-            }
-        }
-        Err(_) => DeepResearchRunOutcome::Degraded,
-        Ok(ValidatedInquiryProjection::LegacyCheckedLoop) => legacy_checked_loop_report_outcome(
-            query,
-            evidence_scope,
-            &value,
-            &canonical_output,
-            workflow_metadata,
-        ),
-    }
-}
-
-/// Historical checked-loop output compatibility only. New runs classify their
-/// outcome exclusively from the replayed Inquiry contract.
-fn legacy_checked_loop_report_outcome(
-    query: &str,
-    evidence_scope: DeepResearchEvidenceScope,
-    workflow: &serde_json::Value,
-    canonical_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> DeepResearchRunOutcome {
-    if deep_research_workflow_needs_recovery_report_with_metadata(
-        canonical_output,
-        workflow_metadata,
-    ) {
-        return DeepResearchRunOutcome::Degraded;
-    }
-    let explicitly_qualified = workflow
-        .pointer("/verification/status")
-        .and_then(serde_json::Value::as_str)
-        == Some("degraded")
-        || workflow
-            .pointer("/checker/decision")
-            .and_then(serde_json::Value::as_str)
-            == Some("degrade")
-        || workflow
-            .get("mode")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|mode| mode.contains("degraded"));
-    if explicitly_qualified {
-        return DeepResearchRunOutcome::Qualified;
-    }
-    if deep_research_evidence_package_is_complete_for_query(
-        query,
-        evidence_scope,
-        canonical_output,
-        workflow_metadata,
-    ) {
-        DeepResearchRunOutcome::Completed
-    } else {
-        // Traceable evidence can remain useful when the final checker is
-        // unavailable or explicitly leaves bounded gaps. Publish that report
-        // with a qualified lifecycle instead of discarding the evidence into
-        // a generic recovery artifact or claiming full completion.
-        DeepResearchRunOutcome::Qualified
     }
 }
 
@@ -261,7 +90,6 @@ mod deep_research_workflow_snapshot_tests {
             output: Some("stale output".to_string()),
             metadata: Some(serde_json::json!({"stale": true})),
             args: Some(serde_json::json!({"run_id": "old"})),
-            last_synthesis_text: Some("stale synthesis".to_string()),
         };
 
         snapshot.reset_for_run();
@@ -269,7 +97,6 @@ mod deep_research_workflow_snapshot_tests {
         assert!(snapshot.output.is_none());
         assert!(snapshot.metadata.is_none());
         assert!(snapshot.args.is_none());
-        assert!(snapshot.last_synthesis_text.is_none());
     }
 
     #[test]
@@ -278,7 +105,6 @@ mod deep_research_workflow_snapshot_tests {
             output: Some("output".to_string()),
             metadata: Some(serde_json::json!({"source": "workflow"})),
             args: Some(serde_json::json!({"run_id": "run"})),
-            last_synthesis_text: Some("synthesis".to_string()),
         };
 
         snapshot.clear();
@@ -286,6 +112,5 @@ mod deep_research_workflow_snapshot_tests {
         assert!(snapshot.output.is_none());
         assert!(snapshot.metadata.is_none());
         assert!(snapshot.args.is_none());
-        assert!(snapshot.last_synthesis_text.is_none());
     }
 }

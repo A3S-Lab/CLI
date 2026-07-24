@@ -239,6 +239,7 @@ impl App {
         &mut self,
         artifacts: &ResearchReportArtifacts,
         outcome: DeepResearchRunOutcome,
+        authority: DeepResearchTerminalArtifactAuthority,
     ) {
         debug_assert!(!matches!(outcome, DeepResearchRunOutcome::Active));
         self.deep_research_outcome = outcome;
@@ -246,7 +247,7 @@ impl App {
             self.loop_remaining = 0;
         }
         self.pending_deep_research_report_view = remote_ui::local_file_view(&artifacts.html).ok();
-        self.deep_research_terminal_artifacts = Some(artifacts.clone());
+        self.deep_research_terminal_artifacts = Some((artifacts.clone(), authority));
     }
 
     pub(super) fn capture_research_report_view(&mut self, output: &str) -> bool {

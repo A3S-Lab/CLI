@@ -306,24 +306,10 @@ async fn generate_comparison_report(
     violations.sort();
     violations.dedup();
     let mut rejected_items = violations.clone();
-    let admitted = if violations.is_empty() {
-        Some((resolved, "generated"))
-    } else {
-        match super::super::salvage_source_bound_markdown(&raw, &frozen_case) {
-            Ok(salvaged) => {
-                rejected_items.extend(salvaged.rejected_items);
-                debug_assert!(!salvaged.used_sources.is_empty());
-                Some((salvaged.markdown, "generated_salvaged"))
-            }
-            Err(error) => {
-                rejected_items.push(error);
-                None
-            }
-        }
-    };
+    let admitted = violations.is_empty().then_some(resolved);
     rejected_items.sort();
     rejected_items.dedup();
-    if let Some((markdown, _)) = admitted.as_ref() {
+    if let Some(markdown) = admitted.as_ref() {
         let html = crate::tui::deep_research_completed_report_html_for_test(&case.query, markdown);
         crate::tui::deep_research_write_report_pair_for_test(
             &markdown_path,
@@ -339,14 +325,15 @@ async fn generate_comparison_report(
             budget.public_excerpt_chars,
         )?;
     }
-    let status = admitted
-        .as_ref()
-        .map(|(_, status)| *status)
-        .unwrap_or("report_rejected");
     let generated = admitted.is_some();
     Ok(ReportResult {
         strategy,
-        status: status.to_string(),
+        status: if generated {
+            "generated"
+        } else {
+            "report_rejected"
+        }
+        .to_string(),
         outcome: if generated {
             "generated_report"
         } else {
@@ -1035,7 +1022,7 @@ mod persisted_evidence_tests {
     }
 
     #[tokio::test]
-    async fn comparison_report_salvages_missing_h1_sources_and_boundary_citation() {
+    async fn comparison_report_rejects_malformed_output_without_prose_salvage() {
         let output = tempfile::tempdir().expect("report directory");
         let acquisition = acquisition(EvaluationStrategy::Minimal);
         write_preliminary_source_report(
@@ -1058,17 +1045,20 @@ mod persisted_evidence_tests {
             output.path(),
         )
         .await
-        .expect("salvaged report");
+        .expect("strictly rejected report");
 
         let markdown = std::fs::read_to_string(&result.markdown_path).expect("report Markdown");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(saw_preliminary.load(Ordering::SeqCst));
-        assert_eq!(result.status, "generated_salvaged");
-        assert_eq!(result.outcome, "generated_report");
-        assert!(result.generation_error.is_none());
+        assert_eq!(result.status, "report_rejected");
+        assert_eq!(result.outcome, "source_backed");
+        assert!(result.generation_error.is_some());
         assert!(result.rejected_item_count > 0);
-        assert!(markdown.starts_with("# Research Report"), "{markdown}");
-        assert!(markdown.contains("## Direct answer"), "{markdown}");
+        assert!(
+            markdown.starts_with("# Verifiable Research Evidence"),
+            "{markdown}"
+        );
+        assert!(!markdown.contains("## Direct answer"), "{markdown}");
         assert!(markdown.contains("## Sources"), "{markdown}");
         assert!(
             markdown.contains("https://example.test/support"),
