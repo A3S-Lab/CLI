@@ -66,7 +66,7 @@ const MANAGED_SRT_COMPAT_PATCHER: &str = include_str!("managed_srt/patch-managed
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
 const INSTALL_SETTLEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const SANDBOX_PROBE_TIMEOUT_MS: u64 = 15_000;
+const SANDBOX_PROBE_TIMEOUT_MS: u64 = 30_000;
 const MINIMUM_NODE_VERSION: (u64, u64, u64) = (20, 11, 0);
 
 #[derive(Debug, Clone, Copy)]

@@ -668,7 +668,6 @@ async fn restart_reconciliation_preserves_exact_receipt_backed_publication() {
     let query = "Assess the current Nimbus support boundary";
     let mut interrupted_spec = spec();
     interrupted_spec.query = query.to_string();
-    interrupted_spec.host_pid = u32::MAX;
     record_workflow_started(temp.path(), run_id, interrupted_spec)
         .await
         .unwrap();
@@ -825,7 +824,6 @@ async fn restart_reconciliation_preserves_exact_bootstrap_checkpoint_without_rep
     let query = "Compare two storage engines";
     let mut interrupted_spec = spec();
     interrupted_spec.query = query.to_string();
-    interrupted_spec.host_pid = u32::MAX;
     record_workflow_started(temp.path(), run_id, interrupted_spec)
         .await
         .unwrap();
