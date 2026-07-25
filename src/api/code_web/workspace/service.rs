@@ -6,6 +6,7 @@ use a3s_boot::{BootError, Result as BootResult};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::process::Command;
 
 use crate::api::code_web::state::CodeWebState;
 
@@ -101,6 +102,26 @@ impl WorkspaceService {
         request: Value,
     ) -> BootResult<serde_json::Value> {
         super::picker::pick_directory(&self.state.default_workspace, request).await
+    }
+
+    pub(in crate::api::code_web) async fn reveal_path(
+        &self,
+        request: Value,
+    ) -> BootResult<serde_json::Value> {
+        let requested = required_json_path(&request, "path")?;
+        let path = fs::canonicalize(&requested).await.map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                BootError::NotFound(format!("path was not found: {}", requested.display()))
+            } else {
+                fs_error(error)
+            }
+        })?;
+        let metadata = fs::metadata(&path).await.map_err(fs_error)?;
+        reveal_in_file_manager(&path, metadata.is_dir()).await?;
+        Ok(json!({
+            "revealed": true,
+            "path": path.display().to_string(),
+        }))
     }
 
     pub(in crate::api::code_web) async fn create_dir(
@@ -544,6 +565,60 @@ impl WorkspaceService {
 
 async fn path_exists(path: &Path) -> bool {
     fs::metadata(path).await.is_ok()
+}
+
+async fn reveal_in_file_manager(path: &Path, is_directory: bool) -> BootResult<()> {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        if is_directory {
+            command.arg(path);
+        } else {
+            command.arg("-R").arg(path);
+        }
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        if is_directory {
+            command.arg(path);
+        } else {
+            command.arg("/select,").arg(path);
+        }
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let target = if is_directory {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        let mut command = Command::new("xdg-open");
+        command.arg(target);
+        command
+    };
+
+    #[cfg(not(any(unix, target_os = "windows")))]
+    return Err(BootError::ServiceUnavailable(
+        "revealing paths is not supported on this platform".to_string(),
+    ));
+
+    #[cfg(any(unix, target_os = "windows"))]
+    {
+        let status = command.status().await.map_err(|error| {
+            BootError::Internal(format!("failed to open the system file manager: {error}"))
+        })?;
+        if !status.success() {
+            return Err(BootError::Internal(format!(
+                "the system file manager exited with status {status}"
+            )));
+        }
+        Ok(())
+    }
 }
 
 fn required_json_path(value: &Value, field: &str) -> BootResult<PathBuf> {

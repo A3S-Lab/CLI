@@ -61,6 +61,14 @@ impl WorkspaceController {
         self.service.pick_directory(request).await
     }
 
+    #[post("/actions/reveal")]
+    async fn reveal_workspace_path(
+        &self,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.reveal_path(request).await
+    }
+
     #[post("/mkdir")]
     async fn create_workspace_dir(
         &self,

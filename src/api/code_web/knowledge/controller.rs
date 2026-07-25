@@ -3,6 +3,7 @@ use std::sync::Arc;
 use a3s_boot::{controller, Result as BootResult};
 use serde::Deserialize;
 
+use super::compilation::{CompilationOutcome, CompilationPolicy};
 use super::service::KnowledgeService;
 
 #[derive(Debug, Default, Deserialize)]
@@ -53,6 +54,46 @@ pub(super) struct KnowledgeBaseImportRequest {
 pub(super) struct KnowledgeBasePinRequest {
     pub(super) workspace: Option<String>,
     pub(super) pinned: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeBaseSelectionRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) paths: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeBaseFromSelectionRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) paths: Vec<String>,
+    pub(super) name: String,
+    pub(super) description: Option<String>,
+    pub(super) compilation_policy: CompilationPolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeCompilationRequest {
+    pub(super) workspace: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeCompilationPolicyRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) policy: CompilationPolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct KnowledgeCompilationResultRequest {
+    pub(super) workspace: Option<String>,
+    pub(super) outcome: Option<CompilationOutcome>,
+    pub(super) transient: Option<bool>,
+    pub(super) error: Option<String>,
+    pub(super) compiler_version: Option<String>,
 }
 
 pub(super) struct KnowledgeController {
@@ -146,6 +187,26 @@ impl KnowledgeController {
         self.service.import_knowledge_base(request).await
     }
 
+    #[post("/bases/from-selection/preview")]
+    async fn preview_knowledge_base_from_selection(
+        &self,
+        #[body] request: KnowledgeBaseSelectionRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .preview_knowledge_base_from_selection(request)
+            .await
+    }
+
+    #[post("/bases/from-selection")]
+    async fn create_knowledge_base_from_selection(
+        &self,
+        #[body] request: KnowledgeBaseFromSelectionRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .create_knowledge_base_from_selection(request)
+            .await
+    }
+
     #[post("/bases/{id}/pinned")]
     async fn set_knowledge_base_pinned(
         &self,
@@ -153,5 +214,79 @@ impl KnowledgeController {
         #[body] request: KnowledgeBasePinRequest,
     ) -> BootResult<serde_json::Value> {
         self.service.set_knowledge_base_pinned(&id, request).await
+    }
+
+    #[post("/bases/{id}/compilations")]
+    async fn request_knowledge_compilation(
+        &self,
+        #[param("id")] id: String,
+        #[body] request: KnowledgeCompilationRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .request_knowledge_compilation(&id, request)
+            .await
+    }
+
+    #[get("/bases/{id}/compilation")]
+    async fn knowledge_compilation_status(
+        &self,
+        #[param("id")] id: String,
+        #[query("workspace")] workspace: Option<String>,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .knowledge_compilation_status(&id, workspace)
+            .await
+    }
+
+    #[patch("/bases/{id}/compilation-policy")]
+    async fn set_knowledge_compilation_policy(
+        &self,
+        #[param("id")] id: String,
+        #[body] request: KnowledgeCompilationPolicyRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .set_knowledge_compilation_policy(&id, request)
+            .await
+    }
+
+    #[get("/bases/{id}/source-changes")]
+    async fn knowledge_source_changes(
+        &self,
+        #[param("id")] id: String,
+        #[query("workspace")] workspace: Option<String>,
+    ) -> BootResult<serde_json::Value> {
+        self.service.knowledge_source_changes(&id, workspace).await
+    }
+
+    #[post("/bases/{id}/compilations/{job_id}/cancel")]
+    async fn cancel_knowledge_compilation(
+        &self,
+        #[param("id")] id: String,
+        #[param("job_id")] job_id: String,
+        #[body] request: KnowledgeCompilationRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .cancel_knowledge_compilation(&id, &job_id, request)
+            .await
+    }
+
+    #[post("/compilations/claim")]
+    async fn claim_knowledge_compilation(
+        &self,
+        #[body] request: KnowledgeCompilationRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service.claim_knowledge_compilation(request).await
+    }
+
+    #[post("/bases/{id}/compilations/{job_id}/result")]
+    async fn complete_knowledge_compilation(
+        &self,
+        #[param("id")] id: String,
+        #[param("job_id")] job_id: String,
+        #[body] request: KnowledgeCompilationResultRequest,
+    ) -> BootResult<serde_json::Value> {
+        self.service
+            .complete_knowledge_compilation(&id, &job_id, request)
+            .await
     }
 }

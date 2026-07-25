@@ -10,6 +10,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::compilation::{self, CompilationSummary};
 use super::marketplace::MarketPackage;
 use crate::tui::asset_lifecycle::{self, AssetAclDocument, OsService, RuntimeBindingIntent};
 
@@ -36,6 +37,7 @@ pub(super) struct KnowledgeBase {
     pub(super) source_count: usize,
     pub(super) concept_count: usize,
     pub(super) bytes: u64,
+    pub(super) compilation: CompilationSummary,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -73,6 +75,78 @@ struct KnowledgeBaseManifest {
     pinned: bool,
     created_at: String,
     updated_at: String,
+}
+
+pub(super) fn materialize_personal_base<F>(
+    workspace: &Path,
+    name: &str,
+    description: Option<&str>,
+    origin: &str,
+    initialize: F,
+) -> Result<KnowledgeBaseMutation, KnowledgeStoreError>
+where
+    F: FnOnce(&Path) -> Result<(), KnowledgeStoreError>,
+{
+    if !matches!(origin, "created" | "imported" | "selection") {
+        return Err(KnowledgeStoreError::Invalid(format!(
+            "unsupported personal knowledge-base origin `{origin}`"
+        )));
+    }
+    let name = normalize_required_text(name, "knowledge-base name", MAX_NAME_CHARS)?;
+    let description = normalize_optional_text(description, MAX_DESCRIPTION_CHARS)
+        .unwrap_or_else(|| "Personal knowledge created in A3S Web.".to_string());
+    let id = knowledge_base_id(&name);
+    validate_base_id(&id)?;
+    let now = Utc::now().to_rfc3339();
+    let manifest = KnowledgeBaseManifest {
+        id: id.clone(),
+        name: name.clone(),
+        description: description.clone(),
+        origin: origin.to_string(),
+        marketplace_id: None,
+        version: "1.0.0".to_string(),
+        pinned: true,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    let root = bases_root(workspace);
+    std::fs::create_dir_all(&root).map_err(|error| io_error(&root, error))?;
+    let target = root.join(&id);
+    if std::fs::symlink_metadata(&target).is_ok() {
+        return Err(KnowledgeStoreError::Conflict(format!(
+            "knowledge base `{id}` already exists"
+        )));
+    }
+    let staging = root.join(format!(
+        ".{id}.tmp-{}-{}",
+        std::process::id(),
+        timestamp_nanos()
+    ));
+    std::fs::create_dir(&staging).map_err(|error| io_error(&staging, error))?;
+    let files = vec![
+        (
+            "README.md".to_string(),
+            format!("# {name}\n\n{description}\n"),
+        ),
+        (
+            "eval/smoke.md".to_string(),
+            "# Compilation Check\n\n1. Confirm every concept links to a source.\n2. Record unresolved conflicts and freshness limits.\n"
+                .to_string(),
+        ),
+    ];
+    let outcome = initialize(&staging)
+        .and_then(|()| materialize_base_in_staging(&staging, &manifest, &files))
+        .and_then(|()| {
+            std::fs::rename(&staging, &target).map_err(|error| io_error(&target, error))
+        });
+    if outcome.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    outcome?;
+    Ok(KnowledgeBaseMutation {
+        changed: true,
+        knowledge_base: knowledge_base_from_directory(&target, &id)?,
+    })
 }
 
 pub(super) fn bases_root(workspace: &Path) -> PathBuf {
@@ -506,6 +580,7 @@ fn knowledge_base_from_directory(
         source_count: stats.source_count,
         concept_count: stats.concept_count,
         bytes: stats.bytes,
+        compilation: compilation::summary_for_base(path),
     })
 }
 
@@ -535,6 +610,7 @@ fn legacy_workspace_base(workspace: &Path) -> Option<KnowledgeBase> {
         source_count: stats.source_count,
         concept_count: stats.concept_count,
         bytes: stats.bytes,
+        compilation: compilation::summary_for_base(&path),
     })
 }
 
@@ -649,7 +725,10 @@ fn read_manifest(
         )));
     }
     let origin = required("origin")?;
-    if !matches!(origin.as_str(), "created" | "marketplace" | "imported") {
+    if !matches!(
+        origin.as_str(),
+        "created" | "marketplace" | "imported" | "selection"
+    ) {
         return Err(KnowledgeStoreError::Invalid(format!(
             "unsupported knowledge-base origin `{origin}`"
         )));
@@ -680,6 +759,42 @@ fn read_manifest(
         created_at: required("created_at")?,
         updated_at: required("updated_at")?,
     })
+}
+
+pub(super) fn resolve_base_path(
+    workspace: &Path,
+    id: &str,
+) -> Result<PathBuf, KnowledgeStoreError> {
+    if id == "workspace" {
+        let path = workspace.join(".a3s").join("kb");
+        if is_regular_directory(&path) {
+            return Ok(path);
+        }
+        return Err(KnowledgeStoreError::NotFound(
+            "workspace knowledge base was not found".to_string(),
+        ));
+    }
+    validate_base_id(id)?;
+    let path = bases_root(workspace).join(id);
+    if !is_regular_directory(&path) {
+        return Err(KnowledgeStoreError::NotFound(format!(
+            "knowledge base `{id}` was not found"
+        )));
+    }
+    Ok(path)
+}
+
+pub(super) fn knowledge_base_by_id(
+    workspace: &Path,
+    id: &str,
+) -> Result<KnowledgeBase, KnowledgeStoreError> {
+    let path = resolve_base_path(workspace, id)?;
+    if id == "workspace" {
+        return legacy_workspace_base(workspace).ok_or_else(|| {
+            KnowledgeStoreError::NotFound("workspace knowledge base was not found".to_string())
+        });
+    }
+    knowledge_base_from_directory(&path, id)
 }
 
 fn render_manifest(manifest: &KnowledgeBaseManifest) -> String {
@@ -848,91 +963,4 @@ fn io_error(path: &Path, error: std::io::Error) -> KnowledgeStoreError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::api::code_web::knowledge::marketplace;
-
-    #[test]
-    fn creates_installs_lists_and_pins_real_okf_directories() {
-        let temporary = tempfile::tempdir().expect("temporary workspace");
-        let workspace = temporary.path();
-
-        let created = create_knowledge_base(workspace, "Project Notes", Some("Local notes"))
-            .expect("create personal knowledge base");
-        assert!(created.changed);
-        assert_eq!(created.knowledge_base.origin, "created");
-        assert!(Path::new(&created.knowledge_base.path)
-            .join(MANIFEST_PATH)
-            .is_file());
-
-        let package = marketplace::packages()[0];
-        let installed = install_market_package(workspace, package).expect("install market package");
-        assert!(installed.changed);
-        assert_eq!(
-            installed.knowledge_base.marketplace_id.as_deref(),
-            Some(package.id)
-        );
-        assert!(Path::new(&installed.knowledge_base.path)
-            .join(asset_lifecycle::ASSET_ACL_PATH)
-            .is_file());
-
-        let repeated =
-            install_market_package(workspace, package).expect("repeat market installation");
-        assert!(!repeated.changed);
-
-        let unpinned = set_pinned(workspace, &created.knowledge_base.id, false)
-            .expect("unpin personal knowledge base");
-        assert!(unpinned.changed);
-        assert!(!unpinned.knowledge_base.pinned);
-
-        let listed = list_knowledge_bases(workspace);
-        assert!(listed.warnings.is_empty(), "{:?}", listed.warnings);
-        assert_eq!(listed.items.len(), 2);
-    }
-
-    #[test]
-    fn unicode_only_names_receive_safe_stable_ids() {
-        let first = knowledge_base_id("量子研究");
-        assert_eq!(first, knowledge_base_id("量子研究"));
-        assert!(first.starts_with("kb-"));
-        validate_base_id(&first).expect("safe ID");
-    }
-
-    #[test]
-    fn invalid_package_paths_never_escape_the_base() {
-        assert!(safe_relative_path("../outside").is_err());
-        assert!(safe_relative_path("/outside").is_err());
-        assert!(safe_relative_path("wiki/index.md").is_ok());
-    }
-
-    #[test]
-    fn imports_an_obsidian_vault_without_application_metadata() {
-        let temporary = tempfile::tempdir().expect("temporary workspace");
-        let workspace = temporary.path().join("workspace");
-        let vault = temporary.path().join("Research Vault");
-        std::fs::create_dir_all(vault.join("topics")).expect("create vault topics");
-        std::fs::create_dir_all(vault.join(".obsidian")).expect("create Obsidian metadata");
-        std::fs::write(vault.join("Home.md"), "# Home\n\n[[topics/Methods]]\n")
-            .expect("write vault home");
-        std::fs::write(vault.join("topics/Methods.md"), "# Methods\n")
-            .expect("write nested vault note");
-        std::fs::write(vault.join(".obsidian/workspace.json"), "{}")
-            .expect("write Obsidian workspace state");
-
-        let imported = import_knowledge_base(&workspace, &vault, None)
-            .expect("import Obsidian vault as personal knowledge");
-
-        assert!(imported.changed);
-        assert_eq!(imported.knowledge_base.name, "Research Vault");
-        assert_eq!(imported.knowledge_base.origin, "imported");
-        let target = Path::new(&imported.knowledge_base.path);
-        assert_eq!(
-            std::fs::read_to_string(target.join("sources/Home.md")).expect("read imported home"),
-            "# Home\n\n[[topics/Methods]]\n"
-        );
-        assert!(target.join("sources/topics/Methods.md").is_file());
-        assert!(!target.join("sources/.obsidian").exists());
-        assert!(target.join(MANIFEST_PATH).is_file());
-        assert_eq!(imported.knowledge_base.source_count, 2);
-    }
-}
+mod tests;

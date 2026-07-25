@@ -401,6 +401,159 @@ fn knowledge_marketplace_creates_and_installs_real_personal_bases() {
 }
 
 #[test]
+fn knowledge_selection_creation_and_compilation_are_separate_api_steps() {
+    let root = temp_directory("web-knowledge-selection");
+    let config_path = root.join("config.acl");
+    let web_dir = root.join("web");
+    let session_state = root.join("session-state");
+    fs::create_dir_all(&web_dir).expect("create web directory");
+    fs::write(
+        web_dir.join("index.html"),
+        "<!doctype html><title>A3S knowledge selection test</title>",
+    )
+    .expect("write web fixture");
+    fs::write(&config_path, test_config()).expect("write config fixture");
+
+    let research = root.join("Research");
+    fs::create_dir_all(research.join("empty")).expect("create source directories");
+    fs::write(research.join("note.md"), "# Research note\n").expect("write source note");
+    let brief = root.join("brief.txt");
+    fs::write(&brief, "Project brief").expect("write source brief");
+
+    let (mut daemon, address) = start_detached_web(&root, &config_path, &web_dir, &session_state);
+    let paths = serde_json::json!([research, root.join("Research/note.md"), brief]);
+    let preview_request = serde_json::json!({ "paths": paths.clone() });
+    let preview = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/bases/from-selection/preview",
+        Some(&preview_request.to_string()),
+        "200",
+    );
+    let preview = api_data(&preview);
+    assert_eq!(preview["selectedCount"], 3);
+    assert_eq!(preview["sourceRootCount"], 2);
+    assert_eq!(preview["deduplicatedCount"], 1);
+    assert_eq!(preview["fileCount"], 2);
+
+    let create_request = serde_json::json!({
+        "paths": paths,
+        "name": "Research Pack",
+        "description": "Mixed local sources",
+        "compilationPolicy": "manual",
+    });
+    let created = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/bases/from-selection",
+        Some(&create_request.to_string()),
+        "200",
+    );
+    let created = api_data(&created);
+    let base_id = created["knowledgeBase"]["id"]
+        .as_str()
+        .expect("created base ID")
+        .to_string();
+    assert_eq!(created["knowledgeBase"]["origin"], "selection");
+    assert_eq!(
+        created["knowledgeBase"]["compilation"]["phase"],
+        "source_ready"
+    );
+    assert_eq!(created["knowledgeBase"]["compilation"]["policy"], "manual");
+
+    let queued = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/bases/{base_id}/compilations"),
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(
+        api_data(&queued)["knowledgeBase"]["compilation"]["phase"],
+        "queued"
+    );
+
+    let claim = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/compilations/claim",
+        Some("{}"),
+        "200",
+    );
+    let claim = api_data(&claim);
+    assert_eq!(claim["claimed"], true);
+    let job_id = claim["job"]["id"]
+        .as_str()
+        .expect("claimed job ID")
+        .to_string();
+    let output_path = PathBuf::from(claim["outputPath"].as_str().expect("compiler output path"));
+    fs::write(
+        output_path.join("index.md"),
+        "---\ntype: Note\n---\n# Compiled research\n",
+    )
+    .expect("write compiler output");
+    let completed = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/bases/{base_id}/compilations/{job_id}/result"),
+        Some(r#"{"outcome":"succeeded","compilerVersion":"test-compiler"}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&completed)["knowledgeBase"]["compilation"]["phase"],
+        "succeeded"
+    );
+    let wiki = root
+        .join(".a3s/kb/bases")
+        .join(&base_id)
+        .join("wiki/index.md");
+    assert!(fs::read_to_string(&wiki)
+        .expect("read compiled wiki")
+        .contains("Compiled research"));
+
+    let second = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/bases/{base_id}/compilations"),
+        Some("{}"),
+        "200",
+    );
+    assert_eq!(
+        api_data(&second)["knowledgeBase"]["compilation"]["phase"],
+        "queued"
+    );
+    let second_claim = http_json(
+        &address,
+        "POST",
+        "/api/v1/knowledge/compilations/claim",
+        Some("{}"),
+        "200",
+    );
+    let second_claim = api_data(&second_claim);
+    let second_job_id = second_claim["job"]["id"]
+        .as_str()
+        .expect("second claimed job ID");
+    let failed = http_json(
+        &address,
+        "POST",
+        &format!("/api/v1/knowledge/bases/{base_id}/compilations/{second_job_id}/result"),
+        Some(r#"{"outcome":"failed","transient":false,"error":"fixture failure"}"#),
+        "200",
+    );
+    assert_eq!(
+        api_data(&failed)["knowledgeBase"]["compilation"]["phase"],
+        "failed"
+    );
+    assert!(fs::read_to_string(&wiki)
+        .expect("read preserved wiki")
+        .contains("Compiled research"));
+
+    daemon.stop();
+    wait_until_stopped(&address);
+    fs::remove_dir_all(root).expect("clean knowledge selection fixture");
+}
+
+#[test]
 fn evolution_api_reviews_versions_and_rolls_back_local_assets() {
     let root = temp_directory("web-evolution-api");
     let config_path = root.join("config.acl");

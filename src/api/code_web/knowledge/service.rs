@@ -1,28 +1,92 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use a3s_boot::{BootError, Result as BootResult};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
+use super::compilation;
 use super::controller::{
     KbAddNoteRequest, KbImportRequest, KbSearchRequest, KnowledgeBaseCreateRequest,
-    KnowledgeBaseImportRequest, KnowledgeBasePinRequest,
+    KnowledgeBaseFromSelectionRequest, KnowledgeBaseImportRequest, KnowledgeBasePinRequest,
+    KnowledgeBaseSelectionRequest, KnowledgeCompilationPolicyRequest, KnowledgeCompilationRequest,
+    KnowledgeCompilationResultRequest,
 };
 use super::personal_bases::{self, KnowledgeBaseMutation, KnowledgeStoreError};
+use super::source_packages;
 use crate::api::code_web::state::CodeWebState;
 use crate::tui::kbutil::{self, ImportKind, ImportPreview, KbStats, SearchHit};
 
 pub(in crate::api::code_web) struct KnowledgeService {
     state: Arc<CodeWebState>,
-    operation_lock: Mutex<()>,
+    operation_lock: Arc<Mutex<()>>,
+    monitored_workspaces: Arc<RwLock<HashSet<PathBuf>>>,
+    _compilation_monitor: Option<CompilationMonitor>,
+}
+
+fn start_compilation_monitor(
+    workspaces: Arc<RwLock<HashSet<PathBuf>>>,
+    operation_lock: Arc<Mutex<()>>,
+) -> Option<CompilationMonitor> {
+    let runtime = tokio::runtime::Handle::try_current().ok()?;
+    Some(CompilationMonitor(runtime.spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let scan_targets = workspaces
+                .read()
+                .map(|workspaces| workspaces.iter().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for workspace in scan_targets {
+                if !workspace.is_dir() {
+                    continue;
+                }
+                let _guard = operation_lock.lock().await;
+                match tokio::task::spawn_blocking(move || {
+                    compilation::poll_compilations(&workspace, chrono::Utc::now())
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(%error, "knowledge auto-compilation scan failed");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "knowledge auto-compilation task failed");
+                    }
+                }
+            }
+        }
+    })))
+}
+
+struct CompilationMonitor(tokio::task::JoinHandle<()>);
+
+impl Drop for CompilationMonitor {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl KnowledgeService {
     pub(in crate::api::code_web) fn new(state: Arc<CodeWebState>) -> Self {
+        let operation_lock = Arc::new(Mutex::new(()));
+        let monitored_workspaces = Arc::new(RwLock::new(HashSet::from([state
+            .default_workspace
+            .clone()])));
+        let monitor = start_compilation_monitor(
+            Arc::clone(&monitored_workspaces),
+            Arc::clone(&operation_lock),
+        );
         Self {
             state,
-            operation_lock: Mutex::new(()),
+            operation_lock,
+            monitored_workspaces,
+            _compilation_monitor: monitor,
         }
     }
 
@@ -228,6 +292,50 @@ impl KnowledgeService {
         Ok(mutation_json(mutation))
     }
 
+    pub(in crate::api::code_web) async fn preview_knowledge_base_from_selection(
+        &self,
+        request: KnowledgeBaseSelectionRequest,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(request.workspace);
+        let paths = request
+            .paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let preview = run_blocking("preview knowledge source selection", move || {
+            source_packages::preview_source_selection(&workspace, &paths)
+        })
+        .await?;
+        serialize_value(preview)
+    }
+
+    pub(in crate::api::code_web) async fn create_knowledge_base_from_selection(
+        &self,
+        request: KnowledgeBaseFromSelectionRequest,
+    ) -> BootResult<Value> {
+        let workspace = self.workspace_from_request(request.workspace);
+        let paths = request
+            .paths
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let name = request.name;
+        let description = request.description;
+        let policy = request.compilation_policy;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("create knowledge base from selected sources", move || {
+            source_packages::create_from_selection(
+                &workspace,
+                &paths,
+                &name,
+                description.as_deref(),
+                policy,
+            )
+        })
+        .await?;
+        Ok(mutation_json(mutation))
+    }
+
     pub(in crate::api::code_web) async fn install_marketplace_item(
         &self,
         id: &str,
@@ -261,6 +369,133 @@ impl KnowledgeService {
         Ok(mutation_json(mutation))
     }
 
+    pub(in crate::api::code_web) async fn request_knowledge_compilation(
+        &self,
+        id: &str,
+        request: KnowledgeCompilationRequest,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let workspace = self.workspace_from_request(request.workspace);
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("request knowledge compilation", move || {
+            compilation::request_compilation(&workspace, &id, chrono::Utc::now())
+        })
+        .await?;
+        serialize_value(mutation)
+    }
+
+    pub(in crate::api::code_web) async fn knowledge_compilation_status(
+        &self,
+        id: &str,
+        workspace: Option<String>,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let workspace = self.workspace_from_request(workspace);
+        let status = run_blocking("read knowledge compilation status", move || {
+            compilation::status(&workspace, &id)
+        })
+        .await?;
+        serialize_value(status)
+    }
+
+    pub(in crate::api::code_web) async fn set_knowledge_compilation_policy(
+        &self,
+        id: &str,
+        request: KnowledgeCompilationPolicyRequest,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let workspace = self.workspace_from_request(request.workspace);
+        let policy = request.policy;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("update knowledge compilation policy", move || {
+            compilation::set_policy(&workspace, &id, policy, chrono::Utc::now())
+        })
+        .await?;
+        serialize_value(mutation)
+    }
+
+    pub(in crate::api::code_web) async fn knowledge_source_changes(
+        &self,
+        id: &str,
+        workspace: Option<String>,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let workspace = self.workspace_from_request(workspace);
+        let _guard = self.operation_lock.lock().await;
+        let changes = run_blocking("inspect knowledge source changes", move || {
+            compilation::inspect_source_changes(&workspace, &id, chrono::Utc::now())
+        })
+        .await?;
+        serialize_value(changes)
+    }
+
+    pub(in crate::api::code_web) async fn cancel_knowledge_compilation(
+        &self,
+        id: &str,
+        job_id: &str,
+        request: KnowledgeCompilationRequest,
+    ) -> BootResult<Value> {
+        let id = id.to_string();
+        let job_id = job_id.to_string();
+        let workspace = self.workspace_from_request(request.workspace);
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("cancel knowledge compilation", move || {
+            compilation::cancel_job(&workspace, &id, &job_id, chrono::Utc::now())
+        })
+        .await?;
+        serialize_value(mutation)
+    }
+
+    pub(in crate::api::code_web) async fn claim_knowledge_compilation(
+        &self,
+        request: KnowledgeCompilationRequest,
+    ) -> BootResult<Value> {
+        self.workspace_from_request(request.workspace);
+        let workspaces = self
+            .monitored_workspaces
+            .read()
+            .map(|workspaces| workspaces.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_else(|_| vec![self.state.default_workspace.clone()]);
+        let _guard = self.operation_lock.lock().await;
+        let claim = run_blocking("claim knowledge compilation", move || {
+            compilation::claim_next_in_workspaces(&workspaces, chrono::Utc::now())
+        })
+        .await?;
+        serialize_value(claim)
+    }
+
+    pub(in crate::api::code_web) async fn complete_knowledge_compilation(
+        &self,
+        id: &str,
+        job_id: &str,
+        request: KnowledgeCompilationResultRequest,
+    ) -> BootResult<Value> {
+        let outcome = request.outcome.ok_or_else(|| {
+            BootError::BadRequest("knowledge compilation outcome is required".to_string())
+        })?;
+        let id = id.to_string();
+        let job_id = job_id.to_string();
+        let workspace = self.workspace_from_request(request.workspace);
+        let transient = request.transient.unwrap_or(false);
+        let error = request.error;
+        let compiler_version = request.compiler_version;
+        let _guard = self.operation_lock.lock().await;
+        let mutation = run_blocking("complete knowledge compilation", move || {
+            compilation::complete_job(
+                &workspace,
+                &id,
+                &job_id,
+                outcome,
+                transient,
+                error.as_deref(),
+                compiler_version.as_deref(),
+                chrono::Utc::now(),
+            )
+        })
+        .await?;
+        serialize_value(mutation)
+    }
+
     async fn ensure_workspace(&self, workspace: &Path) -> BootResult<()> {
         let kb_root = kbutil::kb_dir(&workspace.display().to_string());
         tokio::fs::create_dir_all(kb_root.join("sources"))
@@ -273,12 +508,16 @@ impl KnowledgeService {
     }
 
     fn workspace_from_request(&self, workspace: Option<String>) -> PathBuf {
-        workspace
+        let workspace = workspace
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
-            .unwrap_or_else(|| self.state.default_workspace.clone())
+            .unwrap_or_else(|| self.state.default_workspace.clone());
+        if let Ok(mut workspaces) = self.monitored_workspaces.write() {
+            workspaces.insert(workspace.clone());
+        }
+        workspace
     }
 }
 
@@ -354,6 +593,12 @@ fn mutation_json(mutation: KnowledgeBaseMutation) -> Value {
     json!({
         "changed": mutation.changed,
         "knowledgeBase": mutation.knowledge_base,
+    })
+}
+
+fn serialize_value<T: Serialize>(value: T) -> BootResult<Value> {
+    serde_json::to_value(value).map_err(|error| {
+        BootError::Internal(format!("failed to encode knowledge response: {error}"))
     })
 }
 
