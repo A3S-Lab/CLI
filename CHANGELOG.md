@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.7] - 2026-07-26
+
+### Added
+
+- Added Finder- and Explorer-style mouse marquee, Command/Ctrl additive
+  selection, Shift range selection, checkboxes, Select All, sortable list
+  headers, and a non-displacing selection action shelf to the Work file
+  manager.
+- Documented the AI-native local full-text retrieval architecture for compiled
+  OKF knowledge, with Tantivy indexing and explicit separation from Office,
+  PDF, OCR, and other knowledge-compilation concerns.
+
+### Changed
+
+- Unified the Code, Work, and Knowledge sidebars around the same dimensions,
+  navigation rows, framed icon grammar, stroke weight, and responsive behavior.
+- Kept folder creation, Office-file naming, rename, and duplication inline in
+  both grid and list views; only irreversible permanent deletion opens a
+  confirmation dialog.
+- Made the Work assistant cover the full Work pane at 1120 px and below, and
+  excluded generated dependency and build trees from workspace search while
+  retaining compiled `.a3s/kb` knowledge.
+
 ## [0.10.6] - 2026-07-25
 
 ### Fixed
