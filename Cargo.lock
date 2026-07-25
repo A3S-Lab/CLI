@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a3s"
-version = "0.10.5"
+version = "0.10.6"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-boot",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-code-core"
-version = "6.4.2"
+version = "6.4.3"
 dependencies = [
  "a3s-acl 0.3.0",
  "a3s-common",
@@ -274,9 +274,7 @@ dependencies = [
 
 [[package]]
 name = "a3s-tui"
-version = "0.1.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a24dc15deb60695f255ad7f5615e070b69ec83591dce3da9ab211a1c3ff73b7"
+version = "0.1.14"
 dependencies = [
  "comrak",
  "crossterm",
@@ -6606,7 +6604,3 @@ checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
 ]
-
-[[patch.unused]]
-name = "a3s-tui"
-version = "0.1.12"

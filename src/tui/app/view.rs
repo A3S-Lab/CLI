@@ -2,6 +2,10 @@
 
 use super::*;
 
+fn should_capture_bottom_anchor(viewport: &Viewport) -> bool {
+    viewport.auto_scroll_enabled()
+}
+
 impl App {
     /// One-shot transcript warning as the context fills: a heads-up at 70%
     /// and a red alert at 85% (the auto-compact point). Called wherever
@@ -605,7 +609,12 @@ impl App {
     }
 
     pub(super) fn capture_viewport_anchor(&self) -> ViewportAnchor {
-        if self.viewport.at_bottom() {
+        // Auto-follow is explicit user state. During streaming, Markdown
+        // reflow can temporarily shrink the rendered tail until a paused
+        // viewport happens to be at the current bottom. Treating that geometry
+        // as intent would re-enable follow mode and yank the user back down as
+        // soon as the next delta grows the tail again.
+        if should_capture_bottom_anchor(&self.viewport) {
             return ViewportAnchor::Bottom;
         }
         let offset = self.viewport.scroll_offset();
@@ -826,5 +835,20 @@ impl App {
 
     pub(super) fn approval_rows_below(&self) -> usize {
         approval_rows_below_for(self.transcript_view.is_some(), self.overlay_rows_below())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bottom_anchor_uses_follow_state_not_transient_geometry() {
+        let mut viewport = Viewport::new(80, 2).with_auto_scroll(false);
+        viewport.set_content("zero\none\ntwo\nthree");
+        viewport.set_scroll_offset(2);
+
+        assert!(viewport.at_bottom());
+        assert!(!should_capture_bottom_anchor(&viewport));
     }
 }

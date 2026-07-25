@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-07-25
+
+### Fixed
+
+- Cleared the legacy anonymous Code draft once when upgrading A3S Web so text
+  previously copied from the Work assistant no longer reappears in the Code
+  composer.
+- Kept Code Auto mode direct when structured pre-analysis is unavailable
+  instead of presenting locally fabricated task steps.
+- Preserved the reader's paused transcript position while Markdown output is
+  streaming, including brief layout shrinkage that places the viewport at the
+  current bottom.
+
 ## [0.10.5] - 2026-07-25
 
 ### Added
