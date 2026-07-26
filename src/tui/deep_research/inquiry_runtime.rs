@@ -118,11 +118,12 @@ impl StructuredGenerationPort for A3sDeepResearchRuntime<'_> {
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
     async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+        let arguments = crate::research::adapt_dynamic_workflow_arguments(request.arguments);
         let result = match request.stage {
             WorkflowStage::Bootstrap => {
                 run_bootstrap_acquisition_stage(
                     self.session,
-                    request.arguments,
+                    arguments,
                     self.progress_tx,
                     request.timeout_ms,
                 )
@@ -130,7 +131,7 @@ impl WorkflowExecutionPort for A3sDeepResearchRuntime<'_> {
             }
             WorkflowStage::PlannedRetrieval => {
                 within_inquiry_stage_timeout(
-                    run_dynamic_workflow(self.session, request.arguments, self.progress_tx),
+                    run_dynamic_workflow(self.session, arguments, self.progress_tx),
                     request.timeout_ms,
                     request.stage.label(),
                 )

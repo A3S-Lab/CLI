@@ -174,9 +174,10 @@ impl StructuredGenerationPort for CodeDeepResearchRuntime {
 #[async_trait::async_trait]
 impl WorkflowExecutionPort for CodeDeepResearchRuntime {
     async fn execute_workflow(&self, request: WorkflowRequest) -> Result<WorkflowOutput, String> {
+        let arguments = adapt_dynamic_workflow_arguments(request.arguments);
         let result = tokio::time::timeout(
             Duration::from_millis(request.timeout_ms),
-            self.call_tool("dynamic_workflow", request.arguments, true),
+            self.call_tool("dynamic_workflow", arguments, true),
         )
         .await
         .map_err(|_| {
@@ -199,6 +200,15 @@ impl WorkflowExecutionPort for CodeDeepResearchRuntime {
             metadata: result.metadata,
         })
     }
+}
+
+/// Keep the standalone engine's request compatible with the exact dynamic
+/// workflow schema published by the pinned Code Core release.
+pub(crate) fn adapt_dynamic_workflow_arguments(mut arguments: Value) -> Value {
+    if let Some(limits) = arguments.get_mut("limits").and_then(Value::as_object_mut) {
+        limits.remove("maxConcurrentGenerations");
+    }
+    arguments
 }
 
 #[async_trait::async_trait]
@@ -429,5 +439,30 @@ fn is_dynamic_workflow_envelope(event: &AgentEvent) -> bool {
         | AgentEvent::ToolOutputDelta { name, .. }
         | AgentEvent::ToolEnd { name, .. } => name == "dynamic_workflow",
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workflow_arguments_match_the_published_code_core_schema() {
+        let arguments = serde_json::json!({
+            "source": "async function run() {}",
+            "limits": {
+                "timeoutMs": 600_000,
+                "maxToolCalls": 56,
+                "maxOutputBytes": 8_388_608,
+                "maxConcurrentGenerations": 2,
+            },
+        });
+
+        let adapted = adapt_dynamic_workflow_arguments(arguments);
+
+        assert_eq!(adapted["limits"]["timeoutMs"], 600_000);
+        assert_eq!(adapted["limits"]["maxToolCalls"], 56);
+        assert_eq!(adapted["limits"]["maxOutputBytes"], 8_388_608);
+        assert!(adapted["limits"].get("maxConcurrentGenerations").is_none());
     }
 }
