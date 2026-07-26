@@ -243,7 +243,7 @@ impl KernelService {
                         &tool_id,
                         tool_args,
                         started_at,
-                        synthesis,
+                        *synthesis,
                     )
                     .await
                 }
@@ -321,7 +321,7 @@ impl KernelService {
 }
 
 enum ResearchCompletion {
-    Published(DeepResearchReportSynthesis),
+    Published(Box<DeepResearchReportSynthesis>),
     Cancelled,
     Failed(String),
 }
@@ -348,13 +348,13 @@ fn research_completion_from_exit(
             result.run_id
         ));
     };
-    ResearchCompletion::Published(DeepResearchReportSynthesis {
+    ResearchCompletion::Published(Box::new(DeepResearchReportSynthesis {
         run_id: result.run_id,
         text,
         artifacts: result.artifacts,
         status: result.publication,
         quality: result.quality,
-    })
+    }))
 }
 
 async fn forward_deep_research_event(
