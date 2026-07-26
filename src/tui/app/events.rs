@@ -42,8 +42,10 @@ impl App {
     }
 
     pub(super) fn on_agent_event(&mut self, event: AgentEvent) -> Option<Cmd<Msg>> {
-        // After an interrupt, rx is cleared — ignore any late buffered events.
-        self.rx.as_ref()?;
+        // After an interrupt, both receivers are cleared — ignore late events.
+        if self.rx.is_none() && self.deep_research_events.is_none() {
+            return None;
+        }
         if self.interrupting {
             return None;
         }

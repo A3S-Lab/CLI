@@ -1,13 +1,18 @@
 # DeepResearch Evidence-First Redesign
 
-Status: implemented for new CLI and TUI DeepResearch runs. Exact-query
-bootstrap acquisition and one bounded semantic outline run concurrently. The
+Status: implemented through the shared typed runner for new CLI, TUI, and Code
+Web DeepResearch runs. Exact-query bootstrap acquisition and one bounded
+semantic outline run concurrently. The
 outline declares `focused` or `comprehensive` scope, freshness and workspace
-requirements, one to four evidence tracks, and at most three supplemental
-plain-text queries. The Host preserves the exact query, rejects URLs and
-duplicates, owns all transport budgets, merges bootstrap and supplemental
-evidence, and applies generic source and publication gates. It contains no
-topic dictionary or domain-specific report path. Open-ended query expansion,
+requirements, one to four evidence tracks, and at most seven supplemental
+plain-text queries. The Host preserves
+the exact query, rejects URL-shaped supplements and duplicates, and separately
+promotes at most three explicit HTTP(S) references from the user query to
+normalized direct retrieval seeds. Credential-bearing references are rejected,
+and local-only scope remains network-free. The Host owns all transport budgets,
+merges bootstrap and supplemental evidence, and applies generic source and
+publication gates. It contains no topic dictionary or domain-specific report
+path. Open-ended query expansion,
 research-brief fan-out, and feedback-loop experiments remain rejected because
 they multiply probabilistic boundaries. Their retained evidence is documented
 in [`deep-research-evidence-loop.md`](deep-research-evidence-loop.md). Corpus
@@ -39,27 +44,29 @@ The active reusable implementation is the independent
 - report quality and citation gates; and
 - Markdown and HTML artifact construction.
 
-The CLI owns only the A3S product adapter. `A3sDeepResearchRuntime` implements
+The CLI owns only the A3S product adapter. `CodeDeepResearchRuntime` implements
 the engine's structured-generation, workflow-execution, publication, and
-progress ports by calling the existing AgentSession, Flow-backed workflow, and
-workspace artifact surfaces. A new evidence-first run crosses this boundary
-through one `DeepResearchEngine::execute` call. Typed Inquiry events may still
-be projected into the generic run journal for diagnostics; the former
-sectioned-report executor and report-resume transaction have been removed.
+progress ports by calling an isolated AgentSession, Flow-backed workflow, and
+workspace artifact surfaces. `CodeDeepResearchRunner` is shared by headless
+CLI, TUI, and Code Web; a new evidence-first run crosses this boundary through
+one `DeepResearchEngine::execute_request` call. Typed engine events are
+projected into the version-2 run journal for Web refresh. Historical Inquiry
+events remain readable through compatibility paths; the former sectioned-report
+executor and report-resume transaction are not active product paths.
 
 ## Decision
 
 DeepResearch terminal publication must require zero successful report-synthesis
 calls. Once semantically admitted fetched text exists, the Host can publish a
-traceable degraded Markdown report and equivalent HTML site without waiting
-for a report writer, reviewer, repairer, or presentation model. Web acquisition
-uses one closed semantic candidate decision before fetch and one closed
-semantic evidence protocol over fetched chunks. Small catalogs use one direct
-selector. Larger catalogs use complete source-local JSON windows capped at
-32 KiB and an exact-ID per-source reduction capped at four excerpts. A failed
-candidate decision may choose bounded fallback URLs for transport resilience,
-but that fallback text remains audit-only unless the fetched-text selector
-admits its exact chunk IDs. Provider metadata never becomes evidence.
+traceable source-backed Markdown report and equivalent HTML site without
+waiting for a report writer, reviewer, repairer, or presentation model. Web
+acquisition uses one closed semantic candidate decision before fetch and one
+closed semantic evidence protocol over fetched chunks. Small catalogs use one
+direct selector. Larger catalogs use complete source-local JSON windows capped
+at 32 KiB and an exact-ID per-source reduction capped at four excerpts. A
+failed candidate decision may choose bounded fallback URLs for transport
+resilience, but that fallback text remains audit-only unless the fetched-text
+selector admits its exact chunk IDs. Provider metadata never becomes evidence.
 
 Source admission has no publisher allowlist, protected-host table,
 query-token-overlap score, language/script routing, or topic-specific branch.
@@ -91,7 +98,7 @@ The following stages are not admitted to the active path:
 
 One semantic outline generation is admitted only because it runs beside, not
 before, exact-query bootstrap and has an exact-query-only fallback. It may
-propose up to three supplemental queries for the evidence tracks it defines.
+propose up to seven supplemental queries for the evidence tracks it defines.
 It may not return URLs, sources, facts, conclusions, or budgets. The Host does
 not infer a topic when closing the outline: it validates shape, preserves query
 identity, removes transport authority from the planner, and applies fixed caps.
@@ -234,16 +241,25 @@ The planner returns:
 - whether freshness or workspace evidence is required;
 - one to four coherent evidence tracks with completion criteria and typed
   source requirements; and
-- zero to three supplemental plain-text queries.
+- zero to seven supplemental plain-text queries.
 
 The planner cannot return URLs, seed sites, facts, answers, stop conditions, or
 budgets. The Host prepends the unchanged exact query, rejects blank,
 duplicate, whitespace-mutated, or URL-shaped supplements, and caps the complete
-query set at four. Planning failure produces one generic track and the exact
-query only. Unknown semantic breadth and temporal intent select the stronger
+query set at eight. For web-capable scopes, the Host separately extracts at
+most three explicit HTTP(S) references from the user query, removes fragments,
+rejects credentials, and sends the normalized unique references as direct
+retrieval seeds. Local-only scope never emits them. Planning failure produces
+one generic track and the exact query only. Unknown semantic breadth and temporal intent select the stronger
 publication contract: the fallback is always `comprehensive` and
 `freshness_required = true`. That fallback deliberately performs no topic or
 freshness inference from query text.
+
+For a comprehensive comparison of named subjects, the outline must include a
+central shared track whose atomic baselines can be supported by at least two
+separately attributable records and synthesized together. Distinct atomic
+criteria may reuse a question role; the required establish, challenge, and
+compare-or-explain mix is validated once across the complete plan.
 
 Planned retrieval reuses the durable bootstrap packet. If bootstrap retained
 web evidence, the planned pass skips the exact query and searches only the
@@ -325,11 +341,11 @@ inside a source cannot alter the report template. The fallback never prints
 workflow statuses, packet IDs, model errors, hashes, local journal paths, or
 retry instructions.
 
-A source-backed extractive artifact is explicitly `degraded`: it retains useful
-evidence but has no admitted direct answer, Findings, claims, or citations. It
-must never be promoted to `qualified` or synthesized success merely because
-sources were fetched. A run with no safely publishable evidence uses a separate
-localized no-evidence boundary artifact.
+A source-backed extractive artifact is explicitly `SourceBacked`: it retains
+useful evidence but has no admitted direct answer, Findings, claims, or
+citations. It must never be promoted to `Qualified` or `Synthesized` merely
+because sources were fetched. A run with no safely publishable evidence uses a
+separate localized `NoEvidence` boundary artifact.
 
 This fallback is intentionally less polished than a valid synthesized report.
 Its purpose is to preserve user value and make model failure non-destructive,
@@ -378,19 +394,27 @@ rules without another model call:
 4. Admit a contradiction only between two admitted claims in the same
    dimension. Preserve both claims and both citation paths.
 5. Derive material coverage from the admitted graph. Complete material
-   coverage yields `Synthesized`; useful admitted claims with a material
-   typed gap yield `Qualified`; no admitted generated graph retains the staged
-   `SourceBacked` artifact.
+   coverage yields `Synthesized`; deeply analyzed resolved dimensions plus a
+   material typed gap yield `Qualified`. If every dimension remains bounded,
+   exactly one partial conclusion may yield `Qualified` only when it satisfies
+   the same two-source analytical chain and retains a typed gap. No admitted
+   generated graph retains the staged `SourceBacked` artifact.
 6. Apply fixed scope metrics. Focused reports require one cited direct-answer
    claim, at least one admitted claim, and one cited eligible source.
-   Comprehensive reports additionally require four findings, five admitted
-   claims, two cited sources, and 480 substantive characters.
+   Comprehensive reports additionally require five findings, six admitted
+   claims, two cited sources, and 1,200 substantive characters. Every resolved
+   material dimension independently requires two facts across two sources, two
+   inferences, three analytical claims, one cross-source synthesis, and 800
+   substantive characters.
 7. Accept reader-facing labels by closed schema and budget only. Escape labels,
    claim text, titles, and excerpts as inert Markdown or HTML data.
 8. Build numeric citations and one deduplicated source ledger from exact
    admitted support. Model prose cannot author ledger identity, citation
    numbering, or artifact paths.
-9. Classify the Markdown/HTML pair only through matching exact versioned
+9. Validate a closed narrative plan that contains only natural section
+   headings and ordered claim-ID groups. Every finding must appear exactly once
+   in authored order; the plan cannot add or rewrite evidence.
+10. Classify the Markdown/HTML pair only through matching exact versioned
    artifact markers and persist the closed publication enum in the receipt.
 
 If the complete proposal does not satisfy this closed structural and typed
@@ -421,7 +445,9 @@ Markdown and HTML consume the same Host report document. The renderer owns:
   the sources actually used, with visible `[n]` labels;
 - one matching deduplicated linked source ledger without a second list number;
 - semantic H1-to-H2 heading order;
-- focus states, overflow handling, narrow-screen layout, and print styles; and
+- a sticky left action menu, centered report, and sticky right table of
+  contents on desktop, with a stacked narrow-screen layout;
+- fixed edit, save-HTML, print, focus, and overflow behavior; and
 - a fixed reading design until visual evaluation justifies variation.
 
 No art-director generation is permitted. F01 and F04 already show that content
@@ -458,10 +484,10 @@ persistence, fallback readiness, and terminal publication are timed separately.
 | Bootstrap acquisition fails | Preserve the error and let bounded planned retrieval retain or retry the exact query as needed. |
 | Every configured search provider fails | Publish an honest no-evidence boundary artifact. |
 | Web candidate selection fails or times out | Fetch only the bounded cross-query fallback set, record fallback provenance, and keep its web text audit-only unless closed semantic chunk selection admits it. |
-| Fetched-text semantic selection fails or returns invalid IDs | Promote none of that failed selection's web text; preserve valid sibling sources and publish the honest degraded boundary when necessary. |
+| Fetched-text semantic selection fails or returns invalid IDs | Promote none of that failed selection's web text; preserve valid sibling sources and publish `SourceBacked` when safe evidence remains or `NoEvidence` otherwise. |
 | One search or fetch sibling fails | Preserve successful sources and continue. |
 | First report attempt fails transiently | Retry once with the same closed evidence and durable identity. |
-| Second report attempt fails, times out, or is invalid | Publish the explicitly degraded staged source-backed report. |
+| Second report attempt fails, times out, or is invalid | Publish the staged `SourceBacked` report. |
 | One graph item has an invalid reference or shape | Remove that item and retain valid siblings. |
 | No generated claim graph passes publication gates | Publish the staged extractive report. |
 | HTML enhancement fails | Publish the same report through a deterministic minimal HTML document. |
@@ -495,7 +521,7 @@ Retain:
 - URL safety, canonicalization, and bounded source persistence;
 - exact source/excerpt restoration;
 - atomic artifact-pair publication;
-- CLI/TUI result handoff and browser opening; and
+- CLI/TUI result handoff and browser opening, plus Code Web report serving; and
 - generic event-journal replay needed for diagnostics.
 
 The new-run control flow no longer uses:
@@ -512,11 +538,11 @@ The old planner, extraction, section writer, reviewer, repair, and report-resume
 executors have no consumers and are removed. Compatibility is data replay, not
 executable business logic.
 
-The active seam is the standalone engine publication envelope. CLI and TUI
-settlement validate its exact query, status, artifact paths, artifact content,
-and typed quality metrics. A failed envelope can settle only as degraded with a
-Host-materialized verified recovery pair; it cannot be reclassified through
-Inquiry convergence or an accepted-evidence count.
+The active seam is the standalone engine publication envelope. CLI, TUI, and
+Code Web settlement validate its exact query, status, artifact identity,
+artifact content, and typed quality metrics. Code Web exposes artifacts only
+through validated run identity and artifact kind. A failed envelope cannot be
+reclassified through Inquiry convergence or an accepted-evidence count.
 
 ## Next Decision Gates
 

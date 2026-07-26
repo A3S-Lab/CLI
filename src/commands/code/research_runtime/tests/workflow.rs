@@ -52,21 +52,21 @@ fn deepresearch_cli_uses_the_shared_hard_safety_envelope() {
     assert!(
         args["input"]["local_max_steps"]
             .as_u64()
-            .is_some_and(|value| value <= 2),
+            .is_some_and(|value| value == 4),
         "a child task must never inherit the old 80-240 turn budget"
     );
     assert!(args["input"]
         .get("local_parallel_task_timeout_ms")
         .is_none());
-    assert_eq!(args["limits"]["timeoutMs"], 300_000);
+    assert_eq!(args["limits"]["timeoutMs"], 600_000);
     assert_eq!(
         spec.total_budget_ms,
         crate::tui::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS
     );
-    assert_eq!(spec.retrieval_stage_budget_ms, 7 * 60 * 1_000 + 30 * 1_000);
+    assert_eq!(spec.retrieval_stage_budget_ms, 12 * 60 * 1_000 + 30 * 1_000);
     assert_eq!(
         spec.question_review_stage_budget_ms,
-        3 * 60 * 1_000 + 15 * 1_000
+        2 * (8 * 60 * 1_000 + 15 * 1_000)
     );
     assert_eq!(spec.finalization_reserve_ms, 15 * 1_000);
 }
@@ -76,14 +76,12 @@ fn deepresearch_cli_scope_is_query_agnostic_and_only_explicitly_selected() {
     let local_wording =
         deep_research_workflow_args("仅本地分析当前工作区，不要联网，并说明证据缺口");
     let web_wording = deep_research_workflow_args("Compare current public documentation");
-    let explicit_local = crate::tui::deep_research_cli_workflow_args_for_budget(
+    let explicit_local = deep_research_workflow_args_for_scope(
         "Compare current public documentation",
-        deep_research_default_budget(),
         Some(crate::tui::DeepResearchEvidenceScope::LocalOnly),
     );
-    let explicit_web = crate::tui::deep_research_cli_workflow_args_for_budget(
+    let explicit_web = deep_research_workflow_args_for_scope(
         "Do not use web; inspect only local files",
-        deep_research_default_budget(),
         Some(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace),
     );
 
@@ -91,12 +89,12 @@ fn deepresearch_cli_scope_is_query_agnostic_and_only_explicitly_selected() {
         local_wording["input"]["evidence_scope"],
         "web_and_workspace"
     );
-    assert_eq!(local_wording["limits"]["timeoutMs"], 300_000);
+    assert_eq!(local_wording["limits"]["timeoutMs"], 600_000);
     assert_eq!(web_wording["input"]["evidence_scope"], "web_and_workspace");
-    assert_eq!(web_wording["limits"]["timeoutMs"], 300_000);
+    assert_eq!(web_wording["limits"]["timeoutMs"], 600_000);
     assert_eq!(explicit_local["input"]["evidence_scope"], "local_only");
     assert_eq!(explicit_local["limits"]["timeoutMs"], 210_000);
     assert_eq!(explicit_web["input"]["evidence_scope"], "web_and_workspace");
-    assert_eq!(explicit_web["limits"]["timeoutMs"], 300_000);
+    assert_eq!(explicit_web["limits"]["timeoutMs"], 600_000);
     assert_eq!(local_wording["source"], web_wording["source"]);
 }

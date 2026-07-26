@@ -102,18 +102,19 @@ impl KernelSessionsController {
             .await
     }
 
-    #[get("/v1/kernel/sessions/{session_id}/research-report", raw)]
-    async fn read_kernel_deep_research_report(
+    #[get("/v1/kernel/sessions/{session_id}/research-artifact", raw)]
+    async fn read_kernel_deep_research_artifact(
         &self,
         #[param("session_id")] session_id: String,
-        #[query("path")] path: String,
+        #[query("runId")] run_id: String,
+        #[query("kind")] kind: String,
     ) -> BootResult<BootResponse> {
-        let body = self
+        let artifact = self
             .service
-            .read_deep_research_report(&session_id, path)
+            .read_deep_research_artifact(&session_id, &run_id, &kind)
             .await?;
-        Ok(BootResponse::new(200, body)
-            .with_content_type("text/html; charset=utf-8")
+        Ok(BootResponse::new(200, artifact.body)
+            .with_content_type(artifact.content_type)
             .with_header("cache-control", "no-store")
             .with_header("x-content-type-options", "nosniff")
             .with_header("referrer-policy", "no-referrer")

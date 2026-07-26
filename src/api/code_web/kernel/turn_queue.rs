@@ -33,6 +33,8 @@ pub(in crate::api::code_web) struct CodeWebQueuedTurn {
     pub(in crate::api::code_web) skill_names: Vec<String>,
     #[serde(default)]
     pub(in crate::api::code_web) mode: CodeWebQueuedTurnMode,
+    #[serde(default)]
+    pub(in crate::api::code_web) research_run_id: Option<String>,
     pub(in crate::api::code_web) priority: Priority,
     pub(in crate::api::code_web) enqueued_at: i64,
 }
@@ -262,6 +264,7 @@ mod tests {
             context_files: Vec::new(),
             skill_names: Vec::new(),
             mode: CodeWebQueuedTurnMode::Standard,
+            research_run_id: None,
             priority,
             enqueued_at: 1,
         }
@@ -301,12 +304,17 @@ mod tests {
     fn deep_research_mode_survives_queue_snapshot_and_restore() {
         let mut research = turn("research", CodeWebQueuedTurnKind::User, USER_TURN_PRIORITY);
         research.mode = CodeWebQueuedTurnMode::DeepResearch;
+        research.research_run_id = Some("web-research".to_string());
         let mut queue = CodeWebSessionTurnQueue::default();
         queue.enqueue(research);
 
         let restored = CodeWebSessionTurnQueue::restore(queue.snapshot()).snapshot();
 
         assert_eq!(restored.items[0].mode, CodeWebQueuedTurnMode::DeepResearch);
+        assert_eq!(
+            restored.items[0].research_run_id.as_deref(),
+            Some("web-research")
+        );
     }
 
     #[test]

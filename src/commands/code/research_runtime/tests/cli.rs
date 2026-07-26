@@ -67,6 +67,8 @@ async fn deepresearch_cli_rejects_removed_runtime_selection() {
 
 #[tokio::test]
 async fn deepresearch_cli_resolves_account_model_before_building_the_session() {
+    use a3s_code_core::permissions::PermissionDecision;
+
     let workspace = tempfile::tempdir().expect("DeepResearch workspace");
     let config = CodeConfig::from_acl(
         r#"
@@ -81,11 +83,17 @@ async fn deepresearch_cli_resolves_account_model_before_building_the_session() {
     let resolved_route = Arc::new(Mutex::new(None));
     let captured_route = Arc::clone(&resolved_route);
 
-    let session = build_deepresearch_session_with_resolver(
-        workspace.path().to_string_lossy().as_ref(),
+    let session = crate::research::build_isolated_research_session_with_resolver(
+        workspace.path(),
         config,
         workspace.path().join("memory"),
+        EvidenceScope::LocalOnly,
+        "deep-research-session-test",
         move |config, options, session_id| {
+            let permission_policy = options
+                .permission_policy
+                .as_ref()
+                .expect("typed DeepResearch permission policy");
             *captured_route.lock().unwrap() = Some((
                 config.default_model.clone(),
                 options.session_id.clone(),
@@ -103,6 +111,14 @@ async fn deepresearch_cli_resolves_account_model_before_building_the_session() {
                 }),
                 options.manual_delegation_enabled,
                 options.auto_parallel_delegation,
+                options.workspace_services.is_some(),
+                options.skill_dirs.is_empty(),
+                options
+                    .skill_registry
+                    .as_ref()
+                    .is_some_and(|registry| registry.is_empty()),
+                permission_policy.check("read", &serde_json::json!({"file_path": "src/lib.rs"})),
+                permission_policy.check("web_search", &serde_json::json!({"query": "a3s"})),
             ));
             Ok(scripted)
         },
@@ -121,6 +137,11 @@ async fn deepresearch_cli_resolves_account_model_before_building_the_session() {
         auto_delegation,
         manual_delegation_enabled,
         auto_parallel_delegation,
+        has_workspace_services,
+        has_no_skill_dirs,
+        has_empty_skill_registry,
+        read_decision,
+        web_search_decision,
     ) = resolved_route
         .lock()
         .unwrap()
@@ -139,70 +160,28 @@ async fn deepresearch_cli_resolves_account_model_before_building_the_session() {
     assert_eq!(auto_delegation, Some((false, false, true)));
     assert_eq!(manual_delegation_enabled, Some(true));
     assert_eq!(auto_parallel_delegation, Some(false));
+    assert!(has_workspace_services);
+    assert!(has_no_skill_dirs);
+    assert!(has_empty_skill_registry);
+    assert_eq!(read_decision, PermissionDecision::Allow);
+    assert_eq!(web_search_decision, PermissionDecision::Deny);
 }
 
 #[test]
-fn deepresearch_cli_policy_denies_model_writes_including_report_artifacts() {
-    use a3s_code_core::permissions::PermissionDecision;
+fn deepresearch_cli_preserves_all_publication_outcomes() {
+    let outcomes = [
+        DeepResearchReportStatus::Synthesized,
+        DeepResearchReportStatus::Qualified,
+        DeepResearchReportStatus::SourceBacked,
+        DeepResearchReportStatus::NoEvidence,
+    ];
+    let encoded = outcomes
+        .into_iter()
+        .map(|outcome| serde_json::to_value(outcome).expect("publication outcome"))
+        .collect::<Vec<_>>();
 
-    let policy = deepresearch_cli_permission_policy();
     assert_eq!(
-        policy.check(
-            "write",
-            &serde_json::json!({
-                "file_path": ".a3s/research/local-test/report.md",
-                "content": "# Report"
-            })
-        ),
-        PermissionDecision::Deny
+        encoded,
+        vec!["synthesized", "qualified", "source_backed", "no_evidence"]
     );
-    assert_eq!(
-        policy.check(
-            "Write",
-            &serde_json::json!({
-                "file_path": ".a3s/research/local-test/index.html",
-                "content": "<!doctype html><html><body></body></html>"
-            })
-        ),
-        PermissionDecision::Deny
-    );
-    assert_eq!(
-        policy.check("read", &serde_json::json!({"file_path": "src/lib.rs"})),
-        PermissionDecision::Allow
-    );
-    assert_eq!(
-        policy.check("web_search", &serde_json::json!({"query": "a3s"})),
-        PermissionDecision::Allow
-    );
-    assert_eq!(
-        policy.check("bash", &serde_json::json!({"command": "ls -la"})),
-        PermissionDecision::Deny
-    );
-    assert_eq!(
-        policy.check(
-            "write",
-            &serde_json::json!({"file_path": "README.md", "content": "oops"})
-        ),
-        PermissionDecision::Deny
-    );
-}
-
-#[test]
-fn deepresearch_cli_missing_publication_materializes_only_a_degraded_host_report() {
-    let workspace = tempfile::tempdir().expect("degraded CLI report workspace");
-    let synthesis = materialize_deepresearch_cli_recovery(
-        workspace.path(),
-        "no accepted evidence",
-        "the standalone engine returned without a publication",
-        r#"{"mode":"engine_failure","research":{"status":"failed"}}"#,
-        None,
-    )
-    .expect("the Host should materialize a bounded recovery report");
-
-    assert_eq!(synthesis.status, DeepResearchReportStatus::Degraded);
-    assert!(synthesis.artifacts.markdown.is_file());
-    assert!(synthesis.artifacts.html.is_file());
-    assert!(std::fs::read_to_string(&synthesis.artifacts.markdown)
-        .unwrap()
-        .contains("A3S_DEEP_RESEARCH_ARTIFACT:recovery:v1"));
 }

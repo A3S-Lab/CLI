@@ -129,16 +129,24 @@ impl App {
         let session = self.session.clone();
         let join = self.stream_join.take();
         let host_abort = self.host_tool_abort.take();
+        let deep_research = self.deep_research_loop.is_some();
+        let deep_research_handle = self.deep_research_handle.take();
+        self.deep_research_events = None;
+        self.host_progress_inflight = false;
         Some(cmd::cmd(move || async move {
             if let Some(host_abort) = host_abort {
                 host_abort.abort();
             }
-            let _ = session
-                .cancel_and_settle(
-                    Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
-                    Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
-                )
-                .await;
+            if let Some(handle) = deep_research_handle {
+                let _ = handle.cancel_and_settle().await;
+            } else if !deep_research {
+                let _ = session
+                    .cancel_and_settle(
+                        Duration::from_millis(DEEP_RESEARCH_ABORT_GRACE_MS),
+                        Duration::from_millis(GRACEFUL_QUIT_ABORT_SETTLE_MS),
+                    )
+                    .await;
+            }
             if let Some(join) = join {
                 let _ = settle_stream_join_for_quit(
                     join,

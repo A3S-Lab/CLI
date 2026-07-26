@@ -1,8 +1,8 @@
 //! Codex Responses transport selection and retry state.
 //!
-//! The transport state belongs to one logical Codex session. A failed
-//! WebSocket path is therefore sticky for the rest of that session, while a
-//! forked A3S agent gets a fresh probe state.
+//! Transport selection is shared by logical Codex sessions derived from one
+//! account client. Once the route proves that WebSocket is unavailable, child
+//! sessions inherit the HTTPS fallback instead of repeating the failed probe.
 
 mod network;
 mod proxy;
@@ -243,12 +243,6 @@ impl TransportController {
                 config,
             }),
         }
-    }
-
-    /// Create transport state for a new logical agent session while reusing
-    /// the immutable network client and its Cloudflare cookie store.
-    pub(super) fn fresh_session(&self) -> Self {
-        Self::with_config(Arc::clone(&self.state.wire), self.state.config.clone())
     }
 
     pub(super) fn active_kind(&self) -> TransportKind {

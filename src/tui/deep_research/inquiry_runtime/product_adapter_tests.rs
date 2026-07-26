@@ -172,6 +172,19 @@ struct FixtureClaim {
     derivation: Option<String>,
 }
 
+impl FixtureClaim {
+    fn analysis_role(&self) -> &'static str {
+        if self.placement == FixtureClaimPlacement::DirectAnswer {
+            return "conclusion";
+        }
+        match self.kind {
+            FixtureClaimKind::Fact => "evidence",
+            FixtureClaimKind::Inference => "explanation",
+            FixtureClaimKind::Recommendation => "implication",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FixtureRelation {
     id: String,
@@ -242,6 +255,7 @@ impl StructuredGenerationPort for FrozenPorts<'_> {
                 Err("frozen typed report timeout".to_string())
             }
             GenerationStage::Report => Ok(report_proposal(self.replay)),
+            GenerationStage::Editorial => Ok(editorial_plan(self.replay)),
         }
     }
 }
@@ -628,6 +642,11 @@ fn planner_outline(replay: &ProductReplay) -> Value {
                 "focus": bounded_text(&dimension.question, 500),
                 "material": dimension.material,
                 "completion_criteria": [bounded_text(&dimension.question, 240)],
+                "questions": [{
+                    "question": bounded_text(&dimension.question, 500),
+                    "role": "establish",
+                    "completion_criterion_indexes": [0],
+                }],
                 "evidence_requirements": {
                     "primary_source_required": true,
                     "independent_corroboration_required": false,
@@ -646,13 +665,14 @@ fn bootstrap_output(replay: &ProductReplay) -> WorkflowOutput {
             "acquisition": {
                 "packet": {
                     "version": 1,
-                    "sources": replay.sources.iter().map(|source| {
+                    "sources": replay.sources.iter().enumerate().map(|(index, source)| {
+                        let source_id = format!("bootstrap-web-source-{}", index + 1);
                         serde_json::json!({
-                            "source_id": source.id,
+                            "source_id": source_id,
                             "title": source.title,
                             "url_or_path": source_anchor(source),
                             "chunks": [{
-                                "chunk_id": format!("{}:chunk:1", source.id),
+                                "chunk_id": format!("{source_id}:chunk:1"),
                                 "text": source.content.trim(),
                             }],
                         })
@@ -673,17 +693,18 @@ fn planned_output(replay: &ProductReplay) -> WorkflowOutput {
     let mut relevance = Vec::new();
     let mut coverage = Vec::new();
     let mut relevant_dimensions = BTreeSet::new();
-    for source in &replay.sources {
+    for (source_index, source) in replay.sources.iter().enumerate() {
+        let source_id = format!("catalog-source-{}", source_index + 1);
         for dimension_id in source_dimensions(replay, &source.id) {
             if Some(dimension_id.as_str()) == failed_dimension {
                 continue;
             }
             relevance.push(serde_json::json!({
-                "source_id": source.id,
+                "source_id": &source_id,
                 "obligation_id": dimension_id,
             }));
             coverage.push(serde_json::json!({
-                "source_id": source.id,
+                "source_id": &source_id,
                 "obligation_id": dimension_id,
                 "completion_criterion_indexes": [0],
                 "roles": ["supporting", "primary"],
@@ -701,14 +722,15 @@ fn planned_output(replay: &ProductReplay) -> WorkflowOutput {
                     "evidence_selection_mode": "semantic_chunk_ids_with_typed_coverage",
                 },
                 "results": [{
-                    "task_id": "frozen-product-projection",
+                        "task_id": "frozen-product-projection",
                     "agent": "workflow",
                     "success": true,
                     "structured": {
                         "summary": "Frozen product projection.",
-                        "sources": replay.sources.iter().map(|source| {
+                        "sources": replay.sources.iter().enumerate().map(|(index, source)| {
+                            let source_id = format!("catalog-source-{}", index + 1);
                             serde_json::json!({
-                                "source_id": source.id,
+                                "source_id": source_id,
                                 "title": source.title,
                                 "url_or_path": source_anchor(source),
                                 "reliability": "fetched",
@@ -774,6 +796,7 @@ fn report_proposal(replay: &ProductReplay) -> Value {
                 "dimension_id": claim.dimension_id,
                 "placement": claim.placement.code(),
                 "kind": claim.kind.code(),
+                "analysis_role": claim.analysis_role(),
                 "text": claim.text,
                 "evidence_refs": evidence_refs,
                 "basis_claim_ids": claim.basis_claim_ids,
@@ -785,6 +808,37 @@ fn report_proposal(replay: &ProductReplay) -> Value {
                 } else {
                     None
                 },
+            })
+        })
+        .collect::<Vec<_>>();
+    let narrative_sections = replay
+        .dimensions
+        .iter()
+        .map(|dimension| {
+            let paragraphs = replay
+                .claims
+                .iter()
+                .filter(|claim| {
+                    claim.disposition.is_active()
+                        && claim.dimension_id == dimension.id
+                        && claim.placement == FixtureClaimPlacement::Finding
+                })
+                .map(|claim| {
+                    let purpose = match claim.kind {
+                        FixtureClaimKind::Fact => "evidence",
+                        FixtureClaimKind::Inference => "synthesis",
+                        FixtureClaimKind::Recommendation => "implication",
+                    };
+                    serde_json::json!({
+                        "purpose": purpose,
+                        "claim_ids": [claim.id],
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "dimension_id": dimension.id,
+                "heading": bounded_text(&dimension.question, 96),
+                "paragraphs": paragraphs,
             })
         })
         .collect::<Vec<_>>();
@@ -801,7 +855,64 @@ fn report_proposal(replay: &ProductReplay) -> Value {
             })
         }).collect::<Vec<_>>(),
         "gaps": [],
+        "narrative": {
+            "sections": narrative_sections,
+        },
     })
+}
+
+fn editorial_plan(replay: &ProductReplay) -> Value {
+    let malformed_dimension = replay.malformed_dimension();
+    let mut answered_dimensions = BTreeSet::new();
+    let sections = replay
+        .dimensions
+        .iter()
+        .map(|dimension| {
+            let paragraphs = replay
+                .claims
+                .iter()
+                .filter(|claim| {
+                    claim.disposition.is_active()
+                        && claim.dimension_id == dimension.id
+                        && Some(claim.dimension_id.as_str()) != malformed_dimension
+                })
+                .filter_map(|claim| {
+                    let is_finding = match claim.placement {
+                        FixtureClaimPlacement::Finding => true,
+                        FixtureClaimPlacement::DirectAnswer => {
+                            !answered_dimensions.insert(claim.dimension_id.clone())
+                        }
+                    };
+                    if !is_finding {
+                        return None;
+                    }
+                    let purpose = if claim.placement == FixtureClaimPlacement::DirectAnswer {
+                        match claim.kind {
+                            FixtureClaimKind::Fact => "evidence",
+                            FixtureClaimKind::Inference => "boundary",
+                            FixtureClaimKind::Recommendation => "implication",
+                        }
+                    } else {
+                        match claim.kind {
+                            FixtureClaimKind::Fact => "evidence",
+                            FixtureClaimKind::Inference => "synthesis",
+                            FixtureClaimKind::Recommendation => "implication",
+                        }
+                    };
+                    Some(serde_json::json!({
+                        "purpose": purpose,
+                        "claim_ids": [claim.id],
+                    }))
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "dimension_id": dimension.id,
+                "heading": bounded_text(&dimension.question, 96),
+                "paragraphs": paragraphs,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({ "sections": sections })
 }
 
 fn source_dimensions(replay: &ProductReplay, source_id: &str) -> BTreeSet<String> {

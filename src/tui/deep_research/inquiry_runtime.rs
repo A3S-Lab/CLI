@@ -23,9 +23,11 @@ use self::execution::{
     run_bootstrap_acquisition_stage, run_dynamic_workflow, within_inquiry_stage_timeout,
 };
 use super::deep_research_artifacts::{
-    materialize_deep_research_admitted_report, materialize_deep_research_no_evidence_report,
-    materialize_deep_research_source_backed_report, record_deep_research_publication_receipt,
-    DeepResearchEvidenceFirstPublication, ResearchReportArtifacts,
+    materialize_deep_research_admitted_report,
+    materialize_deep_research_no_evidence_report_in_language,
+    materialize_deep_research_source_backed_report_in_language,
+    record_deep_research_publication_receipt_in_language, DeepResearchEvidenceFirstPublication,
+    ResearchReportArtifacts,
 };
 use super::deep_research_state_journal::{
     load_research_run_started_at_ms, record_workflow_started, ResearchSpec,
@@ -43,20 +45,21 @@ const PROGRESS_CHANNEL_CAPACITY: usize = 256;
 // applies its unchanged evidence gates.
 const BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS: u64 = 150_000;
 // After the exact query starts immediately, the semantic plan may contribute
-// at most three additional queries and one typed-coverage supplemental pass.
+// bounded supplemental queries and one typed-coverage supplemental pass.
 // This stage reuses the durable bootstrap packet instead of replacing it.
-const PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 300_000;
+const PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS: u64 = 600_000;
 const DURABLE_GENERATION_WORKFLOW_GRACE_MS: u64 = 15_000;
-const REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS: u64 = 90_000;
+const REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS: u64 = 240_000;
 const REPORT_PROPOSAL_MAX_ATTEMPTS: u8 = 2;
 const REPORT_PROPOSAL_STAGE_TIMEOUT_MS: u64 = REPORT_PROPOSAL_ATTEMPT_TIMEOUT_MS
     * REPORT_PROPOSAL_MAX_ATTEMPTS as u64
     + DURABLE_GENERATION_WORKFLOW_GRACE_MS;
+const REPORT_GENERATION_STAGE_COUNT: u64 = 2;
 const EVIDENCE_FIRST_FINALIZATION_RESERVE_MS: u64 = 15_000;
 pub(crate) const DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS: u64 =
     BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
         + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS
-        + REPORT_PROPOSAL_STAGE_TIMEOUT_MS
+        + REPORT_PROPOSAL_STAGE_TIMEOUT_MS * REPORT_GENERATION_STAGE_COUNT
         + EVIDENCE_FIRST_FINALIZATION_RESERVE_MS;
 const MIN_INQUIRY_STAGE_TIMEOUT_MS: u64 = 1_000;
 const JOURNAL_INITIALIZATION_ATTEMPTS: usize = 8;
@@ -151,23 +154,26 @@ impl PublicationPort for A3sDeepResearchRuntime<'_> {
             PublicationRequest::SourceBacked {
                 run_id,
                 query,
+                output_language,
                 workflow_output,
                 workflow_metadata,
                 quality,
             } => {
                 self.validate_publication_run_id(&run_id)?;
-                let artifacts = materialize_deep_research_source_backed_report(
+                let artifacts = materialize_deep_research_source_backed_report_in_language(
                     self.session.workspace(),
                     &query,
                     &workflow_output,
                     workflow_metadata.as_ref(),
+                    &output_language,
                 )?
                 .ok_or_else(|| {
                     "source catalog disappeared before deterministic publication".to_string()
                 })?;
-                record_deep_research_publication_receipt(
+                record_deep_research_publication_receipt_in_language(
                     self.session.workspace(),
                     &query,
+                    &output_language,
                     &run_id,
                     DeepResearchEvidenceFirstPublication::SourceBacked,
                     quality,
@@ -178,6 +184,7 @@ impl PublicationPort for A3sDeepResearchRuntime<'_> {
             PublicationRequest::Synthesized {
                 run_id,
                 query,
+                output_language,
                 report,
                 publication,
                 quality,
@@ -198,9 +205,10 @@ impl PublicationPort for A3sDeepResearchRuntime<'_> {
                     &query,
                     &report,
                 )?;
-                record_deep_research_publication_receipt(
+                record_deep_research_publication_receipt_in_language(
                     self.session.workspace(),
                     &query,
+                    &output_language,
                     &run_id,
                     publication,
                     quality,
@@ -211,14 +219,19 @@ impl PublicationPort for A3sDeepResearchRuntime<'_> {
             PublicationRequest::NoEvidence {
                 run_id,
                 query,
+                output_language,
                 quality,
             } => {
                 self.validate_publication_run_id(&run_id)?;
-                let artifacts =
-                    materialize_deep_research_no_evidence_report(self.session.workspace(), &query)?;
-                record_deep_research_publication_receipt(
+                let artifacts = materialize_deep_research_no_evidence_report_in_language(
                     self.session.workspace(),
                     &query,
+                    &output_language,
+                )?;
+                record_deep_research_publication_receipt_in_language(
+                    self.session.workspace(),
+                    &query,
+                    &output_language,
                     &run_id,
                     DeepResearchEvidenceFirstPublication::NoEvidence,
                     quality,
@@ -287,7 +300,8 @@ pub(crate) fn deep_research_evidence_first_research_spec(args: &Value) -> Resear
         total_budget_ms: DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS,
         retrieval_stage_budget_ms: BOOTSTRAP_ACQUISITION_STAGE_TIMEOUT_MS
             + PLANNED_RETRIEVAL_STAGE_TIMEOUT_MS,
-        question_review_stage_budget_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS,
+        question_review_stage_budget_ms: REPORT_PROPOSAL_STAGE_TIMEOUT_MS
+            * REPORT_GENERATION_STAGE_COUNT,
         finalization_reserve_ms: EVIDENCE_FIRST_FINALIZATION_RESERVE_MS,
         host_pid: std::process::id(),
     }

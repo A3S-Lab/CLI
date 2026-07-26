@@ -72,12 +72,13 @@ model and therefore impossible for the Host to enforce.
 
 ## Active-Path Root-Cause Audit (2026-07-21)
 
-The new-run CLI and TUI path currently executes this concrete sequence:
+The new-run CLI, TUI, and Code Web path currently executes this concrete
+sequence:
 
 ```text
-CLI or TUI submission
-  -> spawn_deep_research_evidence_first
-  -> execute_evidence_first_research
+CLI, TUI, or Code Web submission
+  -> CodeDeepResearchRunner::start
+  -> DeepResearchEngine::execute_request
   -> bootstrap_workflow_args
   -> host_fallback_plan
   -> one search for the complete user request
@@ -530,11 +531,17 @@ must be converted to a deterministic gap before publication.
 
 Internal terminal outcomes use structural facts only:
 
-- `completed`: every material dimension has claims and no material gap;
-- `qualified`: at least one useful claim exists and one material dimension is
-  partial or bounded;
-- `source_backed`: sources exist but no claim ledger was admitted;
-- `degraded`: no safely publishable source or no safe artifact exists.
+- `Synthesized`: every material dimension has claims and no material gap;
+- `Qualified`: useful incomplete work exists and every resolved dimension has
+  passed the comprehensive depth gate; when all dimensions are bounded, exactly
+  one partial conclusion must independently pass that gate and retain a typed
+  gap;
+- `SourceBacked`: sources exist but no claim ledger was admitted; and
+- `NoEvidence`: no safely publishable source exists and the explicit boundary
+  artifact was published.
+
+Failure to publish a safe artifact is an execution error, not a fifth
+publication outcome.
 
 These outcomes describe runtime artifacts, not product correctness. Corpus
 evaluation still assigns `supported`, `bounded`, `missed`, or `incorrect` per
@@ -803,7 +810,7 @@ legacy Inquiry shapes.
 
 | Existing capability | New-run disposition | Boundary |
 | --- | --- | --- |
-| CLI/TUI launch, session setup, absolute deadlines, and budget calculation | Retain | They transport one compiler run and do not decide research truth. |
+| CLI, TUI, and Code Web launch, session setup, absolute deadlines, and budget calculation | Retain | They transport one compiler run and do not decide research truth. |
 | Web/local tool invocation, fetch retry, document-range restoration, and text chunking | Retain below acquisition | Candidate, fetched-source, and packet records must be extended so query, family, target, and attempt identities survive fetching. |
 | URL/path validation, canonicalization, secret filtering, and source-text bounding | Retain | These remain Host-owned SourceCatalog admission rules. |
 | Graph event store, optimistic concurrency, checkpoints, and strict replay | Retain as storage machinery | New runs persist versioned compiler aggregates. Existing Inquiry objects are replayed only for old run versions. |
@@ -868,9 +875,9 @@ The report-protocol migration is complete:
 3. `CoverageMatrix` and `ReportDocument` are Host projections rather than model
    output;
 4. Markdown and HTML render from the same document;
-5. CLI and TUI settle `Synthesized`, `Qualified`, `SourceBacked`, and
-   `NoEvidence` through receipts and replay while retaining accepted relation,
-   derivation, basis-edge, and gap counts; and
+5. CLI, TUI, and Code Web settle `Synthesized`, `Qualified`, `SourceBacked`,
+   and `NoEvidence` through receipts and replay while retaining accepted
+   relation, derivation, basis-edge, and gap counts; and
 6. the production F01-F08 engine replay exercises the same wire contract.
 
 The original full planner migration remains rejected. Retrieval continues to

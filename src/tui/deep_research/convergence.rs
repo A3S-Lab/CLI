@@ -271,6 +271,7 @@ pub(crate) fn validated_inquiry_publication_outcome(
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConvergenceAction {
@@ -278,6 +279,7 @@ pub(crate) enum ConvergenceAction {
     Degrade,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ConvergenceDecision {
     pub(crate) action: ConvergenceAction,
@@ -286,6 +288,7 @@ pub(crate) struct ConvergenceDecision {
 
 /// Convert the replayed inquiry projection into the terminal workflow
 /// decision. Retrieval is already closed when this function runs.
+#[cfg(test)]
 pub(crate) fn evaluate_terminal_inquiry_convergence(state: &InquiryState) -> ConvergenceDecision {
     let (action, reason) = match inquiry_terminal_outcome(state) {
         Some(InquiryTerminalOutcome::Completed) => (

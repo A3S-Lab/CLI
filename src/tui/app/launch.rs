@@ -1018,6 +1018,8 @@ pub(crate) async fn run_in(
         pending_deep_research_report_view: None,
         deep_research_loop: None,
         deep_research_workflow: DeepResearchWorkflowSnapshot::default(),
+        deep_research_handle: None,
+        deep_research_events: None,
         deep_research_outcome: DeepResearchRunOutcome::Active,
         deep_research_stream_timeout_token: 0,
         stream_start_token: 0,

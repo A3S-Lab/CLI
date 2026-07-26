@@ -427,6 +427,39 @@ fn standard_responses_request_keeps_top_level_instructions_and_tools() {
 }
 
 #[test]
+fn provider_session_identity_is_stable_and_bounded() {
+    let mut client = client(false, Some("xhigh"));
+    let long_session = "research-run:select_evidence_chunks_shard_recovery_1234567890".repeat(2);
+    client.session_id = long_session.clone();
+
+    let first = client.build_body(&[], None, &[], true);
+    let second = client.build_body(&[], None, &[], true);
+    let cache_key = first["prompt_cache_key"].as_str().unwrap();
+
+    assert!(
+        cache_key.len() <= 64,
+        "cache key was {} bytes",
+        cache_key.len()
+    );
+    assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+    assert_eq!(
+        client
+            .request_headers()
+            .into_iter()
+            .find(|(name, _)| name == "session_id")
+            .map(|(_, value)| value),
+        Some(cache_key.to_string())
+    );
+
+    let mut sibling = client;
+    sibling.session_id.push_str(":sibling");
+    assert_ne!(
+        first["prompt_cache_key"],
+        sibling.build_body(&[], None, &[], true)["prompt_cache_key"]
+    );
+}
+
+#[test]
 fn responses_lite_moves_instructions_and_tools_into_input() {
     let client = client(true, Some("ultra"));
     let body = client.build_body(&[Message::user("hello")], Some("system"), &[tool()], true);
@@ -643,7 +676,7 @@ async fn unauthorized_reloads_rotated_auth_and_retries_transport_once() -> Resul
 }
 
 #[tokio::test]
-async fn transport_fallback_is_sticky_across_turns_but_not_child_sessions() -> Result<()> {
+async fn transport_fallback_is_sticky_across_turns_and_child_sessions() -> Result<()> {
     let wire = Arc::new(SessionScopedWire::default());
     let mut client = client(false, Some("low"));
     client.transport = test_transport(wire.clone());
@@ -667,8 +700,8 @@ async fn transport_fallback_is_sticky_across_turns_but_not_child_sessions() -> R
         .complete_streaming(&[], None, &[], CancellationToken::new())
         .await?;
     assert!(matches!(stream.recv().await, Some(StreamEvent::Done(_))));
-    assert_eq!(wire.websocket_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(wire.http_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(wire.websocket_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wire.http_calls.load(Ordering::SeqCst), 3);
     Ok(())
 }
 

@@ -371,24 +371,44 @@ Files split by concern before reaching repository size limits.
 Typed asset execution lives under `commands/code`. DeepResearch itself lives
 in the independent `a3s-deep-research` crate. That crate owns the engine stage
 machine, workflow assets, source admission, report admission, and
-Markdown/HTML construction. `commands/code` and the TUI are product adapters:
-they provide an `AgentSession`, explicit evidence scope, workspace, progress
-sink, and terminal journal. Neither adapter owns a planner or report
-implementation.
+Markdown/HTML construction. Headless CLI, TUI, and Code Web call the shared
+`src/research/CodeDeepResearchRunner` product adapter. It provides an isolated
+read-only `AgentSession`, explicit evidence scope, workspace publication,
+progress events, cancellation settlement, and a typed run journal. No surface
+owns a planner or report implementation.
 
-Every new TUI or headless run records a transient evidence-first contract with
+Every new CLI, TUI, or Web run compiles a transient evidence-first contract with
 `quota.mode = bounded` and `execution.mode = progressively_publishable`. The
 contract travels with durable runtime input but never creates a user-facing
 `.a3s/loops/` asset. One Host-owned wall-clock origin bounds acquisition,
-optional report proposal, and finalization across process restarts; a resumed
-process consumes the remaining budget instead of receiving a fresh one.
+optional report proposal, and finalization. Stable Flow effects retain their
+own replay semantics; the version-2 Code run journal is a surface-refresh
+projection and does not claim to resume an interrupted root process.
 
-`spawn_deep_research_evidence_first` is the new-run entry point. It delegates
-one transaction to the standalone engine, runs durable bootstrap acquisition,
-combines the exact query with only the planner's closed supplemental-query
-contract, stages a source-backed or no-evidence report, optionally upgrades it
-with an admitted proposal, and returns one publication projection. There is no
-string router or second report implementation.
+`CodeDeepResearchRunner::start` is the new-run entry point. It validates a
+`DeepResearchRequest`, creates an empty Skill registry, removes Web tools for
+local-only evidence, and delegates one cancellable transaction to
+`DeepResearchEngine::execute_request` through `CodeDeepResearchRuntime`. The
+engine runs durable bootstrap acquisition, combines the exact query with only
+the planner's closed supplemental-query contract, stages a source-backed or
+no-evidence report, optionally upgrades it with an admitted proposal, and
+returns one typed result. There is no string router or second report
+implementation.
+
+Every result is run-scoped under
+`.a3s/research/artifacts/<run-id>/report.md` and `index.html`. Engine events are
+persisted at `.a3s/research/runs/<run-id>/journal-v2.jsonl` with a strict
+sequence and matching run identity. The durable projection retains lifecycle,
+stage, publication, and quality while deliberately omitting absolute artifact
+paths. Code Web uses it to restore progress after a browser refresh. Artifacts
+are served only by validated run ID and `html` or `markdown` kind.
+
+Web context files become bounded relative `WorkspaceSourceHint` values and are
+preflighted as existing, non-empty, non-symlink files before the isolated
+session starts. Non-empty Skill selections fail explicitly until the typed
+runner defines a supported Skill contract. TUI escape, Agent Island stop, Web
+cancel, and handle drop all cancel the root run; explicit cancellation waits
+for settlement and closes the isolated session.
 
 Web bootstrap always searches the exact query. One optional bounded semantic
 outline may supply zero to three supplemental plain-text queries. The Host
@@ -429,17 +449,31 @@ one `ReportDocument`. Invalid graph items cannot erase valid siblings.
 Each attempt uses a schema compiled from the current packet: dimension, source,
 and chunk enums contain only the validated run, and audit-only sources cannot
 be referenced. Opaque IDs are control data only, not reader prose. Reader
-language and semantic quality remain model/evaluator concerns; the Host does
-not detect language or match claim prose to source prose. Larger fetched
-catalogs are divided only by source identity and a 32 KiB UTF-8 packet budget;
-a closed exact-ID reduction retains at most four excerpts per source. Complete
-material coverage publishes `Synthesized`; useful admitted claims with a
-material typed gap publish `Qualified`. A focused report may be structurally
-sufficient with one cited direct-answer claim.
+language is request-owned: the Host pins one inferred or explicit BCP 47 tag
+through planning, generation, admission, and publication, and rejects an
+altered tag or an obvious aggregate prose-language mismatch. Semantic
+entailment remains a model/evaluator concern; the Host does not match claim
+prose to source prose. Larger fetched catalogs are divided only by source
+identity and a 32 KiB UTF-8 packet budget; a closed exact-ID reduction retains
+at most four excerpts per source. Complete material coverage publishes
+`Synthesized`; useful admitted claims with a material typed gap publish
+`Qualified` only after the resolved dimensions pass the per-dimension depth
+gate. If every dimension remains bounded, the Host admits exactly one qualified
+partial conclusion only when it independently supplies the full two-source
+comparison, explanation, implication, boundary, and substantive-length chain
+plus a typed gap. A focused report may be structurally sufficient with one
+cited direct-answer claim.
 
 Markdown and HTML publication pairs carry the same versioned artifact marker.
 The Host never infers synthesized, source-backed, no-evidence, recovery, or
 fallback status from titles or body vocabulary.
+
+The fixed HTML renderer follows the A3S Web design tokens. Desktop output uses
+a sticky left action menu, centered report surface, and sticky right table of
+contents; narrow screens stack both navigation regions without horizontal
+overflow. One Host-owned script supports edit mode, title and table-of-contents
+synchronization, saving a self-contained HTML copy, and printing. Arbitrary
+reader-authored scripts remain rejected.
 
 The returned status distinguishes `synthesized`, `qualified`, `source_backed`,
 and `no_evidence`; it never equates artifact availability with semantic truth.

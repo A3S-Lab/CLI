@@ -354,20 +354,21 @@ impl App {
                 ),
             },
 
-            Msg::DeepResearchWorkflowCompleted {
-                query,
-                args,
-                result,
-                convergence,
-                accepted_evidence,
-            } => {
-                return self.on_deep_research_workflow_completed(
-                    query,
-                    args,
-                    result,
-                    convergence,
-                    accepted_evidence,
-                )
+            Msg::DeepResearchRunStarted { run_id, result } => {
+                return self.on_deep_research_run_started(run_id, result)
+            }
+            Msg::DeepResearchRunEvent { source, event } => {
+                return self.on_deep_research_run_event(source, *event)
+            }
+            Msg::DeepResearchRunEventsEnded { source } => {
+                return self.on_deep_research_events_ended(source)
+            }
+            Msg::DeepResearchRunReady { run_id } => return self.on_deep_research_run_ready(run_id),
+            Msg::DeepResearchRunSettled { run_id, result } => {
+                return self.on_deep_research_run_settled(run_id, result)
+            }
+            Msg::DeepResearchRunDiscarded { run_id } => {
+                tracing::debug!(%run_id, "discarded stale DeepResearch run");
             }
 
             Msg::UpdatePlan(latest) => {

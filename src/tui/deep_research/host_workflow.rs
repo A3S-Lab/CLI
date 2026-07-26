@@ -126,9 +126,11 @@ pub(super) fn deep_research_safety_envelope(
     // chooses the tracks and the bounded per-pass retrieval budget.
     DeepResearchSafetyEnvelope {
         max_tracks: MAX_DEEP_RESEARCH_TRACKS,
-        max_steps_per_task: budget.deep_research_child_steps.clamp(1, 2),
+        max_steps_per_task: budget
+            .deep_research_child_steps
+            .clamp(1, MAX_DEEP_RESEARCH_TRACKS),
         workflow_timeout_ms: if evidence_scope.network_enabled() {
-            300_000
+            600_000
         } else {
             210_000
         },

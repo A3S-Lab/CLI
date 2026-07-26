@@ -1979,8 +1979,8 @@ fn deep_research_safety_envelope_is_query_agnostic() {
         non_parallel.max_tracks, web.max_tracks,
         "semantic plan shape must not depend on parallel-task capacity"
     );
-    assert_eq!(web.max_steps_per_task, 2);
-    assert_eq!(web.workflow_timeout_ms, 300_000);
+    assert_eq!(web.max_steps_per_task, 4);
+    assert_eq!(web.workflow_timeout_ms, 600_000);
     assert_eq!(local.workflow_timeout_ms, 210_000);
 }
 

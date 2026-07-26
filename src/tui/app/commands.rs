@@ -17,6 +17,56 @@ pub(super) fn pump(rx: SharedRx) -> Cmd<Msg> {
     })
 }
 
+/// Read one event from the isolated typed DeepResearch run.
+pub(super) fn pump_deep_research(rx: SharedDeepResearchRx) -> Cmd<Msg> {
+    let source = rx.clone();
+    cmd::cmd(move || async move {
+        let mut guard = rx.lock().await;
+        match guard.recv().await {
+            Some(event) => Msg::DeepResearchRunEvent {
+                source,
+                event: Box::new(event),
+            },
+            None => Msg::DeepResearchRunEventsEnded { source },
+        }
+    })
+}
+
+/// Wait independently of the lossy progress channel for the root task to end.
+pub(super) fn wait_for_deep_research_completion(
+    run_id: String,
+    mut completion: tokio::sync::watch::Receiver<bool>,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        if !*completion.borrow() {
+            let _ = completion.changed().await;
+        }
+        Msg::DeepResearchRunReady { run_id }
+    })
+}
+
+pub(super) fn settle_deep_research_run(
+    run_id: String,
+    handle: CodeDeepResearchRunHandle,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        Msg::DeepResearchRunSettled {
+            run_id,
+            result: handle.settle().await,
+        }
+    })
+}
+
+pub(super) fn discard_deep_research_run(
+    run_id: String,
+    handle: CodeDeepResearchRunHandle,
+) -> Cmd<Msg> {
+    cmd::cmd(move || async move {
+        let _ = handle.cancel_and_settle().await;
+        Msg::DeepResearchRunDiscarded { run_id }
+    })
+}
+
 /// Wait for the previous stream worker to release the session's single-flight
 /// admission lease before the update loop constructs any follow-up operation.
 pub(super) fn wait_for_stream_join(
@@ -146,19 +196,6 @@ pub(super) async fn settle_stream_join_for_quit(
 
 pub(super) fn host_progress_event_is_terminal(event: &AgentEvent) -> bool {
     matches!(event, AgentEvent::End { .. } | AgentEvent::Error { .. })
-}
-
-pub(super) fn deep_research_plan_status(workflow_output: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(workflow_output.trim()).ok()?;
-    let shape = value.pointer("/plan/answer_shape")?.as_str()?;
-    let budget = value.pointer("/plan/budget")?;
-    let iterations = budget.get("max_iterations")?.as_u64()?;
-    let parallel = budget.get("max_parallel_tasks")?.as_u64()?;
-    let retrieval_seconds = budget.get("retrieval_timeout_ms")?.as_u64()? / 1000;
-    Some(format!(
-        "  ◇ LLM plan · {shape} · ≤{iterations} iteration{} · ≤{parallel} parallel · {retrieval_seconds}s retrieval",
-        if iterations == 1 { "" } else { "s" }
-    ))
 }
 
 /// Remember the outer host-direct DynamicWorkflow call without letting nested

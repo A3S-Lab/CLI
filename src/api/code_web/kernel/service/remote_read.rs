@@ -356,6 +356,7 @@ mod tests {
             context_files: Vec::new(),
             skill_names: Vec::new(),
             mode: CodeWebQueuedTurnMode::Standard,
+            research_run_id: None,
             priority: USER_TURN_PRIORITY,
             enqueued_at,
         }

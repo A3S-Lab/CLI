@@ -126,13 +126,16 @@ async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> an
         synthesis.artifacts = relocate_research_artifacts(&synthesis.artifacts, &report_dir)?;
     }
     let (status, incomplete) = match synthesis.status {
-        research_runtime::DeepResearchReportStatus::Completed => ("completed", false),
+        research_runtime::DeepResearchReportStatus::Synthesized => ("synthesized", false),
         research_runtime::DeepResearchReportStatus::Qualified => ("qualified", false),
-        research_runtime::DeepResearchReportStatus::Degraded => ("degraded", true),
+        research_runtime::DeepResearchReportStatus::SourceBacked => ("source_backed", true),
+        research_runtime::DeepResearchReportStatus::NoEvidence => ("no_evidence", true),
     };
     let data = json!({
+        "runId": synthesis.run_id,
         "status": status,
         "text": synthesis.text,
+        "quality": synthesis.quality,
         "artifacts": {
             "markdown": synthesis.artifacts.markdown,
             "html": synthesis.artifacts.html,
@@ -145,7 +148,7 @@ async fn run_research(args: CodeResearchArgs, context: &InvocationContext) -> an
         return Err(CliError::new(
             "research.incomplete",
             format!(
-                "DeepResearch could not validate a completed report; degraded report written at {}",
+                "DeepResearch published a {status} result; report written at {}",
                 synthesis.artifacts.html.display()
             ),
             ExitClass::Failure,

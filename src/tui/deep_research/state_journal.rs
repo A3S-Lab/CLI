@@ -807,6 +807,7 @@ pub(crate) async fn record_child_event(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn record_convergence(
     workspace: &Path,
     run_id: &str,
@@ -1153,12 +1154,12 @@ fn bounded_string(value: &str, max_chars: usize) -> String {
 mod diagnostics;
 #[path = "state_journal/inquiry.rs"]
 mod inquiry;
-pub(crate) use diagnostics::{
-    fork_current_for_contradiction_review, reconcile_interrupted_latest_run, research_diagnostic,
-    research_diff, ResearchDiagnosticKind, ResearchRecoveryDisposition,
-};
 #[cfg(test)]
 use diagnostics::{fork_with_validated_evidence, load_latest_checkpoint};
+pub(crate) use diagnostics::{
+    reconcile_interrupted_latest_run, research_diagnostic, research_diff, ResearchDiagnosticKind,
+    ResearchRecoveryDisposition,
+};
 #[cfg(test)]
 #[path = "state_journal_tests.rs"]
 mod tests;
