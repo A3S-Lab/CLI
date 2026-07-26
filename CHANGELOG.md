@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.9] - 2026-07-26
+
+### Changed
+
+- Updated the shared CLI, TUI, and Web adapter to `a3s-deep-research` 0.1.3.
+  Reports are pinned to the user's language, comprehensive publication now
+  requires a multi-source analytical chain in every resolved dimension, and a
+  fully bounded run may qualify one deeply analyzed partial conclusion only
+  while retaining an explicit typed gap.
+- Added normalized direct retrieval for up to three explicit HTTP(S) references
+  in a Web-capable query, a shared synthesis track for named comparisons, and
+  plan-wide validation of required question roles.
+- Unified headless CLI, TUI, and Code Web on one typed runner with isolated
+  read-only sessions, run-scoped artifacts, journal-backed refresh, settled
+  cancellation, and report delivery by validated run ID instead of filesystem
+  path.
+- Standardized single-file reports on the A3S Web design system with a left
+  action menu, centered editable report, right table of contents, save, print,
+  and responsive controls. Natural narrative planning produces continuous
+  prose while preserving closed evidence and traceability.
+- Removed the bundled `report-master` Skill and pruned its retired managed
+  directory from the CLI-owned Skill root.
+
+### Fixed
+
+- Bounded long Codex provider session and prompt-cache identifiers while
+  sharing a proven HTTPS fallback across isolated research child sessions.
+
 ## [0.10.8] - 2026-07-26
 
 ### Added

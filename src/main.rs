@@ -13,6 +13,8 @@ mod compact;
 mod config;
 mod evolution;
 mod model;
+#[path = "research/code.rs"]
+mod research;
 mod runtime_tool;
 mod session_llm;
 mod system_agents;

@@ -6,6 +6,7 @@ use super::*;
 /// pump command can own a clone; pumps run sequentially, so the mutex never
 /// actually contends.
 pub(super) type SharedRx = Arc<Mutex<mpsc::Receiver<AgentEvent>>>;
+pub(super) type SharedDeepResearchRx = Arc<Mutex<mpsc::Receiver<CodeDeepResearchEvent>>>;
 pub(super) type SharedManifestRx =
     Arc<Mutex<tokio::sync::broadcast::Receiver<LocalWorkspaceManifestSnapshot>>>;
 pub(super) type SharedActiveSession = Arc<std::sync::Mutex<Arc<AgentSession>>>;
@@ -472,13 +473,32 @@ pub(super) enum Msg {
         result: Result<panels::checkup::CheckupPreflight, String>,
     },
     ResearchDiagnostic(Result<String, String>),
-    /// Host-controlled `?` deep-research workflow finished; next step is synthesis.
-    DeepResearchWorkflowCompleted {
-        query: String,
-        args: serde_json::Value,
-        result: Result<ToolCallResult, String>,
-        convergence: ConvergenceDecision,
-        accepted_evidence: Vec<AcceptedEvidence>,
+    /// The isolated typed DeepResearch runtime and its event stream are ready.
+    DeepResearchRunStarted {
+        run_id: String,
+        result: Result<(CodeDeepResearchRunHandle, SharedDeepResearchRx), String>,
+    },
+    /// One typed engine or nested-agent event from the isolated research run.
+    DeepResearchRunEvent {
+        source: SharedDeepResearchRx,
+        event: Box<CodeDeepResearchEvent>,
+    },
+    /// The typed event stream closed before the completion watcher fired.
+    DeepResearchRunEventsEnded {
+        source: SharedDeepResearchRx,
+    },
+    /// The root research task reached a terminal state and is ready to join.
+    DeepResearchRunReady {
+        run_id: String,
+    },
+    /// The root task and isolated session have both settled.
+    DeepResearchRunSettled {
+        run_id: String,
+        result: Result<CodeDeepResearchRunExit, String>,
+    },
+    /// A stale asynchronously-started run was cancelled and joined.
+    DeepResearchRunDiscarded {
+        run_id: String,
     },
     /// `/update` version check finished: the latest version tag, if reachable.
     UpdatePlan(Option<String>),

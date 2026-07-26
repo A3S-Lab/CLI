@@ -23,6 +23,7 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
             "optional_gap_acquisition",
             "optional_gap_extraction",
             "report_document_generation",
+            "report_editorial_planning",
             "deterministic_publication"
         ])
     );
@@ -31,6 +32,7 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
         "initial_extractions",
         "gap_extractions",
         "report_generations",
+        "editorial_generations",
         "report_repairs",
     ] {
         assert_eq!(contract["cardinality"][field], 1, "{field}");
@@ -41,9 +43,9 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
     assert!(contract["planner"].get("outline_prompt").is_none());
     assert!(contract["planner"].get("track_prompt").is_none());
     assert!(contract["planner"].get("retrieval_prompt").is_none());
-    assert_eq!(contract["hard_caps"]["max_searches"], 4);
-    assert_eq!(contract["hard_caps"]["max_fetches"], 8);
-    assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 2);
+    assert_eq!(contract["hard_caps"]["max_searches"], 8);
+    assert_eq!(contract["hard_caps"]["max_fetches"], 12);
+    assert_eq!(contract["hard_caps"]["max_supplemental_fetches"], 4);
     for obsolete in [
         "checker",
         "maker",
@@ -85,6 +87,7 @@ fn production_contract_has_one_optional_outline_and_host_owned_retrieval() {
             "focus",
             "id",
             "material",
+            "questions",
             "title",
         ]
         .into_iter()
@@ -101,14 +104,20 @@ fn optional_outline_prompt_is_language_agnostic_and_host_closes_the_contract() {
     let prompt = args["input"]["loop_contract"]["planner"]["prompt"]
         .as_str()
         .expect("optional outline prompt");
-    assert!(prompt.chars().count() < 3_000);
+    let prompt_character_count = prompt.chars().count();
+    assert!(
+        prompt_character_count < 7_500,
+        "planner prompt grew to {prompt_character_count} characters"
+    );
 
     assert!(prompt.contains("Do not use fixed topic taxonomies"));
-    assert!(prompt.contains("Use the query language"));
+    assert!(prompt.contains("Output language: es"));
+    assert!(prompt.contains("in the exact output language"));
+    assert!(prompt.contains("may use the language of the strongest likely source"));
     assert!(prompt.contains("always searches the exact user query first"));
     assert!(prompt.contains("one to four coherent evidence tracks"));
     assert!(prompt.contains("observable completion criteria"));
-    assert!(prompt.contains("zero to three supplemental_queries"));
+    assert!(prompt.contains("zero to seven supplemental_queries"));
     assert!(prompt.contains("not a URL"));
     assert!(prompt.contains("Do not return URLs"));
     for obsolete in [

@@ -25,10 +25,7 @@ pub(super) struct SkillUsageSubject {
 
 impl SkillUsageSubject {
     pub(super) fn new(name: String, bytes: u64, modified_at: Option<i64>, enabled: bool) -> Self {
-        let managed = matches!(
-            name.as_str(),
-            "okf" | "report-master" | "a3s-os-capabilities"
-        );
+        let managed = matches!(name.as_str(), "okf" | "a3s-os-capabilities");
         Self {
             name,
             bytes,

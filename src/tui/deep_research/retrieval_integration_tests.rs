@@ -72,6 +72,14 @@ struct InterruptedSiblingFetchFixture {
 
 struct LocalEvidenceFixture;
 
+struct NoLocalEvidenceFixture;
+
+struct AbsoluteLocalCandidateFixture {
+    path: String,
+}
+
+struct OversizedLocalRangeFixture;
+
 const PDF_RANGE_ONE: &str =
     "第一段记录了双阶段检索方法以及证据保留边界，内容足够构成一个结构化文本块。";
 const PDF_RANGE_TWO: &str = "第二段报告消融实验使引用完整率下降十七个百分点，并给出明确测量条件。";
@@ -884,6 +892,123 @@ impl Tool for LocalEvidenceFixture {
     }
 }
 
+#[async_trait::async_trait]
+impl Tool for NoLocalEvidenceFixture {
+    fn name(&self) -> &str {
+        "task"
+    }
+
+    fn description(&self) -> &str {
+        "Returns a typed local task result without an observed source anchor."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(
+            ToolOutput::success("no observed local evidence").with_metadata(serde_json::json!({
+                "results": [{
+                    "success": true,
+                    "source_anchors": [],
+                    "structured": {
+                        "sources": [{
+                            "url_or_path": "src/unobserved.rs",
+                            "ranges": [{"offset": 0, "limit": 20}]
+                        }]
+                    }
+                }]
+            })),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for AbsoluteLocalCandidateFixture {
+    fn name(&self) -> &str {
+        "task"
+    }
+
+    fn description(&self) -> &str {
+        "Returns one absolute candidate path inside the workspace."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(
+            ToolOutput::success("absolute local candidate").with_metadata(serde_json::json!({
+                "results": [{
+                    "success": true,
+                    "source_anchors": [],
+                    "structured": {
+                        "sources": [{
+                            "url_or_path": self.path,
+                            "ranges": [{"offset": 0, "limit": 20}]
+                        }]
+                    }
+                }]
+            })),
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for OversizedLocalRangeFixture {
+    fn name(&self) -> &str {
+        "task"
+    }
+
+    fn description(&self) -> &str {
+        "Returns one oversized local source and one valid sibling."
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+
+    async fn execute(
+        &self,
+        _args: &serde_json::Value,
+        _ctx: &ToolContext,
+    ) -> anyhow::Result<ToolOutput> {
+        Ok(
+            ToolOutput::success("mixed bounded local candidates").with_metadata(
+                serde_json::json!({
+                    "results": [{
+                        "success": true,
+                        "structured": {
+                            "sources": [{
+                                "url_or_path": "src/oversized.rs",
+                                "ranges": [
+                                    {"offset": 0, "limit": 1},
+                                    {"offset": 1, "limit": 1},
+                                    {"offset": 2, "limit": 1},
+                                    {"offset": 3, "limit": 1}
+                                ]
+                            }, {
+                                "url_or_path": "src/valid.rs",
+                                "ranges": [{"offset": 0, "limit": 20}]
+                            }]
+                        }
+                    }]
+                }),
+            ),
+        )
+    }
+}
+
 fn minimal_plan(
     tracks: serde_json::Value,
     search_queries: serde_json::Value,
@@ -1383,6 +1508,154 @@ async fn semantic_retrieval_reuses_bootstrap_packet_without_repeating_transport(
 }
 
 #[tokio::test]
+async fn semantic_retrieval_reuses_local_bootstrap_packet_when_followup_has_no_evidence() {
+    let workspace = tempfile::tempdir().unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(NoLocalEvidenceFixture));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec!["preserved workspace evidence".to_string()],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "Trace the active implementation";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("request.primary", "Original request", query)]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    plan["workspace_evidence_required"] = serde_json::json!(true);
+    let mut args = super::deep_research_workflow_args_with_scope(
+        query,
+        super::DeepResearchEvidenceScope::LocalOnly,
+    );
+    args["input"]["research_plan"] = plan;
+    args["input"]["execution_mode"] = serde_json::json!("collect_only");
+    args["input"]["bootstrap_acquisition"] = serde_json::json!({
+        "status": "partial",
+        "packet": {
+            "version": 1,
+            "focuses": [],
+            "sources": [{
+                "source_id": "bootstrap-local-source-1",
+                "title": "src/active.rs",
+                "url_or_path": "src/active.rs",
+                "reliability": "Exact workspace text restored by host read ranges.",
+                "chunks": [{
+                    "chunk_id": "bootstrap-local-source-1:chunk:1",
+                    "text": "This preserved workspace evidence traces the active implementation."
+                }]
+            }]
+        },
+        "errors": ["A separate proposed path had no observed read or grep anchor."],
+        "metadata": {
+            "source_count": 1,
+            "chunk_count": 1
+        }
+    });
+    args["run_id"] = serde_json::json!("deepresearch-local-bootstrap-reuse-test");
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(24);
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["mode"], "inquiry_collection");
+    assert_eq!(output["research"]["metadata"]["bootstrap_source_count"], 1);
+    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        "src/active.rs"
+    );
+    assert!(
+        output["research"]["warnings"]["collection_errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "the retained bootstrap evidence must not erase typed collection diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn semantic_retrieval_assigns_unique_ids_after_merging_independent_packets() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(
+        workspace.path().join("src/unobserved.rs"),
+        "pub const FOLLOWUP: &str = \"The follow-up packet contributes distinct evidence.\";\n",
+    )
+    .unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(NoLocalEvidenceFixture));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: vec![
+            "bootstrap packet contributes".to_string(),
+            "follow-up packet contributes".to_string(),
+        ],
+        fail: false,
+        invalid_selection: false,
+    }));
+    let query = "Combine independently collected workspace evidence";
+    let mut plan = minimal_plan(
+        serde_json::json!([track("workspace", "Workspace", query)]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    plan["workspace_evidence_required"] = serde_json::json!(true);
+    let mut args = super::deep_research_workflow_args_with_scope(
+        query,
+        super::DeepResearchEvidenceScope::LocalOnly,
+    );
+    args["input"]["research_plan"] = plan;
+    args["input"]["execution_mode"] = serde_json::json!("collect_only");
+    args["input"]["bootstrap_acquisition"] = serde_json::json!({
+        "status": "success",
+        "packet": {
+            "version": 1,
+            "focuses": [],
+            "sources": [{
+                "source_id": "local-source-1",
+                "title": "src/bootstrap.rs",
+                "url_or_path": "src/bootstrap.rs",
+                "reliability": "Exact workspace text restored by a prior Host read.",
+                "chunks": [{
+                    "chunk_id": "local-source-1:chunk:1",
+                    "text": "The bootstrap packet contributes preserved evidence."
+                }]
+            }]
+        },
+        "errors": [],
+        "metadata": {}
+    });
+    args["run_id"] = serde_json::json!("deepresearch-independent-packet-identity-test");
+    args["limits"]["timeoutMs"] = serde_json::json!(45_000);
+    args["limits"]["maxToolCalls"] = serde_json::json!(24);
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["research"]["metadata"]["source_count"], 2);
+    let sources = output["research"]["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| &result["structured"]["sources"][0])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sources
+            .iter()
+            .filter_map(|source| source["url_or_path"].as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["src/bootstrap.rs", "src/unobserved.rs"])
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .filter_map(|source| source["source_id"].as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        2,
+        "the aggregate catalog must own unique source identities"
+    );
+}
+
+#[tokio::test]
 async fn semantic_retrieval_searches_only_supplements_and_merges_bootstrap_evidence() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
@@ -1798,42 +2071,54 @@ async fn oversubscribed_provider_catalog_is_semantically_admitted_before_fetch()
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let urls = Arc::new(Mutex::new(Vec::new()));
-    executor.register_dynamic_tool(Arc::new(SearchFixture {
+    let search_queries = (1..=4)
+        .map(|index| format!("provider query {index}"))
+        .collect::<Vec<_>>();
+    let results_by_query = search_queries
+        .iter()
+        .enumerate()
+        .map(|(query_index, query)| {
+            let results = (1..=16)
+                .map(|result_index| {
+                    let is_authoritative = query_index == 3 && result_index == 16;
+                    serde_json::json!({
+                        "title": if is_authoritative {
+                            "真正相关的跨语言记录".to_string()
+                        } else {
+                            format!("Unrelated provider result {query_index}-{result_index}")
+                        },
+                        "url": if is_authoritative {
+                            "https://selection.example/authoritative".to_string()
+                        } else {
+                            format!(
+                                "https://selection.example/unrelated-{query_index}-{result_index}"
+                            )
+                        },
+                        "content": if is_authoritative {
+                            "This authoritative record directly addresses the planned focus."
+                                .to_string()
+                        } else {
+                            "A valid page that does not address the planned research focus."
+                                .to_string()
+                        },
+                        "engines": ["fixture"]
+                    })
+                })
+                .collect::<Vec<_>>();
+            (query.clone(), serde_json::Value::Array(results))
+        })
+        .collect::<BTreeMap<_, _>>();
+    executor.register_dynamic_tool(Arc::new(QuerySearchFixture {
         queries: Arc::new(Mutex::new(Vec::new())),
-        results: serde_json::json!([{
-            "title": "Unrelated first provider result",
-            "url": "https://selection.example/unrelated-first",
-            "content": "A valid page that does not address the planned research focus.",
-            "engines": ["fixture"]
-        }, {
-            "title": "另一个无关结果",
-            "url": "https://selection.example/unrelated-second",
-            "content": "Este resultado tampoco responde a la pregunta.",
-            "engines": ["fixture"]
-        }, {
-            "title": "真正相关的跨语言记录",
-            "url": "https://selection.example/authoritative",
-            "content": "This authoritative record directly addresses the planned focus.",
-            "engines": ["fixture"]
-        }]),
+        results_by_query,
     }));
     executor.register_dynamic_tool(Arc::new(TextFetchFixture {
         urls: Arc::clone(&urls),
-        bodies: BTreeMap::from([
-            (
-                "https://selection.example/unrelated-first".to_string(),
-                "Unrelated but substantive provider text.".to_string(),
-            ),
-            (
-                "https://selection.example/unrelated-second".to_string(),
-                "Otro texto sustantivo pero irrelevante.".to_string(),
-            ),
-            (
-                "https://selection.example/authoritative".to_string(),
-                "真正相关的跨语言记录提供了可追溯的一手证据，并明确回答了计划中的研究问题。"
-                    .to_string(),
-            ),
-        ]),
+        bodies: BTreeMap::from([(
+            "https://selection.example/authoritative".to_string(),
+            "真正相关的跨语言记录提供了可追溯的一手证据，并明确回答了计划中的研究问题。"
+                .to_string(),
+        )]),
     }));
     executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
         preferred_fragments: vec!["真正相关的跨语言记录".to_string()],
@@ -1846,7 +2131,7 @@ async fn oversubscribed_provider_catalog_is_semantically_admitted_before_fetch()
             "语义来源准入",
             "从完整供应商候选目录中选择真正相关的跨语言记录"
         )]),
-        serde_json::json!(["MiXeD provider catalog"]),
+        serde_json::json!(search_queries),
         serde_json::json!([]),
     );
     plan["budget"]["direct_fetches"] = serde_json::json!(1);
@@ -1854,7 +2139,7 @@ async fn oversubscribed_provider_catalog_is_semantically_admitted_before_fetch()
         "验证跨语言语义来源准入",
         super::DeepResearchEvidenceScope::WebAndWorkspace,
         plan,
-        "fixture_web_search",
+        "fixture_query_web_search",
         "fixture_web_fetch",
     );
 
@@ -2473,7 +2758,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
             .iter()
             .enumerate()
             .map(|(source_index, url)| {
-                let body = (0..82)
+                let body = (0..170)
                     .map(|chunk_index| {
                         format!(
                             "OVERFLOW_SECRET_EVIDENCE_{}_{chunk_index:03} {}",
@@ -2518,7 +2803,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
         .as_u64()
         .unwrap_or_default();
     assert!(
-        catalog_chunk_count > 640,
+        catalog_chunk_count > 1_280,
         "fixture produced only {catalog_chunk_count} chunks"
     );
     assert!(output.to_string().contains("closed catalog limit"));
@@ -2526,7 +2811,7 @@ async fn oversized_chunk_catalog_fails_closed_without_positional_sampling() {
 }
 
 #[tokio::test]
-async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source() {
+async fn eight_source_catalog_uses_byte_bounded_multi_source_selectors() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -2613,9 +2898,12 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
         "{}",
         serde_json::to_string_pretty(&output).unwrap()
     );
-    assert_eq!(
-        output["research"]["metadata"]["semantic_selection_shard_count"],
-        8
+    let selector_shard_count = output["research"]["metadata"]["semantic_selection_shard_count"]
+        .as_u64()
+        .expect("selector shard count");
+    assert!(
+        selector_shard_count > 0 && selector_shard_count < 8,
+        "small sources should share byte-bounded selector packets"
     );
     assert_eq!(research_source_urls(&output), source_urls);
     assert!(
@@ -2656,7 +2944,7 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
             })
             .count(),
         32,
-        "all bounded source-local selections must reach closed question review"
+        "every source keeps its own bounded candidate allowance inside packed selectors"
     );
 
     let steps = result
@@ -2670,7 +2958,7 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
     }
     assert!(!steps.contains_key("retrieve_web"));
     assert!(!steps.contains_key("select_evidence_chunks"));
-    let mut shard_attempts = (1..=8)
+    let mut shard_attempts = (1..=selector_shard_count)
         .map(|index| {
             steps[&format!("select_evidence_chunks_shard_{index}")]["attempt"]
                 .as_u64()
@@ -2678,7 +2966,7 @@ async fn eight_source_catalog_above_the_old_limit_uses_one_selector_per_source()
         })
         .collect::<Vec<_>>();
     shard_attempts.sort_unstable();
-    assert_eq!(shard_attempts, [1, 1, 1, 1, 1, 1, 1, 1]);
+    assert!(shard_attempts.iter().all(|attempt| *attempt == 1));
 }
 
 #[tokio::test]
@@ -2740,6 +3028,10 @@ async fn failed_shards_promote_no_own_text_but_preserve_valid_siblings() {
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_failed_shard_count"],
         1
+    );
+    assert_eq!(
+        output["research"]["metadata"]["semantic_selection_recovery_shard_count"],
+        2
     );
     let encoded = output.to_string();
     assert!(encoded.contains("RETAINED_SHARD_TEXT"));
@@ -2819,6 +3111,10 @@ async fn failed_source_local_selection_drops_only_that_source() {
         1
     );
     assert_eq!(
+        output["research"]["metadata"]["semantic_selection_recovery_shard_count"],
+        2
+    );
+    assert_eq!(
         output["research"]["metadata"]["semantic_selection_source_reduction_count"],
         0
     );
@@ -2829,7 +3125,7 @@ async fn failed_source_local_selection_drops_only_that_source() {
 }
 
 #[tokio::test]
-async fn large_source_is_structurally_windowed_then_semantically_reduced() {
+async fn large_source_fits_one_bounded_selector_without_redundant_reduction() {
     let workspace = tempfile::tempdir().unwrap();
     let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
     let queries = Arc::new(Mutex::new(Vec::new()));
@@ -2904,14 +3200,13 @@ async fn large_source_is_structurally_windowed_then_semantically_reduced() {
         "{}",
         serde_json::to_string_pretty(&output).unwrap()
     );
-    assert!(
-        output["research"]["metadata"]["semantic_selection_shard_count"]
-            .as_u64()
-            .is_some_and(|count| count > 1)
+    assert_eq!(
+        output["research"]["metadata"]["semantic_selection_shard_count"],
+        1
     );
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_source_reduction_count"],
-        1
+        0
     );
     assert_eq!(
         output["research"]["metadata"]["semantic_selection_materialized_count"],
@@ -2932,8 +3227,8 @@ async fn large_source_is_structurally_windowed_then_semantically_reduced() {
         .and_then(|metadata| metadata["dynamic_workflow"]["snapshot"]["steps"].as_object())
         .expect("source-reduction durable steps");
     assert_eq!(steps["select_evidence_chunks_shard_1"]["attempt"], 1);
-    assert_eq!(steps["select_evidence_chunks_shard_2"]["attempt"], 1);
-    assert_eq!(steps["select_evidence_chunks_source_1"]["attempt"], 1);
+    assert!(!steps.contains_key("select_evidence_chunks_shard_2"));
+    assert!(!steps.contains_key("select_evidence_chunks_source_1"));
     assert!(!steps.contains_key("select_evidence_chunks"));
 }
 
@@ -3396,7 +3691,7 @@ async fn visible_serialized_text_is_not_removed_by_vocabulary() {
 }
 
 #[tokio::test]
-async fn local_only_retrieval_accepts_only_read_or_grep_anchors() {
+async fn local_only_retrieval_promotes_and_discloses_only_host_verified_paths() {
     let workspace = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(workspace.path().join("src")).unwrap();
     std::fs::write(
@@ -3454,6 +3749,162 @@ async fn local_only_retrieval_accepts_only_read_or_grep_anchors() {
         .is_some_and(|errors| !errors.is_empty()));
     assert!(!output.to_string().contains("fabricated.rs"));
     assert!(!output.to_string().contains("listed-only.rs"));
+}
+
+#[tokio::test]
+async fn local_only_retrieval_revalidates_unobserved_candidates_with_host_read() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(
+        workspace.path().join("src/unobserved.rs"),
+        "pub const HOST_VERIFIED: &str = \"Only the host-verified range becomes evidence.\";\n",
+    )
+    .unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(NoLocalEvidenceFixture));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
+    }));
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "workspace",
+            "Workspace",
+            "Inspect host-verified workspace evidence"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    plan["workspace_evidence_required"] = serde_json::json!(true);
+    let args = workflow_args(
+        "Inspect the local workspace",
+        super::DeepResearchEvidenceScope::LocalOnly,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        "src/unobserved.rs"
+    );
+    assert!(
+        output["research"]["results"][0]["structured"]["sources"][0]["quote_or_fact"]
+            .as_str()
+            .is_some_and(|text| text.contains("host-verified range"))
+    );
+    assert_eq!(
+        output["research"]["metadata"]["local"]["observed_source_count"],
+        1
+    );
+}
+
+#[tokio::test]
+async fn local_only_retrieval_uses_the_exact_canonical_host_read_anchor() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    let source_path = workspace.path().join("src/canonical.rs");
+    std::fs::write(
+        &source_path,
+        "pub const CANONICAL: &str = \"The canonical host anchor identifies this evidence.\";\n",
+    )
+    .unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(AbsoluteLocalCandidateFixture {
+        path: source_path.to_string_lossy().to_string(),
+    }));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
+    }));
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "workspace",
+            "Workspace",
+            "Inspect canonically identified workspace evidence"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    plan["workspace_evidence_required"] = serde_json::json!(true);
+    let args = workflow_args(
+        "Inspect the local workspace",
+        super::DeepResearchEvidenceScope::LocalOnly,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        "src/canonical.rs"
+    );
+    assert!(
+        !output
+            .to_string()
+            .contains(&source_path.to_string_lossy().to_string()),
+        "the absolute candidate must be replaced by the canonical host anchor"
+    );
+}
+
+#[tokio::test]
+async fn local_only_retrieval_drops_one_oversized_source_without_losing_valid_siblings() {
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join("src")).unwrap();
+    std::fs::write(
+        workspace.path().join("src/oversized.rs"),
+        "first\nsecond\nthird\nfourth\n",
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.path().join("src/valid.rs"),
+        "pub const VALID: &str = \"A valid sibling remains publishable.\";\n",
+    )
+    .unwrap();
+    let executor = ToolExecutor::new(workspace.path().to_string_lossy().to_string());
+    executor.register_dynamic_tool(Arc::new(OversizedLocalRangeFixture));
+    executor.register_dynamic_tool(Arc::new(SemanticSelectorFixture {
+        preferred_fragments: Vec::new(),
+        fail: false,
+        invalid_selection: false,
+    }));
+    let mut plan = minimal_plan(
+        serde_json::json!([track(
+            "workspace",
+            "Workspace",
+            "Inspect bounded workspace evidence"
+        )]),
+        serde_json::json!([]),
+        serde_json::json!([]),
+    );
+    plan["workspace_evidence_required"] = serde_json::json!(true);
+    let args = workflow_args(
+        "Inspect the local workspace",
+        super::DeepResearchEvidenceScope::LocalOnly,
+        plan,
+        "fixture_web_search",
+        "fixture_web_fetch",
+    );
+
+    let output = execute(&executor, &args).await;
+
+    assert_eq!(output["research"]["metadata"]["source_count"], 1);
+    assert_eq!(
+        output["research"]["results"][0]["structured"]["sources"][0]["url_or_path"],
+        "src/valid.rs"
+    );
+    assert!(
+        !output.to_string().contains("src/oversized.rs"),
+        "the rejected candidate path must not leak into evidence or diagnostics"
+    );
 }
 
 #[tokio::test]

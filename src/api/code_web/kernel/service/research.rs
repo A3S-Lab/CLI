@@ -1,20 +1,32 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::time::{interval_at, Duration};
 use tokio_util::sync::CancellationToken;
 
 use super::streaming::send_code_web_event;
 use super::*;
 use crate::budget::{budget_plan_for_effort_id, BudgetWorkload};
 use crate::commands::code::research_runtime::{
-    execute_deepresearch_query_in, DeepResearchReportStatus, DeepResearchReportSynthesis,
+    DeepResearchReportStatus, DeepResearchReportSynthesis,
 };
+use crate::research::{
+    build_code_deep_research_request, CodeDeepResearchEvent, CodeDeepResearchLaunch,
+    CodeDeepResearchRunExit, CodeDeepResearchRunner, CodeDeepResearchRunnerBudget,
+};
+use a3s_deep_research::engine::{
+    DeepResearchEvent, DeepResearchLifecycle, DeepResearchRequest, EvidenceScope,
+    PublicationOutcome, ResearchStage, WorkspaceSourceHint,
+};
+use a3s_deep_research::report::clean_deep_research_final_text_from_artifacts;
 
-const RESEARCH_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_RESEARCH_REPORT_BYTES: u64 = 4 * 1024 * 1024;
 const RESEARCH_CANCELLED_MESSAGE: &str = "DeepResearch was cancelled by the user.";
+
+pub(in crate::api::code_web) struct DeepResearchArtifactResponse {
+    pub(in crate::api::code_web) body: Vec<u8>,
+    pub(in crate::api::code_web) content_type: &'static str,
+}
 
 impl KernelService {
     pub(super) async fn stream_deep_research_turn(
@@ -30,8 +42,67 @@ impl KernelService {
                 "DeepResearch mode is only available for user turns".to_string(),
             ));
         }
+        if !turn.skill_names.is_empty() {
+            self.restore_queued_turn(session.session_id(), &turn.id)
+                .await?;
+            return Err(BootError::BadRequest(
+                "DeepResearch does not support selected skills; remove skillNames and retry"
+                    .to_string(),
+            ));
+        }
 
         let session_id = session.session_id().to_string();
+        let workspace = session.workspace().to_path_buf();
+        let query = turn.content.clone();
+        let run_id = turn
+            .research_run_id
+            .clone()
+            .unwrap_or_else(|| code_web_research_run_id(&turn.id));
+        let mut code_config = self.state.code_config_snapshot();
+        if let Some(model) = self.session_response_model(&session_id).await {
+            code_config.default_model = Some(model);
+        }
+        let memory_dir = research_memory_dir(&workspace, code_config.memory_dir.as_deref());
+        let controls = self.session_controls_snapshot(&session_id).await;
+        let budget =
+            budget_plan_for_effort_id(&controls.effort, None, BudgetWorkload::DeepResearch);
+        let request = build_code_deep_research_request(
+            Some(run_id.clone()),
+            &query,
+            EvidenceScope::WebAndWorkspace,
+            CodeDeepResearchRunnerBudget {
+                local_max_steps: budget.deep_research_child_steps,
+                max_tool_calls: budget.workflow_max_tool_calls,
+                max_output_bytes: budget.workflow_max_output_bytes,
+            },
+            turn.context_files
+                .iter()
+                .cloned()
+                .map(WorkspaceSourceHint::new)
+                .collect(),
+        )
+        .map_err(BootError::BadRequest)?;
+        let runner = CodeDeepResearchRunner::new(&workspace, code_config, memory_dir);
+        let mut handle = match runner
+            .start(
+                CodeDeepResearchLaunch {
+                    request,
+                    skill_names: turn.skill_names.clone(),
+                },
+                crate::session_llm::resolve_session_llm_client,
+            )
+            .await
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.restore_queued_turn(&session_id, &turn.id).await?;
+                return Err(deep_research_start_error(error));
+            }
+        };
+        let mut research_events = handle.take_events().ok_or_else(|| {
+            BootError::Internal("DeepResearch event stream was already consumed".to_string())
+        })?;
+        let mut completion_signal = handle.completion_signal();
         let cancellation = Arc::new(CancellationToken::new());
         self.state
             .active_research_runs
@@ -47,13 +118,12 @@ impl KernelService {
                 .lock()
                 .await
                 .remove(&session_id);
+            let _ = handle.cancel_and_settle().await;
             let _ = self.finish_queued_turn(&session_id, &turn.id, true).await;
             return Err(error);
         }
 
         let service = Self::new(Arc::clone(&self.state));
-        let workspace = session.workspace().to_path_buf();
-        let query = turn.content.clone();
         let turn_id = turn.id.clone();
         let (sender, receiver) = tokio::sync::mpsc::channel::<BootResult<SseEvent>>(64);
         tokio::spawn(async move {
@@ -62,6 +132,8 @@ impl KernelService {
             let tool_args = json!({
                 "query": query.clone(),
                 "scope": "webAndWorkspace",
+                "runId": run_id,
+                "contextFiles": turn.context_files,
             });
             let mut events = Vec::new();
             emit_research_event(
@@ -103,49 +175,62 @@ impl KernelService {
             )
             .await;
 
-            let mut code_config = service.state.code_config_snapshot();
-            if let Some(model) = service.session_response_model(&session_id).await {
-                code_config.default_model = Some(model);
-            }
-            let memory_dir = research_memory_dir(&workspace, code_config.memory_dir.as_deref());
-            let controls = service.session_controls_snapshot(&session_id).await;
-            let budget =
-                budget_plan_for_effort_id(&controls.effort, None, BudgetWorkload::DeepResearch);
-            let research = execute_deepresearch_query_in(
-                &query,
-                Some(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace),
-                budget,
-                &workspace,
-                code_config,
-                memory_dir,
-            );
-            tokio::pin!(research);
-            let mut heartbeat = interval_at(
-                tokio::time::Instant::now() + RESEARCH_HEARTBEAT_INTERVAL,
-                RESEARCH_HEARTBEAT_INTERVAL,
-            );
+            let completion_wait = async {
+                if !*completion_signal.borrow() {
+                    let _ = completion_signal.changed().await;
+                }
+            };
+            tokio::pin!(completion_wait);
+            let mut handle = Some(handle);
+            let mut events_open = true;
             let completion = loop {
                 tokio::select! {
-                    _ = cancellation.cancelled() => break ResearchCompletion::Cancelled,
-                    result = &mut research => {
-                        break match result {
-                            Ok(synthesis) => ResearchCompletion::Published(synthesis),
-                            Err(error) => ResearchCompletion::Failed(error.to_string()),
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        let Some(handle) = handle.take() else {
+                            break ResearchCompletion::Cancelled;
                         };
+                        let _ = handle.cancel_and_settle().await;
+                        break ResearchCompletion::Cancelled;
                     }
-                    _ = heartbeat.tick() => {
-                        emit_research_event(
-                            &sender,
-                            &mut events,
-                            AgentEvent::ToolOutputDelta {
-                                id: tool_id.clone(),
-                                name: "deep_research".to_string(),
-                                delta: "DeepResearch is still gathering and validating sources.\n".to_string(),
-                            },
-                        ).await;
+                    _ = &mut completion_wait => {
+                        while let Ok(event) = research_events.try_recv() {
+                            forward_deep_research_event(
+                                &sender,
+                                &mut events,
+                                &tool_id,
+                                event,
+                            )
+                            .await;
+                        }
+                        let Some(handle) = handle.take() else {
+                            break ResearchCompletion::Failed(
+                                "DeepResearch root handle was already settled".to_string(),
+                            );
+                        };
+                        let exit = handle.settle().await;
+                        break research_completion_from_exit(exit, &workspace);
+                    }
+                    event = research_events.recv(), if events_open => {
+                        match event {
+                            Some(event) => {
+                                forward_deep_research_event(
+                                    &sender,
+                                    &mut events,
+                                    &tool_id,
+                                    event,
+                                )
+                                .await;
+                            }
+                            None => events_open = false,
+                        }
                     }
                 }
             };
+
+            if let Some(handle) = handle {
+                let _ = handle.cancel_and_settle().await;
+            }
 
             let succeeded = match completion {
                 ResearchCompletion::Published(synthesis) => {
@@ -158,7 +243,7 @@ impl KernelService {
                         &tool_id,
                         tool_args,
                         started_at,
-                        synthesis,
+                        *synthesis,
                     )
                     .await
                 }
@@ -211,13 +296,15 @@ impl KernelService {
         Ok(BootResponse::sse(stream))
     }
 
-    pub(in crate::api::code_web) async fn read_deep_research_report(
+    pub(in crate::api::code_web) async fn read_deep_research_artifact(
         &self,
         session_id: &str,
-        relative_path: String,
-    ) -> BootResult<Vec<u8>> {
+        run_id: &str,
+        kind: &str,
+    ) -> BootResult<DeepResearchArtifactResponse> {
         let session = self.kernel_session(session_id).await?;
-        let report_path = validated_report_path(session.workspace(), &relative_path).await?;
+        let (report_path, content_type) =
+            validated_run_artifact_path(session.workspace(), run_id, kind).await?;
         let metadata = tokio::fs::metadata(&report_path)
             .await
             .map_err(report_io_error)?;
@@ -226,14 +313,240 @@ impl KernelService {
                 "DeepResearch report exceeds the {MAX_RESEARCH_REPORT_BYTES}-byte display limit"
             )));
         }
-        tokio::fs::read(report_path).await.map_err(report_io_error)
+        let body = tokio::fs::read(report_path)
+            .await
+            .map_err(report_io_error)?;
+        Ok(DeepResearchArtifactResponse { body, content_type })
     }
 }
 
 enum ResearchCompletion {
-    Published(DeepResearchReportSynthesis),
+    Published(Box<DeepResearchReportSynthesis>),
     Cancelled,
     Failed(String),
+}
+
+fn research_completion_from_exit(
+    exit: Result<CodeDeepResearchRunExit, String>,
+    workspace: &Path,
+) -> ResearchCompletion {
+    let result = match exit {
+        Ok(CodeDeepResearchRunExit::Completed(result)) => *result,
+        Ok(CodeDeepResearchRunExit::Cancelled) => return ResearchCompletion::Cancelled,
+        Err(error) => return ResearchCompletion::Failed(error),
+    };
+    if result.lifecycle != DeepResearchLifecycle::Completed {
+        return ResearchCompletion::Failed(format!(
+            "root task settled with lifecycle {:?}",
+            result.lifecycle
+        ));
+    }
+    let Some(text) = clean_deep_research_final_text_from_artifacts(&result.artifacts, workspace)
+    else {
+        return ResearchCompletion::Failed(format!(
+            "published artifacts for run {} could not be read",
+            result.run_id
+        ));
+    };
+    ResearchCompletion::Published(Box::new(DeepResearchReportSynthesis {
+        run_id: result.run_id,
+        text,
+        artifacts: result.artifacts,
+        status: result.publication,
+        quality: result.quality,
+    }))
+}
+
+async fn forward_deep_research_event(
+    sender: &tokio::sync::mpsc::Sender<BootResult<SseEvent>>,
+    events: &mut Vec<AgentEvent>,
+    tool_id: &str,
+    event: CodeDeepResearchEvent,
+) {
+    match event {
+        CodeDeepResearchEvent::Agent(AgentEvent::End { .. } | AgentEvent::Error { .. }) => {}
+        CodeDeepResearchEvent::Agent(event) => emit_research_event(sender, events, event).await,
+        CodeDeepResearchEvent::Engine(event) => {
+            let wire = SseEvent::json(&deep_research_event_wire(&event))
+                .map(|event| event.with_event("deep_research"));
+            let _ = sender.send(wire).await;
+            if let Some(delta) = deep_research_event_delta(&event) {
+                emit_research_event(
+                    sender,
+                    events,
+                    AgentEvent::ToolOutputDelta {
+                        id: tool_id.to_string(),
+                        name: "deep_research".to_string(),
+                        delta,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+}
+
+fn deep_research_event_wire(event: &DeepResearchEvent) -> Value {
+    match event {
+        DeepResearchEvent::RunStarted { run_id, query } => json!({
+            "type": "run_started",
+            "run_id": run_id,
+            "query": query,
+        }),
+        DeepResearchEvent::StageStarted { run_id, stage } => json!({
+            "type": "stage_started",
+            "run_id": run_id,
+            "stage": stage,
+        }),
+        DeepResearchEvent::StageCompleted { run_id, stage } => json!({
+            "type": "stage_completed",
+            "run_id": run_id,
+            "stage": stage,
+        }),
+        DeepResearchEvent::StageDegraded {
+            run_id,
+            stage,
+            reason,
+        } => json!({
+            "type": "stage_degraded",
+            "run_id": run_id,
+            "stage": stage,
+            "reason": reason,
+        }),
+        DeepResearchEvent::PublicationCompleted {
+            run_id,
+            outcome,
+            quality,
+            ..
+        } => json!({
+            "type": "publication_completed",
+            "run_id": run_id,
+            "outcome": outcome,
+            "quality": quality,
+            "artifact_kinds": ["markdown", "html"],
+        }),
+        DeepResearchEvent::RunCompleted { run_id, outcome } => json!({
+            "type": "run_completed",
+            "run_id": run_id,
+            "outcome": outcome,
+        }),
+        DeepResearchEvent::RunCancelled { run_id } => json!({
+            "type": "run_cancelled",
+            "run_id": run_id,
+        }),
+        DeepResearchEvent::RunFailed { run_id, message } => json!({
+            "type": "run_failed",
+            "run_id": run_id,
+            "message": message,
+        }),
+    }
+}
+
+fn deep_research_event_delta(event: &DeepResearchEvent) -> Option<String> {
+    match event {
+        DeepResearchEvent::RunStarted { .. } => Some("DeepResearch run started.\n".to_string()),
+        DeepResearchEvent::StageStarted { stage, .. } => {
+            Some(format!("DeepResearch: {}.\n", research_stage_id(*stage)))
+        }
+        DeepResearchEvent::StageCompleted { stage, .. } => Some(format!(
+            "DeepResearch completed {}.\n",
+            research_stage_id(*stage)
+        )),
+        DeepResearchEvent::StageDegraded { stage, reason, .. } => Some(format!(
+            "DeepResearch degraded {}: {reason}\n",
+            research_stage_id(*stage)
+        )),
+        DeepResearchEvent::PublicationCompleted {
+            outcome, quality, ..
+        } => Some(format!(
+            "DeepResearch published {} with {}/{} relevant sources.\n",
+            publication_outcome_id(*outcome),
+            quality.relevant_source_count,
+            quality.source_count
+        )),
+        DeepResearchEvent::RunCompleted { outcome, .. } => Some(format!(
+            "DeepResearch completed with {} publication.\n",
+            publication_outcome_id(*outcome)
+        )),
+        DeepResearchEvent::RunCancelled { .. } => {
+            Some("DeepResearch cancellation settled.\n".to_string())
+        }
+        DeepResearchEvent::RunFailed { message, .. } => {
+            Some(format!("DeepResearch failed: {message}\n"))
+        }
+    }
+}
+
+fn research_stage_id(stage: ResearchStage) -> &'static str {
+    match stage {
+        ResearchStage::Planning => "planning",
+        ResearchStage::BootstrapRetrieval => "bootstrap retrieval",
+        ResearchStage::PlannedRetrieval => "planned retrieval",
+        ResearchStage::SourcePublication => "source publication",
+        ResearchStage::ReportGeneration => "report generation",
+        ResearchStage::FinalPublication => "final publication",
+    }
+}
+
+fn publication_outcome_id(outcome: PublicationOutcome) -> &'static str {
+    match outcome {
+        PublicationOutcome::Synthesized => "synthesized",
+        PublicationOutcome::Qualified => "qualified",
+        PublicationOutcome::SourceBacked => "source-backed",
+        PublicationOutcome::NoEvidence => "no-evidence",
+    }
+}
+
+pub(super) fn code_web_research_run_id(turn_id: &str) -> String {
+    let normalized = turn_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(120)
+        .collect::<String>();
+    format!("web-{normalized}")
+}
+
+pub(super) fn validate_code_web_research_turn(
+    query: &str,
+    context_files: &[String],
+    skill_names: &[String],
+) -> Result<(), String> {
+    if !skill_names.is_empty() {
+        return Err(
+            "DeepResearch does not support selected skills; remove skillNames and retry"
+                .to_string(),
+        );
+    }
+    DeepResearchRequest::new(
+        "web-queue-contract-validation",
+        query,
+        EvidenceScope::WebAndWorkspace,
+    )
+    .with_workspace_source_hints(
+        context_files
+            .iter()
+            .cloned()
+            .map(WorkspaceSourceHint::new)
+            .collect(),
+    )
+    .validate()
+}
+
+fn deep_research_start_error(error: String) -> BootError {
+    if error.contains("workspace source hint")
+        || error.contains("workspace source hints")
+        || error.contains("DeepResearch request")
+    {
+        BootError::BadRequest(error)
+    } else {
+        BootError::Internal(error)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -430,42 +743,24 @@ fn research_memory_dir(workspace: &Path, configured: Option<&Path>) -> PathBuf {
 }
 
 fn research_artifact_metadata(
-    workspace: &Path,
+    _workspace: &Path,
     synthesis: &DeepResearchReportSynthesis,
 ) -> Result<Value, String> {
+    a3s_deep_research::report::validate_deep_research_run_id(&synthesis.run_id)?;
     Ok(json!({
+        "runId": synthesis.run_id,
         "status": report_status_id(synthesis.status),
-        "markdownPath": relative_research_artifact(workspace, &synthesis.artifacts.markdown, "report.md")?,
-        "htmlPath": relative_research_artifact(workspace, &synthesis.artifacts.html, "index.html")?,
+        "quality": synthesis.quality,
+        "artifactKinds": ["markdown", "html"],
     }))
-}
-
-fn relative_research_artifact(
-    workspace: &Path,
-    artifact: &Path,
-    expected_name: &str,
-) -> Result<String, String> {
-    let relative = artifact.strip_prefix(workspace).map_err(|_| {
-        format!(
-            "DeepResearch artifact escaped the active workspace: {}",
-            artifact.display()
-        )
-    })?;
-    let normalized = relative.to_string_lossy().replace('\\', "/");
-    if !normalized.starts_with(".a3s/research/") || !normalized.ends_with(expected_name) {
-        return Err(format!(
-            "DeepResearch returned an invalid report artifact path: {}",
-            artifact.display()
-        ));
-    }
-    Ok(normalized)
 }
 
 fn report_status_id(status: DeepResearchReportStatus) -> &'static str {
     match status {
-        DeepResearchReportStatus::Completed => "completed",
+        DeepResearchReportStatus::Synthesized => "synthesized",
         DeepResearchReportStatus::Qualified => "qualified",
-        DeepResearchReportStatus::Degraded => "degraded",
+        DeepResearchReportStatus::SourceBacked => "source_backed",
+        DeepResearchReportStatus::NoEvidence => "no_evidence",
     }
 }
 
@@ -473,32 +768,52 @@ fn duration_millis(started_at: Instant) -> u64 {
     u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-async fn validated_report_path(workspace: &Path, relative_path: &str) -> BootResult<PathBuf> {
-    let relative_path = Path::new(relative_path.trim());
-    if relative_path.is_absolute()
-        || relative_path
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        || !relative_path.starts_with(".a3s/research")
-        || relative_path.file_name().and_then(|name| name.to_str()) != Some("index.html")
-    {
-        return Err(BootError::BadRequest(
-            "path must identify a generated .a3s/research/*/index.html report".to_string(),
-        ));
-    }
+async fn validated_run_artifact_path(
+    workspace: &Path,
+    run_id: &str,
+    kind: &str,
+) -> BootResult<(PathBuf, &'static str)> {
+    let (file_name, content_type) = match kind.trim() {
+        "html" => ("index.html", "text/html; charset=utf-8"),
+        "markdown" => ("report.md", "text/markdown; charset=utf-8"),
+        _ => {
+            return Err(BootError::BadRequest(
+                "kind must be `html` or `markdown`".to_string(),
+            ))
+        }
+    };
+    let relative_dir =
+        a3s_deep_research::report::deep_research_run_artifact_relative_directory(run_id)
+            .map_err(BootError::BadRequest)?;
     let workspace = tokio::fs::canonicalize(workspace)
         .await
         .map_err(report_io_error)?;
-    let report_root = workspace.join(".a3s/research");
-    let candidate = tokio::fs::canonicalize(workspace.join(relative_path))
+    let artifact_dir = tokio::fs::canonicalize(workspace.join(relative_dir))
         .await
         .map_err(report_io_error)?;
-    if !candidate.starts_with(&report_root) {
+    if !artifact_dir.starts_with(&workspace) {
         return Err(BootError::Forbidden(
-            "DeepResearch report path escapes the active workspace".to_string(),
+            "DeepResearch artifact directory escapes the active workspace".to_string(),
         ));
     }
-    Ok(candidate)
+    let report_path = artifact_dir.join(file_name);
+    let link_metadata = tokio::fs::symlink_metadata(&report_path)
+        .await
+        .map_err(report_io_error)?;
+    if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+        return Err(BootError::Forbidden(
+            "DeepResearch artifact must be a plain file".to_string(),
+        ));
+    }
+    let report_path = tokio::fs::canonicalize(report_path)
+        .await
+        .map_err(report_io_error)?;
+    if report_path.parent() != Some(artifact_dir.as_path()) {
+        return Err(BootError::Forbidden(
+            "DeepResearch artifact escaped its run directory".to_string(),
+        ));
+    }
+    Ok((report_path, content_type))
 }
 
 fn report_io_error(error: std::io::Error) -> BootError {
@@ -514,22 +829,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn artifact_metadata_exposes_only_workspace_relative_report_paths() {
+    fn artifact_metadata_exposes_run_identity_without_filesystem_paths() {
         let workspace = Path::new("/tmp/workspace");
         let synthesis = DeepResearchReportSynthesis {
+            run_id: "artifact-metadata-test".to_string(),
             text: "report".to_string(),
             artifacts: crate::commands::code::research_runtime::ResearchReportArtifacts {
-                markdown: workspace.join(".a3s/research/topic/report.md"),
-                html: workspace.join(".a3s/research/topic/index.html"),
+                markdown: workspace
+                    .join(".a3s/research/artifacts/artifact-metadata-test/report.md"),
+                html: workspace.join(".a3s/research/artifacts/artifact-metadata-test/index.html"),
             },
-            status: DeepResearchReportStatus::Completed,
+            status: DeepResearchReportStatus::Synthesized,
+            quality: a3s_deep_research::report::DeepResearchPublicationQuality::default(),
         };
 
         let metadata = research_artifact_metadata(workspace, &synthesis).expect("report metadata");
 
-        assert_eq!(metadata["status"], "completed");
-        assert_eq!(metadata["markdownPath"], ".a3s/research/topic/report.md");
-        assert_eq!(metadata["htmlPath"], ".a3s/research/topic/index.html");
+        assert_eq!(metadata["status"], "synthesized");
+        assert_eq!(metadata["runId"], "artifact-metadata-test");
+        assert_eq!(metadata["artifactKinds"], json!(["markdown", "html"]));
+        assert!(metadata.get("markdownPath").is_none());
+        assert!(metadata.get("htmlPath").is_none());
+    }
+
+    #[test]
+    fn typed_sse_publication_event_omits_filesystem_paths() {
+        let event = DeepResearchEvent::PublicationCompleted {
+            run_id: "typed-sse-test".to_string(),
+            outcome: PublicationOutcome::SourceBacked,
+            quality: a3s_deep_research::report::DeepResearchPublicationQuality::default(),
+            artifacts: crate::commands::code::research_runtime::ResearchReportArtifacts {
+                markdown: PathBuf::from(
+                    "/private/workspace/.a3s/research/artifacts/typed-sse-test/report.md",
+                ),
+                html: PathBuf::from(
+                    "/private/workspace/.a3s/research/artifacts/typed-sse-test/index.html",
+                ),
+            },
+        };
+
+        let wire = deep_research_event_wire(&event);
+
+        assert_eq!(wire["type"], "publication_completed");
+        assert_eq!(wire["run_id"], "typed-sse-test");
+        assert_eq!(wire["outcome"], "source_backed");
+        assert_eq!(wire["artifact_kinds"], json!(["markdown", "html"]));
+        assert!(wire.get("artifacts").is_none());
+        assert!(!wire.to_string().contains("/private/workspace"));
     }
 
     #[test]
@@ -551,21 +897,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn report_path_rejects_traversal_and_symlink_escape() {
+    async fn artifact_lookup_uses_run_identity_and_kind() {
         let workspace = tempfile::tempdir().expect("workspace");
-        let report_dir = workspace.path().join(".a3s/research/topic");
+        let report_dir = workspace
+            .path()
+            .join(".a3s/research/artifacts/artifact-path-test");
         std::fs::create_dir_all(&report_dir).expect("report directory");
         std::fs::write(report_dir.join("index.html"), "<!doctype html>").expect("report");
+        std::fs::write(report_dir.join("report.md"), "# Report").expect("markdown");
 
-        let valid = validated_report_path(workspace.path(), ".a3s/research/topic/index.html")
-            .await
-            .expect("valid report path");
-        assert!(valid.ends_with(".a3s/research/topic/index.html"));
-        assert!(validated_report_path(workspace.path(), "../index.html")
-            .await
-            .is_err());
+        let (valid, content_type) =
+            validated_run_artifact_path(workspace.path(), "artifact-path-test", "html")
+                .await
+                .expect("valid report identity");
+        assert!(valid.ends_with(".a3s/research/artifacts/artifact-path-test/index.html"));
+        assert_eq!(content_type, "text/html; charset=utf-8");
         assert!(
-            validated_report_path(workspace.path(), ".a3s/research/topic/report.md")
+            validated_run_artifact_path(workspace.path(), "../index", "html")
+                .await
+                .is_err()
+        );
+        assert!(
+            validated_run_artifact_path(workspace.path(), "artifact-path-test", "path")
                 .await
                 .is_err()
         );

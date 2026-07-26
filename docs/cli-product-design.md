@@ -249,14 +249,19 @@ atomic-claim, and strong-source gates, and rebuilds the source ledger from the
 accepted blocks. An invalid block cannot erase a valid sibling, and an invalid
 or unavailable proposal leaves the source-backed report in place.
 
-Publication status is operational: `synthesized` passed the Host admission
-gates, `source_backed` preserves fetched evidence without claiming a completed
+Publication status is operational: `synthesized` passed complete Host admission,
+`qualified` preserves useful admitted claims with an explicit typed material
+gap, `source_backed` preserves fetched evidence without claiming a completed
 synthesis, and `no_evidence` records the acquisition boundary. The Host renders
 and atomically replaces both artifacts from the admitted report document.
-The TUI `?` path and `a3s code research` call this same runtime. Stable Flow
-identities reuse completed search, fetch, and generation effects after restart;
-an ambiguous running effect may be redelivered once, but bootstrap workflow
+Headless CLI, the TUI `?` path, and Code Web call the same typed runner. Stable
+Flow identities retain their effect-level replay semantics; bootstrap workflow
 metadata can never replace the Host-owned terminal publication result.
+
+Artifacts are keyed by run ID under `.a3s/research/artifacts/`. The version-2
+run journal stores a strict typed lifecycle/stage/publication projection
+without absolute artifact paths. Code Web restores that projection on page
+refresh and serves artifacts only by validated run ID and format kind.
 
 ### 6.3 Asset Families
 

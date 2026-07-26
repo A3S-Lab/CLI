@@ -31,7 +31,9 @@ fn recorded_f01_is_readmitted_and_rendered_without_a_model() {
 
     let html = crate::tui::deep_research_completed_report_html_for_test(&case.query, &resolved);
     assert!(html.contains("<html lang=\"en\">"));
-    assert!(html.contains("Evidence profile"));
+    assert!(html.contains("class=\"report-shell\""));
+    assert!(html.contains("class=\"report-nav\""));
+    assert!(!html.contains("Evidence profile"));
     assert!(html.contains("https://releases.example.test/aurora/2.0"));
     assert!(html.contains("https://status.example.test/aurora/archive"));
 }
@@ -73,7 +75,9 @@ fn recorded_f04_is_rejected_and_replaced_without_a_model() {
     assert!(markdown.contains("Northwind SDK 3.0 supports Linux and macOS."));
     assert!(markdown.contains("https://docs.example.test/northwind/3/platforms"));
     assert!(!markdown.contains("platform-policy"));
-    assert!(html.contains("Evidence profile"));
+    assert!(html.contains("class=\"report-shell\""));
+    assert!(html.contains("class=\"report-nav\""));
+    assert!(!html.contains("Evidence profile"));
 }
 
 fn recorded_raw_output(case_id: &str) -> String {

@@ -48,12 +48,21 @@ use a3s_tui::{
 };
 use tokio::sync::{mpsc, Mutex};
 
+use a3s_deep_research::engine::{
+    DeepResearchEvent, DeepResearchLifecycle, EvidenceScope, PublicationOutcome, ResearchStage,
+};
+
 // Team digital assets.
 #[path = "assets/clone.rs"]
 pub(crate) mod asset_clone;
 #[path = "assets/lifecycle.rs"]
 pub(crate) mod asset_lifecycle;
 use crate::commands::code::naming as asset_naming;
+use crate::research::{
+    build_code_deep_research_request, CodeDeepResearchEvent, CodeDeepResearchLaunch,
+    CodeDeepResearchRunExit, CodeDeepResearchRunHandle, CodeDeepResearchRunner,
+    CodeDeepResearchRunnerBudget,
+};
 
 // DeepResearch.
 #[path = "deep_research/artifacts.rs"]
@@ -94,8 +103,11 @@ pub(crate) use deep_research_artifacts::deep_research_write_report_pair_for_test
 use deep_research_artifacts::looks_like_deep_research_fallback_draft;
 #[cfg(test)]
 pub(crate) use deep_research_artifacts::materialize_deep_research_fallback_draft;
+use deep_research_artifacts::normalize_research_source_anchor;
 #[cfg(test)]
 use deep_research_artifacts::research_report_artifacts_from_output_for_query;
+#[cfg(test)]
+use deep_research_artifacts::workflow_evidence_summary;
 pub(crate) use deep_research_artifacts::{
     clean_deep_research_final_text_from_artifacts, materialize_deep_research_recovery_report,
     research_report_artifacts_from_output, resolve_deep_research_run_publication,
@@ -105,13 +117,11 @@ pub(crate) use deep_research_artifacts::{
 use deep_research_artifacts::{
     deep_research_report_artifacts_from_output_for_query, deep_research_report_slug,
 };
-use deep_research_artifacts::{normalize_research_source_anchor, workflow_evidence_summary};
 use deep_research_convergence::{
-    evaluate_terminal_inquiry_convergence, validated_inquiry_projection,
-    validated_inquiry_publication_outcome, ConvergenceAction, ConvergenceDecision,
-    InquiryTerminalOutcome, ValidatedInquiryProjection,
+    validated_inquiry_projection, validated_inquiry_publication_outcome, InquiryTerminalOutcome,
+    ValidatedInquiryProjection,
 };
-use deep_research_evidence_ledger::{accepted_evidence_ledger, AcceptedEvidence};
+use deep_research_evidence_ledger::accepted_evidence_ledger;
 use deep_research_host_digest::*;
 use deep_research_host_metadata::*;
 use deep_research_host_prompt::*;
@@ -125,9 +135,7 @@ pub(crate) use deep_research_inquiry_runtime::{
 };
 pub(crate) use deep_research_state_journal::ResearchOutcome;
 use deep_research_state_journal::{
-    fork_current_for_contradiction_review, reconcile_interrupted_latest_run,
-    record_child_event as record_deep_research_child_event,
-    record_convergence as record_deep_research_convergence,
+    reconcile_interrupted_latest_run, record_child_event as record_deep_research_child_event,
     record_evidence_ledger as record_deep_research_evidence_ledger,
     record_inquiry_state as record_deep_research_inquiry_state,
     record_run_terminal as record_deep_research_run_terminal,
@@ -140,25 +148,6 @@ pub(crate) use deep_research_workflow_store::{
     ensure_deep_research_workflow_run_id, recover_deep_research_bootstrap_acquisition_from_store,
     recover_deep_research_workflow_run_from_store,
 };
-
-/// Build the same engineered workflow for `a3s code research` that the TUI
-/// uses for `?` turns. The CLI must not carry a second planner, workflow
-/// source, or timeout policy that can drift from the interactive path.
-pub(crate) fn deep_research_cli_workflow_args_for_budget(
-    query: &str,
-    budget: BudgetPlan,
-    evidence_scope: Option<DeepResearchEvidenceScope>,
-) -> serde_json::Value {
-    let evidence_scope = evidence_scope.unwrap_or_else(deep_research_default_evidence_scope);
-    deep_research_workflow_args_for_budget(query, evidence_scope, budget)
-}
-
-pub(crate) fn deep_research_cli_canonical_workflow_output(
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> String {
-    deep_research_canonical_workflow_output(workflow_output, workflow_metadata)
-}
 
 pub(crate) struct DeepResearchCliSettlement<'a> {
     pub(crate) workspace: &'a std::path::Path,
@@ -285,6 +274,7 @@ mod deep_research_cli_settlement_tests {
         let run_id = "invalid-cli-publication-recovery";
         let workflow_output = serde_json::json!({
             "query": query,
+            "output_language": "en",
             "mode": "evidence_first_report",
             "publication": {}
         })
@@ -344,25 +334,6 @@ mod deep_research_cli_settlement_tests {
         .expect("verified recovery must close the CLI transaction");
         assert_eq!(outcome, ResearchOutcome::Degraded);
     }
-}
-
-pub(crate) fn materialize_deep_research_cli_recovery_report(
-    workspace: &Path,
-    query: &str,
-    reason: &str,
-    workflow_output: &str,
-    workflow_metadata: Option<&serde_json::Value>,
-) -> Result<(String, PathBuf, PathBuf), String> {
-    let artifacts = materialize_deep_research_recovery_report(
-        workspace,
-        query,
-        reason,
-        workflow_output,
-        workflow_metadata,
-    )?;
-    let text = clean_deep_research_final_text_from_artifacts(&artifacts, workspace)
-        .unwrap_or_else(|| reason.to_string());
-    Ok((text, artifacts.markdown, artifacts.html))
 }
 
 // System integrations.
@@ -543,10 +514,10 @@ const AUTO_REVIEW_IDLE: Duration = Duration::from_secs(300);
 const TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 const DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS: u64 = 10_000;
 const DEEP_RESEARCH_ABORT_GRACE_MS: u64 = 2_000;
-// The standalone engine owns acquisition, semantic admission, and its one
-// bounded report proposal. Smoke and interactive execution therefore share
-// one absolute Host budget instead of adding the legacy sectioned-synthesis
-// transaction.
+// The standalone engine owns acquisition, semantic admission, typed claim
+// generation, and evidence-preserving editorial planning. Smoke and
+// interactive execution therefore share one absolute Host budget instead of
+// adding the legacy sectioned-synthesis transaction.
 const DEEP_RESEARCH_RUN_HARD_TIMEOUT_MS: u64 = DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS
     + (2 * DEEP_RESEARCH_ABORT_GRACE_MS)
     + DEEP_RESEARCH_SMOKE_FINALIZATION_RESERVE_MS;
@@ -659,6 +630,10 @@ struct App {
     /// Transient host hand-off data. Event-derived lifecycle and quality state
     /// deliberately remain outside this snapshot.
     deep_research_workflow: DeepResearchWorkflowSnapshot,
+    /// Lifecycle owner for the isolated typed DeepResearch runtime.
+    deep_research_handle: Option<CodeDeepResearchRunHandle>,
+    /// Typed engine and nested-agent progress stream for the active run.
+    deep_research_events: Option<SharedDeepResearchRx>,
     /// Terminal classification for the active DeepResearch run. Recovery
     /// artifacts are useful diagnostics but must never be counted as a
     /// completed report.
@@ -1074,6 +1049,8 @@ impl App {
         let session = Arc::clone(&self.session);
         let stream_join = self.stream_join.take();
         let host_tool_abort = self.host_tool_abort.take();
+        let deep_research_handle = self.deep_research_handle.take();
+        self.deep_research_events = None;
         let agent_presence = self.agent_presence.publisher.clone();
         self.rx = None;
 
@@ -1092,6 +1069,9 @@ impl App {
             }
             if let Some(abort) = host_tool_abort {
                 abort.abort();
+            }
+            if let Some(handle) = deep_research_handle {
+                let _ = handle.cancel_and_settle().await;
             }
 
             let close = settle_session_close_for_quit(

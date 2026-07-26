@@ -150,6 +150,8 @@ impl App {
         self.host_tool_abort = None;
         self.host_progress_inflight = false;
         self.host_tool_call_id = None;
+        self.deep_research_events = None;
+        debug_assert!(self.deep_research_handle.is_none());
         self.restore_current_approval_feedback();
         self.pending_tools.clear();
         self.permission_rule_write_inflight = None;

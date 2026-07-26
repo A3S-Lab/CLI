@@ -19,6 +19,7 @@ use a3s_code_core::llm::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, path::PathBuf, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -30,6 +31,7 @@ const CODEX_BASE: &str = "https://chatgpt.com/backend-api/codex";
 const ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_MODEL_REFRESH_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+const MAX_PROMPT_CACHE_KEY_BYTES: usize = 64;
 const FALLBACK_CODEX_MODEL: &str = "gpt-5.6-sol";
 const CODEX_WIRE_REASONING_EFFORT_ORDER: &[&str] =
     &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -553,6 +555,7 @@ impl CodexClient {
     ) -> Value {
         let mut input = convert_messages(messages);
         let tools = convert_tools(tools);
+        let prompt_cache_key = codex_prompt_cache_key(&self.session_id);
         let reasoning_effort = self
             .reasoning_effort
             .as_deref()
@@ -583,7 +586,7 @@ impl CodexClient {
                 "reasoning": reasoning,
                 "store": false,
                 "stream": stream,
-                "prompt_cache_key": self.session_id,
+                "prompt_cache_key": prompt_cache_key,
             });
         }
 
@@ -596,7 +599,7 @@ impl CodexClient {
             "parallel_tool_calls": false,
             "store": false,
             "stream": stream,
-            "prompt_cache_key": self.session_id,
+            "prompt_cache_key": prompt_cache_key,
         });
         if let Some(effort) = reasoning_effort {
             body["reasoning"] = json!({ "effort": effort });
@@ -613,6 +616,7 @@ impl CodexClient {
 
     fn request_headers(&self) -> Vec<(String, String)> {
         let credentials = self.auth.credentials();
+        let provider_session_id = codex_prompt_cache_key(&self.session_id);
         let mut headers = vec![
             (
                 "Authorization".to_string(),
@@ -624,7 +628,7 @@ impl CodexClient {
                 "responses=experimental".to_string(),
             ),
             ("originator".to_string(), ORIGINATOR.to_string()),
-            ("session_id".to_string(), self.session_id.clone()),
+            ("session_id".to_string(), provider_session_id),
             ("Accept".to_string(), "text/event-stream".to_string()),
             ("User-Agent".to_string(), codex_user_agent()),
         ];
@@ -654,6 +658,13 @@ impl CodexClient {
     }
 }
 
+fn codex_prompt_cache_key(session_id: &str) -> String {
+    if session_id.len() <= MAX_PROMPT_CACHE_KEY_BYTES {
+        return session_id.to_string();
+    }
+    format!("{:x}", Sha256::digest(session_id.as_bytes()))
+}
+
 fn codex_user_agent() -> String {
     format!(
         "codex_cli_rs/{} ({} {}; a3s)",
@@ -674,11 +685,7 @@ impl LlmClient for CodexClient {
 
     fn fork_for_session(&self, session_id: &str) -> Option<Arc<dyn LlmClient>> {
         let mut client = self.clone();
-        let is_new_session = self.session_id != session_id;
         client.session_id = session_id.to_string();
-        if is_new_session {
-            client.transport = self.transport.fresh_session();
-        }
         Some(Arc::new(client))
     }
 

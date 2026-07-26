@@ -1,17 +1,26 @@
 //! Non-interactive DeepResearch execution and report synthesis.
 
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Arc;
 
 use a3s_code_core::config::CodeConfig;
-use a3s_code_core::{Agent, AgentSession, SessionOptions, ToolCallResult};
+#[cfg(test)]
+use a3s_code_core::{AgentSession, SessionOptions};
+use a3s_deep_research::engine::{
+    DeepResearchEvent, DeepResearchLifecycle, EvidenceScope, PublicationOutcome, ResearchStage,
+};
+use a3s_deep_research::report::{
+    clean_deep_research_final_text_from_artifacts, DeepResearchPublicationQuality,
+};
 
 use crate::budget::{
     budget_plan_for_effort_index, BudgetPlan, BudgetWorkload, DEFAULT_TUI_EFFORT_INDEX,
 };
-
-const RESEARCH_TOOL_EXEC_TIMEOUT_MS: u64 = 30 * 60 * 1000;
-const RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD: u32 = 12;
+use crate::research::{
+    build_code_deep_research_request, CodeDeepResearchEvent, CodeDeepResearchLaunch,
+    CodeDeepResearchRunExit, CodeDeepResearchRunner, CodeDeepResearchRunnerBudget,
+};
 
 pub(crate) fn deep_research_default_budget() -> BudgetPlan {
     budget_plan_for_effort_index(DEFAULT_TUI_EFFORT_INDEX, None, BudgetWorkload::DeepResearch)
@@ -19,11 +28,25 @@ pub(crate) fn deep_research_default_budget() -> BudgetPlan {
 
 #[cfg(test)]
 pub(crate) fn deep_research_workflow_args(query: &str) -> serde_json::Value {
-    crate::tui::deep_research_cli_workflow_args_for_budget(
+    deep_research_workflow_args_for_scope(query, None)
+}
+
+#[cfg(test)]
+fn deep_research_workflow_args_for_scope(
+    query: &str,
+    evidence_scope: Option<crate::tui::DeepResearchEvidenceScope>,
+) -> serde_json::Value {
+    let request = build_code_deep_research_request(
+        Some("cli-workflow-contract-test".to_string()),
         query,
-        deep_research_default_budget(),
-        None,
+        engine_evidence_scope(evidence_scope),
+        runner_budget(deep_research_default_budget()),
+        Vec::new(),
     )
+    .expect("DeepResearch test request");
+    request
+        .to_workflow_arguments()
+        .expect("DeepResearch workflow arguments")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,281 +126,153 @@ pub(crate) async fn execute_deepresearch_query_in(
     if query.is_empty() {
         anyhow::bail!("DeepResearch query must not be empty");
     }
-    let workspace_text = workspace.to_string_lossy().to_string();
-    let session = build_deepresearch_session(&workspace_text, code_config, memory_dir).await?;
-    eprintln!("deepresearch: gathering evidence via the host-managed workflow…");
-    let mut workflow_args =
-        crate::tui::deep_research_cli_workflow_args_for_budget(query, budget, evidence_scope);
-    let run_id = crate::tui::ensure_deep_research_workflow_run_id(&mut workflow_args)
-        .ok_or_else(|| anyhow::anyhow!("failed to assign a DeepResearch workflow run ID"))?;
-    let workflow = run_deepresearch_inquiry(Arc::clone(&session), workflow_args.clone()).await;
-    let workflow_succeeded = workflow.as_ref().is_ok_and(|result| result.exit_code == 0);
-    let (workflow_output, metadata) = match workflow {
-        Ok(result) => (result.output, result.metadata),
-        Err(error) => (error, None),
-    };
-
-    let (mut synthesis, artifact_authority) =
-        match crate::tui::resolve_deep_research_run_publication(
-            workspace,
-            query,
-            &run_id,
-            &workflow_output,
-        ) {
-        Ok(Some(published)) => {
-            let text = crate::tui::clean_deep_research_final_text_from_artifacts(
-                &published.artifacts,
-                workspace,
-            )
-            .unwrap_or_else(|| "DeepResearch report published without a text preview.".to_string());
-            let status = match published.publication {
-                crate::tui::DeepResearchEvidenceFirstPublication::Synthesized => {
-                    DeepResearchReportStatus::Completed
-                }
-                crate::tui::DeepResearchEvidenceFirstPublication::Qualified => {
-                    DeepResearchReportStatus::Qualified
-                }
-                crate::tui::DeepResearchEvidenceFirstPublication::SourceBacked => {
-                    DeepResearchReportStatus::Degraded
-                }
-                crate::tui::DeepResearchEvidenceFirstPublication::NoEvidence => {
-                    DeepResearchReportStatus::Degraded
-                }
-            };
-            (
-                DeepResearchReportSynthesis {
-                    text,
-                    artifacts: ResearchReportArtifacts {
-                        markdown: published.artifacts.markdown,
-                        html: published.artifacts.html,
-                    },
-                    status,
-                },
-                crate::tui::DeepResearchTerminalArtifactAuthority::ValidatedPublication,
-            )
-        }
-        Ok(None) => (
-            materialize_deepresearch_cli_recovery(
-                workspace,
-                query,
-                "the standalone DeepResearch engine returned without its required Host publication",
-                &workflow_output,
-                metadata.as_ref(),
-            )?,
-            crate::tui::DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
-        ),
-        Err(error) => (
-            materialize_deepresearch_cli_recovery(
-                workspace,
-                query,
-                &format!("the standalone DeepResearch publication failed validation: {error}"),
-                &workflow_output,
-                metadata.as_ref(),
-            )?,
-            crate::tui::DeepResearchTerminalArtifactAuthority::VerifiedRecovery,
-        ),
-    };
-    let requested_outcome = match synthesis.status {
-        DeepResearchReportStatus::Completed => crate::tui::ResearchOutcome::Completed,
-        DeepResearchReportStatus::Qualified => crate::tui::ResearchOutcome::Qualified,
-        DeepResearchReportStatus::Degraded => crate::tui::ResearchOutcome::Degraded,
-    };
-    let journal_artifacts = crate::tui::ResearchReportArtifacts {
-        markdown: synthesis.artifacts.markdown.clone(),
-        html: synthesis.artifacts.html.clone(),
-    };
-    let settled_outcome =
-        crate::tui::settle_deep_research_cli_run(crate::tui::DeepResearchCliSettlement {
-            workspace,
-            run_id: &run_id,
-            query,
-            workflow_succeeded,
-            workflow_output: &workflow_output,
-            workflow_metadata: metadata.as_ref(),
-            requested_outcome,
-            artifacts: &journal_artifacts,
-            artifact_authority,
-        })
-        .await
-        .map_err(anyhow::Error::msg)?;
-    synthesis.status = match settled_outcome {
-        crate::tui::ResearchOutcome::Completed => DeepResearchReportStatus::Completed,
-        crate::tui::ResearchOutcome::Qualified => DeepResearchReportStatus::Qualified,
-        crate::tui::ResearchOutcome::Degraded | crate::tui::ResearchOutcome::Failed => {
-            DeepResearchReportStatus::Degraded
-        }
-        crate::tui::ResearchOutcome::Active => {
-            return Err(anyhow::anyhow!(
-                "DeepResearch CLI journal remained active after terminal settlement"
-            ));
-        }
-    };
-    Ok(synthesis)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeepResearchReportStatus {
-    Completed,
-    Qualified,
-    Degraded,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResearchReportArtifacts {
-    pub(crate) markdown: PathBuf,
-    pub(crate) html: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct DeepResearchReportSynthesis {
-    pub(crate) text: String,
-    pub(crate) artifacts: ResearchReportArtifacts,
-    pub(crate) status: DeepResearchReportStatus,
-}
-
-fn materialize_deepresearch_cli_recovery(
-    workspace: &Path,
-    query: &str,
-    reason: &str,
-    workflow_output: &str,
-    metadata: Option<&serde_json::Value>,
-) -> anyhow::Result<DeepResearchReportSynthesis> {
-    let (text, markdown, html) = crate::tui::materialize_deep_research_cli_recovery_report(
-        workspace,
+    let request = build_code_deep_research_request(
+        None,
         query,
-        reason,
-        workflow_output,
-        metadata,
+        engine_evidence_scope(evidence_scope),
+        runner_budget(budget),
+        Vec::new(),
     )
     .map_err(anyhow::Error::msg)?;
+    let runner = CodeDeepResearchRunner::new(workspace, code_config, memory_dir);
+    eprintln!("deepresearch: starting typed evidence-first run…");
+    let mut handle = runner
+        .start(
+            CodeDeepResearchLaunch {
+                request,
+                skill_names: Vec::new(),
+            },
+            crate::session_llm::resolve_session_llm_client,
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let events = handle
+        .take_events()
+        .ok_or_else(|| anyhow::anyhow!("DeepResearch event stream was already consumed"))?;
+    let event_drain = tokio::spawn(drain_deep_research_events(events));
+    let settled = handle.settle().await;
+    event_drain
+        .await
+        .map_err(|error| anyhow::anyhow!("DeepResearch event stream failed: {error}"))?;
+    let result = match settled.map_err(anyhow::Error::msg)? {
+        CodeDeepResearchRunExit::Completed(result) => *result,
+        CodeDeepResearchRunExit::Cancelled => {
+            anyhow::bail!("DeepResearch run was cancelled before publication")
+        }
+    };
+    if result.lifecycle != DeepResearchLifecycle::Completed {
+        anyhow::bail!(
+            "DeepResearch returned a non-terminal lifecycle after settlement: {:?}",
+            result.lifecycle
+        );
+    }
+    let text = clean_deep_research_final_text_from_artifacts(&result.artifacts, workspace)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "DeepResearch published unreadable report artifacts for run {}",
+                result.run_id
+            )
+        })?;
     Ok(DeepResearchReportSynthesis {
+        run_id: result.run_id,
         text,
-        artifacts: ResearchReportArtifacts { markdown, html },
-        status: DeepResearchReportStatus::Degraded,
+        artifacts: result.artifacts,
+        status: result.publication,
+        quality: result.quality,
     })
 }
 
-fn deepresearch_cli_permission_policy() -> a3s_code_core::permissions::PermissionPolicy {
-    let mut policy = a3s_code_core::permissions::PermissionPolicy::new()
-        .deny_all(&[
-            "Write(/**)",
-            "Edit(/**)",
-            "Write(**/../**)",
-            "Edit(**/../**)",
-        ])
-        .allow_all(&[
-            "Read(*)",
-            "Grep(*)",
-            "Glob(*)",
-            "LS(*)",
-            "read(*)",
-            "grep(*)",
-            "glob(*)",
-            "ls(*)",
-            "web_search(*)",
-            "web_fetch(*)",
-        ]);
-    policy.default_decision = a3s_code_core::permissions::PermissionDecision::Deny;
-    policy
+fn engine_evidence_scope(
+    evidence_scope: Option<crate::tui::DeepResearchEvidenceScope>,
+) -> EvidenceScope {
+    match evidence_scope.unwrap_or(crate::tui::DeepResearchEvidenceScope::WebAndWorkspace) {
+        crate::tui::DeepResearchEvidenceScope::LocalOnly => EvidenceScope::LocalOnly,
+        crate::tui::DeepResearchEvidenceScope::WebAndWorkspace => EvidenceScope::WebAndWorkspace,
+    }
 }
 
+fn runner_budget(budget: BudgetPlan) -> CodeDeepResearchRunnerBudget {
+    CodeDeepResearchRunnerBudget {
+        local_max_steps: budget.deep_research_child_steps,
+        max_tool_calls: budget.workflow_max_tool_calls,
+        max_output_bytes: budget.workflow_max_output_bytes,
+    }
+}
+
+async fn drain_deep_research_events(
+    mut events: tokio::sync::mpsc::Receiver<CodeDeepResearchEvent>,
+) {
+    while let Some(event) = events.recv().await {
+        match event {
+            CodeDeepResearchEvent::Engine(DeepResearchEvent::StageStarted { stage, .. }) => {
+                eprintln!("deepresearch: {}…", research_stage_label(stage));
+            }
+            CodeDeepResearchEvent::Engine(DeepResearchEvent::StageDegraded {
+                stage,
+                reason,
+                ..
+            }) => {
+                eprintln!(
+                    "deepresearch: {} degraded: {reason}",
+                    research_stage_label(stage)
+                );
+            }
+            CodeDeepResearchEvent::Engine(DeepResearchEvent::RunFailed { message, .. }) => {
+                eprintln!("deepresearch: run failed: {message}");
+            }
+            CodeDeepResearchEvent::Engine(_) | CodeDeepResearchEvent::Agent(_) => {}
+        }
+    }
+}
+
+fn research_stage_label(stage: ResearchStage) -> &'static str {
+    match stage {
+        ResearchStage::Planning => "planning research questions",
+        ResearchStage::BootstrapRetrieval => "gathering initial evidence",
+        ResearchStage::PlannedRetrieval => "retrieving planned evidence",
+        ResearchStage::SourcePublication => "publishing source-backed findings",
+        ResearchStage::ReportGeneration => "synthesizing the report",
+        ResearchStage::FinalPublication => "publishing final artifacts",
+    }
+}
+
+pub(crate) type DeepResearchReportStatus = PublicationOutcome;
+pub(crate) type ResearchReportArtifacts = a3s_deep_research::report::ResearchReportArtifacts;
+
+#[derive(Debug)]
+pub(crate) struct DeepResearchReportSynthesis {
+    pub(crate) run_id: String,
+    pub(crate) text: String,
+    pub(crate) artifacts: ResearchReportArtifacts,
+    pub(crate) status: DeepResearchReportStatus,
+    pub(crate) quality: DeepResearchPublicationQuality,
+}
+
+#[cfg(test)]
 async fn build_deepresearch_session(
     workspace: &str,
     code_config: CodeConfig,
     memory_dir: PathBuf,
 ) -> anyhow::Result<Arc<AgentSession>> {
-    build_deepresearch_session_with_resolver(
-        workspace,
+    let session_id = deep_research_execution_id();
+    crate::research::build_isolated_research_session_with_resolver(
+        Path::new(workspace),
         code_config,
         memory_dir,
+        EvidenceScope::WebAndWorkspace,
+        &session_id,
         crate::session_llm::resolve_session_llm_client,
     )
     .await
 }
 
-async fn build_deepresearch_session_with_resolver<F>(
-    workspace: &str,
-    code_config: CodeConfig,
-    memory_dir: PathBuf,
-    resolve_llm_client: F,
-) -> anyhow::Result<Arc<AgentSession>>
-where
-    F: FnOnce(
-        &CodeConfig,
-        &SessionOptions,
-        &str,
-    ) -> Result<Arc<dyn a3s_code_core::llm::LlmClient>, String>,
-{
-    let permission_policy = deepresearch_cli_permission_policy();
-    let session_id = deep_research_execution_id();
-    let opts = SessionOptions::new()
-        .with_session_id(&session_id)
-        .with_confirmation_policy(a3s_code_core::hitl::ConfirmationPolicy::default())
-        .with_permission_policy(permission_policy.clone())
-        .with_tool_timeout(RESEARCH_TOOL_EXEC_TIMEOUT_MS)
-        .with_duplicate_tool_call_threshold(RESEARCH_DUPLICATE_TOOL_CALL_THRESHOLD)
-        .with_file_memory(memory_dir)
-        // DeepResearch invokes only host-owned tools. Keep one manual `task`
-        // slot for the optional local-workspace retrieval step; never expose
-        // automatic delegation, parallel fan-out, or parent continuations.
-        .with_continuation(false)
-        .with_max_parallel_tasks(1)
-        .with_auto_delegation_enabled(false)
-        .with_auto_parallel_delegation(false)
-        .with_manual_delegation_enabled(true);
-    let llm_client = resolve_llm_client(&code_config, &opts, &session_id)
-        .map_err(|error| anyhow::anyhow!("failed to resolve DeepResearch model: {error}"))?;
-    let opts = opts.with_llm_client(llm_client);
-    let agent = Agent::from_config(code_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to load DeepResearch agent: {e}"))?;
-    let session = agent
-        .session_async(workspace.to_string(), Some(opts))
-        .await?;
-    session.register_dynamic_workflow_runtime()?;
-    Ok(Arc::new(session))
-}
-
+#[cfg(test)]
 fn deep_research_execution_id() -> String {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
     format!("research-{nanos:016x}-{:x}", std::process::id())
-}
-
-async fn run_deepresearch_inquiry(
-    session: Arc<AgentSession>,
-    args: serde_json::Value,
-) -> Result<ToolCallResult, String> {
-    let timeout_ms = crate::tui::DEEP_RESEARCH_EVIDENCE_FIRST_HOST_TIMEOUT_MS;
-    let (mut progress_rx, workflow_join) =
-        crate::tui::spawn_deep_research_evidence_first(session, args);
-    let workflow_abort = workflow_join.abort_handle();
-    let progress_drain = tokio::spawn(async move { while progress_rx.recv().await.is_some() {} });
-    let result = match tokio::time::timeout(
-        std::time::Duration::from_millis(timeout_ms),
-        workflow_join,
-    )
-    .await
-    {
-        Ok(Ok(result)) => result.map_err(|err| err.to_string()),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => {
-            workflow_abort.abort();
-            Err(format!(
-                "DeepResearch timed out after {timeout_ms} ms while acquiring sources and publishing its Host-owned report"
-            ))
-        }
-    };
-    progress_drain.abort();
-    result.map(|mut result| {
-        result.output = crate::tui::deep_research_cli_canonical_workflow_output(
-            &result.output,
-            result.metadata.as_ref(),
-        );
-        result
-    })
 }
 
 #[cfg(test)]

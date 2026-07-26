@@ -23,13 +23,25 @@ impl KernelService {
         let context_files = string_array(&request, "contextFiles")?;
         let skill_names = string_array(&request, "skillNames")?;
         let mode = queued_turn_mode(&request)?;
+        if mode == CodeWebQueuedTurnMode::DeepResearch {
+            super::research::validate_code_web_research_turn(
+                &content,
+                &context_files,
+                &skill_names,
+            )
+            .map_err(BootError::BadRequest)?;
+        }
+        let turn_id = HostEnv::default().next_id();
+        let research_run_id = (mode == CodeWebQueuedTurnMode::DeepResearch)
+            .then(|| super::research::code_web_research_run_id(&turn_id));
         let turn = CodeWebQueuedTurn {
-            id: HostEnv::default().next_id(),
+            id: turn_id,
             kind: CodeWebQueuedTurnKind::User,
             content,
             context_files,
             skill_names,
             mode,
+            research_run_id,
             priority: USER_TURN_PRIORITY,
             enqueued_at: chrono::Utc::now().timestamp_millis(),
         };
@@ -60,14 +72,23 @@ impl KernelService {
         let content = required_queue_content(&request)?;
         let context_files = string_array(&request, "contextFiles")?;
         let skill_names = string_array(&request, "skillNames")?;
-        let updated = self
-            .state
-            .session_turn_queues
-            .lock()
-            .await
-            .entry(session_id.to_string())
-            .or_default()
-            .update_user_turn(turn_id, content, context_files, skill_names);
+        let updated = {
+            let mut queues = self.state.session_turn_queues.lock().await;
+            let queue = queues.entry(session_id.to_string()).or_default();
+            let deep_research =
+                queue.snapshot().items.iter().any(|turn| {
+                    turn.id == turn_id && turn.mode == CodeWebQueuedTurnMode::DeepResearch
+                });
+            if deep_research {
+                super::research::validate_code_web_research_turn(
+                    &content,
+                    &context_files,
+                    &skill_names,
+                )
+                .map_err(BootError::BadRequest)?;
+            }
+            queue.update_user_turn(turn_id, content, context_files, skill_names)
+        };
         if !updated {
             return Err(BootError::NotFound(format!(
                 "queued user turn `{turn_id}` was not found"
@@ -230,6 +251,7 @@ impl KernelService {
             context_files: Vec::new(),
             skill_names: Vec::new(),
             mode: CodeWebQueuedTurnMode::Standard,
+            research_run_id: None,
             priority: GOAL_CONTINUATION_PRIORITY,
             enqueued_at: chrono::Utc::now().timestamp_millis(),
         });
@@ -239,6 +261,42 @@ impl KernelService {
 
     async fn session_turn_queue_json(&self, session_id: &str) -> Value {
         let snapshot = self.session_turn_queue_snapshot(session_id).await;
+        let active_research = match snapshot.active.as_ref().and_then(|active| {
+            (active.turn.mode == CodeWebQueuedTurnMode::DeepResearch)
+                .then_some(active.turn.research_run_id.as_deref())
+                .flatten()
+        }) {
+            Some(run_id) => match self.kernel_session(session_id).await {
+                Ok(session) => match crate::research::read_code_deep_research_journal(
+                    session.workspace(),
+                    run_id,
+                )
+                .await
+                {
+                    Ok(Some(research)) => Some(json!({
+                        "schemaVersion": research.schema_version,
+                        "runId": research.run_id,
+                        "sequence": research.sequence,
+                        "recordedAt": research.recorded_at,
+                        "lifecycle": research.lifecycle,
+                        "stage": research.stage,
+                        "publication": research.publication,
+                        "quality": research.quality,
+                    })),
+                    Ok(None) => Some(json!({
+                        "schemaVersion": 2,
+                        "runId": run_id,
+                        "lifecycle": "running",
+                    })),
+                    Err(error) => {
+                        tracing::warn!(%error, %session_id, %run_id, "could not restore DeepResearch journal projection");
+                        None
+                    }
+                },
+                Err(_) => None,
+            },
+            None => None,
+        };
         let total = snapshot.items.len();
         let next_item_id = snapshot.items.first().map(|turn| turn.id.clone());
         let status = if snapshot.active.is_some() {
@@ -255,6 +313,7 @@ impl KernelService {
             "status": status,
             "paused": snapshot.paused,
             "active": snapshot.active,
+            "research": active_research,
             "items": snapshot.items,
             "total": total,
             "nextItemId": next_item_id,

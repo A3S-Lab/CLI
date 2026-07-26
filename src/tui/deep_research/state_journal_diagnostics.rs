@@ -100,6 +100,7 @@ pub(crate) async fn research_diff(
     ))
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResearchForkSummary {
     pub(crate) branch_store_id: String,
@@ -108,6 +109,7 @@ pub(crate) struct ResearchForkSummary {
     pub(crate) relations_added: usize,
 }
 
+#[cfg(test)]
 pub(crate) async fn fork_with_validated_evidence(
     workspace: &Path,
     run_id: &str,
@@ -172,30 +174,6 @@ pub(crate) async fn fork_with_validated_evidence(
         objects_added: diff.objects_added.len(),
         relations_added: diff.relations_added.len(),
     })
-}
-
-pub(crate) async fn fork_current_for_contradiction_review(
-    workspace: &Path,
-    run_id: &str,
-    evidence: &[super::super::deep_research_evidence_ledger::AcceptedEvidence],
-) -> Result<ResearchForkSummary> {
-    if !evidence.iter().any(|item| !item.contradictions.is_empty()) {
-        anyhow::bail!("contradiction review fork requires contradictory evidence");
-    }
-    let journal = DeepResearchStateJournal::open(workspace, run_id)
-        .await?
-        .with_context(|| format!("DeepResearch run `{run_id}` was not found"))?;
-    let sequence = u64::try_from(journal.runtime.events().len())
-        .context("DeepResearch event sequence exceeds u64")?;
-    drop(journal);
-    fork_with_validated_evidence(
-        workspace,
-        run_id,
-        sequence,
-        "contradiction-review",
-        evidence,
-    )
-    .await
 }
 
 fn summarize_object_diff(diff: &a3s_code_core::state_graph::GraphDiff) -> String {

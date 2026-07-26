@@ -808,6 +808,9 @@ impl App {
         if self.deep_research_journal_finalization_inflight {
             return None;
         }
+        if self.deep_research_workflow.typed_runner {
+            return self.complete_deep_research_settlement(exit);
+        }
         let run_id = self
             .deep_research_workflow
             .args
@@ -834,6 +837,9 @@ impl App {
             DeepResearchRunOutcome::Active => None,
             DeepResearchRunOutcome::Completed => Some(ResearchOutcome::Completed),
             DeepResearchRunOutcome::Qualified => Some(ResearchOutcome::Qualified),
+            DeepResearchRunOutcome::SourceBacked | DeepResearchRunOutcome::NoEvidence => {
+                Some(ResearchOutcome::Degraded)
+            }
             DeepResearchRunOutcome::Degraded => Some(ResearchOutcome::Degraded),
         };
         if let (Some(run_id), Some(outcome)) = (run_id, outcome) {
@@ -955,6 +961,8 @@ impl App {
             self.goal_since = goal_since;
         }
         self.deep_research_workflow.clear();
+        debug_assert!(self.deep_research_handle.is_none());
+        self.deep_research_events = None;
         self.deep_research_outcome = DeepResearchRunOutcome::Active;
         self.deep_research_journal_finalization_inflight = false;
         self.deep_research_terminal_artifacts = None;

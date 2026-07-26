@@ -13,10 +13,11 @@ No evaluator-only architecture is admitted as production authority. The
 feedback-loop experiment in
 [`deep-research-evidence-loop.md`](deep-research-evidence-loop.md) remains
 historical design evidence while the candidate is reset around the trust and
-measurement boundaries below. New CLI and TUI runs now use the standalone
-`a3s-deep-research` engine, but architecture integration is not product
-acceptance. Equal-budget replay, representative live evaluation, fault,
-latency, source-quality, and website gates remain the release authority.
+measurement boundaries below. New CLI, TUI, and Code Web runs now use the
+standalone `a3s-deep-research` engine through the shared typed runner, but
+architecture integration is not product acceptance. Equal-budget replay,
+representative live evaluation, fault, latency, source-quality, and website
+gates remain the release authority.
 
 ## Decision
 
@@ -187,8 +188,8 @@ For every requested dimension, the evaluator records exactly one outcome:
   report did not find or use it; or
 - `incorrect`: the report gives a materially false or unsupported answer.
 
-An internal `completed`, `qualified`, or `degraded` status never replaces this
-external assessment.
+An internal `Synthesized`, `Qualified`, `SourceBacked`, or `NoEvidence`
+publication outcome never replaces this external assessment.
 
 ## Hard Gates
 
@@ -443,14 +444,14 @@ case.
 
 The engine now also covers an error returned after the synthesized report pair
 has already replaced the staged source-backed pair. It records report
-generation as complete, records final publication as degraded, and explicitly
-re-publishes the same closed source catalog. A real-file regression first
-writes the synthesized pair, injects the post-write error, and then verifies
-that artifact discovery accepts only the restored source-backed marker and
-zero-claim quality envelope. If that deterministic restoration also fails, the
-engine returns a publication error rather than describing an unverified
-artifact generation as safe. This closes the final-publication write-error case
-without inspecting error prose.
+generation as complete, records final publication as `SourceBacked`, and
+explicitly re-publishes the same closed source catalog. A real-file regression
+first writes the synthesized pair, injects the post-write error, and then
+verifies that artifact discovery accepts only the restored source-backed marker
+and zero-claim quality envelope. If that deterministic restoration also fails,
+the engine returns a publication error rather than describing an unverified
+artifact generation as safe. This closes the final-publication write-error
+case without inspecting error prose.
 
 The active TUI path also covers the later crash window in which a validated
 Markdown/HTML pair has been published but the terminal research event has not
@@ -564,6 +565,30 @@ If a stage does not beat the baseline on its declared outcome, remove it from
 the active path. Passing unit tests for the stage is not sufficient.
 
 ## Current-State Evidence
+
+The 2026-07-26 release gate passed the new depth and product contracts:
+
+- standalone DeepResearch 0.1.3 passed 318 unit tests, eight integration and
+  public-contract tests, documentation tests, the executable JavaScript
+  discovery smoke, formatting, and package verification;
+- an exact durable replay produced a `qualified` Chinese report with 18
+  accepted claims, 17 findings, 10 analytical claims, three cross-source
+  syntheses, three cited sources, three typed gaps, and 3,453 substantive
+  characters. Its zero-resolved/one-deeply-analyzed shape exercised the narrow
+  all-bounded exception rather than bypassing the depth gate;
+- browser contract checks at 1,440, 1,024, and 390 CSS pixels found no
+  horizontal overflow and verified the left action menu, right table of
+  contents, active-anchor state, edit completion, title and table-of-contents
+  synchronization, self-contained HTML save/reopen, and print invocation; and
+- A3S Web passed 1,045 tests across 190 files, TypeScript checking, Biome lint,
+  and a production build. The shared CLI/TUI adapter tests covered typed
+  lifecycle projection, run-scoped artifacts, cancellation, and publication
+  recovery.
+
+This establishes deterministic publication and surface integration for the
+new rules. The retained report is intentionally qualified: three sources do
+not prove the complete current A3S Code TUI and Web implementation state, and
+the typed gaps remain visible rather than being converted into a roadmap claim.
 
 The 2026-07-24 structural-control regression passed the active standalone path:
 
@@ -790,12 +815,13 @@ cargo test deterministic_fallback_renders_source_instructions_as_inert_text -- -
 ```
 
 This proved that useful deterministic publication from a closed source catalog
-was feasible. The active CLI and TUI now call the standalone engine, stage the
-source-backed artifact before synthesis, and do not execute the former
-inquiry/sectioned-report transaction. That integration removes the dependency
-identified by the prototype, but it does not by itself pass F06. The complete
-interruption, persistence, model-timeout, artifact-write, and provider-failure
-matrix still requires frozen production-path evidence.
+was feasible. The active CLI, TUI, and Code Web now call the standalone engine
+through the shared typed runner, stage the source-backed artifact before
+synthesis, and do not execute the former inquiry/sectioned-report transaction.
+That integration removes the dependency identified by the prototype, but it
+does not by itself pass F06. The complete interruption, persistence,
+model-timeout, artifact-write, and provider-failure matrix still requires
+frozen production-path evidence.
 
 ### Host admission and deterministic renderer evidence
 
@@ -811,7 +837,8 @@ another model call. Focused tests prove that it:
 - derives complete, partial, and bounded material coverage from the admitted
   graph;
 - produces `Qualified` only when useful claims coexist with a material typed
-  gap; and
+  gap and the resolved dimensions pass the deep analytical gate, or when the
+  single permitted all-bounded partial conclusion passes that same gate; and
 - builds one citation sequence and deduplicated source ledger from exact
   admitted support.
 
@@ -838,11 +865,11 @@ cargo test --locked frozen_corpus_reaches_the_active_engine
 
 These were necessary contract corrections, not production acceptance. The
 closed admission contract and deterministic renderer now live in the
-standalone engine used by the active CLI and TUI. One live synthesized artifact
-has been inspected at 1440 pixels and 390 pixels and through a real four-page
-print render; the resulting print-width and ordered-list-marker defects now
-have renderer regressions. A single artifact is not a Website Gate pass for the
-representative corpus.
+standalone engine used by the active CLI, TUI, and Code Web. One live
+synthesized artifact has been inspected at 1440 pixels and 390 pixels and
+through a real four-page print render; the resulting print-width and
+ordered-list-marker defects now have renderer regressions. A single artifact
+is not a Website Gate pass for the representative corpus.
 
 ## Current Decision Point
 
@@ -892,9 +919,9 @@ Before claiming release-quality product acceptance:
    reruns;
 4. enforce the declared latency gates from exact-query submission through
    durable source persistence and final artifact publication; and
-5. inspect representative focused, comprehensive, qualified, degraded,
-   multilingual, and long-source artifacts on desktop, mobile, and print
-   surfaces.
+5. inspect representative focused, comprehensive, `Synthesized`, `Qualified`,
+   `SourceBacked`, `NoEvidence`, multilingual, and long-source artifacts on
+   desktop, mobile, and print surfaces.
 
 This decision point authorizes deletion as readily as addition. The goal is a
 reliable research product, not preservation of the current architecture.

@@ -10,7 +10,7 @@ use std::time::Duration;
 fn deep_research_report_route_serves_only_session_workspace_artifacts_with_a_sandbox_csp() {
     let root = tempfile::tempdir().expect("temporary DeepResearch report fixture");
     let workspace = root.path().join("workspace");
-    let report_dir = workspace.join(".a3s/research/report-fixture");
+    let report_dir = workspace.join(".a3s/research/artifacts/report-fixture");
     let web_dir = root.path().join("web");
     let state_dir = root.path().join("state");
     let config_path = root.path().join("config.acl");
@@ -43,7 +43,7 @@ fn deep_research_report_route_serves_only_session_workspace_artifacts_with_a_san
         &address,
         "GET",
         &format!(
-            "/api/v1/kernel/sessions/{session_id}/research-report?path=.a3s/research/report-fixture/index.html"
+            "/api/v1/kernel/sessions/{session_id}/research-artifact?runId=report-fixture&kind=html"
         ),
         None,
     );
@@ -60,14 +60,14 @@ fn deep_research_report_route_serves_only_session_workspace_artifacts_with_a_san
         &address,
         "GET",
         &format!(
-            "/api/v1/kernel/sessions/{session_id}/research-report?path=.a3s/research/../secret/index.html"
+            "/api/v1/kernel/sessions/{session_id}/research-artifact?runId=..%2Fsecret&kind=html"
         ),
         None,
         "400",
     );
     assert!(rejected["message"]
         .as_str()
-        .is_some_and(|message| message.contains("generated .a3s/research")));
+        .is_some_and(|message| message.contains("run ID")));
 
     daemon.stop();
     wait_until_stopped(&address);

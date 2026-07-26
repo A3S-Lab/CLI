@@ -1,6 +1,7 @@
 # DeepResearch Durable Evidence-First Runtime
 
-Status: active for new CLI and TUI DeepResearch runs.
+Status: active through the shared typed runner for new CLI, TUI, and Code Web
+DeepResearch runs.
 
 The active runtime is evidence-first and progressively publishable:
 
@@ -14,10 +15,11 @@ exact-query bootstrap + optional bounded semantic outline
   -> evidence-compiler admission and atomic artifact replacement
 ```
 
-The TUI `?` prefix and `a3s code research` use this same standalone
-`a3s-deep-research` runtime. New runs do not select between research engines.
-Historical Inquiry events remain inspectable in the generic run journal, but
-the former sectioned-report executor is not present.
+The TUI `?` prefix, `a3s code research`, and Code Web use this same standalone
+`a3s-deep-research` runtime through `CodeDeepResearchRunner`. New runs do not
+select between research engines. Historical Inquiry events remain inspectable
+through the legacy reader, but the former sectioned-report executor is not an
+active product path.
 
 The publication architecture and product acceptance gates are defined in
 [`deep-research-evidence-first-redesign.md`](deep-research-evidence-first-redesign.md)
@@ -39,11 +41,12 @@ Every run records a transient Loop Engineering contract with:
 The contract is runtime input, not a user-managed loop. It never creates a
 `.a3s/loops/` asset and cannot inherit a user loop's iteration budget.
 
-The DeepResearch state journal records one immutable wall-clock origin and the
-Host budget. A restarted process derives its remaining deadline from that
-origin. It cannot grant acquisition or proposal generation a fresh full budget.
+The engine request carries one wall-clock origin and a bounded Host budget.
 Per-operation timeouts, output limits, catalog limits, and concurrency limits
-remain narrower safety fuses inside the shared deadline.
+remain narrower safety fuses inside the shared deadline. Stable Flow effects
+retain their own replay semantics. The Code version-2 journal described below
+is a surface-refresh projection, not authority to resume an interrupted root
+process with a fresh budget.
 
 ## Authority Boundaries
 
@@ -63,9 +66,16 @@ DeepResearch uses three distinct durable surfaces.
 
 ### Run journal
 
-The DeepResearch journal records the run creation event, immutable research
-specification, shared deadline origin, and Host-owned checkpoints needed for
-restart. It is authoritative for the run's operational identity and budget.
+The active Code journal is
+`.a3s/research/runs/<run-id>/journal-v2.jsonl`. It records typed engine events
+with schema version 2, a strict sequence beginning at one, and a matching run
+identity. Its projection restores lifecycle, current stage, publication, and
+quality for Code Web page refresh. Publication events deliberately omit
+absolute artifact paths. A malformed sequence, foreign run ID, symlink, or
+oversized journal fails closed.
+
+Legacy query-slug and Inquiry journals remain read-only compatibility inputs.
+New typed runs do not append to them.
 
 ### Flow journals
 
@@ -90,10 +100,13 @@ database-backed Flow store.
 
 ### Report artifacts
 
-The Host owns `.a3s/research/<slug>/report.md` and `index.html`. It stages a
-complete source-backed or no-evidence pair before optional report generation
-can become a terminal risk. A synthesized pair replaces both artifacts only
-after Host admission succeeds.
+The Host owns
+`.a3s/research/artifacts/<run-id>/report.md` and
+`.a3s/research/artifacts/<run-id>/index.html`. Equal queries in concurrent runs
+therefore cannot overwrite one another. It stages a complete source-backed or
+no-evidence pair before optional report generation can become a terminal risk.
+A synthesized or qualified pair replaces both artifacts only after Host
+admission succeeds.
 
 ## Acquisition
 
@@ -124,7 +137,7 @@ The Host selects one of four operational publication states:
 | --- | --- |
 | `no_evidence` | No safe source catalog exists; the Host publishes a specific evidence boundary in both formats |
 | `source_backed` | A bounded source catalog and source ledger are published, but no synthesized answer passed admission |
-| `qualified` | At least one useful typed claim passed admission, but a material dimension remains explicitly bounded by a typed gap |
+| `qualified` | Supported incomplete work passed the applicable depth gate and retains a typed material gap; an all-bounded report may contain exactly one deeply analyzed partial conclusion |
 | `synthesized` | The typed claim graph passed exact support, graph, complete material coverage, and scope-depth gates |
 
 These states describe artifact production. They do not claim that a research
@@ -144,10 +157,14 @@ coverage yields `synthesized`; useful claims plus a material typed gap yield
 `qualified`. Artifact class comes only from matching versioned markers in
 Markdown and HTML, never from reader-facing words.
 
-The engine publication envelope, version-2 receipt, and TUI event journal
-retain the accepted relation, derivation, basis-edge, and gap counts. A
-`qualified` terminal event therefore requires a persisted nonzero gap, while
-source-backed and no-evidence states require all claim-graph counts to remain
+The engine publication envelope, version-5 receipt, and version-2 product
+journal retain accepted relation, derivation, basis-edge, analytical-claim,
+cross-source-synthesis, resolved-dimension, deeply-analyzed-dimension, and gap
+counts. A `qualified` terminal event therefore requires a persisted nonzero
+gap. A normal comprehensive qualified report has equal nonzero resolved and
+deeply analyzed dimension counts; the all-bounded exception has zero resolved
+dimensions, one deeply analyzed dimension, and exactly one direct answer.
+Source-backed and no-evidence states require all claim-graph counts to remain
 zero. A focused synthesized report may contain one sufficient direct-answer
 claim and zero findings; the adapter does not replace the scope-aware compiler
 gate with a second prose-shape rule.
@@ -175,7 +192,7 @@ A restart must preserve these invariants:
 Process-level and workflow-store tests exercise planner, acquisition, source
 selection, report proposal, and artifact boundaries. They verify stable
 identity, valid-prefix recovery, at-least-once redelivery, sibling salvage, and
-that replay cannot upgrade a degraded artifact.
+that replay cannot upgrade a `SourceBacked` or `NoEvidence` artifact.
 
 ## Legacy Journal Compatibility
 

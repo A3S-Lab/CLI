@@ -1,5 +1,6 @@
 //! Durable workflow output selection and bounded TUI presentation.
 
+#[cfg(test)]
 use super::*;
 
 /// Return the final workflow projection committed by the event-sourced
@@ -33,6 +34,7 @@ pub(super) fn deep_research_canonical_workflow_output(
     serde_json::to_string(output).unwrap_or_else(|_| workflow_output.to_string())
 }
 
+#[cfg(test)]
 pub(super) fn deep_research_tool_card_output(workflow_output: &str) -> String {
     workflow_evidence_summary(workflow_output).unwrap_or_else(|| {
         "Evidence collection did not return a typed summary; raw transport output is available only in terminal diagnostics."

@@ -16,12 +16,17 @@ pub(super) enum DeepResearchRunOutcome {
     Active,
     Completed,
     Qualified,
+    SourceBacked,
+    NoEvidence,
     Degraded,
 }
 
 impl DeepResearchRunOutcome {
     pub(super) fn report_ready(self) -> bool {
-        matches!(self, Self::Completed | Self::Qualified)
+        matches!(
+            self,
+            Self::Completed | Self::Qualified | Self::SourceBacked | Self::NoEvidence
+        )
     }
 
     pub(super) fn ensure_smoke_success(
@@ -29,7 +34,7 @@ impl DeepResearchRunOutcome {
         artifacts: &ResearchReportArtifacts,
     ) -> anyhow::Result<()> {
         match self {
-            Self::Completed | Self::Qualified => Ok(()),
+            Self::Completed | Self::Qualified | Self::SourceBacked | Self::NoEvidence => Ok(()),
             Self::Degraded => anyhow::bail!(
                 "DeepResearch smoke produced only a degraded recovery report at {}",
                 artifacts.html.display()
@@ -47,6 +52,7 @@ pub(super) struct DeepResearchWorkflowSnapshot {
     pub(super) output: Option<String>,
     pub(super) metadata: Option<serde_json::Value>,
     pub(super) args: Option<serde_json::Value>,
+    pub(super) typed_runner: bool,
 }
 
 impl DeepResearchWorkflowSnapshot {
@@ -90,6 +96,7 @@ mod deep_research_workflow_snapshot_tests {
             output: Some("stale output".to_string()),
             metadata: Some(serde_json::json!({"stale": true})),
             args: Some(serde_json::json!({"run_id": "old"})),
+            typed_runner: true,
         };
 
         snapshot.reset_for_run();
@@ -97,6 +104,7 @@ mod deep_research_workflow_snapshot_tests {
         assert!(snapshot.output.is_none());
         assert!(snapshot.metadata.is_none());
         assert!(snapshot.args.is_none());
+        assert!(!snapshot.typed_runner);
     }
 
     #[test]
@@ -105,6 +113,7 @@ mod deep_research_workflow_snapshot_tests {
             output: Some("output".to_string()),
             metadata: Some(serde_json::json!({"source": "workflow"})),
             args: Some(serde_json::json!({"run_id": "run"})),
+            typed_runner: true,
         };
 
         snapshot.clear();
@@ -112,5 +121,20 @@ mod deep_research_workflow_snapshot_tests {
         assert!(snapshot.output.is_none());
         assert!(snapshot.metadata.is_none());
         assert!(snapshot.args.is_none());
+        assert!(!snapshot.typed_runner);
+    }
+
+    #[test]
+    fn every_typed_publication_outcome_is_report_ready() {
+        for outcome in [
+            DeepResearchRunOutcome::Completed,
+            DeepResearchRunOutcome::Qualified,
+            DeepResearchRunOutcome::SourceBacked,
+            DeepResearchRunOutcome::NoEvidence,
+        ] {
+            assert!(outcome.report_ready());
+        }
+        assert!(!DeepResearchRunOutcome::Active.report_ready());
+        assert!(!DeepResearchRunOutcome::Degraded.report_ready());
     }
 }

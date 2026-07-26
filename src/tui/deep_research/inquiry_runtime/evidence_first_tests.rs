@@ -83,6 +83,42 @@ fn evidence_selection_from_schema(schema: &Value) -> anyhow::Result<Value> {
     }))
 }
 
+fn editorial_plan_from_schema(schema: &Value) -> anyhow::Result<Value> {
+    let section_item = schema
+        .pointer("/properties/sections/items")
+        .ok_or_else(|| anyhow::anyhow!("fixture schema omitted editorial sections"))?;
+    let variants = section_item
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| vec![section_item.clone()]);
+    let sections = variants
+        .iter()
+        .map(|variant| {
+            let dimension_id = first_schema_enum_string(variant, "/properties/dimension_id/enum")?;
+            let claim_ids = variant
+                .pointer("/properties/paragraphs/items/properties/claim_ids/items/enum")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let paragraphs = if claim_ids.is_empty() {
+                Vec::new()
+            } else {
+                vec![serde_json::json!({
+                    "purpose": "evidence",
+                    "claim_ids": claim_ids,
+                })]
+            };
+            Ok(serde_json::json!({
+                "dimension_id": dimension_id,
+                "heading": format!("Evidence for {}", dimension_id.replace(['.', '-'], " ")),
+                "paragraphs": paragraphs,
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({ "sections": sections }))
+}
+
 struct EvidenceFirstSearch {
     return_source: bool,
 }
@@ -172,12 +208,8 @@ impl EvidenceFirstProposal {
     async fn proposal(&self, tools: &[ToolDefinition]) -> anyhow::Result<Value> {
         let tool = generated_schema_tool(tools)?;
         match tool.name.as_str() {
-            "emit_deep_research_semantic_outline" => Ok(serde_json::json!({
-                "report_title": "Nimbus support research",
-                "research_scope": "focused",
-                "freshness_required": false,
-                "workspace_evidence_required": false,
-                "tracks": [{
+            "emit_deep_research_semantic_outline" => {
+                let mut tracks = vec![serde_json::json!({
                     "id": "support.boundary",
                     "title": "Support boundary",
                     "focus": "Establish the supported Nimbus release and maintenance boundary.",
@@ -185,13 +217,45 @@ impl EvidenceFirstProposal {
                     "completion_criteria": [
                         "A traceable source identifies the release and support boundary."
                     ],
+                    "questions": [{
+                        "question": "Which release and maintenance date does the record establish?",
+                        "role": "establish",
+                        "completion_criterion_indexes": [0]
+                    }],
                     "evidence_requirements": {
                         "primary_source_required": true,
                         "independent_corroboration_required": false
                     }
-                }],
-                "supplemental_queries": []
-            })),
+                })];
+                if matches!(self.behavior, ProposalBehavior::Qualified) {
+                    tracks.push(serde_json::json!({
+                        "id": "support.conditions",
+                        "title": "Support conditions",
+                        "focus": "Establish any conditions attached to the stated maintenance period.",
+                        "material": true,
+                        "completion_criteria": [
+                            "A traceable source identifies any support conditions."
+                        ],
+                        "questions": [{
+                            "question": "Which conditions limit the stated support period?",
+                            "role": "establish",
+                            "completion_criterion_indexes": [0]
+                        }],
+                        "evidence_requirements": {
+                            "primary_source_required": true,
+                            "independent_corroboration_required": false
+                        }
+                    }));
+                }
+                Ok(serde_json::json!({
+                    "report_title": "Nimbus support research",
+                    "research_scope": "focused",
+                    "freshness_required": false,
+                    "workspace_evidence_required": false,
+                    "tracks": tracks,
+                    "supplemental_queries": []
+                }))
+            }
             "emit_deep_research_web_source_selection" => Ok(serde_json::json!({
                 "candidate_ids": [
                     first_schema_enum_string(
@@ -235,6 +299,7 @@ impl EvidenceFirstProposal {
                             "dimension_id": "support.boundary",
                             "placement": "direct_answer",
                             "kind": "fact",
+                            "analysis_role": "conclusion",
                             "text": "A fabricated source claims support through 2099.",
                             "evidence_refs": [{
                                 "source_id": "source-99",
@@ -244,7 +309,14 @@ impl EvidenceFirstProposal {
                             "derivation": null
                         }],
                         "relations": [],
-                        "gaps": []
+                        "gaps": [],
+                        "narrative": {
+                            "sections": [{
+                                "dimension_id": "support.boundary",
+                                "heading": "Support boundary",
+                                "paragraphs": []
+                            }]
+                        }
                     })),
                     ProposalBehavior::FailOnceThenValid
                         if self.calls.load(Ordering::SeqCst) == 1 =>
@@ -270,6 +342,7 @@ impl EvidenceFirstProposal {
                             "dimension_id": "support.boundary",
                             "placement": "direct_answer",
                             "kind": "fact",
+                            "analysis_role": "conclusion",
                             "text": "Nimbus version 2 receives fixes through September 2027.",
                             "evidence_refs": [{
                                 "source_id": "source-1",
@@ -282,6 +355,7 @@ impl EvidenceFirstProposal {
                             "dimension_id": "support.boundary",
                             "placement": "finding",
                             "kind": "fact",
+                            "analysis_role": "evidence",
                             "text": "The official Nimbus record identifies version 2 and September 2027 as the support boundary.",
                             "evidence_refs": [{
                                 "source_id": "source-1",
@@ -291,7 +365,17 @@ impl EvidenceFirstProposal {
                             "derivation": null
                         }],
                         "relations": [],
-                        "gaps": []
+                        "gaps": [],
+                        "narrative": {
+                            "sections": [{
+                                "dimension_id": "support.boundary",
+                                "heading": "Support boundary",
+                                "paragraphs": [{
+                                    "purpose": "evidence",
+                                    "claim_ids": ["nimbus-boundary"]
+                                }]
+                            }]
+                        }
                     })),
                     ProposalBehavior::Qualified => Ok(serde_json::json!({
                         "report_language": "en",
@@ -312,6 +396,7 @@ impl EvidenceFirstProposal {
                             "dimension_id": "support.boundary",
                             "placement": "direct_answer",
                             "kind": "fact",
+                            "analysis_role": "conclusion",
                             "text": "Nimbus version 2 receives fixes through September 2027.",
                             "evidence_refs": [{
                                 "source_id": "source-1",
@@ -323,11 +408,25 @@ impl EvidenceFirstProposal {
                         "relations": [],
                         "gaps": [{
                             "id": "nimbus-unresolved-boundary",
-                            "dimension_id": "support.boundary",
+                            "dimension_id": "support.conditions",
                             "text": "The reviewed record does not establish support conditions beyond the stated maintenance date."
-                        }]
+                        }],
+                        "narrative": {
+                            "sections": [{
+                                "dimension_id": "support.boundary",
+                                "heading": "Support boundary",
+                                "paragraphs": []
+                            }, {
+                                "dimension_id": "support.conditions",
+                                "heading": "Support conditions",
+                                "paragraphs": []
+                            }]
+                        }
                     })),
                 }
+            }
+            "emit_deep_research_typed_editorial_plan" => {
+                editorial_plan_from_schema(&tool.parameters)
             }
             unexpected => {
                 anyhow::bail!("unexpected evidence-first structured schema tool `{unexpected}`")
@@ -408,6 +507,11 @@ impl LlmClient for UnexpectedProposal {
                     "focus": "Establish the requested answer.",
                     "material": true,
                     "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "questions": [{
+                        "question": "What evidence establishes or bounds the requested answer?",
+                        "role": "establish",
+                        "completion_criterion_indexes": [0]
+                    }],
                     "evidence_requirements": {
                         "primary_source_required": false,
                         "independent_corroboration_required": false
@@ -440,6 +544,11 @@ impl LlmClient for UnexpectedProposal {
                     "focus": "Establish the requested answer.",
                     "material": true,
                     "completion_criteria": ["The answer is supported or explicitly bounded."],
+                    "questions": [{
+                        "question": "What evidence establishes or bounds the requested answer?",
+                        "role": "establish",
+                        "completion_criterion_indexes": [0]
+                    }],
                     "evidence_requirements": {
                         "primary_source_required": false,
                         "independent_corroboration_required": false

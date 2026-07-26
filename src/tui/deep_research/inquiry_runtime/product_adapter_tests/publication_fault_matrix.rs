@@ -216,6 +216,7 @@ impl StructuredGenerationPort for PublicationScenarioPorts<'_> {
         Ok(match request.stage {
             GenerationStage::Planning => planner_outline(self.replay),
             GenerationStage::Report => report_proposal(self.replay),
+            GenerationStage::Editorial => editorial_plan(self.replay),
         })
     }
 }

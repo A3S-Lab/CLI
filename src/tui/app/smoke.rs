@@ -524,13 +524,15 @@ async fn run_smoke_deep_research(
     let outcome = match published.publication {
         DeepResearchEvidenceFirstPublication::Synthesized => DeepResearchRunOutcome::Completed,
         DeepResearchEvidenceFirstPublication::Qualified => DeepResearchRunOutcome::Qualified,
-        DeepResearchEvidenceFirstPublication::SourceBacked
-        | DeepResearchEvidenceFirstPublication::NoEvidence => DeepResearchRunOutcome::Degraded,
+        DeepResearchEvidenceFirstPublication::SourceBacked => DeepResearchRunOutcome::SourceBacked,
+        DeepResearchEvidenceFirstPublication::NoEvidence => DeepResearchRunOutcome::NoEvidence,
     };
     let journal_outcome = match outcome {
         DeepResearchRunOutcome::Completed => ResearchOutcome::Completed,
         DeepResearchRunOutcome::Qualified => ResearchOutcome::Qualified,
-        DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
+        DeepResearchRunOutcome::SourceBacked
+        | DeepResearchRunOutcome::NoEvidence
+        | DeepResearchRunOutcome::Degraded => ResearchOutcome::Degraded,
         DeepResearchRunOutcome::Active => {
             unreachable!("a validated evidence-first publication is terminal")
         }

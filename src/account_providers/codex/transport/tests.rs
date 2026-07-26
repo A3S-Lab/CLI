@@ -139,35 +139,6 @@ async fn websocket_403_falls_back_to_http_and_stays_there() {
 }
 
 #[tokio::test]
-async fn fresh_session_probes_websocket_after_sticky_http_fallback() {
-    let wire = Arc::new(FakeWireClient::with_outcomes(
-        vec![
-            Outcome::Error(TransportError::http(403, None, None)),
-            Outcome::Events(vec![]),
-        ],
-        vec![Outcome::Events(vec![])],
-    ));
-    let controller = TransportController::with_config(wire.clone(), test_config());
-
-    let first = controller
-        .open(&request(), CancellationToken::new())
-        .await
-        .unwrap();
-    let fresh = controller.fresh_session();
-    let second = fresh
-        .open(&request(), CancellationToken::new())
-        .await
-        .unwrap();
-
-    assert_eq!(first.kind, TransportKind::HttpSse);
-    assert_eq!(second.kind, TransportKind::WebSocket);
-    assert_eq!(controller.active_kind(), TransportKind::HttpSse);
-    assert_eq!(fresh.active_kind(), TransportKind::WebSocket);
-    assert_eq!(wire.websocket_calls.load(Ordering::Relaxed), 2);
-    assert_eq!(wire.http_calls.load(Ordering::Relaxed), 1);
-}
-
-#[tokio::test]
 async fn retryable_websocket_failures_exhaust_budget_before_http() {
     let failure = || TransportError::network("connection reset");
     let wire = Arc::new(FakeWireClient::with_outcomes(
