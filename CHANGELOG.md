@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.8] - 2026-07-26
+
+### Added
+
+- Added complete blank-area and item context menus to the Work file manager,
+  including keyboard invocation, copy, cut, collision-safe paste, view and sort
+  controls, path actions, OS reveal, and selection-aware AI actions.
+- Added mixed file-and-folder source packages for personal knowledge bases.
+  Creation now materializes only `sources/`; compilation is a separate manual
+  action or an opt-in smart-automatic policy.
+- Added a durable independent-compiler protocol with manual-priority claiming,
+  one global running job, cancellation, bounded retries, staged OKF output, and
+  atomic `wiki/` promotion.
+
+### Changed
+
+- Made knowledge creation and import non-modal, exposed compilation state and
+  policy controls on the Knowledge page, and limited search publication to
+  successfully compiled `wiki/**/*.md` content.
+- Debounced smart-automatic compilation until files are stable for 5 seconds
+  and sources are quiet for 30 seconds, with a 10-minute minimum interval and
+  safety pauses for suspicious bulk changes.
+- Updated the bundled A3S Web source to the responsive file and knowledge
+  workflow release.
+
+### Fixed
+
+- Kept mixed-selection context-menu wording aligned with the complete selected
+  set and made the inline knowledge composer reflow around an open Work AI
+  panel.
+- Prevented policy changes from manufacturing an unchanged source generation,
+  and tracked compiler identity separately from the compilation protocol
+  version.
+
 ## [0.10.7] - 2026-07-26
 
 ### Added
