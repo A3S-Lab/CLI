@@ -556,6 +556,7 @@ pub(super) fn claim_next_in_workspaces(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn complete_job(
     workspace: &Path,
     id: &str,
