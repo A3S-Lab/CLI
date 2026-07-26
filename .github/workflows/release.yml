@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 env:
   # Immutable commit in A3S-Lab/a3s containing the Web workspace sources.
-  A3S_WEB_SOURCE_REF: 78c9f4c06df2f6aad7d1fd4910417ca91fa3404a
+  A3S_WEB_SOURCE_REF: 139d528e18db97c8c33042fa4ed4e02c6febd4bb
   # Exact companion prerequisite; preflight rejects an absent or incomplete release.
   A3S_WEBVIEW_VERSION: 0.1.5
   A3S_CODE_CORE_VERSION: 6.4.3
@@ -120,6 +120,7 @@ jobs:
           }
           required_crates=(
             "a3s-code-core $A3S_CODE_CORE_VERSION"
+            "a3s-deep-research 0.1.3"
             "a3s-boot 0.1.3"
             "a3s-lane 0.5.1"
             "a3s-memory 0.1.2"
