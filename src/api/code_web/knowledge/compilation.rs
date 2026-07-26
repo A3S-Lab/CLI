@@ -229,6 +229,7 @@ struct CompilationState {
     last_error: Option<String>,
     paused_reason: Option<String>,
     compiler_version: Option<String>,
+    compiler_contract_version: Option<String>,
     retry_attempt: usize,
     retry_at: Option<String>,
 }
@@ -342,11 +343,18 @@ pub(super) fn set_policy(
             now.into(),
         )?;
         source_packages::sync_source_package(&base, &plan)?;
-        state.source_digest = Some(plan.snapshot.content_digest.clone());
-        state.pending_source_digest = Some(plan.snapshot.content_digest);
-        state.change_detected_at = Some(now.to_rfc3339());
-        if state.phase != CompilationPhase::Running {
-            state.phase = CompilationPhase::SourceReady;
+        let source_digest = plan.snapshot.content_digest;
+        let compilation_needed = state.last_compiled_digest.as_deref() != Some(&source_digest);
+        state.source_digest = Some(source_digest.clone());
+        if compilation_needed {
+            state.pending_source_digest = Some(source_digest);
+            state.change_detected_at = Some(now.to_rfc3339());
+        } else {
+            state.pending_source_digest = None;
+            state.change_detected_at = None;
+        }
+        if state.active_job_id.is_none() {
+            state.phase = fallback_phase(&state);
         }
     } else if let Some(active_id) = state.active_job_id.clone() {
         let mut job = read_job(&base, &active_id)?;
@@ -485,7 +493,8 @@ pub(super) fn poll_compilations(
     Ok(changed_bases)
 }
 
-pub(super) fn claim_next(
+#[cfg(test)]
+fn claim_next(
     workspace: &Path,
     now: DateTime<Utc>,
 ) -> Result<CompilationClaim, KnowledgeStoreError> {
@@ -588,6 +597,7 @@ pub(super) fn complete_job(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
                 .or_else(|| Some(COMPILER_CONTRACT_VERSION.to_string()));
+            state.compiler_contract_version = Some(COMPILER_CONTRACT_VERSION.to_string());
             if state.pending_source_digest.as_deref() == Some(job.source_digest.as_str()) {
                 state.pending_source_digest = None;
             }

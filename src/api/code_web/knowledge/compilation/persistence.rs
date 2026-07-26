@@ -25,10 +25,8 @@ impl CompilationState {
             last_error: self.last_error.clone(),
             paused_reason: self.paused_reason.clone(),
             compiler_version: self.compiler_version.clone(),
-            recompile_recommended: self
-                .compiler_version
-                .as_deref()
-                .is_some_and(|version| version != COMPILER_CONTRACT_VERSION),
+            recompile_recommended: self.last_compiled_digest.is_some()
+                && self.compiler_contract_version.as_deref() != Some(COMPILER_CONTRACT_VERSION),
             next_auto_compile_at: next_auto_compile_at(self),
             stable_window_seconds: SOURCE_STABLE_SECONDS,
             quiet_window_seconds: AUTO_QUIET_SECONDS as u64,
@@ -89,11 +87,15 @@ pub(super) fn read_state(base: &Path) -> Result<CompilationState, KnowledgeStore
             path.display()
         )));
     }
+    let last_compiled_digest = optional_string(block, "last_compiled_digest");
+    // Schema-v1 state written before this field existed always used contract 1.
+    let compiler_contract_version = optional_string(block, "compiler_contract_version")
+        .or_else(|| last_compiled_digest.as_ref().map(|_| "1".to_string()));
     Ok(CompilationState {
         policy: CompilationPolicy::parse(&required_string(block, "policy", &path)?)?,
         phase: CompilationPhase::parse(&required_string(block, "phase", &path)?)?,
         source_digest: optional_string(block, "source_digest"),
-        last_compiled_digest: optional_string(block, "last_compiled_digest"),
+        last_compiled_digest,
         pending_source_digest: optional_string(block, "pending_source_digest"),
         pending_manual: block
             .attributes
@@ -109,6 +111,7 @@ pub(super) fn read_state(base: &Path) -> Result<CompilationState, KnowledgeStore
         last_error: optional_string(block, "last_error"),
         paused_reason: optional_string(block, "paused_reason"),
         compiler_version: optional_string(block, "compiler_version"),
+        compiler_contract_version,
         retry_attempt: optional_string(block, "retry_attempt")
             .and_then(|value| value.parse().ok())
             .unwrap_or_default(),
@@ -156,6 +159,10 @@ pub(super) fn write_state(
         ("last_error", &state.last_error),
         ("paused_reason", &state.paused_reason),
         ("compiler_version", &state.compiler_version),
+        (
+            "compiler_contract_version",
+            &state.compiler_contract_version,
+        ),
         ("retry_at", &state.retry_at),
     ] {
         if let Some(value) = value {

@@ -121,6 +121,7 @@ fn failed_compilation_preserves_last_good_wiki_and_schedules_only_transient_retr
     let mutation = create_fixture_base(workspace, "Failure", CompilationPolicy::Manual);
     let id = mutation.knowledge_base.id;
     let base = PathBuf::from(mutation.knowledge_base.path);
+    std::fs::create_dir_all(base.join("wiki")).expect("create last good wiki directory");
     std::fs::write(base.join("wiki/index.md"), "last good").expect("write last good wiki");
     let requested = request_compilation(workspace, &id, Utc::now()).expect("request compilation");
     let job = requested.job.expect("queued job");
@@ -214,6 +215,55 @@ fn smart_auto_waits_for_quiet_window_and_minimum_interval() {
         &state,
         now + chrono::Duration::seconds(630)
     ));
+}
+
+#[test]
+fn enabling_smart_auto_keeps_an_unchanged_successful_generation_current() {
+    let temporary = tempfile::tempdir().expect("temporary workspace");
+    let workspace = temporary.path();
+    let mutation = create_fixture_base(workspace, "Current", CompilationPolicy::Manual);
+    let id = mutation.knowledge_base.id;
+    let base = PathBuf::from(mutation.knowledge_base.path);
+    let requested = request_compilation(workspace, &id, Utc::now())
+        .expect("request current generation compilation");
+    let job = requested.job.expect("queued current generation");
+    claim_next(workspace, Utc::now()).expect("claim current generation");
+    std::fs::write(
+        PathBuf::from(&job.output_path).join("wiki/index.md"),
+        "---\ntype: Note\n---\n# Current\n",
+    )
+    .expect("write compiler output");
+    let completed = complete_job(
+        workspace,
+        &id,
+        &job.id,
+        CompilationOutcome::Succeeded,
+        false,
+        None,
+        Some("fixture-compiler/1.0.0"),
+        Utc::now(),
+    )
+    .expect("complete current generation");
+    assert!(!completed.knowledge_base.compilation.recompile_recommended);
+
+    let updated = set_policy(workspace, &id, CompilationPolicy::SmartAuto, Utc::now())
+        .expect("enable smart automatic compilation");
+
+    assert_eq!(
+        updated.knowledge_base.compilation.phase,
+        CompilationPhase::Succeeded
+    );
+    assert!(!updated.knowledge_base.compilation.pending_changes);
+    assert!(updated
+        .knowledge_base
+        .compilation
+        .next_auto_compile_at
+        .is_none());
+    let state = read_state(&base).expect("read updated compilation state");
+    assert_eq!(
+        state.last_compiled_digest.as_deref(),
+        state.source_digest.as_deref()
+    );
 }
 
 fn create_fixture_base(
