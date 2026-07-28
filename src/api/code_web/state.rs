@@ -10,6 +10,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::kernel::turn_queue::CodeWebSessionTurnQueue;
+use super::previews::PreviewRegistry;
 use super::session_store::{CodeWebSessionMetadata, CodeWebSessionRepository};
 use super::workspace_backend_cache::WorkspaceBackendCache;
 use crate::budget::DEFAULT_CODE_WEB_EFFORT_ID;
@@ -135,6 +136,7 @@ pub(in crate::api) struct CodeWebState {
         Mutex<HashMap<String, Arc<CancellationToken>>>,
     use_registry: RwLock<Option<crate::use_registry::UseRegistryHandle>>,
     workspace_backends: WorkspaceBackendCache,
+    preview_registry: Arc<PreviewRegistry>,
 }
 
 impl CodeWebState {
@@ -146,6 +148,7 @@ impl CodeWebState {
         session_repository: Arc<CodeWebSessionRepository>,
     ) -> Self {
         let auto_compact_threshold = crate::config::auto_compact_threshold_for_path(&config_path);
+        let preview_registry = Arc::new(PreviewRegistry::new(default_workspace.clone()));
         Self {
             agent,
             config_path,
@@ -166,7 +169,12 @@ impl CodeWebState {
             active_research_runs: Mutex::new(HashMap::new()),
             use_registry: RwLock::new(None),
             workspace_backends: WorkspaceBackendCache::default(),
+            preview_registry,
         }
+    }
+
+    pub(in crate::api) fn preview_registry(&self) -> Arc<PreviewRegistry> {
+        Arc::clone(&self.preview_registry)
     }
 
     pub(in crate::api) fn install_use_registry(

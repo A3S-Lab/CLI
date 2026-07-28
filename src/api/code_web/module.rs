@@ -13,6 +13,7 @@ use super::knowledge::KnowledgeModule;
 use super::loops::LoopsModule;
 use super::os::OsModule;
 use super::plugins::PluginsModule;
+use super::previews::PreviewsModule;
 use super::processes::ProcessesModule;
 use super::state::CodeWebState;
 use super::weixin::WeixinModule;
@@ -48,6 +49,7 @@ impl Module for CodeWebModule {
             Arc::new(EvolutionModule),
             Arc::new(KernelModule),
             Arc::new(ProcessesModule),
+            Arc::new(PreviewsModule),
             Arc::new(LoopsModule),
             Arc::new(PluginsModule),
             Arc::new(OsModule),

@@ -734,6 +734,9 @@ impl App {
                 }
             }
         }
+        if let Some(rest) = slash_tail(trimmed, "/preview") {
+            return self.submit_live_preview_command(rest);
+        }
         if let Some(rest) = slash_tail(trimmed, "/fork") {
             return self.submit_fork_command(rest);
         }

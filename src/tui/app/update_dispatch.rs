@@ -265,6 +265,11 @@ impl App {
                         return command;
                     }
                     self.ide_key(&key);
+                    if let Some(target) =
+                        self.ide.as_mut().and_then(|ide| ide.preview_request.take())
+                    {
+                        return self.submit_live_preview_command(&target.to_string_lossy());
+                    }
                     return None;
                 }
                 // `/tasks` / Ctrl+B is a modal delegated-work inspector. It
@@ -951,6 +956,14 @@ impl App {
                 result,
             } => {
                 self.apply_ide_intelligence_jump(request_id, jump_request_id, result);
+            }
+
+            Msg::LivePreviewLaunched {
+                request_id,
+                status_entry,
+                result,
+            } => {
+                self.apply_live_preview_launch(request_id, status_entry, *result);
             }
 
             Msg::Interrupted {

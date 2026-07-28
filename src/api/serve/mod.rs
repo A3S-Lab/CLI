@@ -22,7 +22,9 @@ use crate::config;
 
 use self::api_gateway::ApiGateway;
 use self::options::ServeOptions;
-use super::code_web::{CodeWebModule, CodeWebSessionRepository, CodeWebState, KernelService};
+use super::code_web::{
+    preview_content_router, CodeWebModule, CodeWebSessionRepository, CodeWebState, KernelService,
+};
 use super::web::{api_only_fallback, prepare_default_web_dir, serve_static};
 
 mod api_gateway;
@@ -209,7 +211,9 @@ async fn run_foreground(
         .map_err(boot_to_anyhow)?;
 
     app.bootstrap().await.map_err(boot_to_anyhow)?;
-    let api_router = ApiGateway::new(app.clone(), BODY_LIMIT_BYTES).router();
+    let api_router = ApiGateway::new(app.clone(), BODY_LIMIT_BYTES)
+        .router()
+        .merge(preview_content_router(state.preview_registry()));
 
     let router = if options.api_only {
         api_router.fallback(api_only_fallback)

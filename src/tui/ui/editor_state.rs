@@ -515,6 +515,9 @@ pub(super) struct Ide {
     pub(super) preview: Option<(std::path::PathBuf, Vec<String>)>,
     /// Active command prompt inside the editor footer (`/`, `?`, `:`).
     pub(super) prompt: Option<IdePrompt>,
+    /// One-shot artifact path requested by tree `p` or editor `:preview`.
+    /// The outer TUI takes it after key handling and owns the async launch.
+    pub(super) preview_request: Option<std::path::PathBuf>,
     /// `/kb` browser: the vault root. Enables `x` delete, hard-bounded to
     /// paths inside this root. `None` for /ide and /config.
     pub(super) kb_root: Option<std::path::PathBuf>,
@@ -548,6 +551,7 @@ impl Ide {
             surface: IdeSurface::ReusedEditor,
             preview: None,
             prompt: None,
+            preview_request: None,
             kb_root: None,
             armed_delete: None,
             delete_confirm_yes: true,
