@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.10] - 2026-07-28
+
+### Changed
+
+- Made Work the single AI-native browser workspace. Coding, Office editing,
+  files, and AI conversations now share one session list, composer, workspace
+  selector, model controls, queue, and artifact flow instead of separate Code
+  and Office products.
+- Rebuilt the Work home around a task-first entry point with document,
+  spreadsheet, presentation, file, and analysis shortcuts plus recent files
+  and reusable creation templates.
+- Standardized browser navigation on `#home` and `#memory`; retired Code,
+  Work-prefixed, Help, and Weixin route aliases now return to the canonical
+  Work home rather than mounting legacy interfaces.
+
+### Fixed
+
+- Reconnected quick open and generated artifact actions to the unified Work
+  editors, including code/text and Office/PDF targets.
+- Removed an unintended horizontal scrollbar caused by the Work home hero's
+  decorative background at desktop widths.
+
 ## [0.10.9] - 2026-07-26
 
 ### Changed
