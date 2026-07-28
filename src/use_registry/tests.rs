@@ -1,6 +1,6 @@
 use super::*;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 // Keep process-backed fixtures from competing for spawn and stdio scheduling;
 // startup budget tests must measure the product path, not test-harness load.
 static PROCESS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1190,19 +1190,10 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
         .await
         .expect("built-in OCR doctor must be callable");
     assert!(ocr_doctor.output.contains("readiness"), "{ocr_doctor:?}");
-    let office_list = session
-        .tool("mcp__use_office__office_list", serde_json::json!({}))
-        .await
-        .expect("built-in Office list must be callable");
-    assert!(
-        office_list.output.contains("\"count\":0"),
-        "{office_list:?}"
-    );
     let status = handle.status_text(Arc::clone(&session), false).await;
     assert!(status.contains("A3S Use status"), "{status}");
     assert!(status.contains("use/acme/report"), "{status}");
     assert!(status.contains("use/browser"), "{status}");
-    assert!(status.contains("use/office"), "{status}");
     assert!(status.contains("use/ocr"), "{status}");
     assert!(status.contains("MCP connected (1 tools)"), "{status}");
     assert!(status.contains("Skill verified + loaded (1/1)"), "{status}");
@@ -1288,6 +1279,164 @@ async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable()
     replacement.close().await;
 }
 
+/// Exercises the same real process boundary on Windows without relying on a
+/// shell-script MCP fixture. The independently built Browser driver is
+/// installed as an external Use extension and supplies a standard MCP server.
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "requires A3S_USE_E2E_BIN and A3S_USE_E2E_BROWSER_BIN"]
+async fn real_use_process_converges_install_upgrade_rebuild_disable_and_enable() {
+    let _process_test_guard = PROCESS_TEST_LOCK.lock().await;
+    let binary = required_e2e_binary("A3S_USE_E2E_BIN");
+    let browser_driver = required_e2e_binary("A3S_USE_E2E_BROWSER_BIN");
+    let use_home = std::env::var_os("A3S_USE_HOME")
+        .map(PathBuf::from)
+        .expect("A3S_USE_HOME must isolate the real Use process test");
+    assert!(
+        use_home.is_absolute(),
+        "A3S_USE_HOME must be absolute: {}",
+        use_home.display()
+    );
+
+    let temp = tempfile::tempdir().unwrap();
+    let package = temp.path().join("package");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(package.join("bin")).unwrap();
+    std::fs::create_dir_all(package.join("skills/fixture-report")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    write_browser_backed_extension_fixture(&package, &browser_driver, "1.0.0");
+    run_real_use(
+        &binary,
+        vec![
+            "component".into(),
+            "install".into(),
+            "acme/report".into(),
+            "--from".into(),
+            package.display().to_string(),
+            "--allow-unsigned".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+
+    let agent = a3s_code_core::Agent::from_config(test_config())
+        .await
+        .unwrap();
+    let session = Arc::new(
+        agent
+            .session_async(workspace.display().to_string(), None)
+            .await
+            .unwrap(),
+    );
+    let cancellation = CancellationToken::new();
+    let (handle, warning) = start(
+        binary.clone(),
+        workspace,
+        cancellation,
+        Arc::clone(&session),
+    )
+    .await;
+    assert!(warning.is_none(), "{warning:?}");
+
+    const EXTENSION_TOOL: &str = "mcp__use_report__agent_browser_tools_profiles";
+    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
+    wait_for_builtin_use_surfaces(&session).await;
+    let profiles = session
+        .tool(EXTENSION_TOOL, serde_json::json!({}))
+        .await
+        .expect("the Browser-backed extension MCP tool must be callable");
+    assert_eq!(profiles.exit_code, 0, "{}", profiles.output);
+    assert!(profiles.output.contains("core"), "{}", profiles.output);
+
+    let initial_generation = handle.inner.desired_tx.borrow().generation;
+    write_browser_backed_extension_fixture(&package, &browser_driver, "2.0.0");
+    run_real_use(
+        &binary,
+        vec![
+            "component".into(),
+            "install".into(),
+            "acme/report".into(),
+            "--from".into(),
+            package.display().to_string(),
+            "--allow-unsigned".into(),
+            "--force".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    wait_for_projected_generation(&handle, initial_generation + 1).await;
+    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
+
+    run_real_use(
+        &binary,
+        vec![
+            "extension".into(),
+            "disable".into(),
+            "acme/report".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    wait_for_named_capabilities(&session, EXTENSION_TOOL, false).await;
+
+    run_real_use(
+        &binary,
+        vec![
+            "extension".into(),
+            "enable".into(),
+            "acme/report".into(),
+            "--json".into(),
+        ],
+    )
+    .await;
+    wait_for_named_capabilities(&session, EXTENSION_TOOL, true).await;
+
+    handle.shutdown().await;
+    session.close().await;
+}
+
+#[cfg(windows)]
+fn required_e2e_binary(name: &str) -> PathBuf {
+    let path = std::env::var_os(name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("{name} must point to a real executable"));
+    std::fs::canonicalize(&path)
+        .unwrap_or_else(|error| panic!("failed to resolve {}: {error}", path.display()))
+}
+
+#[cfg(windows)]
+fn write_browser_backed_extension_fixture(package: &Path, browser_driver: &Path, version: &str) {
+    let executable = "bin/report-mcp.exe";
+    let manifest = format!(
+        r#"extension "acme/report" {{
+  schema_version = 1
+  version = "{version}"
+  route = "report"
+  actions = ["read"]
+
+  mcp {{
+    executable = "{executable}"
+    args = ["mcp"]
+    transport = "stdio"
+  }}
+
+  skill {{
+    path = "skills/fixture-report/SKILL.md"
+  }}
+}}
+"#,
+    );
+    std::fs::write(package.join("a3s-use-extension.acl"), manifest).unwrap();
+    std::fs::write(
+        package.join("skills/fixture-report/SKILL.md"),
+        fixture_skill(),
+    )
+    .unwrap();
+    std::fs::copy(browser_driver, package.join(executable))
+        .unwrap_or_else(|error| panic!("failed to copy Browser driver fixture: {error}"));
+}
+
 #[cfg(unix)]
 fn write_real_extension_fixture(package: &Path, version: &str, response: &str) {
     use std::os::unix::fs::PermissionsExt;
@@ -1343,7 +1492,7 @@ done
     std::fs::set_permissions(&server, permissions).unwrap();
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn run_real_use(executable: &Path, args: Vec<String>) -> serde_json::Value {
     let output = tokio::process::Command::new(executable)
         .args(&args)
@@ -1388,19 +1537,18 @@ async fn wait_for_capabilities(session: &AgentSession, present: bool) {
     .unwrap_or_else(|_| panic!("capabilities did not converge to present={present}"));
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let skills = session.skill_names();
             let tools = session.tool_names();
-            let skills_present = ["a3s-use-browser", "a3s-use-office", "a3s-use-ocr"]
+            let skills_present = ["a3s-use-browser", "a3s-use-ocr"]
                 .iter()
                 .all(|expected| skills.iter().any(|name| name == expected));
             let tools_present = [
                 "mcp__use_browser__agent_browser_doctor",
                 "mcp__use_browser__agent_browser_install",
-                "mcp__use_office__office_list",
                 "mcp__use_ocr__ocr_doctor",
             ]
             .iter()
@@ -1412,7 +1560,40 @@ async fn wait_for_builtin_use_surfaces(session: &AgentSession) {
         }
     })
     .await
-    .expect("built-in Browser, Office, and OCR did not project into the Code session");
+    .expect("built-in Browser and OCR did not project into the Code session");
+}
+
+#[cfg(windows)]
+async fn wait_for_named_capabilities(session: &AgentSession, tool_name: &str, present: bool) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let skill_present = session
+                .skill_names()
+                .iter()
+                .any(|name| name == "fixture-report");
+            let tool_present = session.tool_names().iter().any(|name| name == tool_name);
+            if skill_present == present && tool_present == present {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("capabilities did not converge to present={present}"));
+}
+
+#[cfg(windows)]
+async fn wait_for_projected_generation(handle: &UseRegistryHandle, minimum: u64) {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if handle.inner.desired_tx.borrow().generation >= minimum {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("registry projection did not reach generation {minimum}"));
 }
 
 #[cfg(unix)]

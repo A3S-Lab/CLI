@@ -520,7 +520,7 @@ fn code_tui_offline_and_no_auto_install_never_download_or_write_a_receipt() {
 }
 
 #[test]
-#[ignore = "requires A3S_USE_E2E_BIN and A3S_USE_E2E_SOURCE_ROOT"]
+#[ignore = "requires real Use, Browser, and OCR source artifacts"]
 fn code_tui_first_use_installs_a_real_use_release_before_the_first_turn() {
     let workspace = TempWorkspace::new("code-use-real-release");
     let release = real_release::start(&workspace);
@@ -559,14 +559,13 @@ fn code_tui_first_use_installs_a_real_use_release_before_the_first_turn() {
     let executable = PathBuf::from(receipt["executablePath"].as_str().unwrap());
     let install_root = executable.parent().unwrap();
     for path in [
-        "a3s-use-browser-driver",
-        "skills/a3s-use-browser/SKILL.md",
-        "office-skills/a3s-use-office/SKILL.md",
-        "ocr-skills/a3s-use-ocr/SKILL.md",
-        "ocr-models/PP-OCRv6_small/det/inference.onnx",
-        "ocr-models/PP-OCRv6_small/det/inference.yml",
-        "ocr-models/PP-OCRv6_small/rec/inference.onnx",
-        "ocr-models/PP-OCRv6_small/rec/inference.yml",
+        format!("a3s-use-browser-driver{}", std::env::consts::EXE_SUFFIX),
+        "skills/a3s-use-browser/SKILL.md".to_string(),
+        "ocr-skills/a3s-use-ocr/SKILL.md".to_string(),
+        "ocr-models/PP-OCRv6_small/det/inference.onnx".to_string(),
+        "ocr-models/PP-OCRv6_small/det/inference.yml".to_string(),
+        "ocr-models/PP-OCRv6_small/rec/inference.onnx".to_string(),
+        "ocr-models/PP-OCRv6_small/rec/inference.yml".to_string(),
     ] {
         assert!(
             install_root.join(path).is_file(),
