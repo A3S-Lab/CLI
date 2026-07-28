@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.13] - 2026-07-28
+
+### Changed
+
+- Updated the shared Code runtime used by the CLI, TUI, and Web adapter to
+  `a3s-code-core` 6.5.2, including strict built-in tool contracts, root JSON
+  Schema value support, governed generation timeouts, and typed transport
+  failures.
+
 ## [0.10.12] - 2026-07-28
 
 ### Added
