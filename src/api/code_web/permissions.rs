@@ -84,7 +84,6 @@ impl CodeWebExecutionMode {
 pub(in crate::api::code_web) struct CodeWebPermissionChecker {
     interactive: InteractiveToolGuardrail,
     mode: CodeWebExecutionMode,
-    sandbox_available: bool,
     workspace: PathBuf,
 }
 
@@ -135,15 +134,7 @@ impl PermissionChecker for CodeWebPermissionChecker {
                     return PermissionDecision::Deny;
                 }
                 match tool.as_str() {
-                    "bash" => {
-                        if bash_boundary_request(args) == BashBoundaryRequest::UseDefault
-                            && self.sandbox_available
-                        {
-                            PermissionDecision::Allow
-                        } else {
-                            PermissionDecision::Deny
-                        }
-                    }
+                    "bash" => PermissionDecision::Deny,
                     "git" => match InteractiveToolGuardrail::risk_decision(&tool, args) {
                         PermissionDecision::Allow => PermissionDecision::Allow,
                         PermissionDecision::Ask | PermissionDecision::Deny => {
@@ -165,9 +156,6 @@ impl PermissionChecker for CodeWebPermissionChecker {
                     }
                 }
                 "bash" => match bash_boundary_request(args) {
-                    BashBoundaryRequest::UseDefault if self.sandbox_available => {
-                        PermissionDecision::Allow
-                    }
                     BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
                         PermissionDecision::Ask
                     }
@@ -186,13 +174,11 @@ impl PermissionChecker for CodeWebPermissionChecker {
 pub(in crate::api::code_web) fn permission_checker_for_mode(
     mode: &str,
     workspace: &Path,
-    sandbox_available: bool,
 ) -> CodeWebPermissionChecker {
     let execution_mode = CodeWebExecutionMode::from_name(mode);
     CodeWebPermissionChecker {
         interactive: InteractiveToolGuardrail::for_mode(mode).with_workspace(workspace),
         mode: execution_mode,
-        sandbox_available,
         workspace: workspace.to_path_buf(),
     }
 }
@@ -373,28 +359,23 @@ mod tests {
     };
     use serde_json::json;
 
-    fn checker(mode: &str, sandbox_available: bool) -> CodeWebPermissionChecker {
-        permission_checker_for_mode(mode, Path::new("."), sandbox_available)
+    fn checker(mode: &str) -> CodeWebPermissionChecker {
+        permission_checker_for_mode(mode, Path::new("."))
     }
 
     #[test]
-    fn default_mode_uses_the_sandbox_and_prompts_only_for_host_escalation() {
-        let sandboxed = checker("default", true);
-        let unsandboxed = checker("default", false);
+    fn default_mode_requires_approval_for_every_host_bash_command() {
+        let checker = checker("default");
         assert_eq!(
-            unsandboxed.check("read", &json!({ "file_path": "src/main.rs" })),
+            checker.check("read", &json!({ "file_path": "src/main.rs" })),
             PermissionDecision::Allow
         );
         assert_eq!(
-            unsandboxed.check("bash", &json!({ "command": "pwd" })),
+            checker.check("bash", &json!({ "command": "pwd" })),
             PermissionDecision::Ask
         );
         assert_eq!(
-            sandboxed.check("bash", &json!({ "command": "cargo test" })),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            sandboxed.check(
+            checker.check(
                 "bash",
                 &json!({
                     "command": "cargo test",
@@ -405,11 +386,11 @@ mod tests {
             PermissionDecision::Ask
         );
         assert_eq!(
-            unsandboxed.check("git", &json!({ "command": "status" })),
+            checker.check("git", &json!({ "command": "status" })),
             PermissionDecision::Allow
         );
         assert_eq!(
-            unsandboxed.check("write", &json!({ "file_path": "src/main.rs" })),
+            checker.check("write", &json!({ "file_path": "src/main.rs" })),
             PermissionDecision::Allow
         );
         assert!(confirmation_policy_for_mode("default").enabled);
@@ -417,7 +398,7 @@ mod tests {
 
     #[test]
     fn plan_mode_is_a_non_escalatable_read_only_boundary() {
-        let checker = checker("plan", true);
+        let checker = checker("plan");
         assert_eq!(
             checker.check("grep", &json!({ "pattern": "TODO" })),
             PermissionDecision::Allow
@@ -437,19 +418,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_runs_inside_srt_without_ever_escalating_to_hitl() {
-        let unsandboxed = checker("auto", false);
-        let checker = checker("auto", true);
+    fn auto_mode_denies_host_bash_without_entering_hitl() {
+        let checker = checker("auto");
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
             PermissionDecision::Allow
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "cargo test" })),
-            PermissionDecision::Allow
-        );
-        assert_eq!(
-            unsandboxed.check("bash", &json!({ "command": "cargo test" })),
             PermissionDecision::Deny
         );
         assert_eq!(
@@ -478,27 +454,11 @@ mod tests {
             checker.check("git", &json!({ "command": "unknown" })),
             PermissionDecision::Deny
         );
-        assert_eq!(
-            checker.check("bash", &json!({ "command": "cat *" })),
-            PermissionDecision::Allow
-        );
-        for command in [
-            "sort -o/tmp/a3s-hitl-bypass input.txt",
-            "find . -fls output.txt",
-            "sed w output.txt README.md",
-            "sed e commands.txt",
-        ] {
+        for command in ["cat *", "rg mkfs README.md", "cat docs/mkfs-guide.md"] {
             assert_eq!(
                 checker.check("bash", &json!({ "command": command })),
-                PermissionDecision::Allow,
-                "sandboxed shell side effects stay inside the governed workspace: {command}"
-            );
-        }
-        for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
-            assert_eq!(
-                checker.check("bash", &json!({ "command": command })),
-                PermissionDecision::Allow,
-                "read-only arguments must not be overblocked: {command}"
+                PermissionDecision::Deny,
+                "Auto must not execute host Bash: {command}"
             );
         }
         assert_eq!(
@@ -516,8 +476,8 @@ mod tests {
     }
 
     #[test]
-    fn web_auto_keeps_explainable_risk_while_srt_resolves_high_risk_shell_calls() {
-        let checker = checker("auto", true);
+    fn web_auto_keeps_explainable_risk_while_denying_host_bash() {
+        let checker = checker("auto");
         for (tool, args, level, action, permission) in [
             (
                 "read",
@@ -538,7 +498,7 @@ mod tests {
                 json!({"command": "cargo test"}),
                 ToolRiskLevel::High,
                 ToolRiskAction::ReviewByLlm,
-                PermissionDecision::Allow,
+                PermissionDecision::Deny,
             ),
             (
                 "bash",
@@ -599,7 +559,7 @@ mod tests {
 
     #[test]
     fn primary_web_model_hides_raw_use_tools_without_blocking_the_worker() {
-        let checker = checker("default", false);
+        let checker = checker("default");
         let tool = "mcp__use_office__office_list";
 
         assert!(!checker.expose_to_model(tool));

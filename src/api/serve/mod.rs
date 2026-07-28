@@ -170,32 +170,13 @@ async fn run_foreground(
             None
         }
     };
-    let managed_srt = if let Some(paths) = component_paths.as_ref() {
-        let resolution = a3s::components::resolve_managed_srt(
-            paths,
-            &options.workspace,
-            options.allow_asset_download,
-            options.offline,
-            false,
-        )
-        .await;
-        if let Some(warning) = resolution.warning {
-            eprintln!("warning: Code Web local command sandbox is unavailable: {warning}");
-        }
-        resolution.runtime
-    } else {
-        None
-    };
-    let state = Arc::new(
-        CodeWebState::new(
-            agent,
-            PathBuf::from(&config_path),
-            options.workspace.clone(),
-            code_config,
-            session_repository,
-        )
-        .with_managed_srt(managed_srt),
-    );
+    let state = Arc::new(CodeWebState::new(
+        agent,
+        PathBuf::from(&config_path),
+        options.workspace.clone(),
+        code_config,
+        session_repository,
+    ));
     if let Some(paths) = component_paths.as_ref() {
         match a3s::components::find_ready_executable_with("use", paths) {
             Ok(Some(executable)) => {

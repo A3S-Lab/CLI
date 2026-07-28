@@ -1,35 +1,10 @@
 use super::*;
 use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
-struct TestSandbox;
-
-#[async_trait::async_trait]
-impl a3s_code_core::sandbox::BashSandbox for TestSandbox {
-    async fn exec_command(
-        &self,
-        _command: &str,
-        _guest_workspace: &str,
-    ) -> anyhow::Result<a3s_code_core::sandbox::SandboxOutput> {
-        Ok(a3s_code_core::sandbox::SandboxOutput {
-            stdout: String::new(),
-            stderr: String::new(),
-            exit_code: 0,
-        })
-    }
-
-    async fn shutdown(&self) {}
-}
-
-fn checker(
-    workspace: &Path,
-    mode: Mode,
-    sandboxed: bool,
-) -> (TuiHitlPermissionChecker, TuiExecutionPolicy) {
+fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecutionPolicy) {
     let gate = DeepResearchReportToolGate::default();
     gate.set_workspace(workspace);
-    let sandbox =
-        sandboxed.then(|| Arc::new(TestSandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>);
-    let execution = TuiExecutionPolicy::for_workspace(mode, workspace.to_path_buf(), sandbox);
+    let execution = TuiExecutionPolicy::for_workspace(mode, workspace.to_path_buf());
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
         tui_permission_policy(),
         gate,
@@ -40,16 +15,15 @@ fn checker(
 }
 
 #[test]
-fn default_mode_is_quiet_inside_the_enforced_workspace_boundary() {
+fn default_mode_approves_bounded_tools_and_prompts_for_host_bash() {
     let workspace = tempfile::tempdir().unwrap();
-    let (checker, _) = checker(workspace.path(), Mode::Default, true);
+    let (checker, _) = checker(workspace.path(), Mode::Default);
 
     for (tool, args) in [
         (
             "write",
             serde_json::json!({"file_path": "README.md", "content": "updated"}),
         ),
-        ("bash", serde_json::json!({"command": "cargo test"})),
         (
             "task",
             serde_json::json!({"prompt": "inspect and implement the change"}),
@@ -69,6 +43,10 @@ fn default_mode_is_quiet_inside_the_enforced_workspace_boundary() {
             "Default should not enter HITL for bounded {tool}"
         );
     }
+    assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Ask
+    );
     assert_eq!(
         checker.check(
             "bash",
@@ -110,24 +88,6 @@ fn default_mode_is_quiet_inside_the_enforced_workspace_boundary() {
 }
 
 #[test]
-fn default_mode_requires_hitl_when_the_process_sandbox_is_missing() {
-    let workspace = tempfile::tempdir().unwrap();
-    let (checker, _) = checker(workspace.path(), Mode::Default, false);
-
-    assert_eq!(
-        checker.check(
-            "write",
-            &serde_json::json!({"file_path": "README.md", "content": "updated"})
-        ),
-        PermissionDecision::Allow
-    );
-    assert_eq!(
-        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
-        PermissionDecision::Ask
-    );
-}
-
-#[test]
 fn default_mode_can_remember_one_exact_protected_metadata_grant() {
     let workspace = tempfile::tempdir().unwrap();
     let gate = DeepResearchReportToolGate::default();
@@ -142,11 +102,7 @@ fn default_mode_can_remember_one_exact_protected_metadata_grant() {
         tui_permission_policy(),
         gate,
         grants,
-        TuiExecutionPolicy::for_workspace(
-            Mode::Default,
-            workspace.path().to_path_buf(),
-            Some(Arc::new(TestSandbox)),
-        ),
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf()),
     );
 
     assert_eq!(
@@ -169,14 +125,13 @@ fn default_mode_can_remember_one_exact_protected_metadata_grant() {
 #[test]
 fn auto_mode_resolves_non_denied_tools_without_hitl() {
     let workspace = tempfile::tempdir().unwrap();
-    let (checker, _) = checker(workspace.path(), Mode::Auto, true);
+    let (checker, _) = checker(workspace.path(), Mode::Auto);
 
     for (tool, args) in [
         (
             "write",
             serde_json::json!({"file_path": "README.md", "content": "updated"}),
         ),
-        ("bash", serde_json::json!({"command": "cargo test"})),
         (
             "task",
             serde_json::json!({"prompt": "inspect and implement the change"}),
@@ -194,6 +149,12 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
     }
 
     assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
+        PermissionDecision::Deny,
+        "Auto must deny host Bash without entering HITL"
+    );
+
+    assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "rm -rf /"})),
         PermissionDecision::Deny,
         "hard guardrails remain authoritative in Auto"
@@ -208,7 +169,7 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
             })
         ),
         PermissionDecision::Deny,
-        "Auto must deny sandbox escape instead of entering HITL"
+        "Auto must deny explicit host Bash without entering HITL"
     );
     assert_eq!(
         checker.check(
@@ -227,7 +188,7 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
             &serde_json::json!({"command": "checkout", "ref": "feature"})
         ),
         PermissionDecision::Deny,
-        "Auto must not write protected Git metadata outside the process sandbox"
+        "Auto must not write protected Git metadata"
     );
     assert_eq!(
         checker.check("git", &serde_json::json!({"command": "status"})),
@@ -244,27 +205,9 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
 }
 
 #[test]
-fn auto_mode_fails_closed_when_the_process_sandbox_is_missing() {
-    let workspace = tempfile::tempdir().unwrap();
-    let (checker, _) = checker(workspace.path(), Mode::Auto, false);
-
-    assert_eq!(
-        checker.check("bash", &serde_json::json!({"command": "cargo test"})),
-        PermissionDecision::Deny
-    );
-    assert_eq!(
-        checker.check(
-            "write",
-            &serde_json::json!({"file_path": "README.md", "content": "updated"})
-        ),
-        PermissionDecision::Allow
-    );
-}
-
-#[test]
 fn execution_mode_is_shared_across_checker_clones() {
     let workspace = tempfile::tempdir().unwrap();
-    let (checker, execution) = checker(workspace.path(), Mode::Default, true);
+    let (checker, execution) = checker(workspace.path(), Mode::Default);
     let clone = checker.clone();
     let args = serde_json::json!({
         "command": "cargo test",
@@ -283,11 +226,7 @@ async fn admitted_run_snapshots_do_not_follow_the_next_tui_mode() {
     use a3s_code_core::hitl::ConfirmationProvider;
 
     let workspace = tempfile::tempdir().unwrap();
-    let execution = TuiExecutionPolicy::for_workspace(
-        Mode::Auto,
-        workspace.path().to_path_buf(),
-        Some(Arc::new(TestSandbox)),
-    );
+    let execution = TuiExecutionPolicy::for_workspace(Mode::Auto, workspace.path().to_path_buf());
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
         tui_permission_policy(),
         DeepResearchReportToolGate::default(),
@@ -338,11 +277,7 @@ async fn run_confirmation_snapshot_keeps_session_settlement_reachable() {
     let workspace = tempfile::tempdir().unwrap();
     let provider = TuiModeConfirmationProvider::new(
         a3s_code_core::hitl::ConfirmationPolicy::enabled(),
-        TuiExecutionPolicy::for_workspace(
-            Mode::Default,
-            workspace.path().to_path_buf(),
-            Some(Arc::new(TestSandbox)),
-        ),
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf()),
     );
     let run_provider = provider.snapshot_for_run().unwrap();
     let response = run_provider
@@ -364,11 +299,7 @@ async fn run_confirmation_snapshot_keeps_session_settlement_reachable() {
 #[test]
 fn auto_confirmation_fallback_fails_closed_without_hitl() {
     let workspace = tempfile::tempdir().unwrap();
-    let execution = TuiExecutionPolicy::for_workspace(
-        Mode::Auto,
-        workspace.path().to_path_buf(),
-        Some(Arc::new(TestSandbox)),
-    );
+    let execution = TuiExecutionPolicy::for_workspace(Mode::Auto, workspace.path().to_path_buf());
 
     assert_eq!(
         execution.auto_confirmation_decision(
@@ -410,17 +341,6 @@ fn auto_confirmation_fallback_fails_closed_without_hitl() {
         ),
         None
     );
-
-    let unavailable =
-        TuiExecutionPolicy::for_workspace(Mode::Auto, workspace.path().to_path_buf(), None);
-    assert_eq!(
-        unavailable.auto_confirmation_decision(
-            "bash",
-            &serde_json::json!({"command": "cargo test"}),
-            workspace.path(),
-        ),
-        Some(false)
-    );
 }
 
 #[test]
@@ -437,11 +357,7 @@ fn plan_mode_is_read_only_even_with_session_grants() {
         tui_permission_policy(),
         gate,
         grants,
-        TuiExecutionPolicy::for_workspace(
-            Mode::Plan,
-            workspace.path().to_path_buf(),
-            Some(Arc::new(TestSandbox)),
-        ),
+        TuiExecutionPolicy::for_workspace(Mode::Plan, workspace.path().to_path_buf()),
     );
 
     assert_eq!(
@@ -466,11 +382,8 @@ async fn auto_mode_rejects_tool_owned_confirmation_escalation() {
     use a3s_code_core::hitl::ConfirmationProvider;
 
     let workspace = tempfile::tempdir().unwrap();
-    let execution = TuiExecutionPolicy::for_workspace(
-        Mode::Default,
-        workspace.path().to_path_buf(),
-        Some(Arc::new(TestSandbox)),
-    );
+    let execution =
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf());
     let provider = TuiModeConfirmationProvider::new(
         a3s_code_core::hitl::ConfirmationPolicy::enabled(),
         execution.clone(),
@@ -523,8 +436,7 @@ async fn tui_confirmation_timeouts_are_always_rejections() {
 
     for mode in [Mode::Default, Mode::Plan, Mode::Auto] {
         let workspace = tempfile::tempdir().unwrap();
-        let execution =
-            TuiExecutionPolicy::for_workspace(mode, workspace.path().to_path_buf(), None);
+        let execution = TuiExecutionPolicy::for_workspace(mode, workspace.path().to_path_buf());
         let provider = TuiModeConfirmationProvider::new(
             a3s_code_core::hitl::ConfirmationPolicy::enabled()
                 .with_timeout(321, TimeoutAction::AutoApprove),
@@ -546,7 +458,7 @@ async fn terminal_confirmation_updates_and_expiry_cannot_manufacture_consent() {
 
     let workspace = tempfile::tempdir().unwrap();
     let execution =
-        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf(), None);
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf());
     let provider = TuiModeConfirmationProvider::new(
         a3s_code_core::hitl::ConfirmationPolicy::enabled(),
         execution,
@@ -580,20 +492,17 @@ async fn terminal_confirmation_updates_and_expiry_cannot_manufacture_consent() {
 }
 
 #[tokio::test]
-async fn session_options_share_one_execution_policy_across_both_hitl_layers() {
+async fn session_options_share_one_host_execution_policy_across_both_hitl_layers() {
     let workspace = tempfile::tempdir().unwrap();
-    let execution = TuiExecutionPolicy::for_workspace(
-        Mode::Default,
-        workspace.path().to_path_buf(),
-        Some(Arc::new(TestSandbox)),
-    );
+    let execution =
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf());
     let options = tui_session_options_with_gate_grants_and_execution(
         a3s_code_core::hitl::ConfirmationPolicy::enabled(),
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
         execution.clone(),
     );
-    assert!(options.sandbox_handle.is_some());
+    assert!(options.sandbox_handle.is_none());
     let checker = options
         .permission_checker
         .expect("TUI options should install a permission checker");
@@ -602,10 +511,10 @@ async fn session_options_share_one_execution_policy_across_both_hitl_layers() {
         .expect("TUI options should install a confirmation provider");
     let args = serde_json::json!({"command": "cargo test"});
 
-    assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
     assert!(confirmation.requires_confirmation("bash").await);
 
     execution.set_mode(Mode::Auto);
-    assert_eq!(checker.check("bash", &args), PermissionDecision::Allow);
+    assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
     assert!(confirmation.requires_confirmation("bash").await);
 }

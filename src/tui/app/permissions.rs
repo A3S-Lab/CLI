@@ -53,10 +53,9 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
     execution_policy: TuiExecutionPolicy,
 ) -> SessionOptions {
     let permission_policy = tui_permission_policy();
-    let sandbox = execution_policy.sandbox_handle();
     let confirmation_manager =
         TuiModeConfirmationProvider::new(confirmation, execution_policy.clone());
-    let options = SessionOptions::new()
+    SessionOptions::new()
         .with_auto_compact(false)
         .with_confirmation_manager(Arc::new(confirmation_manager))
         .with_permission_policy(permission_policy.clone())
@@ -69,11 +68,7 @@ pub(super) fn tui_session_options_with_gate_grants_and_execution(
             ),
         ))
         .with_tool_timeout(TOOL_EXEC_TIMEOUT_MS)
-        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD);
-    match sandbox {
-        Some(sandbox) => options.with_sandbox_handle(sandbox),
-        None => options,
-    }
+        .with_duplicate_tool_call_threshold(TUI_DUPLICATE_TOOL_CALL_THRESHOLD)
 }
 
 /// Core serializable permission policy for the TUI.
@@ -130,7 +125,6 @@ pub(super) fn tui_permission_policy() -> a3s_code_core::permissions::PermissionP
 pub(super) struct TuiExecutionPolicy {
     mode: Arc<AtomicU8>,
     workspace: Arc<PathBuf>,
-    sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
 }
 
 impl Default for TuiExecutionPolicy {
@@ -145,29 +139,16 @@ impl TuiExecutionPolicy {
     const AUTO: u8 = 2;
 
     pub(super) fn new(mode: Mode) -> Self {
-        Self::for_workspace(mode, PathBuf::from("."), None)
+        Self::for_workspace(mode, PathBuf::from("."))
     }
 
-    pub(super) fn for_workspace(
-        mode: Mode,
-        workspace: PathBuf,
-        sandbox: Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>>,
-    ) -> Self {
+    pub(super) fn for_workspace(mode: Mode, workspace: PathBuf) -> Self {
         let policy = Self {
             mode: Arc::new(AtomicU8::new(Self::DEFAULT)),
             workspace: Arc::new(workspace),
-            sandbox,
         };
         policy.set_mode(mode);
         policy
-    }
-
-    pub(super) fn sandbox_handle(&self) -> Option<Arc<dyn a3s_code_core::sandbox::BashSandbox>> {
-        self.sandbox.clone()
-    }
-
-    pub(super) fn sandbox_available(&self) -> bool {
-        self.sandbox.is_some()
     }
 
     pub(super) fn set_mode(&self, mode: Mode) {
@@ -195,7 +176,6 @@ impl TuiExecutionPolicy {
                 Mode::Auto => Self::AUTO,
             })),
             workspace: Arc::clone(&self.workspace),
-            sandbox: self.sandbox.clone(),
         }
     }
 
@@ -555,23 +535,13 @@ impl TuiHitlPermissionChecker {
                 return base;
             }
             match self.execution_policy.mode() {
-                // Auto never enters HITL. Normal shell calls require an actual
-                // process sandbox; a missing boundary or explicit host escape
-                // fails closed.
+                // Auto never enters HITL. Host shell access fails closed.
                 Mode::Auto => {
                     if protected_workspace_metadata {
                         return a3s_code_core::permissions::PermissionDecision::Deny;
                     }
                     if tool == "bash" {
-                        return if matches!(
-                            bash_boundary_request(args),
-                            BashBoundaryRequest::UseDefault
-                        ) && self.execution_policy.sandbox_available()
-                        {
-                            a3s_code_core::permissions::PermissionDecision::Allow
-                        } else {
-                            a3s_code_core::permissions::PermissionDecision::Deny
-                        };
+                        return a3s_code_core::permissions::PermissionDecision::Deny;
                     }
                     if tool == "git" {
                         return match a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(
@@ -627,14 +597,9 @@ impl TuiHitlPermissionChecker {
                         a3s_code_core::permissions::PermissionDecision::Allow
                     }
                 }
-                // A real process sandbox, rather than lexical command
-                // classification, is the authority for routine shell work.
+                // Bash uses the host workspace runner, so every valid command
+                // requires approval. Hard guardrails above remain authoritative.
                 "bash" => match bash_boundary_request(args) {
-                    BashBoundaryRequest::UseDefault
-                        if self.execution_policy.sandbox_available() =>
-                    {
-                        a3s_code_core::permissions::PermissionDecision::Allow
-                    }
                     BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
                         a3s_code_core::permissions::PermissionDecision::Ask
                     }
@@ -643,7 +608,7 @@ impl TuiHitlPermissionChecker {
                     }
                 },
                 // These are governed control-plane wrappers. Their nested tool
-                // calls pass through the same checker and sandbox again.
+                // calls pass through the same checker again.
                 "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow" | "skill" => {
                     a3s_code_core::permissions::PermissionDecision::Allow
                 }

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Local Bash now uses the active workspace's host command runner. Default mode
+  requires approval for each exact command, while Plan and Auto deny Bash.
+
+### Removed
+
+- Removed the Anthropic managed SRT bootstrap, capability probe, packaged
+  support tree, native sandbox prerequisites, and release/update plumbing.
+- Standalone installations from 0.9.9 through 0.10.10 must install the first
+  SRT-free release once from its GitHub archive because those legacy updaters
+  require the deleted support payload. Homebrew upgrades are unaffected.
+
 ## [0.10.10] - 2026-07-28
 
 ### Changed
