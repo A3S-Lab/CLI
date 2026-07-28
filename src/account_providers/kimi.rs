@@ -513,6 +513,7 @@ impl HttpClient for KimiHttpClient {
 
 pub(crate) struct KimiClient {
     inner: OpenAiClient,
+    thinking: bool,
 }
 
 impl KimiClient {
@@ -556,7 +557,7 @@ impl KimiClient {
             .with_provider_name("Kimi")
             .with_headers(auth.identity_headers.clone())
             .with_http_client(http);
-        Self { inner }
+        Self { inner, thinking }
     }
 }
 
@@ -584,7 +585,14 @@ impl LlmClient for KimiClient {
     }
 
     fn native_structured_support(&self) -> NativeStructuredSupport {
-        self.inner.native_structured_support()
+        if self.thinking {
+            // Kimi thinking-only routes reject a specified tool_choice. Report
+            // the capability conservatively so structured generation uses its
+            // schema-in-prompt fallback and retains local validation/repair.
+            NativeStructuredSupport::None
+        } else {
+            self.inner.native_structured_support()
+        }
     }
 
     async fn complete_structured(
@@ -973,5 +981,26 @@ mod tests {
         assert!(request.headers.iter().any(|(name, value)| {
             name.eq_ignore_ascii_case("user-agent") && value == "Desktop Kimi Work"
         }));
+        assert_eq!(
+            client.native_structured_support(),
+            NativeStructuredSupport::None
+        );
+
+        model_metadata().write().unwrap().insert(
+            "non-thinking-test".to_string(),
+            KimiModelMetadata {
+                context: DEFAULT_MODEL_CONTEXT,
+                thinking: false,
+            },
+        );
+        let non_thinking = KimiClient::with_auth_and_http(
+            "non-thinking-test",
+            auth,
+            Arc::new(RecordingHttp::default()),
+        );
+        assert_eq!(
+            non_thinking.native_structured_support(),
+            NativeStructuredSupport::JsonSchema
+        );
     }
 }

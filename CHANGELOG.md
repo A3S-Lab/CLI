@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Kept structured generation compatible with Kimi thinking-only models by
+  advertising prompt-and-schema fallback instead of an unsupported forced tool
+  choice; non-thinking Kimi routes retain native structured-output support.
+
 ## [0.10.11] - 2026-07-28
 
 ### Changed
