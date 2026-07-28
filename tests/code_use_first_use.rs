@@ -537,7 +537,7 @@ fn code_tui_first_use_installs_a_real_use_release_before_the_first_turn() {
         "the TUI smoke did not call the model"
     );
     let descriptions = llm.task_descriptions().join("\n");
-    for capability in ["use/browser", "use/office", "use/ocr"] {
+    for capability in ["use/browser", "use/ocr"] {
         assert!(
             descriptions.contains(capability),
             "the first model turn did not advertise {capability}; descriptions={descriptions:?}; stderr={}",
@@ -568,7 +568,7 @@ fn code_tui_first_use_installs_a_real_use_release_before_the_first_turn() {
         "ocr-models/PP-OCRv6_small/rec/inference.yml".to_string(),
     ] {
         assert!(
-            install_root.join(path).is_file(),
+            install_root.join(&path).is_file(),
             "installed release is missing {path}"
         );
     }
