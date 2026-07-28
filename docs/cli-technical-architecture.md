@@ -521,16 +521,25 @@ installer command definitions embedded in ACL.
 
 Code does not provision or attach a local process sandbox. Bash routes through
 the active workspace backend's host command runner with the workspace as its
-current directory. Default mode requires approval for each exact command;
-Plan and Auto deny Bash. The permission checker, confirmation provider, command
-timeout, process-group cancellation, output bounds, and streaming observer are
-snapshotted with each admitted run and inherited by delegated work.
+current directory. TUI, Web, and headless execution share one Rust policy
+adapter over Core's `InteractiveToolGuardrail`. The classifier fails closed on
+critical commands and silently admits only a narrow subset proven read-only by
+its command structure, options, paths, pipeline stages, expansion, redirection,
+and workspace-symlink checks. Credential and control paths remain a hard floor
+that remembered grants cannot override. Default asks for unproven commands,
+Plan denies Bash, and Auto allows only the proven read-only subset. The
+permission checker, confirmation provider, command timeout, process-group
+cancellation, output bounds, and streaming observer are snapshotted with each
+admitted run and inherited by delegated work.
 
 Release archives, Homebrew, and standalone self-update therefore carry no
 JavaScript sandbox support tree and install no Node.js or native sandbox
 prerequisites. Runtime owns durable Task and Service placement, while Box owns
 OCI and stronger-isolation workloads. Commands that require an isolation
 boundary must use those products instead of the local host runner.
+The Rust classifier is a policy guardrail, not OS isolation: it cannot prevent
+PATH substitution, arbitrary build scripts or Git hooks, filesystem races,
+host-file access, or network access after a process is authorized.
 
 Executable discovery and version probes use bounded output files and an
 explicit portable timeout. They must not install process-global signal

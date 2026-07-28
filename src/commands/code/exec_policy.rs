@@ -2,10 +2,33 @@ use std::path::Path;
 use std::sync::Arc;
 
 use a3s_code_core::hitl::{ConfirmationPolicy, TimeoutAction};
-use a3s_code_core::permissions::{InteractiveToolGuardrail, PermissionPolicy};
+use a3s_code_core::permissions::{
+    InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
+};
 use a3s_code_core::{PlanningMode, SessionOptions};
 
 use crate::cli::args::CodeMode;
+use crate::host_command_guardrail::{host_bash_decision, HostCommandMode};
+
+struct ExecPermissionChecker {
+    interactive: InteractiveToolGuardrail,
+    host_mode: HostCommandMode,
+}
+
+impl PermissionChecker for ExecPermissionChecker {
+    fn expose_to_model(&self, tool_name: &str) -> bool {
+        !(self.host_mode == HostCommandMode::Plan && tool_name.eq_ignore_ascii_case("bash"))
+            && self.interactive.expose_to_model(tool_name)
+    }
+
+    fn check(&self, tool_name: &str, args: &serde_json::Value) -> PermissionDecision {
+        if tool_name.eq_ignore_ascii_case("bash") {
+            host_bash_decision(&self.interactive, self.host_mode, args)
+        } else {
+            self.interactive.check(tool_name, args)
+        }
+    }
+}
 
 pub(super) fn session_options(
     mode: CodeMode,
@@ -20,9 +43,11 @@ pub(super) fn session_options(
             ConfirmationPolicy::enabled().with_timeout(30_000, TimeoutAction::Reject),
         )
         .with_permission_policy(permission_policy)
-        .with_permission_checker(Arc::new(
-            InteractiveToolGuardrail::for_mode(mode_name(mode)).with_workspace(workspace),
-        ))
+        .with_permission_checker(Arc::new(ExecPermissionChecker {
+            interactive: InteractiveToolGuardrail::for_mode(mode_name(mode))
+                .with_workspace(workspace),
+            host_mode: host_mode(mode),
+        }))
 }
 
 fn planning_mode(mode: CodeMode) -> PlanningMode {
@@ -38,6 +63,14 @@ fn mode_name(mode: CodeMode) -> &'static str {
         CodeMode::Plan => "plan",
         CodeMode::Default => "default",
         CodeMode::Auto => "auto",
+    }
+}
+
+fn host_mode(mode: CodeMode) -> HostCommandMode {
+    match mode {
+        CodeMode::Default => HostCommandMode::Default,
+        CodeMode::Plan => HostCommandMode::Plan,
+        CodeMode::Auto => HostCommandMode::Auto,
     }
 }
 
@@ -115,8 +148,12 @@ mod tests {
             PermissionDecision::Allow
         );
         assert_eq!(
+            checker.check("bash", &json!({"command": "pwd"})),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
             checker.check("bash", &json!({"command": "cargo test"})),
-            PermissionDecision::Ask
+            PermissionDecision::Deny
         );
         assert_eq!(
             checker.check("bash", &json!({"command": "rm -rf /"})),
@@ -125,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn default_and_plan_modes_never_silently_approve_writes() {
+    fn default_and_plan_modes_preserve_their_interactive_boundaries() {
         let workspace = tempfile::tempdir().unwrap();
         for (mode, planning) in [
             (CodeMode::Default, PlanningMode::Disabled),
@@ -141,6 +178,15 @@ mod tests {
             assert_eq!(
                 checker.check("write", &json!({"file_path": "answer.txt"})),
                 PermissionDecision::Ask
+            );
+            let expected_bash = match mode {
+                CodeMode::Default => PermissionDecision::Allow,
+                CodeMode::Plan => PermissionDecision::Deny,
+                CodeMode::Auto => unreachable!(),
+            };
+            assert_eq!(
+                checker.check("bash", &json!({"command": "pwd"})),
+                expected_bash
             );
         }
     }

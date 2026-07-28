@@ -3115,7 +3115,7 @@ fn tui_default_policy_allows_readonly_research_tools() {
 }
 
 #[test]
-fn tui_checker_requires_host_bash_approval_after_hard_guardrails() {
+fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
@@ -3127,26 +3127,26 @@ fn tui_checker_requires_host_bash_approval_after_hard_guardrails() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Allow
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "rg Permission crates/cli/src/tui/mod.rs | head -20"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Allow
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "git diff -- crates/cli/src/tui/mod.rs"})
         ),
-        PermissionDecision::Ask
+        PermissionDecision::Allow
     );
     for command in ["rg mkfs README.md", "cat docs/mkfs-guide.md"] {
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": command})),
-            PermissionDecision::Ask,
+            PermissionDecision::Allow,
             "dangerous command names used as data must not be overblocked: {command}"
         );
     }

@@ -198,26 +198,6 @@ impl TuiExecutionPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BashBoundaryRequest {
-    UseDefault,
-    RequireEscalated,
-    Invalid,
-}
-
-fn bash_boundary_request(args: &serde_json::Value) -> BashBoundaryRequest {
-    match args.get("sandbox_permissions") {
-        None => BashBoundaryRequest::UseDefault,
-        Some(serde_json::Value::String(value)) if value == "use_default" => {
-            BashBoundaryRequest::UseDefault
-        }
-        Some(serde_json::Value::String(value)) if value == "require_escalated" => {
-            BashBoundaryRequest::RequireEscalated
-        }
-        Some(_) => BashBoundaryRequest::Invalid,
-    }
-}
-
 fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Value) -> bool {
     matches!(tool_name, "write" | "edit" | "patch")
         && args
@@ -526,6 +506,17 @@ impl TuiHitlPermissionChecker {
         {
             return a3s_code_core::permissions::PermissionDecision::Deny;
         }
+        let guarded_bash_decision = (tool == "bash").then(|| {
+            let mode = match self.execution_policy.mode() {
+                Mode::Default => crate::host_command_guardrail::HostCommandMode::Default,
+                Mode::Plan => crate::host_command_guardrail::HostCommandMode::Plan,
+                Mode::Auto => crate::host_command_guardrail::HostCommandMode::Auto,
+            };
+            crate::host_command_guardrail::host_bash_decision(&hard_guardrail, mode, args)
+        });
+        if guarded_bash_decision == Some(a3s_code_core::permissions::PermissionDecision::Deny) {
+            return a3s_code_core::permissions::PermissionDecision::Deny;
+        }
         let protected_workspace_metadata = targets_protected_workspace_metadata(&tool, args);
         if !evidence_collection {
             if tool.starts_with("mcp__use_") && self.execution_policy.mode() != Mode::Plan {
@@ -541,7 +532,8 @@ impl TuiHitlPermissionChecker {
                         return a3s_code_core::permissions::PermissionDecision::Deny;
                     }
                     if tool == "bash" {
-                        return a3s_code_core::permissions::PermissionDecision::Deny;
+                        return guarded_bash_decision
+                            .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny);
                     }
                     if tool == "git" {
                         return match a3s_code_core::permissions::InteractiveToolGuardrail::risk_decision(
@@ -597,16 +589,10 @@ impl TuiHitlPermissionChecker {
                         a3s_code_core::permissions::PermissionDecision::Allow
                     }
                 }
-                // Bash uses the host workspace runner, so every valid command
-                // requires approval. Hard guardrails above remain authoritative.
-                "bash" => match bash_boundary_request(args) {
-                    BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
-                        a3s_code_core::permissions::PermissionDecision::Ask
-                    }
-                    BashBoundaryRequest::Invalid => {
-                        a3s_code_core::permissions::PermissionDecision::Deny
-                    }
-                },
+                // The shared Rust guardrail silently admits only commands it
+                // can prove read-only. Unproven host work retains HITL.
+                "bash" => guarded_bash_decision
+                    .unwrap_or(a3s_code_core::permissions::PermissionDecision::Deny),
                 // These are governed control-plane wrappers. Their nested tool
                 // calls pass through the same checker again.
                 "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow" | "skill" => {

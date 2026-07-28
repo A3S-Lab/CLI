@@ -9,8 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Local Bash now uses the active workspace's host command runner. Default mode
-  requires approval for each exact command, while Plan and Auto deny Bash.
+- Local Bash now uses the active workspace's host command runner behind one
+  shared Rust guardrail. Default silently admits only commands proven read-only
+  and asks for unproven host work; Plan denies Bash; Auto admits the proven
+  read-only subset and denies everything else without entering HITL.
 
 ### Removed
 

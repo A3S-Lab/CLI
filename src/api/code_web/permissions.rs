@@ -9,6 +9,8 @@ use a3s_code_core::permissions::{
     InteractiveToolGuardrail, PermissionChecker, PermissionDecision, PermissionPolicy,
 };
 
+use crate::host_command_guardrail::{host_bash_decision, HostCommandMode};
+
 const HITL_CONFIRM_TIMEOUT_MS: u64 = 60 * 60 * 1000;
 
 const READ_ONLY_TOOLS: &[&str] = &[
@@ -134,7 +136,7 @@ impl PermissionChecker for CodeWebPermissionChecker {
                     return PermissionDecision::Deny;
                 }
                 match tool.as_str() {
-                    "bash" => PermissionDecision::Deny,
+                    "bash" => host_bash_decision(&self.interactive, HostCommandMode::Auto, args),
                     "git" => match InteractiveToolGuardrail::risk_decision(&tool, args) {
                         PermissionDecision::Allow => PermissionDecision::Allow,
                         PermissionDecision::Ask | PermissionDecision::Deny => {
@@ -155,12 +157,7 @@ impl PermissionChecker for CodeWebPermissionChecker {
                         PermissionDecision::Allow
                     }
                 }
-                "bash" => match bash_boundary_request(args) {
-                    BashBoundaryRequest::UseDefault | BashBoundaryRequest::RequireEscalated => {
-                        PermissionDecision::Ask
-                    }
-                    BashBoundaryRequest::Invalid => PermissionDecision::Deny,
-                },
+                "bash" => host_bash_decision(&self.interactive, HostCommandMode::Default, args),
                 "batch" | "program" | "task" | "parallel_task" | "dynamic_workflow" | "skill" => {
                     PermissionDecision::Allow
                 }
@@ -290,26 +287,6 @@ impl ConfirmationProvider for CodeWebModeConfirmationProvider {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BashBoundaryRequest {
-    UseDefault,
-    RequireEscalated,
-    Invalid,
-}
-
-fn bash_boundary_request(args: &serde_json::Value) -> BashBoundaryRequest {
-    match args.get("sandbox_permissions") {
-        None => BashBoundaryRequest::UseDefault,
-        Some(serde_json::Value::String(value)) if value == "use_default" => {
-            BashBoundaryRequest::UseDefault
-        }
-        Some(serde_json::Value::String(value)) if value == "require_escalated" => {
-            BashBoundaryRequest::RequireEscalated
-        }
-        Some(_) => BashBoundaryRequest::Invalid,
-    }
-}
-
 fn targets_protected_workspace_metadata(tool_name: &str, args: &serde_json::Value) -> bool {
     matches!(tool_name, "write" | "edit" | "patch")
         && args
@@ -364,7 +341,7 @@ mod tests {
     }
 
     #[test]
-    fn default_mode_requires_approval_for_every_host_bash_command() {
+    fn default_mode_uses_the_rust_guardrail_for_host_bash() {
         let checker = checker("default");
         assert_eq!(
             checker.check("read", &json!({ "file_path": "src/main.rs" })),
@@ -372,13 +349,17 @@ mod tests {
         );
         assert_eq!(
             checker.check("bash", &json!({ "command": "pwd" })),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            checker.check("bash", &json!({ "command": "cargo test" })),
             PermissionDecision::Ask
         );
         assert_eq!(
             checker.check(
                 "bash",
                 &json!({
-                    "command": "cargo test",
+                    "command": "pwd",
                     "sandbox_permissions": "require_escalated",
                     "justification": "needs host access"
                 })
@@ -418,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_denies_host_bash_without_entering_hitl() {
+    fn auto_mode_allows_only_rust_proven_read_only_host_bash() {
         let checker = checker("auto");
         assert_eq!(
             checker.check("write", &json!({ "file_path": "src/main.rs" })),
@@ -428,6 +409,13 @@ mod tests {
             checker.check("bash", &json!({ "command": "cargo test" })),
             PermissionDecision::Deny
         );
+        for command in ["pwd", "rg mkfs README.md", "cat docs/mkfs-guide.md"] {
+            assert_eq!(
+                checker.check("bash", &json!({ "command": command })),
+                PermissionDecision::Allow,
+                "Auto should allow Rust-proven read-only Bash: {command}"
+            );
+        }
         assert_eq!(
             checker.check(
                 "bash",
@@ -454,13 +442,11 @@ mod tests {
             checker.check("git", &json!({ "command": "unknown" })),
             PermissionDecision::Deny
         );
-        for command in ["cat *", "rg mkfs README.md", "cat docs/mkfs-guide.md"] {
-            assert_eq!(
-                checker.check("bash", &json!({ "command": command })),
-                PermissionDecision::Deny,
-                "Auto must not execute host Bash: {command}"
-            );
-        }
+        assert_eq!(
+            checker.check("bash", &json!({ "command": "cat *" })),
+            PermissionDecision::Deny,
+            "Auto must deny shell syntax that the Rust guardrail cannot prove read-only"
+        );
         assert_eq!(
             checker.check("bash", &json!({ "command": "mkfs /dev/disk9" })),
             PermissionDecision::Deny
@@ -476,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn web_auto_keeps_explainable_risk_while_denying_host_bash() {
+    fn web_auto_keeps_explainable_risk_for_guarded_host_bash() {
         let checker = checker("auto");
         for (tool, args, level, action, permission) in [
             (

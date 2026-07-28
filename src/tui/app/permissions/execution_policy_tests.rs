@@ -15,7 +15,7 @@ fn checker(workspace: &Path, mode: Mode) -> (TuiHitlPermissionChecker, TuiExecut
 }
 
 #[test]
-fn default_mode_approves_bounded_tools_and_prompts_for_host_bash() {
+fn default_mode_uses_the_rust_guardrail_for_host_bash() {
     let workspace = tempfile::tempdir().unwrap();
     let (checker, _) = checker(workspace.path(), Mode::Default);
 
@@ -44,6 +44,10 @@ fn default_mode_approves_bounded_tools_and_prompts_for_host_bash() {
         );
     }
     assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "pwd"})),
+        PermissionDecision::Allow
+    );
+    assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cargo test"})),
         PermissionDecision::Ask
     );
@@ -51,7 +55,7 @@ fn default_mode_approves_bounded_tools_and_prompts_for_host_bash() {
         checker.check(
             "bash",
             &serde_json::json!({
-                "command": "cargo test",
+                "command": "pwd",
                 "sandbox_permissions": "require_escalated",
                 "justification": "Needs an approved host capability."
             })
@@ -123,6 +127,28 @@ fn default_mode_can_remember_one_exact_protected_metadata_grant() {
 }
 
 #[test]
+fn remembered_grants_cannot_bypass_the_host_command_safety_floor() {
+    let workspace = tempfile::tempdir().unwrap();
+    let gate = DeepResearchReportToolGate::default();
+    gate.set_workspace(workspace.path());
+    let invocation = serde_json::json!({"command": "cat .env"});
+    let grants = TuiPermissionGrants::default();
+    grants.allow_for_session(ExactPermissionGrant::from_invocation("bash", &invocation));
+    let checker = TuiHitlPermissionChecker::with_grants_and_execution(
+        tui_permission_policy(),
+        gate,
+        grants,
+        TuiExecutionPolicy::for_workspace(Mode::Default, workspace.path().to_path_buf()),
+    );
+
+    assert_eq!(
+        checker.check("bash", &invocation),
+        PermissionDecision::Deny,
+        "an exact grant must not expose workspace credentials through Bash"
+    );
+}
+
+#[test]
 fn auto_mode_resolves_non_denied_tools_without_hitl() {
     let workspace = tempfile::tempdir().unwrap();
     let (checker, _) = checker(workspace.path(), Mode::Auto);
@@ -149,9 +175,15 @@ fn auto_mode_resolves_non_denied_tools_without_hitl() {
     }
 
     assert_eq!(
+        checker.check("bash", &serde_json::json!({"command": "pwd"})),
+        PermissionDecision::Allow,
+        "Auto should allow Rust-proven read-only host Bash"
+    );
+
+    assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "cargo test"})),
         PermissionDecision::Deny,
-        "Auto must deny host Bash without entering HITL"
+        "Auto must deny host Bash that the guardrail cannot prove read-only"
     );
 
     assert_eq!(
@@ -510,11 +542,20 @@ async fn session_options_share_one_host_execution_policy_across_both_hitl_layers
         .confirmation_manager
         .expect("TUI options should install a confirmation provider");
     let args = serde_json::json!({"command": "cargo test"});
+    let read_only_args = serde_json::json!({"command": "pwd"});
 
     assert_eq!(checker.check("bash", &args), PermissionDecision::Ask);
+    assert_eq!(
+        checker.check("bash", &read_only_args),
+        PermissionDecision::Allow
+    );
     assert!(confirmation.requires_confirmation("bash").await);
 
     execution.set_mode(Mode::Auto);
     assert_eq!(checker.check("bash", &args), PermissionDecision::Deny);
+    assert_eq!(
+        checker.check("bash", &read_only_args),
+        PermissionDecision::Allow
+    );
     assert!(confirmation.requires_confirmation("bash").await);
 }
