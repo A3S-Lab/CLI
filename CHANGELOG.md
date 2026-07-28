@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.12] - 2026-07-28
+
+### Added
+
+- Added a persistent, resizable A3S Work live-preview panel for static sites,
+  loopback development servers, text, images, PDFs, and supported Office files.
+  Static sites reload after debounced workspace changes and provide responsive
+  device, zoom, refresh, pause, and external-window controls.
+- Added `/preview <path|localhost-url>`, `/preview status`, and `/preview stop`
+  to the Code TUI. The workspace IDE also opens the selected item with `p`, and
+  `:preview` saves a dirty editor buffer before opening it.
+
+### Security
+
+- Confined file previews to canonical active-workspace paths, blocked traversal,
+  hidden and sensitive files, escaping symbolic links, and oversized assets,
+  and limited URL previews to HTTP(S) loopback hosts. Static HTML runs in an
+  opaque-origin CSP sandbox, and preview descriptors and content now expire at
+  their declared deadline.
+- Kept native preview-window ownership separate from the shared Web process.
+  Preview replacement, stop, and TUI exit close only the exact tracked window,
+  and the window receives no A3S OS access or refresh token.
+
 ### Fixed
 
 - Kept structured generation compatible with Kimi thinking-only models by
