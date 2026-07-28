@@ -381,6 +381,8 @@ mod app_events;
 mod app_fork;
 #[path = "app/launch.rs"]
 mod app_launch;
+#[path = "app/live_preview.rs"]
+mod app_live_preview;
 #[path = "app/permission_rules.rs"]
 mod app_permission_rules;
 #[path = "app/permissions.rs"]
@@ -771,6 +773,13 @@ struct App {
     /// Exact local lifecycle publishing and the system-level island bridge.
     /// Rendering belongs to the independent native `a3s-webview` process.
     agent_presence: agent_presence::AgentPresenceRuntime,
+    /// Current host-owned artifact preview. The native window is tracked so it
+    /// can be replaced or closed without stopping the shared A3S Web server.
+    live_preview: Option<app_live_preview::LivePreviewState>,
+    /// Monotonic invalidation guard for asynchronous preview launches.
+    preview_launch_seq: u64,
+    /// Exact launch currently starting, including its user-visible target.
+    live_preview_pending: Option<(u64, String, TranscriptEntryId)>,
     /// Active background completion watchers, keyed by rebuild generation and
     /// task id so session replacement cannot leak stale results into history.
     background_subagent_watches: HashSet<(u64, String)>,
@@ -1041,6 +1050,9 @@ impl App {
             ide.intelligence_cancellation.cancel();
             ide.intelligence_jump_cancellation.cancel();
         }
+        self.preview_launch_seq = self.preview_launch_seq.wrapping_add(1);
+        self.live_preview_pending = None;
+        self.live_preview = None;
         self.stream_start_token = self.stream_start_token.wrapping_add(1);
         self.deep_research_stream_timeout_token =
             self.deep_research_stream_timeout_token.wrapping_add(1);

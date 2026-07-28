@@ -201,6 +201,10 @@ pub(super) const SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/update", "upgrade a3s to the latest release"),
     ("/ide", "superfile-style file browser + editor"),
     (
+        "/preview",
+        "open a live artifact preview · path/localhost URL, status, or stop",
+    ),
+    (
         "/memory",
         "browse memory as an event/entity graph with tiers and forget candidates",
     ),

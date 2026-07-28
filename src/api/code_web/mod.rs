@@ -12,6 +12,7 @@ mod module;
 mod os;
 mod permissions;
 mod plugins;
+mod previews;
 mod processes;
 mod remote;
 mod session_runtime;
@@ -24,5 +25,6 @@ mod workspace_backend_cache;
 
 pub(super) use kernel::KernelService;
 pub(super) use module::CodeWebModule;
+pub(in crate::api) use previews::content_router as preview_content_router;
 pub(super) use session_store::CodeWebSessionRepository;
 pub(super) use state::CodeWebState;

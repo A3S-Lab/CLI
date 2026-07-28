@@ -194,6 +194,15 @@ impl App {
                     ide.focus_editor = true;
                 }
             }
+            // Workspace tree only: open the selected file or static-site
+            // directory in the host-owned live-preview surface.
+            KeyCode::Char('p')
+                if ide.surface == IdeSurface::Workspace && !ide.entries.is_empty() =>
+            {
+                let sel = ide.sel.min(ide.entries.len() - 1);
+                ide.preview_request = Some(ide.entries[sel].path.clone());
+                ide.flash = Some(ide_flash_line(ToastKind::Info, "opening live preview…"));
+            }
             // `/kb` browser only: `x` opens a shared Confirm row for deletion.
             KeyCode::Char('x') if ide.kb_root.is_some() && !ide.entries.is_empty() => {
                 let sel = ide.sel.min(ide.entries.len() - 1);
@@ -211,7 +220,7 @@ impl App {
         // Any tree key other than `x` disarms a pending delete AND dismisses a
         // lingering flash (mirrors the editor, where any key clears it) — else
         // a "✔ deleted …" result masks the key hints for the whole session.
-        if !matches!(key.code, KeyCode::Char('x')) {
+        if !matches!(key.code, KeyCode::Char('x' | 'p')) {
             ide.armed_delete = None;
             ide.flash = None;
         }
@@ -419,14 +428,17 @@ impl App {
                     "-- INSERT -- · paste Cmd/Ctrl+V · Ctrl+Z undo · Ctrl+S save".to_string()
                 }
                 _ if ide.supports_code_intelligence() => {
-                    format!("{} · :w/:q · / search", ide_intelligence_command_hint())
+                    format!(
+                        "{} · :preview · :w/:q · / search",
+                        ide_intelligence_command_hint()
+                    )
                 }
                 _ => "-- NORMAL -- · / search · V visual-line · :w/:q/:wq · . repeat".to_string(),
             }
         } else if ide.kb_root.is_some() {
             "Tab edit · ↑↓ nav · Enter open · x delete · Esc close".to_string()
         } else {
-            "Tab edit · ↑↓ nav · Enter open · Esc close".to_string()
+            "Tab edit · ↑↓ nav · Enter open · p preview · Esc close".to_string()
         };
         let meta_w = (width * 3) / 5;
         let keys_w = width.saturating_sub(meta_w);
@@ -642,6 +654,29 @@ fn apply_ide_command(
                 ide.focus_editor = false;
             }
             msg
+        }
+        "preview" => {
+            if ide.surface != IdeSurface::Workspace {
+                return ide_flash_line(
+                    ToastKind::Warning,
+                    "live preview is available only in the workspace IDE",
+                );
+            }
+            let Some(path) = ide.file.as_ref().map(|file| file.path.clone()) else {
+                return ide_flash_line(ToastKind::Warning, "open a file first");
+            };
+            if ide.file.as_ref().is_some_and(|file| file.dirty) {
+                let save = ide
+                    .file
+                    .as_mut()
+                    .map(|file| save_ide_file(file, workspace_manifest, workspace))
+                    .unwrap_or_else(|| ide_flash_line(ToastKind::Warning, "open a file first"));
+                if ide.file.as_ref().is_some_and(|file| file.dirty) {
+                    return save;
+                }
+            }
+            ide.preview_request = Some(path);
+            ide_flash_line(ToastKind::Info, "opening live preview…")
         }
         "" => ide_flash_line(ToastKind::Warning, "empty command"),
         other => ide_flash_line(ToastKind::Warning, format!("unknown command: {other}")),
@@ -2063,6 +2098,32 @@ mod vim_tests {
         assert_eq!(f.lines, vec!["abc", "def"]);
         feed(&mut f, "i"); // can't enter insert on a read-only buffer
         assert_eq!(f.mode, EditMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn preview_command_saves_the_open_buffer_and_queues_its_path() {
+        let root = temp_root("live-preview-command");
+        let path = root.join("index.html");
+        std::fs::write(&path, "old").unwrap();
+        let manifest = LocalWorkspaceManifest::start(&root);
+        let mut ide = Ide::workspace(Vec::new());
+        let mut file = IdeFile::new(path.clone(), vec!["new".to_string()], false, false);
+        file.dirty = true;
+        ide.file = Some(file);
+
+        let result = apply_ide_command(
+            &mut ide,
+            "preview",
+            &manifest,
+            root.to_string_lossy().as_ref(),
+        );
+
+        assert_eq!(ide.preview_request.as_deref(), Some(path.as_path()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        assert!(!ide.file.as_ref().unwrap().dirty);
+        assert!(a3s_tui::style::strip_ansi(&result).contains("opening live preview"));
+        drop(manifest);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

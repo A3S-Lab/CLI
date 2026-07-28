@@ -5514,6 +5514,7 @@ fn registered_slash_commands_have_declared_handler_paths() {
         "/use",
         "/copy",
         "/export",
+        "/preview",
     ]);
     let exact = HashSet::from([
         "/logout",
@@ -5732,6 +5733,12 @@ fn slash_audit_rows() -> Vec<SlashAuditRow> {
             scope: Local,
         },
         SlashAuditRow {
+            command: "/preview",
+            handler: Parameterized,
+            idle_only: false,
+            scope: Local,
+        },
+        SlashAuditRow {
             command: "/memory",
             handler: Exact,
             idle_only: false,
@@ -5885,6 +5892,7 @@ fn slash_command_audit_matrix_matches_registry_and_policies() {
         "/use",
         "/copy",
         "/export",
+        "/preview",
     ]);
     for row in &rows {
         match row.handler {
