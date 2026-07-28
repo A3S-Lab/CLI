@@ -12,6 +12,7 @@ mod commands;
 mod compact;
 mod config;
 mod evolution;
+mod host_command_guardrail;
 mod model;
 #[path = "research/code.rs"]
 mod research;

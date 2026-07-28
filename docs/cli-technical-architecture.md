@@ -517,39 +517,29 @@ package names. Backends construct typed argv for trusted source kinds. They do
 not execute registry-provided command strings, remote shell scripts, or
 installer command definitions embedded in ACL.
 
-### 11.1 Code local sandbox supply
+### 11.1 Code host command execution
 
-The local command sandbox is an internal Code support component rather than a
-new public product proxy. Core owns the `BashSandbox` contract and permission
-boundary. CLI owns user-wide preparation, receipt validation, compatible Node
-selection, and the capability handshake. Runtime owns durable Task and Service
-placement, while Box owns OCI and stronger-isolation workloads.
+Code does not provision or attach a local process sandbox. Bash routes through
+the active workspace backend's host command runner with the workspace as its
+current directory. TUI, Web, and headless execution share one Rust policy
+adapter over Core's `InteractiveToolGuardrail`. The classifier fails closed on
+critical commands and silently admits only a narrow subset proven read-only by
+its command structure, options, paths, pipeline stages, expansion, redirection,
+and workspace-symlink checks. Credential and control paths remain a hard floor
+that remembered grants cannot override. Default asks for unproven commands,
+Plan denies Bash, and Auto allows only the proven read-only subset. The
+permission checker, confirmation provider, command timeout, process-group
+cancellation, output bounds, and streaming observer are snapshotted with each
+admitted run and inherited by delegated work.
 
-The production supply path is release-owned:
-
-1. reuse only a managed installation whose receipt, exact package identity and
-   version, registry integrity, lock file, and complete tree digest match;
-2. otherwise locate the support tree carried by the CLI archive or Homebrew
-   formula, reject links and workspace-local copies, and compare its complete
-   normalized tree against the digest compiled into the CLI;
-3. require Node.js 20.11 or newer, pin that executable for the Code process, and
-   run the Core handshake before attaching the sandbox;
-4. permit the verified release payload in offline mode and with
-   `A3S_NO_AUTO_INSTALL=1` because discovery performs no mutation;
-5. only when no release payload exists and first-use mutation is allowed, use
-   the fixed npm lock as a source/Cargo development bootstrap with lifecycle
-   scripts disabled and official registry URLs pinned;
-6. if every source fails, continue without a sandbox so Default can request one
-   exact host command and Auto can deny Bash.
-
-The TUI does not select an arbitrary `srt` from `PATH`. Release packaging,
-Homebrew installation, and standalone self-update all preserve the same
-verified support tree. The Homebrew formula restores Cleaner-rewritten Node
-shebangs in its post-install phase, verifies the complete tree digest in its
-formula test, and exercises both fresh-install and same-version reinstall
-paths in the release workflow. Runtime and Box remain the owners of durable
-placement and stronger isolation; this payload does not become a public
-component catalog or stack-wide execution contract.
+Release archives, Homebrew, and standalone self-update therefore carry no
+JavaScript sandbox support tree and install no Node.js or native sandbox
+prerequisites. Runtime owns durable Task and Service placement, while Box owns
+OCI and stronger-isolation workloads. Commands that require an isolation
+boundary must use those products instead of the local host runner.
+The Rust classifier is a policy guardrail, not OS isolation: it cannot prevent
+PATH substitution, arbitrary build scripts or Git hooks, filesystem races,
+host-file access, or network access after a process is authorized.
 
 Executable discovery and version probes use bounded output files and an
 explicit portable timeout. They must not install process-global signal

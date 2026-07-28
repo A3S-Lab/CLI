@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.11] - 2026-07-28
+
+### Changed
+
+- Updated the shared Code runtime used by both the TUI and Web adapter to
+  `a3s-code-core` 6.5.1.
+- Local Bash now uses the active workspace's host command runner behind one
+  shared Rust guardrail. Default silently admits only commands proven read-only
+  and asks for unproven host work; Plan denies Bash; Auto admits the proven
+  read-only subset and denies everything else without entering HITL.
+
+### Removed
+
+- Removed the Anthropic managed SRT bootstrap, capability probe, packaged
+  support tree, native sandbox prerequisites, and release/update plumbing.
+- Standalone installations from 0.9.9 through 0.10.10 must install the first
+  SRT-free release once from its GitHub archive because those legacy updaters
+  require the deleted support payload. Homebrew upgrades are unaffected.
+
 ## [0.10.10] - 2026-07-28
 
 ### Changed

@@ -8,14 +8,6 @@ const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
 const CODE_INTELLIGENCE_ABORT_SETTLE: Duration = Duration::from_millis(250);
 
-fn sandbox_load_warning(error: &anyhow::Error) -> String {
-    format!(
-        "Local command sandbox failed its bounded OS capability probe: {error:#}. \
-         Default mode will ask before exact host Bash execution; Auto mode will deny \
-         Bash. Repair the reported platform prerequisite and restart `a3s code`"
-    )
-}
-
 fn with_tui_prompt_context(
     options: SessionOptions,
     instructions: Option<&str>,
@@ -682,26 +674,8 @@ pub(crate) async fn run_in(
         Err(error) => (Vec::new(), Some(error)),
     };
     let permission_grants = TuiPermissionGrants::with_project(project_permission_grants);
-    let managed_srt = a3s::components::resolve_managed_srt(
-        &context.component_paths,
-        Path::new(&workspace),
-        context.network.allow_first_use_install,
-        context.network.offline,
-        context.output.progress,
-    )
-    .await;
-    let (sandbox_handle, sandbox_load_warning) = match managed_srt.runtime {
-        Some(runtime) => match runtime.build_and_probe_sandbox(Path::new(&workspace)).await {
-            Ok(sandbox) => (
-                Some(Arc::new(sandbox) as Arc<dyn a3s_code_core::sandbox::BashSandbox>),
-                None,
-            ),
-            Err(error) => (None, Some(sandbox_load_warning(&error))),
-        },
-        None => (None, managed_srt.warning),
-    };
     let execution_policy =
-        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace), sandbox_handle);
+        TuiExecutionPolicy::for_workspace(initial_mode, PathBuf::from(&workspace));
     // Claude Code compatibility: inject CLAUDE.md (AGENTS.md is auto-loaded by
     // the core) into the system prompt via prompt slots.
     let instructions = project_instructions(&workspace);
@@ -1189,10 +1163,6 @@ pub(crate) async fn run_in(
             format!("Project permission rules were ignored: {error}"),
         );
     }
-    if let Some(warning) = sandbox_load_warning {
-        app.push_notice(NoticeKind::Warning, warning);
-    }
-
     match interrupted_research_recovery {
         Ok(Some(recovery)) => {
             let disposition = match &recovery.disposition {
@@ -1396,19 +1366,6 @@ mod tests {
 
         assert!(!rendered.contains("\x1b["));
         assert!(rendered.contains("a3s code resume session-42"));
-    }
-
-    #[test]
-    fn sandbox_warning_includes_the_complete_error_chain() {
-        let error = anyhow::anyhow!("No such file or directory (os error 2)")
-            .context("failed to scan SRT workspace /workspace/transient")
-            .context("managed SRT failed its Core capability handshake");
-
-        let warning = sandbox_load_warning(&error);
-
-        assert!(warning.contains("managed SRT failed its Core capability handshake"));
-        assert!(warning.contains("failed to scan SRT workspace /workspace/transient"));
-        assert!(warning.contains("No such file or directory (os error 2)"));
     }
 
     #[tokio::test]

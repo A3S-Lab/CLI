@@ -53,7 +53,7 @@ The differentiator versus Obsidian: the same `.a3s/kb/*.md` files are a **shared
 
 This is a deliberate, verified choice:
 
-- **Inside the workspace backend** so the agent's sandboxed file tools can write it. Agent file I/O is normalized through `ctx.resolve_workspace_path` (`crates/code/core/src/tools/types.rs:121`); a vault *outside* the workspace backend is silently unreachable by the agent. This is a hard constraint.
+- **Inside the workspace backend** so the agent's workspace-bounded file tools can write it. Agent file I/O is normalized through `ctx.resolve_workspace_path` (`crates/code/core/src/tools/types.rs:121`); a vault *outside* the workspace backend is silently unreachable by the agent. This is a hard constraint.
 - **Under `.a3s/`** (alongside the already-committed `.a3s/agents/` and `.a3s/skills/`, discovered by the same cwd walk-up at `crates/cli/src/tui/config.rs:56-79`) so the feature is opt-in, project-scoped, **committable/team-shared**, and does not pollute the repo root.
 - **Chosen over `~/.a3s/`** so it is project-scoped and survives clone, and **kept strictly separate from `~/.a3s/memory/`** (the per-user, append-only agent memory). Different formats, different owners. **Do not fuse them.**
 - Path is overridable via a `kb_dir` key in `.a3s/config.acl` (A3S ACL is preferred over TOML, per AGENTS.md). Created on first `/kb` if missing.
@@ -186,7 +186,7 @@ Three layers, **phased**, each independently shippable. The agent needs **zero n
 
 ### Write path (P0/P1) — convention + one skill, no new capability
 
-The vault is just `.a3s/kb/*.md` inside the workspace sandbox, so the agent **already** has read/write/edit/grep/glob over it via the capability-gated builtin file tools (`crates/code/core/src/tools/builtin/{write,read,edit,grep,glob_tool}.rs`, registered `builtin/mod.rs:37-58`, all routed through `ctx.resolve_workspace_path`). `WriteTool` creates the note + parent dirs.
+The vault is just `.a3s/kb/*.md` inside the workspace backend, so the agent **already** has read/write/edit/grep/glob over it via the capability-gated builtin file tools (`crates/code/core/src/tools/builtin/{write,read,edit,grep,glob_tool}.rs`, registered `builtin/mod.rs:37-58`, all routed through `ctx.resolve_workspace_path`). `WriteTool` creates the note + parent dirs.
 
 The only addition is a shipped built-in **`kb` SKILL.md**, loaded by the existing skills registry (`registry.rs:124` `load_from_dir`), mirroring the `crates/box/integrations/skills/` pattern. It teaches the agent the **convention**, not a capability:
 

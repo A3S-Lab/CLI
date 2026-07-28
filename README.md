@@ -892,7 +892,7 @@ input prefixes:
 | --- | --- |
 | Coding loop | Chat with the coding agent, stream semantic tool cards, choose Default, Plan, or Auto execution, inspect and control pending follow-ups with `/queue`, and inspect or safely cancel delegated work with `/tasks` or `Ctrl+B`. Run direct shell turns with `!`, run a durable Ultracode `/goal`, and fork, rewind, or clear sessions when needed. `/relay` pins the current session, searches a bounded 64-row catalog per source, preserves semantic selection across refreshes, shows saved state, model, age, unfinished runs, and live background-agent counts, or hands the latest task from a workspace-scoped external transcript to the active session. |
 | Permission review | Gated calls enter a FIFO approval queue backed by the authoritative tool name and arguments. The overlay can allow once, grant that exact capability for the current session, atomically add the reviewed capability to `.a3s/permissions.acl`, or collect denial feedback for the agent. `/permissions` searches session and project grants, opens their canonical arguments, and revokes only after a second matching action. Project rules are bounded, parsed and generated with `a3s-acl`, reject symbolic-link targets, and remain narrower than hard workspace guardrails. Revocation affects future checks, not tools already running. |
-| Execution modes | Default runs bounded workspace file changes and ordinary commands inside the enforced local process sandbox; HITL is reserved for explicit host escalation, missing-sandbox Bash, protected metadata, mutating Git operations, and annotated external side effects. Plan exposes only read-only discovery tools, stages the completed plan behind an explicit Approve, Revise, or Abandon decision, and starts approved implementation as a new Default turn. Auto uses the same sandbox but never enters HITL: sandbox escape, missing-sandbox Bash, protected metadata, and mutating Git operations fail closed. A queued turn retains the mode captured when it was submitted. |
+| Execution modes | Default runs bounded workspace file changes directly. A shared Rust guardrail silently admits a narrow, proven read-only host Bash subset; unproven commands, protected metadata, mutating Git operations, and annotated external side effects enter HITL, while critical commands fail closed. Plan exposes only read-only discovery tools and denies Bash. Auto never enters HITL: it admits only Rust-proven read-only Bash and denies other host commands, protected metadata, and mutating Git operations. A queued turn retains the mode captured when it was submitted. |
 | Workspace UI | `/ide` opens a superfile-style tree and editor with terminal-stable file marks, `/config` edits the active config in the same editor, `Ctrl+T` opens the complete semantic transcript, and file edits render bounded diffs through the shared `DiffView` component. Diff headers use green `+N` and red `-N` counts; Markdown uses Codex-spaced section headings, responsive tables, syntax highlighting, and terminal hyperlinks. |
 | Models and effort | `/model` switches configured providers, OS gateway models, and signed-in account tabs. Codex account discovery delegates refresh and entitlement checks to the installed Codex CLI, so an expired identity token does not hide models while reusable account access remains. WorkBuddy `hy3` tagged calls are converted into native tool events without exposing protocol markup in streamed messages. `/effort` scales thinking budget, tool-round budget, auto-continuation, and model-agnostic rigor guidance from `low` through `max` and `ultracode`. A3S Code 5.2.4 structured calls use native JSON Schema or forced-tool output only when the active client advertises that capability; unknown custom OpenAI-compatible endpoints retain the bounded prompt fallback instead of receiving an assumed `tool_choice`. |
 | Dynamic workflows | `ultracode` and `?` DeepResearch can use `DynamicWorkflowRuntime`, a local A3S Flow-backed workflow runner. It records workflow/step history while PTC scripts perform ordinary tool work. This is separate from `/flow`, which is OS Workflow as a Service for persisted workflow assets. |
@@ -1122,7 +1122,7 @@ cells adding or doubling their own outer padding.
 | Prompt history | `/history` or `Ctrl+R` opens a fuzzy-searchable, newest-first catalog of the current session's prompts. Enter or Tab restores the selected prompt, while Esc closes without changing the current draft. |
 | Delegated tasks | `/tasks` or `Ctrl+B` opens the authoritative task catalog while the parent turn keeps streaming. Search, inspect recent progress or full output, refresh, and cancel a running task with a second matching `X` or Delete press. |
 | Permission grants | `/permissions` opens while a parent turn streams, separates session grants from project grants, filters exact tools/arguments, and requires a second matching `X` or Delete before revocation. Both scopes stop authorizing new calls immediately; project changes then atomically update `.a3s/permissions.acl` and restore the grant if persistence fails. Running tools are not cancelled. |
-| Approvals | In Default mode, only calls that cross the established local boundary pause in a confirmation overlay with arguments and result context. Workspace file tools and sandboxed commands remain quiet. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL; an operation that cannot stay inside its boundary is denied. |
+| Approvals | In Default mode, host Bash that the Rust guardrail cannot prove read-only and other calls that cross the established local boundary pause in a confirmation overlay with arguments and result context. Bounded workspace file tools and proven read-only commands remain quiet. Plan is a strict read-only boundary followed by Approve, Revise, or Abandon review. Auto never enters HITL; unproven host Bash and operations that cannot stay inside governed boundaries are denied. |
 | Footer | The footer shows model/provider, effort, the active turn mode, a distinct `next:` composer mode when it differs, context fill, active asset, login/runtime state, and session hints. Context warnings re-arm after compaction, clear, or model switch. |
 | System agent island | Enabled by default. `/island on`, `/island off`, and `/island status` persist or inspect the user preference, and the expanded island also offers `Turn off`. A fresh exact non-idle A3S lifecycle or recognized coding-agent process requests one native per-user window at the physical screen's top center; the shared lock prevents multiple `a3s code` TUIs from rendering duplicate islands. On notched Macs, native safe-area geometry makes the surface meet the physical top edge while its compact content occupies the two unobstructed side wings. A dedicated handle moves the window; periodic centering stops after a successful drag, and expand/collapse preserves the moved surface's top-center. Live `All`, `Needs you`, `Running`, and `Recent` filters preserve parent context and show direct-child progress. Every row shows state and elapsed time with an original vendor-colored robot; terminal durations freeze. Exact approval rows display a bounded reason, expose larger `Allow` / `Always` / `Deny` controls, and offer a direct reply composer; live parent rows can also accept replies or expose `Stop`, while running children may expose `Cancel`. Recognized Codex and other process-only rows are labeled `detected / process`, count as running evidence, trigger and keep the island visible, and never receive controls. Any exact planning/working row or recognized process enables the diffuse multicolor neon breathing border. The standalone Tao/Wry helper embeds offline HTML/CSS/JavaScript and does not use the GUI crate, React, or Next.js. Standard Wayland compositors may constrain exact global placement. |
 | Tool calls | Live tool status appears inline while running. Inline `program` calls summarize structured intent, research scope, workflow phase, and completed nested-call results instead of repeating JavaScript wrapper source. |
@@ -1268,12 +1268,13 @@ mode; the second enters the session with the goal still paused, where
 `/goal resume` can continue it later.
 
 The TUI owns HITL confirmation for boundary crossings. In Default mode,
-workspace-scoped file changes and ordinary commands inside the installed local
-process sandbox run without approval. Explicit `require_escalated` Bash calls,
-Bash execution when no sandbox is available, protected metadata changes,
-mutating Git operations, and MCP or application tools that advertise side
-effects enter the
-wheel-browsable, clickable approval overlay. Each decision is scoped
+workspace-scoped file changes run without approval. Bash executes through the
+active workspace's host command runner. One shared Rust guardrail silently
+admits only a deliberately small command subset that it can prove read-only;
+unproven shell work, protected metadata changes, mutating Git operations, and
+MCP or application tools that advertise side effects enter the wheel-browsable,
+clickable approval overlay. Critical shell operations fail closed before an
+approval can be created. Each decision is scoped
 explicitly: allow once; allow the exact operation and resource for this
 session; add that exact capability to the project's `.a3s/permissions.acl`; or
 deny it and send typed guidance back to the agent. Shell grants retain the exact
@@ -1287,14 +1288,13 @@ Plan mode exposes only read-only discovery tools. When planning completes, the
 TUI freezes queue draining at an explicit Approve, Revise, or Abandon boundary;
 approval starts implementation as a separate Default turn, and remembered
 grants cannot bypass the read-only plan boundary. Auto mode resolves every
-decision without user interaction. Normal Bash runs only when the process
-sandbox is installed; explicit host escalation and missing-sandbox Bash are
-denied, protected metadata and mutating Git operations fail closed, and
-explicit policy denials and workspace guardrails remain authoritative.
-Delegated tasks and Skill runs inherit the same sandbox, permission checker,
-and parent confirmation boundary. Core freezes that governance when the run is
-admitted; foreground, queued, parallel, Skill, and background descendants keep
-the same snapshot even if the composer selects another mode for the next turn.
+decision without user interaction. Rust-proven read-only Bash is admitted;
+unproven host Bash, protected metadata, and mutating Git operations fail closed,
+and explicit policy denials and workspace guardrails remain authoritative.
+Delegated tasks and Skill runs inherit the same permission checker and parent
+confirmation boundary. Core freezes that governance when the run is admitted;
+foreground, queued, parallel, Skill, and background descendants keep the same
+snapshot even if the composer selects another mode for the next turn.
 Tool timeouts and confirmation timeouts are tracked separately so a human
 approval pause does not consume the command runtime budget.
 
@@ -1315,50 +1315,19 @@ streamed output, timeout policy, permission decision, and traceable event id.
 The TUI then turns those events into live status lines, retained output logs,
 approval prompts, and RemoteUI action links.
 
-Before terminal takeover, the TUI first reuses a verified user-wide managed SRT
-installation, then checks the support tree shipped in official CLI archives.
-The packaged tree must match its exact package identity, version, registry
-lock, file-type and size limits, and the complete-tree digest compiled into the
-CLI. It is usable offline without writing component state. The selected
-Node.js 20.11-or-newer executable is pinned for the lifetime of the Code
-process.
-
-The packaged JavaScript runtime still relies on native OS facilities. macOS
-requires `/usr/bin/sandbox-exec` and `ripgrep`; Linux requires `bubblewrap`,
-`socat`, `ripgrep`, and permitted unprivileged user namespaces. The Homebrew
-formula declares those dependencies. Direct-archive users must provide them.
-Windows requires its one-time elevated machine sandbox setup. Before the TUI
-attaches the sandbox, it runs a bounded command through the real OS boundary;
-package presence alone is never treated as readiness. On macOS, A3S writes the
-generated Seatbelt policy to a private mode-0600 file and invokes
-`sandbox-exec -f`, so large credential and hard-link rule sets cannot exceed
-the operating system argument-size limit.
-
-Source and Cargo installations may not carry the release support tree. If no
-verified runtime is ready and first-use setup is allowed, the CLI uses npm as a
-development bootstrap: every registry URL, version, and integrity value is
-pinned, lifecycle scripts are disabled, the Core capability handshake runs in
-staging, and activation is atomic.
-
-A global `srt` installation is neither required nor selected by the TUI.
-Offline mode and `A3S_NO_AUTO_INSTALL=1` can use either verified state or the
-verified release payload but forbid registry bootstrap. Setup failure remains
-non-fatal: Default can ask for one exact host Bash invocation and Auto denies
-Bash. There is no silent unsandboxed fallback.
-Startup warnings include the complete causal error chain so a workspace scan,
-runtime verification, or platform failure remains actionable.
-
-The local sandbox denies command network egress, local binding, and Unix
-sockets; allows writes only in the active workspace and a private per-run
-scratch directory; keeps repository, A3S, agent, editor, and tool control
-metadata read-only; blocks reads of common credential stores; and passes a
-small scrubbed environment plus explicit host-provided values. Timeouts,
-process-group cancellation, bounded output, and streaming deltas use the same
-contract as the normal Bash tool. Existing `.env*` files are denied at every
-governed source-tree depth, and pre-existing multi-link source files are masked
-for both reads and writes so a workspace hardlink cannot expose an outside
-inode. Workspace policy scans tolerate an entry removed concurrently after
-enumeration while permission and other I/O failures remain fatal.
+The CLI does not install or launch a local process sandbox. Bash uses the active
+workspace backend's host command runner with the workspace as its current
+directory. The shared Rust guardrail rejects known critical commands and proves
+a narrow read-only subset by checking command structure, options, paths,
+pipelines, expansion, redirection, and workspace symlinks. Default asks only
+when a command is not proven read-only; Plan denies Bash; Auto allows the proven
+read-only subset and denies the rest. Credential and control paths such as
+`.env*`, `.git/`, `.a3s/`, and SSH keys remain hard denials even when an older
+exact grant exists. Command timeouts, process-group cancellation, bounded
+output, streaming deltas, and explicit environment values remain part of the
+host runner contract. Official archives and Homebrew installations therefore
+carry no Node.js sandbox payload and require no `sandbox-exec`, `bubblewrap`,
+`socat`, or sandbox-specific `ripgrep` prerequisite.
 
 The TUI also enables Core's local workspace credential policy for in-process
 tools. `read`, range reads, `grep`, `write`, `edit`, and `patch` therefore
@@ -1371,23 +1340,11 @@ regenerates output only for allowed files. Option-like revision input cannot
 become a Git flag, and remote display removes embedded HTTP credentials and
 query tokens.
 
-This boundary is for routine local repository commands. Dependency-heavy,
-untrusted, OCI, build, and test workloads that require a stronger isolation
-boundary belong on A3S Box or an A3S Runtime placement; they are not silently
-promoted from the local sandbox.
-
-The release payload shares the CLI archive's release provenance and is
-reverified before every use. Homebrew installs it under the formula share
-directory, direct archives keep it beside the CLI resources, and standalone
-self-update replaces it transactionally with the binary. The Homebrew formula
-restores canonical Node shebangs after keg cleanup, and its test compares the
-complete installed tree digest; the release workflow exercises both install
-and same-version reinstall paths. The npm path remains a development fallback
-rather than the production release supply path. A release cannot publish until
-the exact generated payload passes real macOS and Linux behavior tests for
-ordinary workspace and offline-toolchain access, outside and symlink write
-denial, protected metadata, credential reads, network egress, local listeners,
-and Unix sockets.
+Host Bash is not an isolation boundary. Dependency-heavy, untrusted, OCI,
+build, and test workloads that require isolation belong on A3S Box or an A3S
+Runtime placement. The local workspace credential policy still governs
+in-process file tools, and the interactive guardrail continues to reject known
+critical host commands before any approval request is created.
 
 | Tool family | TUI behavior |
 | --- | --- |
@@ -1903,6 +1860,8 @@ A3S_USE_E2E_BIN=../use/target/debug/a3s-use \
   full_stack_registry_install_and_upgrade_activate_only_reviewed_targets \
   -- --ignored --nocapture
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
+A3S_REAL_LLM_GUARDRAIL_MODEL=codex/gpt-5.6-terra \
+  cargo test --test host_guardrail_real_llm -- --ignored --nocapture
 A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
 A3S_TEST_KIMI_REAL=1 cargo test --bin a3s real_kimi_account_completes_an_a3s_tool_round
 ```
@@ -1926,6 +1885,12 @@ streaming usage is reported, compaction shrinks the history, the provider sees
 a smaller prompt than the uncompressed baseline, and the reduction survives a
 session restore — the machinery behind the TUI's bottom status indicator, fill
 warnings, and auto-compaction.
+The ignored `host_guardrail_real_llm` test launches the current `a3s` binary
+against a real configured model. It verifies that Default quietly executes
+`pwd`, routes a shell redirection to approval without creating its target,
+that Auto denies `cargo test` without entering HITL, that `.env` cannot be read,
+and that Plan does not expose Bash to the execution turn. Set
+`A3S_REAL_LLM_GUARDRAIL_MODEL` to override the configured default model.
 
 ## Updating
 
@@ -1961,6 +1926,12 @@ find the `a3s` binary inside it, swap the current binary, and verify the target
 version before treating the update as successful. If restart fails after a
 successful upgrade, the TUI prints the exact `a3s code resume <id>` command for
 the saved session.
+
+Transition note: standalone installations from 0.9.9 through 0.10.10 cannot
+self-update directly to the first SRT-free release because those legacy
+updaters require the support payload that release removes. Install that release
+once from its GitHub archive, or migrate to Homebrew; later standalone updates
+work normally. Homebrew upgrades are unaffected.
 
 Box retains its complete runtime bundle during installation and update. Bench
 downloads into a staging area, verifies the release checksum, component

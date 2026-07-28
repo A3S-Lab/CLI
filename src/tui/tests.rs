@@ -1,9 +1,5 @@
 use super::*;
 
-struct TuiTestSandbox {
-    workspace: PathBuf,
-}
-
 struct ConfirmationEscalatingTool {
     executed: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -40,37 +36,8 @@ impl a3s_code_core::tools::Tool for ConfirmationEscalatingTool {
     }
 }
 
-#[async_trait::async_trait]
-impl a3s_code_core::sandbox::BashSandbox for TuiTestSandbox {
-    async fn exec_command(
-        &self,
-        command: &str,
-        _guest_workspace: &str,
-    ) -> anyhow::Result<a3s_code_core::sandbox::SandboxOutput> {
-        let output = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .current_dir(&self.workspace)
-            .output()
-            .await?;
-        Ok(a3s_code_core::sandbox::SandboxOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
-    }
-
-    async fn shutdown(&self) {}
-}
-
-fn sandboxed_tui_execution_policy(mode: Mode, workspace: &Path) -> TuiExecutionPolicy {
-    TuiExecutionPolicy::for_workspace(
-        mode,
-        workspace.to_path_buf(),
-        Some(Arc::new(TuiTestSandbox {
-            workspace: workspace.to_path_buf(),
-        })),
-    )
+fn tui_execution_policy(mode: Mode, workspace: &Path) -> TuiExecutionPolicy {
+    TuiExecutionPolicy::for_workspace(mode, workspace.to_path_buf())
 }
 
 #[test]
@@ -3148,14 +3115,14 @@ fn tui_default_policy_allows_readonly_research_tools() {
 }
 
 #[test]
-fn tui_checker_uses_the_enforced_sandbox_instead_of_shell_lexing() {
+fn tui_checker_uses_the_rust_guardrail_for_host_bash() {
     use a3s_code_core::permissions::{PermissionChecker, PermissionDecision};
 
     let checker = TuiHitlPermissionChecker::with_grants_and_execution(
         tui_permission_policy(),
         DeepResearchReportToolGate::default(),
         TuiPermissionGrants::default(),
-        sandboxed_tui_execution_policy(Mode::Default, Path::new(".")),
+        tui_execution_policy(Mode::Default, Path::new(".")),
     );
 
     assert_eq!(
@@ -3210,8 +3177,8 @@ fn tui_checker_uses_the_enforced_sandbox_instead_of_shell_lexing() {
     ] {
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": command})),
-            PermissionDecision::Allow,
-            "the process sandbox, not shell-string guessing, must govern: {command}"
+            PermissionDecision::Ask,
+            "valid host Bash must require approval after hard guardrails: {command}"
         );
     }
     assert_eq!(
@@ -3219,32 +3186,32 @@ fn tui_checker_uses_the_enforced_sandbox_instead_of_shell_lexing() {
             "bash",
             &serde_json::json!({"command": "find . -type f -fprint output.txt"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "sed -i.bak s/old/new/ README.md"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "git diff --ext-diff"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check(
             "bash",
             &serde_json::json!({"command": "cargo test -p a3s-cli"})
         ),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "rm -rf target"})),
-        PermissionDecision::Allow
+        PermissionDecision::Ask
     );
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "ls && rm -rf /"})),
@@ -3348,7 +3315,7 @@ fn tui_checker_uses_the_enforced_sandbox_instead_of_shell_lexing() {
             tui_permission_policy(),
             gate,
             TuiPermissionGrants::default(),
-            sandboxed_tui_execution_policy(Mode::Default, workspace.path()),
+            tui_execution_policy(Mode::Default, workspace.path()),
         );
         assert_eq!(
             checker.check("bash", &serde_json::json!({"command": "cat escape/secret"})),
@@ -3393,7 +3360,7 @@ fn tui_auto_rejects_any_confirmation_event_after_the_permission_floor() {
     };
 
     let checker = InteractiveToolGuardrail::for_mode("auto").with_workspace(Path::new("."));
-    let execution = sandboxed_tui_execution_policy(Mode::Auto, Path::new("."));
+    let execution = tui_execution_policy(Mode::Auto, Path::new("."));
     for (tool, args, level, action, permission, auto_decision) in [
         (
             "read",
@@ -3441,7 +3408,7 @@ fn tui_auto_rejects_any_confirmation_event_after_the_permission_floor() {
 
 #[test]
 fn auto_mode_rejects_every_unexpected_confirmation_without_hitl() {
-    let execution = sandboxed_tui_execution_policy(Mode::Auto, Path::new("."));
+    let execution = tui_execution_policy(Mode::Auto, Path::new("."));
 
     for (tool, args) in [
         ("write", serde_json::json!({"file_path": "README.md"})),
@@ -3505,17 +3472,7 @@ fn auto_mode_rejects_every_unexpected_confirmation_without_hitl() {
             Path::new("."),
         ),
         Some(false),
-        "Auto must reject sandbox escape without entering HITL"
-    );
-    let unavailable = TuiExecutionPolicy::for_workspace(Mode::Auto, PathBuf::from("."), None);
-    assert_eq!(
-        unavailable.auto_confirmation_decision(
-            "bash",
-            &serde_json::json!({"command": "cargo test"}),
-            Path::new("."),
-        ),
-        Some(false),
-        "Auto must fail closed when the process sandbox is unavailable"
+        "Auto must reject explicit host Bash without entering HITL"
     );
 }
 
@@ -3697,7 +3654,8 @@ fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
         .expect("TUI sessions should install the smart HITL checker");
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Allow,
+        "the shared Rust guardrail should admit proven read-only host commands"
     );
     assert_eq!(
         checker.check(
@@ -3744,7 +3702,8 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Allow,
+        "rebuilt sessions should preserve the shared read-only host allowance"
     );
     gate.set_synthesis_only();
     assert_eq!(
@@ -3820,7 +3779,7 @@ async fn tui_session_policy_does_not_block_web_fetch() {
 }
 
 #[tokio::test]
-async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
+async fn auto_mode_denies_host_shell_without_confirmation_event() {
     let dir = std::env::temp_dir().join(format!(
         "a3s-auto-no-hitl-{}-{}",
         std::process::id(),
@@ -3845,7 +3804,7 @@ async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
     ]));
     let gate = DeepResearchReportToolGate::default();
     gate.set_workspace(&dir);
-    let execution = sandboxed_tui_execution_policy(Mode::Auto, &dir);
+    let execution = tui_execution_policy(Mode::Auto, &dir);
     let opts = tui_session_options_with_gate_grants_and_execution(
         a3s_code_core::hitl::ConfirmationPolicy::enabled().with_timeout(300, TimeoutAction::Reject),
         gate,
@@ -3863,23 +3822,19 @@ async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
         .stream("Create the requested probe file.", None)
         .await
         .unwrap();
-    let mut shell_completed = false;
+    let mut denied = false;
     while let Some(event) = rx.recv().await {
         match event {
             a3s_code_core::AgentEvent::ConfirmationRequired { tool_name, .. } => {
                 panic!("Auto emitted an interactive confirmation for {tool_name}")
             }
-            a3s_code_core::AgentEvent::PermissionDenied {
-                tool_name, reason, ..
-            } => panic!("{tool_name} was denied in Auto: {reason}"),
-            a3s_code_core::AgentEvent::ToolEnd {
-                name,
-                output,
-                exit_code,
-                ..
-            } if name == "bash" => {
-                assert_eq!(exit_code, 0, "{output}");
-                shell_completed = true;
+            a3s_code_core::AgentEvent::PermissionDenied { tool_name, .. }
+                if tool_name == "bash" =>
+            {
+                denied = true;
+            }
+            a3s_code_core::AgentEvent::ToolExecutionStart { name, .. } if name == "bash" => {
+                panic!("Auto executed host Bash after the permission denial")
             }
             a3s_code_core::AgentEvent::End { .. } => break,
             a3s_code_core::AgentEvent::Error { message } => panic!("{message}"),
@@ -3888,10 +3843,10 @@ async fn auto_mode_executes_shell_side_effect_without_confirmation_event() {
     }
     join.await.unwrap();
 
-    assert!(shell_completed, "the shell tool did not finish");
-    assert_eq!(
-        std::fs::read_to_string(dir.join("auto-mode-probe.txt")).unwrap(),
-        "auto-mode-ok"
+    assert!(denied, "Auto did not deny the host Bash request");
+    assert!(
+        !dir.join("auto-mode-probe.txt").exists(),
+        "the denied host Bash command created its side effect"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -3922,7 +3877,7 @@ async fn auto_mode_rejects_tool_owned_escalation_before_confirmation_event() {
     ]));
     let gate = DeepResearchReportToolGate::default();
     gate.set_workspace(&dir);
-    let execution = sandboxed_tui_execution_policy(Mode::Auto, &dir);
+    let execution = tui_execution_policy(Mode::Auto, &dir);
     let opts = tui_session_options_with_gate_grants_and_execution(
         a3s_code_core::hitl::ConfirmationPolicy::enabled().with_timeout(300, TimeoutAction::Reject),
         gate,
