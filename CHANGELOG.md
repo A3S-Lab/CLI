@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.14] - 2026-07-29
+
+### Fixed
+
+- Kept PDF artifacts at the full Live Preview panel height by propagating the
+  definite document height through the EmbedPDF renderer chain instead of
+  collapsing the page viewport to its toolbar.
+
 ## [0.10.13] - 2026-07-28
 
 ### Changed
