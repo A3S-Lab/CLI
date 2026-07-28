@@ -1860,6 +1860,8 @@ A3S_USE_E2E_BIN=../use/target/debug/a3s-use \
   full_stack_registry_install_and_upgrade_activate_only_reviewed_targets \
   -- --ignored --nocapture
 cargo test --test ctx_compact_real_llm -- --ignored   # hits the configured LLM
+A3S_REAL_LLM_GUARDRAIL_MODEL=codex/gpt-5.6-terra \
+  cargo test --test host_guardrail_real_llm -- --ignored --nocapture
 A3S_TEST_WORKBUDDY_REAL=1 cargo test real_workbuddy_account_completes_an_a3s_tool_round
 A3S_TEST_KIMI_REAL=1 cargo test --bin a3s real_kimi_account_completes_an_a3s_tool_round
 ```
@@ -1883,6 +1885,12 @@ streaming usage is reported, compaction shrinks the history, the provider sees
 a smaller prompt than the uncompressed baseline, and the reduction survives a
 session restore — the machinery behind the TUI's bottom status indicator, fill
 warnings, and auto-compaction.
+The ignored `host_guardrail_real_llm` test launches the current `a3s` binary
+against a real configured model. It verifies that Default quietly executes
+`pwd`, routes a shell redirection to approval without creating its target,
+that Auto denies `cargo test` without entering HITL, that `.env` cannot be read,
+and that Plan does not expose Bash to the execution turn. Set
+`A3S_REAL_LLM_GUARDRAIL_MODEL` to override the configured default model.
 
 ## Updating
 
