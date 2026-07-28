@@ -3654,7 +3654,8 @@ fn tui_session_options_installs_smart_hitl_checker_and_persistable_policy() {
         .expect("TUI sessions should install the smart HITL checker");
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Allow,
+        "the shared Rust guardrail should admit proven read-only host commands"
     );
     assert_eq!(
         checker.check(
@@ -3701,7 +3702,8 @@ fn rebuilt_session_options_share_live_deep_research_gate_state() {
 
     assert_eq!(
         checker.check("bash", &serde_json::json!({"command": "pwd"})),
-        PermissionDecision::Ask
+        PermissionDecision::Allow,
+        "rebuilt sessions should preserve the shared read-only host allowance"
     );
     gate.set_synthesis_only();
     assert_eq!(
