@@ -8,6 +8,7 @@ repository = "https://github.com/A3S-Lab/Cli"
 homepage = "https://github.com/A3S-Lab/a3s"
 keywords = ["a3s", "cli", "agent", "tui", "coding"]
 categories = ["command-line-utilities"]
+exclude = ["release-compat/**", "tests/legacy_self_update_bridge.rs"]
 
 [[bin]]
 name = "a3s"
