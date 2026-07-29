@@ -1,5 +1,11 @@
 # a3s
 
+> [!IMPORTANT]
+> Active development and releases have moved to
+> [A3S-Lab/a3s](https://github.com/A3S-Lab/a3s). This repository remains
+> available only as a compatibility release endpoint for older A3S clients.
+> Use the monorepo for source installs, issues, and pull requests.
+
 The umbrella CLI for the [A3S](https://github.com/A3S-Lab) platform.
 
 `a3s <tool> [args...]` runs the matching A3S product. Code is included in the
@@ -56,7 +62,7 @@ is unavailable.
 cargo install a3s
 
 # or from source
-cargo install --git https://github.com/A3S-Lab/Cli
+cargo install --git https://github.com/A3S-Lab/a3s
 
 # or Homebrew
 brew install A3S-Lab/tap/a3s

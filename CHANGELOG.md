@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Converted this repository into a compatibility release endpoint after CLI
+  development moved to `A3S-Lab/a3s`. A manual relay verifies canonical
+  monorepo archives byte for byte and publishes only GitHub release assets; it
+  cannot publish crates or update Homebrew.
+
 ## [0.10.15] - 2026-07-29
 
 ### Fixed
