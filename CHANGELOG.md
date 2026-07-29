@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored one-command self-updates from A3S 0.9.9 through 0.10.10 by adding a
+  minimal, fail-closed retirement marker to release archives for their legacy
+  managed-SRT payload check. The Anthropic SRT runtime remains removed and the
+  marker is never discovered or executed by current A3S versions.
+
 ## [0.10.14] - 2026-07-29
 
 ### Fixed
