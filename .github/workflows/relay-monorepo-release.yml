@@ -279,6 +279,37 @@ jobs:
                 exit 1
               fi
             done < expected-assets.txt
+
+            local digest_ready
+            local relay_json
+            local relay_digest
+            local expected_digest
+            digest_ready=false
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              relay_json="$(gh api \
+                "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}")"
+              digest_ready=true
+              while IFS= read -r asset; do
+                relay_digest="$(jq -r --arg asset "$asset" \
+                  '[.assets[] | select(.name == $asset)]
+                   | if length == 1 then (.[] | .digest // "") else "" end' \
+                  <<<"$relay_json")"
+                expected_digest="sha256:$(sha256sum "source-assets/${asset}" \
+                  | awk '{ print $1 }')"
+                if [[ "$relay_digest" != "$expected_digest" ]]; then
+                  digest_ready=false
+                  break
+                fi
+              done < expected-assets.txt
+              if [[ "$digest_ready" == true ]]; then
+                return 0
+              fi
+              if [[ "$attempt" -lt 10 ]]; then
+                sleep 2
+              fi
+            done
+            echo "::error::Legacy relay assets do not expose the canonical GitHub SHA-256 digests"
+            exit 1
           }
 
           if release_json="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
