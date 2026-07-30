@@ -17,7 +17,7 @@ impl Module for PluginsModule {
         Ok(vec![ProviderDefinition::factory_arc::<PluginsService, _>(
             |module_ref| {
                 let state = module_ref.get::<CodeWebState>()?;
-                Ok(Arc::new(PluginsService::new(state)))
+                PluginsService::new(state).map(Arc::new)
             },
         )])
     }

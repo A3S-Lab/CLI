@@ -1,6 +1,7 @@
 //! Reusable infrastructure for the umbrella A3S CLI.
 
 pub mod components;
+pub mod plugin_manager;
 pub mod registry;
 pub mod research;
 

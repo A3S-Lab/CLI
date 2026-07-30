@@ -421,6 +421,14 @@ declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
 define an extension JSON-RPC protocol; `--json` remains a one-command CLI
 result.
 
+The reusable `plugin_manager` library is the application boundary for plugin
+catalog browsing and lifecycle operations. It joins release bundles, complete
+signed `a3s.use.plugin-catalog.v1` records, legacy TUF package records, and the
+current installed/enabled snapshot without downloading package archives. It
+also serializes plan, apply, enable, and disable operations with the same
+timeout, output-size, component-ID, and reviewed-plan-digest checks for every
+adapter.
+
 The Code TUI treats Use as a first-use component: before terminal takeover it
 reuses a healthy install or installs the verified release when networking and
 automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain
@@ -634,12 +642,15 @@ barrier until every affected live session has refreshed successfully.
 
 Code Web also exposes a VS Code-style package contribution boundary under
 `/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
-digest-verified A3S Use registry. The Marketplace enumerates configured TUF
-registries, generates install/upgrade/uninstall plans with `--dry-run`, and
-applies only an explicitly reviewed `--plan-digest`. Package enablement uses
-the existing Use lifecycle. Plugin HTML remains non-callable; the browser host
-owns its opaque-origin iframe, restrictive CSP, bounded messages, and explicit
-context review before a verified same-package Skill is added to Code.
+digest-verified A3S Use registry. The Web adapter reads the shared Plugin
+Manager Marketplace model, including signed provenance, compatibility,
+download and installed size, named Skill/MCP/Tool/UI surfaces, permission
+ceilings, availability, and installed state. It generates
+install/upgrade/uninstall plans with `--dry-run` and applies only an explicitly
+reviewed `--plan-digest`. Package enablement uses the existing Use lifecycle.
+Plugin HTML remains non-callable; the browser host owns its opaque-origin
+iframe, restrictive CSP, bounded messages, and explicit context review before
+a verified same-package Skill is added to Code.
 
 The TUI `/ide` editor and the Web Monaco editor share native Code Intelligence
 for saved-file symbols, definitions, declarations, references,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use a3s::plugin_manager::{PluginApplyRequest, PluginPackageToggleRequest, PluginPlanRequest};
 use a3s_boot::{controller, Result as BootResult};
 use serde::Deserialize;
 
@@ -15,32 +16,6 @@ pub(super) struct PluginToggleRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct PluginReloadRequest {
     pub(super) rebuild_sessions: Option<bool>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PluginPlanRequest {
-    pub(super) action: String,
-    pub(super) component_id: String,
-    pub(super) version: Option<String>,
-    pub(super) channel: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PluginApplyRequest {
-    pub(super) action: String,
-    pub(super) component_id: String,
-    pub(super) version: Option<String>,
-    pub(super) channel: Option<String>,
-    pub(super) plan_digest: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct PluginPackageToggleRequest {
-    pub(super) component_id: String,
-    pub(super) enabled: bool,
 }
 
 impl Default for PluginReloadRequest {
