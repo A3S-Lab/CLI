@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use a3s_use_core::PlanActor;
+
 use super::super::capability::PluginCapabilityEvidence;
 use super::super::process::{normalize_plan_request, PluginPlanRequest};
 use super::super::{PluginManagerError, PluginManagerResult};
@@ -36,6 +38,8 @@ pub(super) struct StoredPluginPlan {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub request: PluginPlanRequest,
+    #[serde(default = "default_plan_actor")]
+    pub actor: PlanActor,
     pub plan_digest: String,
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
@@ -76,6 +80,7 @@ impl PluginOperationStore {
         PluginMutationLock::acquire(self.root.join("mutation.lock")).await
     }
 
+    #[cfg(test)]
     pub(super) async fn create_plan(
         &self,
         request: PluginPlanRequest,
@@ -83,9 +88,27 @@ impl PluginOperationStore {
         capability_state: PluginCapabilityEvidence,
         plan: Value,
     ) -> PluginManagerResult<StoredPluginPlan> {
+        self.create_plan_for_actor(
+            request,
+            PlanActor::User,
+            plan_digest,
+            capability_state,
+            plan,
+        )
+        .await
+    }
+
+    pub(super) async fn create_plan_for_actor(
+        &self,
+        request: PluginPlanRequest,
+        actor: PlanActor,
+        plan_digest: String,
+        capability_state: PluginCapabilityEvidence,
+        plan: Value,
+    ) -> PluginManagerResult<StoredPluginPlan> {
         let store = self.clone();
         run_blocking("create reviewed plugin plan", move || {
-            store.create_plan_sync(request, plan_digest, capability_state, plan)
+            store.create_plan_sync(request, actor, plan_digest, capability_state, plan)
         })
         .await
     }
@@ -150,6 +173,7 @@ impl PluginOperationStore {
     fn create_plan_sync(
         &self,
         request: PluginPlanRequest,
+        actor: PlanActor,
         plan_digest: String,
         capability_state: PluginCapabilityEvidence,
         plan: Value,
@@ -168,6 +192,7 @@ impl PluginOperationStore {
                 created_at_ms: now,
                 expires_at_ms: now.saturating_add(PLAN_LIFETIME_MS),
                 request: request.clone(),
+                actor,
                 plan_digest: plan_digest.clone(),
                 capability_state: capability_state.clone(),
                 plan: plan.clone(),
@@ -404,6 +429,10 @@ impl PluginOperationStore {
     fn result_path(&self, operation_id: &str) -> PathBuf {
         self.results_root().join(record_file_name(operation_id))
     }
+}
+
+fn default_plan_actor() -> PlanActor {
+    PlanActor::User
 }
 
 async fn run_blocking<T: Send + 'static>(

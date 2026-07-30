@@ -112,6 +112,12 @@ management MCP adapters. Web currently constructs the Manager with the
 default `ask` policy until a trusted host source is explicitly carried into
 that adapter.
 
+The adapter also supplies the plan actor from its trusted boundary. CLI and
+Web select `user`; management MCP selects `agent`. Package metadata, Tool
+output, Skill instructions, and MCP arguments cannot select or downgrade that
+actor. Reviewed records persist the selected actor and the current fixed
+`user/current` lifecycle scope.
+
 The policy source, parser, evaluator, and Manager injection are implemented
 and independently tested. Lifecycle integration still requires the umbrella
 planner to persist the full Use operation plan and to invoke evaluation before

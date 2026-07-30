@@ -218,6 +218,14 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
             .and_then(serde_json::Value::as_str),
         Some("unavailable")
     );
+    assert_eq!(
+        plan.get("actor").and_then(serde_json::Value::as_str),
+        Some("user")
+    );
+    assert_eq!(
+        plan.get("scope"),
+        Some(&serde_json::json!({"kind": "user", "id": "current"}))
+    );
     let request = PluginApplyRequest {
         operation_id: Some(operation_id.clone()),
         action: None,

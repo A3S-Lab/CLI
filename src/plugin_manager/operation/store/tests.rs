@@ -89,6 +89,30 @@ async fn durable_plan_intent_and_result_are_append_only_and_replayable() {
 }
 
 #[tokio::test]
+async fn reviewed_plan_persists_the_host_selected_actor() {
+    let temporary = tempfile::tempdir().unwrap();
+    let store = PluginOperationStore::new(temporary.path().join("operations"));
+    let plan_digest = "6".repeat(64);
+    let plan = store
+        .create_plan_for_actor(
+            request(),
+            a3s_use_core::PlanActor::Agent,
+            plan_digest.clone(),
+            evidence(7, 'b'),
+            plan_value(&plan_digest),
+        )
+        .await
+        .unwrap();
+
+    let resolved = store
+        .resolve_plan(Some(plan.operation_id.clone()), None, plan_digest)
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.actor, a3s_use_core::PlanActor::Agent);
+}
+
+#[tokio::test]
 async fn legacy_apply_resolves_the_latest_matching_reviewed_plan() {
     let temporary = tempfile::tempdir().unwrap();
     let store = PluginOperationStore::new(temporary.path().join("operations"));
@@ -200,6 +224,7 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         created_at_ms: 1,
         expires_at_ms: 2,
         request: request(),
+        actor: a3s_use_core::PlanActor::User,
         plan_digest: plan_digest.clone(),
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),

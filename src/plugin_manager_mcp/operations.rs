@@ -216,12 +216,15 @@ async fn plan(
         None
     };
     let plan = manager
-        .plan_operation(&PluginPlanRequest {
-            action,
-            component_id: format!("use/{}", input.package_id),
-            version,
-            channel,
-        })
+        .plan_operation_for_actor(
+            &PluginPlanRequest {
+                action,
+                component_id: format!("use/{}", input.package_id),
+                version,
+                channel,
+            },
+            a3s_use_core::PlanActor::Agent,
+        )
         .await?;
     Ok(json!({
         "schemaVersion": 1,
@@ -236,12 +239,15 @@ async fn plan_uninstall(
 ) -> Result<Value, PluginToolError> {
     input.validate()?;
     let plan = manager
-        .plan_operation(&PluginPlanRequest {
-            action: PluginLifecycleAction::Uninstall,
-            component_id: format!("use/{}", input.package_id),
-            version: None,
-            channel: None,
-        })
+        .plan_operation_for_actor(
+            &PluginPlanRequest {
+                action: PluginLifecycleAction::Uninstall,
+                component_id: format!("use/{}", input.package_id),
+                version: None,
+                channel: None,
+            },
+            a3s_use_core::PlanActor::Agent,
+        )
         .await?;
     Ok(json!({
         "schemaVersion": 1,

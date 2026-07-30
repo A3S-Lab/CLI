@@ -469,6 +469,12 @@ through a fixed size bound and malformed input fails closed. Web currently
 uses the Manager's conservative default-`ask` policy until it receives an
 equally trusted host policy source.
 
+Every reviewed plan also persists an actor selected by the trusted adapter,
+not by package or request content. CLI and Web plans are user plans; management
+MCP plans are agent plans. The currently supported lifecycle scope remains the
+fixed user scope `current`, and both actor and scope are returned with the
+reviewed plan.
+
 The host-owned `a3s.plugin-policy.v1` ACL contract now provides deterministic
 authorization for complete `a3s.use.plugin-operation-plan.v1` values. It
 normalizes exact registry, publisher, size, surface, workspace, filesystem,

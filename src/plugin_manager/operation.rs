@@ -21,6 +21,7 @@ pub(super) fn store(state_root: &std::path::Path) -> PluginOperationStore {
 pub(super) async fn plan(
     manager: &PluginManager,
     request: &PluginPlanRequest,
+    actor: a3s_use_core::PlanActor,
 ) -> PluginManagerResult<Value> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
     let request = normalize_plan_request(request)?;
@@ -29,7 +30,13 @@ pub(super) async fn plan(
     let plan_digest = plan_digest_from_value(&raw_plan)?;
     let stored = manager
         .operation_store
-        .create_plan(request, plan_digest.clone(), capability_state, raw_plan)
+        .create_plan_for_actor(
+            request,
+            actor,
+            plan_digest.clone(),
+            capability_state,
+            raw_plan,
+        )
         .await?;
     reviewed_plan_output(&stored)
 }
@@ -144,6 +151,19 @@ fn reviewed_plan_output(plan: &StoredPluginPlan) -> PluginManagerResult<Value> {
         object,
         "capabilityState",
         serde_json::to_value(&plan.capability_state).map_err(json_error)?,
+    );
+    insert_manager_field(
+        object,
+        "actor",
+        serde_json::to_value(plan.actor).map_err(json_error)?,
+    );
+    insert_manager_field(
+        object,
+        "scope",
+        serde_json::json!({
+            "kind": "user",
+            "id": "current",
+        }),
     );
     Ok(output)
 }

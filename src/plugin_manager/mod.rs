@@ -207,8 +207,21 @@ impl PluginManager {
         &self,
         request: &PluginPlanRequest,
     ) -> PluginManagerResult<serde_json::Value> {
+        self.plan_operation_for_actor(request, a3s_use_core::PlanActor::User)
+            .await
+    }
+
+    /// Create a reviewed plan for a host-authenticated actor.
+    ///
+    /// Adapters must select the actor from their trusted invocation boundary;
+    /// plugin input never chooses it.
+    pub async fn plan_operation_for_actor(
+        &self,
+        request: &PluginPlanRequest,
+        actor: a3s_use_core::PlanActor,
+    ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        operation::plan(self, request).await
+        operation::plan(self, request, actor).await
     }
 
     /// Apply an already reviewed umbrella component plan through the same
