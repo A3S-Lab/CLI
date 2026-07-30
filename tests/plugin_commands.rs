@@ -33,6 +33,10 @@ fn plugin_help_exposes_the_complete_command_contract() {
             "missing plugin command {command:?}:\n{stdout}"
         );
     }
+    assert!(
+        !stdout.contains("mcp-serve"),
+        "the host-owned management transport must stay out of user-facing help:\n{stdout}"
+    );
 }
 
 #[test]

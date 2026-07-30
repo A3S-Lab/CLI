@@ -42,6 +42,10 @@ pub(crate) async fn run(
             lifecycle::set_enabled(&manager, args, false, context).await
         }
         PluginCommand::Uninstall(args) => lifecycle::uninstall(&manager, args, context).await,
+        PluginCommand::McpServe => {
+            a3s::plugin_manager_mcp::serve_stdio(manager).await?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

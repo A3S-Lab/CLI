@@ -254,6 +254,7 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             PluginCommand::Enable(_) => "plugin.enable",
             PluginCommand::Disable(_) => "plugin.disable",
             PluginCommand::Uninstall(_) => "plugin.uninstall",
+            PluginCommand::McpServe => "plugin.mcp-serve",
         },
         RootCommand::Auth(args) => match &args.command {
             AuthCommand::List => "auth.list",

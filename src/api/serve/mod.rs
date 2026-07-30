@@ -182,10 +182,26 @@ async fn run_foreground(
     if let Some(paths) = component_paths.as_ref() {
         match a3s::components::find_ready_executable_with("use", paths) {
             Ok(Some(executable)) => {
+                let plugin_management = match std::env::current_exe() {
+                    Ok(a3s_executable) => {
+                        Some(crate::use_registry::PluginManagementMcpLaunch::new(
+                            a3s_executable,
+                            PathBuf::from(&config_path),
+                            options.offline,
+                        ))
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "warning: Plugin Manager MCP is unavailable because the A3S executable could not be resolved: {error}"
+                        );
+                        None
+                    }
+                };
                 let (registry, warning) = crate::use_registry::start_detached(
                     executable,
                     options.workspace.clone(),
                     CancellationToken::new(),
+                    plugin_management,
                 )
                 .await;
                 if let Some(warning) = warning {

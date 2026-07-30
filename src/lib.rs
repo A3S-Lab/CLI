@@ -2,6 +2,7 @@
 
 pub mod components;
 pub mod plugin_manager;
+pub mod plugin_manager_mcp;
 pub mod registry;
 pub mod research;
 

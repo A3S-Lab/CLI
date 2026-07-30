@@ -475,9 +475,20 @@ generation/revision. Apply resolves that stored plan from
 `operationId + planDigest`, records append-only intent before invoking the
 umbrella component lifecycle, and retains a successful result for seven-day
 idempotent replay. A process-local guard and a cross-process manager lock give
-CLI, Web, and future management MCP adapters one mutation order. The manager
+CLI, Web, and the management MCP adapter one operation order. The manager
 record owns plan identity and replay only; the existing component batch journal
 remains the sole checkpoint journal for package and delegated Use side effects.
+
+Code TUI and Code Web attach a host-owned standard MCP server named
+`use_plugin_manager` to the dedicated Use worker. Its M4 inventory is limited
+to search, inspect, installed list, status, and install/upgrade/uninstall plan
+creation. It reuses the frozen A3S Use schemas, exposes verified provenance and
+permission summaries, bounds responses to 4 MiB, and currently accepts only
+the `user/current` scope and complete-package plans. It has no apply, enable,
+disable, registry mutation, arbitrary URL/path, shell, secret, or plugin
+execution tool. The internal `plugin mcp-serve` transport command is hidden
+from user help; lifecycle mutation remains on the reviewed user CLI/Web path
+until the policy and Runtime enforcement milestones are complete.
 
 The Code TUI treats Use as a first-use component: before terminal takeover it
 reuses a healthy install or installs the verified release when networking and

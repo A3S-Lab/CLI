@@ -27,6 +27,9 @@ pub(crate) enum PluginCommand {
     Disable(PluginToggleArgs),
     /// Plan and uninstall one plugin package while retaining its data.
     Uninstall(PluginMutationArgs),
+    /// Serve the host-owned read-only Plugin Manager over standard MCP.
+    #[command(hide = true)]
+    McpServe,
 }
 
 #[derive(Clone, Debug, Args)]

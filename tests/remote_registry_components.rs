@@ -2,7 +2,8 @@
 
 mod support;
 
-use std::process::{Command, Output};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, Command, Output, Stdio};
 
 use a3s_use_extension::ResolvedRemotePackage;
 use support::{a3s_bin, configure_component_env, make_executable, sh_quote, TempWorkspace};
@@ -13,6 +14,217 @@ mod tuf_test_support;
 use tuf_test_support::{
     extension_archive, TestRepository, TestServer, EXPIRED, FUTURE, PACKAGE_VERSION,
 };
+
+#[test]
+fn read_only_plugin_manager_mcp_discovers_and_plans_one_signed_plugin() {
+    let temp = TempWorkspace::new("plugin-manager-mcp-signed-plan");
+    let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
+    let server = TestServer::start(repository.routes.clone());
+    let registry_url = localhost_url(&server);
+    let config = temp.path("config/config.acl");
+    let workspace = temp.path("workspace");
+    let use_bin = temp.path("use-bin");
+    let install_log = temp.path("plugin-manager-mcp-install.log");
+    std::fs::create_dir_all(&workspace).unwrap();
+    make_use_fixture(&use_bin, &install_log);
+    add_registry(
+        &temp,
+        &config,
+        &use_bin,
+        &registry_url,
+        &format!("sha256:{}", repository.root_sha256),
+    );
+
+    server.clear_requests();
+    let mut command = Command::new(a3s_bin());
+    configure_component_env(&mut command, &temp);
+    let child = command
+        .arg("--config")
+        .arg(&config)
+        .arg("--directory")
+        .arg(&workspace)
+        .args(["--non-interactive", "--no-progress", "plugin", "mcp-serve"])
+        .env("A3S_USE_INSTALL_DIR", &use_bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch Plugin Manager MCP");
+    let mut child = McpChildGuard(child);
+    let mut stdin = child.0.stdin.take().expect("Plugin Manager MCP stdin");
+    let stdout = child.0.stdout.take().expect("Plugin Manager MCP stdout");
+    let mut reader = BufReader::new(stdout);
+
+    write_mcp_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "a3s-plugin-manager-e2e", "version": "1"}
+            }
+        }),
+    );
+    let initialized = read_mcp_response(&mut reader, 1);
+    assert_eq!(
+        initialized["result"]["serverInfo"]["name"],
+        "a3s-plugin-manager"
+    );
+    write_mcp_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
+
+    write_mcp_message(
+        &mut stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    );
+    let listed = read_mcp_response(&mut reader, 2);
+    let tools = listed["result"]["tools"]
+        .as_array()
+        .expect("Plugin Manager MCP tools");
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "plugin_search",
+            "plugin_inspect",
+            "plugin_list_installed",
+            "plugin_status",
+            "plugin_plan_install",
+            "plugin_plan_upgrade",
+            "plugin_plan_uninstall",
+        ]
+    );
+    assert!(tools.iter().all(|tool| {
+        tool["annotations"]["readOnlyHint"] == true
+            && tool["annotations"]["destructiveHint"] == false
+    }));
+
+    write_mcp_tool_call(
+        &mut stdin,
+        3,
+        "plugin_search",
+        serde_json::json!({"query": "science", "channel": "stable", "limit": 10}),
+    );
+    let searched = read_mcp_response(&mut reader, 3);
+    assert_eq!(
+        searched["result"]["structuredContent"]["items"][0]["packageId"],
+        "a3s/science"
+    );
+    assert_eq!(
+        searched["result"]["structuredContent"]["items"][0]["source"]["kind"],
+        "registry-tuf"
+    );
+    assert!(
+        searched["result"]["structuredContent"]["items"][0]["archiveSha256"]
+            .as_str()
+            .is_some_and(|digest| digest.len() == 64)
+    );
+
+    write_mcp_tool_call(
+        &mut stdin,
+        4,
+        "plugin_inspect",
+        serde_json::json!({
+            "packageId": "a3s/science",
+            "version": PACKAGE_VERSION,
+            "channel": "stable"
+        }),
+    );
+    let inspected = read_mcp_response(&mut reader, 4);
+    assert_eq!(
+        inspected["result"]["structuredContent"]["matches"][0]["packageId"],
+        "a3s/science"
+    );
+
+    write_mcp_tool_call(
+        &mut stdin,
+        5,
+        "plugin_plan_install",
+        serde_json::json!({
+            "packageId": "a3s/science",
+            "versionRequirement": format!("={PACKAGE_VERSION}"),
+            "channel": "stable",
+            "scopeKind": "user",
+            "scopeId": "current"
+        }),
+    );
+    let planned = read_mcp_response(&mut reader, 5);
+    assert_eq!(
+        planned["result"]["structuredContent"]["plan"]["dryRun"],
+        true
+    );
+    assert_eq!(
+        planned["result"]["structuredContent"]["plan"]["plans"][0]["resolvedRegistryPackages"]
+            ["use/a3s/science"]["sha256"],
+        repository.target_sha256
+    );
+    assert!(
+        planned["result"]["structuredContent"]["plan"]["operationId"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("plugin-install-"))
+    );
+    assert!(
+        planned["result"]["structuredContent"]["plan"]["canonicalPlanDigest"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:"))
+    );
+    assert!(
+        !install_log.exists(),
+        "creating an agent plan must not apply it"
+    );
+    assert_no_target_request(&server);
+
+    write_mcp_tool_call(
+        &mut stdin,
+        6,
+        "plugin_search",
+        serde_json::json!({
+            "query": "science",
+            "registryUrl": "https://example.invalid"
+        }),
+    );
+    let arbitrary_source = read_mcp_response(&mut reader, 6);
+    assert_eq!(arbitrary_source["result"]["isError"], true);
+    assert_eq!(
+        arbitrary_source["result"]["structuredContent"]["code"],
+        "plugin.request_invalid"
+    );
+
+    write_mcp_tool_call(
+        &mut stdin,
+        7,
+        "plugin_apply_plan",
+        serde_json::json!({
+            "operationId": planned["result"]["structuredContent"]["plan"]["operationId"],
+            "planDigest": planned["result"]["structuredContent"]["plan"]["canonicalPlanDigest"]
+        }),
+    );
+    let forbidden = read_mcp_response(&mut reader, 7);
+    assert_eq!(forbidden["error"]["code"], -32602);
+    assert!(forbidden["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("not exposed")));
+    assert!(
+        !install_log.exists(),
+        "the read-only management MCP must not apply a plan"
+    );
+}
 
 #[test]
 fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
@@ -724,4 +936,53 @@ fn assert_no_target_request(server: &TestServer) {
         .requests()
         .iter()
         .all(|request| !request.starts_with("/targets/")));
+}
+
+fn write_mcp_tool_call(stdin: &mut impl Write, id: u64, name: &str, arguments: serde_json::Value) {
+    write_mcp_message(
+        stdin,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}
+        }),
+    );
+}
+
+fn write_mcp_message(stdin: &mut impl Write, value: serde_json::Value) {
+    serde_json::to_writer(&mut *stdin, &value).expect("write Plugin Manager MCP message");
+    stdin
+        .write_all(b"\n")
+        .expect("terminate Plugin Manager MCP message");
+    stdin.flush().expect("flush Plugin Manager MCP message");
+}
+
+fn read_mcp_response(reader: &mut impl BufRead, id: u64) -> serde_json::Value {
+    for _ in 0..20 {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .expect("read Plugin Manager MCP response");
+        assert!(
+            bytes > 0,
+            "Plugin Manager MCP closed before responding to request {id}"
+        );
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|error| {
+            panic!("invalid Plugin Manager MCP response ({error}): {line}")
+        });
+        if value["id"].as_u64() == Some(id) {
+            return value;
+        }
+    }
+    panic!("Plugin Manager MCP did not respond to request {id}");
+}
+
+struct McpChildGuard(Child);
+
+impl Drop for McpChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }
