@@ -129,6 +129,12 @@ impl App {
             KeyCode::Char('m') | KeyCode::Enter => {
                 return self.start_evolution_action(EvolutionAction::Materialize);
             }
+            KeyCode::Char('t') => {
+                return self.start_skill_optimization();
+            }
+            KeyCode::Char('a') => {
+                return self.start_skill_optimization_adoption();
+            }
             KeyCode::Char('o') => {
                 return self.start_evolution_action(EvolutionAction::Reopen);
             }
@@ -180,19 +186,119 @@ impl App {
         }))
     }
 
+    fn start_skill_optimization(&mut self) -> Option<Cmd<Msg>> {
+        let candidate = self.evolution.as_ref()?.selected_candidate()?.clone();
+        if candidate.kind != crate::evolution::EvolutionKind::Skill {
+            if let Some(panel) = self.evolution.as_mut() {
+                panel.note =
+                    "task replay optimization is available for Skill candidates".to_string();
+            }
+            return None;
+        }
+        let client = match crate::session_llm::resolve_session_llm_client(
+            &self.code_config,
+            &self.effort_session_opts(false),
+            &format!("{}-skill-opt", self.session_id),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                if let Some(panel) = self.evolution.as_mut() {
+                    panel.note = format!("could not prepare Skill optimizer: {error}");
+                }
+                return None;
+            }
+        };
+        if let Some(panel) = self.evolution.as_mut() {
+            panel.busy = true;
+            panel.confirm = None;
+            panel.note =
+                "replaying train tasks and evaluating a bounded proposal on held-out tasks…"
+                    .to_string();
+        }
+        let workspace = self.cwd.clone();
+        Some(cmd::cmd(move || async move {
+            let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+            let result = async {
+                let run = evolution
+                    .optimize_skill(
+                        &candidate.id,
+                        crate::evolution::SkillOptimizationRequest::default(),
+                        client,
+                    )
+                    .await?;
+                let message = run
+                    .gate
+                    .as_ref()
+                    .map(|gate| gate.reason.clone())
+                    .unwrap_or_else(|| format!("optimization {}", run.status.label()));
+                Ok(EvolutionUiMutation {
+                    overview: evolution.overview().await?,
+                    message,
+                    requires_session_reload: false,
+                })
+            }
+            .await;
+            Msg::EvolutionMutated(result.map_err(|error: anyhow::Error| error.to_string()))
+        }))
+    }
+
+    fn start_skill_optimization_adoption(&mut self) -> Option<Cmd<Msg>> {
+        let panel = self.evolution.as_ref()?;
+        let candidate = panel.selected_candidate()?;
+        let run = panel
+            .overview
+            .as_ref()?
+            .optimizations
+            .iter()
+            .find(|run| {
+                run.candidate_id == candidate.id
+                    && run.status == crate::evolution::SkillOptimizationStatus::Staged
+            })?
+            .clone();
+        if let Some(panel) = self.evolution.as_mut() {
+            panel.busy = true;
+            panel.confirm = None;
+            panel.note =
+                "adopting the held-out-gated proposal as a new local Skill version…".to_string();
+        }
+        let workspace = self.cwd.clone();
+        Some(cmd::cmd(move || async move {
+            let evolution = crate::evolution::WorkspaceEvolution::new(workspace);
+            let result = async {
+                let result = evolution.adopt_skill_optimization(&run.id).await?;
+                let version = result.candidate.current_version.unwrap_or_default();
+                Ok(EvolutionUiMutation {
+                    overview: evolution.overview().await?,
+                    message: format!(
+                        "adopted optimization {} as Skill v{version}; refreshing live session",
+                        run.id
+                    ),
+                    requires_session_reload: result.requires_session_reload,
+                })
+            }
+            .await;
+            Msg::EvolutionMutated(result.map_err(|error: anyhow::Error| error.to_string()))
+        }))
+    }
+
     pub(crate) fn render_evolution(&self, panel: &EvolutionPanel) -> String {
         let width = self.width as usize;
         let height = self.height as usize;
         let mut lines = Vec::new();
-        let stats = panel.overview.as_ref().map(|overview| &overview.stats);
-        let header = match stats {
-            Some(stats) => format!(
-                "  evolution · {} candidates · {} ready · {} materialized · {} updates · {} activation pending   {}",
-                stats.total,
-                stats.ready,
-                stats.materialized,
-                stats.update_available,
-                stats.activation_pending,
+        let overview = panel.overview.as_ref();
+        let header = match overview {
+            Some(overview) => format!(
+                "  evolution · {} candidates · {} ready · {} materialized · {} staged optimizations · {} updates · {} activation pending   {}",
+                overview.stats.total,
+                overview.stats.ready,
+                overview.stats.materialized,
+                overview
+                    .optimizations
+                    .iter()
+                    .filter(|run| run.status == crate::evolution::SkillOptimizationStatus::Staged)
+                    .count(),
+                overview.stats.update_available,
+                overview.stats.activation_pending,
                 Style::new().fg(TN_GRAY).render(&panel.note),
             ),
             None => format!("  evolution   {}", Style::new().fg(TN_GRAY).render(&panel.note)),
@@ -225,7 +331,15 @@ impl App {
         let left_width = (width / 3).clamp(30, 54);
         let right_width = width.saturating_sub(left_width + 3);
         let left = evolution_candidate_lines(candidates, panel.selected, left_width, body_height);
-        let right = evolution_detail_lines(panel.selected_candidate(), right_width);
+        let right = evolution_detail_lines(
+            panel.selected_candidate(),
+            panel
+                .overview
+                .as_ref()
+                .map(|overview| overview.optimizations.as_slice())
+                .unwrap_or_default(),
+            right_width,
+        );
         let separator = Style::new().fg(TN_GRAY).render(" │ ");
         for row in 0..body_height {
             let left = left
@@ -239,7 +353,7 @@ impl App {
             lines.push(format!("{left}{separator}{right}"));
         }
         lines.push(fit_evolution_line(
-            "  ↑↓/jk select · Enter/m materialize/update · x reject · o reopen · b rollback · PgUp/PgDn detail · r rescan · Esc close",
+            "  ↑↓/jk select · t optimize · a adopt staged · Enter/m materialize · x reject · o reopen · b rollback · r rescan · Esc close",
             width,
         ));
         lines.truncate(height);
@@ -371,6 +485,7 @@ fn evolution_candidate_lines(
 
 fn evolution_detail_lines(
     candidate: Option<&crate::evolution::EvolutionCandidate>,
+    optimizations: &[crate::evolution::SkillOptimizationRunSummary],
     width: usize,
 ) -> Vec<String> {
     let Some(candidate) = candidate else {
@@ -436,6 +551,37 @@ fn evolution_detail_lines(
         &candidate.instructions,
         width,
     ));
+    if let Some(run) = optimizations
+        .iter()
+        .find(|run| run.candidate_id == candidate.id)
+    {
+        lines.push(fit_evolution_line("Skill optimization", width));
+        let scores = match (run.baseline_score, run.candidate_score) {
+            (Some(baseline), Some(proposal)) => {
+                format!(
+                    "{baseline:.1} → {proposal:.1} ({:+.1})",
+                    proposal - baseline
+                )
+            }
+            _ => "evaluation pending".to_string(),
+        };
+        lines.push(fit_evolution_line(
+            &format!(
+                "• {} · {} tasks · {} edits · {}",
+                run.status.label(),
+                run.task_count,
+                run.edit_count,
+                scores,
+            ),
+            width,
+        ));
+        if run.status == crate::evolution::SkillOptimizationStatus::Staged {
+            lines.push(fit_evolution_line(
+                "• held-out gate passed; press a to adopt the proposal",
+                width,
+            ));
+        }
+    }
     if candidate.has_conflicts {
         lines.extend(wrapped_section(
             "Conflict",
@@ -554,7 +700,7 @@ mod tests {
         let overview = evolution.overview().await.unwrap();
         let candidate = &overview.candidates[0];
 
-        let rendered = evolution_detail_lines(Some(candidate), 96).join("\n");
+        let rendered = evolution_detail_lines(Some(candidate), &[], 96).join("\n");
 
         assert!(rendered.contains("Concise evidence-backed responses"));
         assert!(rendered.contains("Lead with the outcome"));
@@ -643,6 +789,24 @@ mod tests {
         web.synchronize_memory_store(&memory_dir).await.unwrap();
         let ready = web.overview().await.unwrap().candidates.remove(0);
         assert_eq!(ready.state, crate::evolution::EvolutionState::Ready);
+        let now = chrono::Utc::now();
+        let optimization = crate::evolution::SkillOptimizationRunSummary {
+            id: "opt-focused".to_string(),
+            candidate_id: ready.id.clone(),
+            candidate_title: ready.title.clone(),
+            status: crate::evolution::SkillOptimizationStatus::Staged,
+            edit_count: 2,
+            task_count: 4,
+            baseline_score: Some(61.0),
+            candidate_score: Some(78.5),
+            improvement: Some(17.5),
+            created_at: now,
+            updated_at: now,
+            adopted_version: None,
+        };
+        let rendered = evolution_detail_lines(Some(&ready), &[optimization], 96).join("\n");
+        assert!(rendered.contains("staged · 4 tasks · 2 edits · 61.0 → 78.5 (+17.5)"));
+        assert!(rendered.contains("press a to adopt the proposal"));
 
         let first = run_evolution_action(
             workspace.display().to_string(),

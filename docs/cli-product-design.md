@@ -290,6 +290,14 @@ Lifecycle verbs remain family-specific:
 | `flow` | `publish`, `run`, `deploy`, `open`, `logs`, `status` |
 | `okf` | `publish`, `deploy`, `status` |
 
+Evolution-managed local Skills additionally expose an explicit optimization
+workflow in the TUI and Code Web. It is not a publish or deploy verb. The
+workflow replays bounded tasks, learns only from a training split, gates the
+candidate on held-out tasks, and stages improvements for human adoption. A
+failed or flat candidate does not modify the active Skill; an adopted proposal
+becomes a rollback-capable local version. Normal Code turns never run this
+workflow implicitly.
+
 For Agent actions, the asset path is the operand and kind is an option:
 
 ```text

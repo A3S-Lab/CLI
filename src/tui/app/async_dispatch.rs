@@ -5,6 +5,27 @@ use super::*;
 impl App {
     pub(super) fn handle_async_message(&mut self, msg: Msg) -> Option<Cmd<Msg>> {
         match msg {
+            Msg::RuntimeIntegrationsReady(ready) => {
+                let RuntimeIntegrationsReady {
+                    use_registry,
+                    webview_binary,
+                    warnings,
+                } = *ready;
+                if let Some(registry) = use_registry.as_ref() {
+                    registry.replace_session(Arc::clone(&self.session));
+                }
+                self.use_registry = use_registry;
+                self.agent_presence.set_webview_binary(webview_binary);
+                if !warnings.is_empty() {
+                    for warning in warnings {
+                        self.messages.push(TranscriptEntry::preformatted(
+                            Style::new().fg(TN_YELLOW).render(&format!("  ⚠ {warning}")),
+                        ));
+                    }
+                    self.rebuild_viewport();
+                }
+                return Some(self.refresh_agent_presence());
+            }
             Msg::ProjectPermissionRevoked {
                 request_id,
                 stable_key,
@@ -708,6 +729,28 @@ impl App {
                     }
                 }
             }
+            Msg::EvolutionStartupSynchronized(result) => match result {
+                Ok((_, pending_assets))
+                    if pending_assets > 0
+                        && self.state != State::Streaming
+                        && self.session_rebuild_pending.is_none() =>
+                {
+                    let dirs = self.skill_dirs();
+                    self.skills = load_skills(&dirs);
+                    self.skill_count = count_skill_files(&dirs);
+                    let profile = self.session_rebuild_profile();
+                    return self.start_session_rebuild(
+                        profile,
+                        SessionRebuildAction::Reload {
+                            skill_count: self.skills.len(),
+                        },
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "could not synchronize memory evolution after TUI startup");
+                }
+            },
             Msg::EvolutionMutated(result) => {
                 let mut reload = false;
                 if let Some(panel) = self.evolution.as_mut() {

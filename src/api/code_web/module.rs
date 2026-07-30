@@ -171,6 +171,17 @@ mod tests {
         );
         assert_eq!(targets["warnings"], serde_json::json!([]));
 
+        let optimizations = app
+            .call(BootRequest::new(
+                HttpMethod::Get,
+                "/api/v1/evolution/optimizations",
+            ))
+            .await
+            .expect("list Skill optimization runs")
+            .body_json::<serde_json::Value>()
+            .expect("decode Skill optimization runs");
+        assert_eq!(optimizations, serde_json::json!([]));
+
         app.shutdown().await.expect("shutdown Code Web application");
     }
 

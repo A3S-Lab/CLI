@@ -403,6 +403,8 @@ mod app_session_share;
 mod app_session_state;
 #[path = "app/smoke.rs"]
 mod app_smoke;
+#[path = "app/startup.rs"]
+mod app_startup;
 #[path = "app/submit.rs"]
 mod app_submit;
 #[path = "app/synthesis.rs"]
@@ -541,6 +543,9 @@ struct App {
     /// Live projection of independently managed A3S Use MCP and Skill
     /// extensions into the current Code session.
     use_registry: Option<crate::use_registry::UseRegistryHandle>,
+    /// Optional component discovery and registry startup. The command is
+    /// dispatched only after the first terminal frame has had time to render.
+    deferred_runtime_integrations: Option<Cmd<Msg>>,
     /// Agent + session-rebuild bits, kept so `/model` can switch models by
     /// resuming the session under a new model (no in-place model setter exists).
     agent: Arc<Agent>,

@@ -20,8 +20,79 @@ pub(super) fn materialize_candidate(
     force: bool,
     automatic: bool,
 ) -> anyhow::Result<EvolutionMutationResult> {
+    materialize_candidate_inner(paths, id, force, automatic, None)
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct OptimizedSkillMaterialization {
+    pub(super) run_id: String,
+    pub(super) baseline_digest: String,
+    pub(super) proposal_digest: String,
+    pub(super) summary: String,
+    pub(super) instructions: Vec<String>,
+}
+
+pub(super) fn materialize_optimized_candidate(
+    paths: &EvolutionPaths,
+    id: &str,
+    optimized: OptimizedSkillMaterialization,
+) -> anyhow::Result<EvolutionMutationResult> {
+    materialize_candidate_inner(paths, id, false, false, Some(optimized))
+}
+
+fn materialize_candidate_inner(
+    paths: &EvolutionPaths,
+    id: &str,
+    force: bool,
+    automatic: bool,
+    optimized: Option<OptimizedSkillMaterialization>,
+) -> anyhow::Result<EvolutionMutationResult> {
     mutate_catalog(paths, |catalog| {
         let candidate = candidate_mut(catalog, id)?;
+        if let Some(optimized) = optimized.as_ref() {
+            if candidate.kind != EvolutionKind::Skill {
+                return Err(anyhow!("only Skill candidates accept optimized content"));
+            }
+            let current_digest =
+                super::optimization::snapshot_digest(&candidate.summary, &candidate.instructions);
+            if current_digest != optimized.baseline_digest {
+                return Err(anyhow!(
+                    "the Skill changed after optimization; run a fresh evaluation before adoption"
+                ));
+            }
+            let proposal_digest =
+                super::optimization::snapshot_digest(&optimized.summary, &optimized.instructions);
+            if proposal_digest != optimized.proposal_digest {
+                return Err(anyhow!(
+                    "the staged Skill proposal failed its integrity check"
+                ));
+            }
+            if optimized.instructions.is_empty() || optimized.instructions.len() > 16 {
+                return Err(anyhow!(
+                    "the staged Skill proposal has an invalid instruction count"
+                ));
+            }
+            if optimized.instructions.iter().any(|instruction| {
+                instruction.trim().chars().count() < 8 || instruction.chars().count() > 320
+            }) {
+                return Err(anyhow!(
+                    "the staged Skill proposal has an invalid instruction"
+                ));
+            }
+            candidate.summary = optimized.summary.clone();
+            candidate.instructions = optimized.instructions.clone();
+            candidate.update_available = true;
+            candidate.audit.push(EvolutionAuditEvent {
+                action: EvolutionAuditAction::Optimized,
+                at: Utc::now(),
+                version: candidate.current_version,
+                note: Some(format!(
+                    "adopted held-out-gated Skill optimization run {}",
+                    optimized.run_id
+                )),
+                recovery_path: None,
+            });
+        }
         if candidate.state == EvolutionState::Rejected {
             return Err(anyhow!(
                 "rejected candidates must be reopened before materialization"

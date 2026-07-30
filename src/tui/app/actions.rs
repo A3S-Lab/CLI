@@ -446,6 +446,14 @@ impl App {
                 let display = format!("✦ {} review", skill.name);
                 self.start_stream_inner(prompt, display, true, true, false)
             }
+            panels::skill::SkillSubcommand::Optimize => {
+                self.evolution = Some(panels::evolution::EvolutionPanel::loading());
+                if let Some(panel) = self.evolution.as_mut() {
+                    panel.note =
+                        "loading learned Skills — select one and press t to optimize".to_string();
+                }
+                Some(self.load_evolution_panel())
+            }
             panels::skill::SkillSubcommand::Publish => {
                 self.execute_skill_os_action(panels::skill::SkillOsAction::Publish)
             }

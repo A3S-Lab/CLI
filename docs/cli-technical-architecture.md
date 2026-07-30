@@ -671,6 +671,33 @@ asset roots, and memory root, all resolved from the invocation directory. TUI
 panels receive these paths explicitly and never change the process current
 directory to emulate `-C`.
 
+The interactive startup critical path ends at terminal handoff. It loads the
+existing Evolution catalog needed by the first prompt but defers the full
+durable-memory scan to a post-first-frame TUI command. Only Session construction
+remains on the critical path. Managed Use and WebView discovery run concurrently
+after the first frame, and the ready registry and preferred helper path are then
+attached to the current Session and Agent Island runtime. The first Session is
+created with its complete effort guidance, optional thinking fallback, and
+Ultracode planning mode, so launch never resumes the same Session a second time
+merely to apply the initial profile. Set `A3S_CODE_STARTUP_TRACE=1` to emit phase
+and cumulative milliseconds to stderr before terminal takeover; the trace
+contains no paths, model names, prompts, or credentials.
+
+The deferred scan preserves the existing activation barrier. If it matures a
+new preference or Skill while the TUI is idle, Code rebuilds the Session in the
+background; if a turn already started, the normal post-turn settlement reloads
+the assets before the next queued turn.
+
+Skill optimization extends Evolution rather than creating a second asset
+lifecycle. An isolated, tool-free model adapter generates or consumes bounded
+task/rubric cases, replays the baseline, reflects only over the training split,
+applies deterministic edit limits, and blind-scores baseline/candidate outputs
+on the held-out split. The gate requires strict mean improvement and caps
+per-task regression. Passing proposals remain staged. TUI and Code Web share
+the same run store, digests, adoption operation, immutable materialization, live
+Session refresh barrier, and rollback path. Ordinary inference never starts an
+optimizer call. See [A3S Code Skill Optimization](skill-optimization.md).
+
 Asset-family commands use a common typed discovery request with an explicit
 `AssetLocation`. Each family registers only supported lifecycle operations.
 Agent kind is a value enum option, removing positional inference.

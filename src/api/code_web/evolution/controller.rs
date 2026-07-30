@@ -26,6 +26,46 @@ impl EvolutionController {
         self.service.scan().await
     }
 
+    #[get("/optimizations")]
+    async fn optimizations(&self) -> BootResult<serde_json::Value> {
+        self.service.optimizations().await
+    }
+
+    #[get("/optimizations/{runId}")]
+    async fn optimization(
+        &self,
+        #[param("runId")] run_id: String,
+    ) -> BootResult<serde_json::Value> {
+        self.service.optimization(run_id).await
+    }
+
+    #[post("/{id}/optimize")]
+    async fn optimize(
+        &self,
+        #[param("id")] id: String,
+        #[body] request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.optimize(id, request).await
+    }
+
+    #[post("/optimizations/{runId}/adopt")]
+    async fn adopt_optimization(
+        &self,
+        #[param("runId")] run_id: String,
+        #[body] _request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.adopt_optimization(run_id).await
+    }
+
+    #[post("/optimizations/{runId}/dismiss")]
+    async fn dismiss_optimization(
+        &self,
+        #[param("runId")] run_id: String,
+        #[body] _request: serde_json::Value,
+    ) -> BootResult<serde_json::Value> {
+        self.service.dismiss_optimization(run_id).await
+    }
+
     #[post("/{id}/materialize")]
     async fn materialize(
         &self,

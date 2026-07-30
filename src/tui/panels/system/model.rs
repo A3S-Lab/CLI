@@ -58,7 +58,7 @@ fn account_provider_color(provider: AccountProvider) -> Color {
     }
 }
 
-fn prompt_guideline_for_effort(
+pub(in crate::tui) fn prompt_guideline_for_effort(
     effort: usize,
     has_native_reasoning_effort: bool,
 ) -> Option<&'static str> {

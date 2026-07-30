@@ -667,6 +667,7 @@ mod tests {
             "clone https://github.com/a/asset.git",
             "list",
             "review",
+            "optimize",
             "activity",
             "publish agentic",
             "publish application",

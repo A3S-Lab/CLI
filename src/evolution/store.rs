@@ -28,6 +28,8 @@ pub(crate) struct EvolutionPaths {
     pub(crate) state: PathBuf,
     pub(crate) history: PathBuf,
     pub(crate) recovery: PathBuf,
+    pub(crate) optimizations: PathBuf,
+    pub(crate) optimization_lock: PathBuf,
     pub(crate) preferences: PathBuf,
     pub(crate) skill_root: PathBuf,
     pub(crate) okf_root: PathBuf,
@@ -42,6 +44,8 @@ impl EvolutionPaths {
             state: root.join("state.json"),
             history: root.join("history"),
             recovery: root.join("recovery"),
+            optimizations: root.join("optimizations"),
+            optimization_lock: root.join("optimizations.lock"),
             preferences: root.join("preferences"),
             lock: root.join("state.lock"),
             skill_root: workspace.join(".a3s").join("skills"),
@@ -490,6 +494,7 @@ pub(super) fn overview(paths: &EvolutionPaths) -> anyhow::Result<EvolutionOvervi
         updated_at: catalog.updated_at,
         stats: EvolutionStats::from_candidates(&catalog.candidates),
         candidates: catalog.candidates,
+        optimizations: super::optimization::skill_optimization_summaries(paths, None)?,
         policy: EvolutionPolicySummary {
             ready_evidence: READY_EVIDENCE,
             auto_materialize_evidence: AUTO_MATERIALIZE_EVIDENCE,
@@ -736,7 +741,7 @@ pub(crate) fn truncate_chars(value: &str, max: usize) -> String {
     }
 }
 
-fn looks_sensitive(value: &str) -> bool {
+pub(crate) fn looks_sensitive(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
         "-----begin private key-----",

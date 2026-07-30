@@ -40,6 +40,7 @@ pub(crate) enum SkillSubcommand {
     Clone(String),
     List(String),
     Review,
+    Optimize,
     Activity(String),
     Publish,
     Deploy,
@@ -116,6 +117,12 @@ pub(crate) fn parse_skill_subcommand(input: &str) -> Option<Result<SkillSubcomma
                 return Some(Err("usage: /skill review".to_string()));
             }
             Some(Ok(SkillSubcommand::Review))
+        }
+        "optimize" => {
+            if parts.next().is_some() {
+                return Some(Err("usage: /skill optimize".to_string()));
+            }
+            Some(Ok(SkillSubcommand::Optimize))
         }
         "activity" => Some(Ok(SkillSubcommand::Activity(
             parts.collect::<Vec<_>>().join(" "),
@@ -1737,6 +1744,14 @@ mod tests {
         assert_eq!(
             parse_skill_subcommand("review").unwrap().unwrap(),
             SkillSubcommand::Review
+        );
+        assert_eq!(
+            parse_skill_subcommand("optimize").unwrap().unwrap(),
+            SkillSubcommand::Optimize
+        );
+        assert_eq!(
+            parse_skill_subcommand("optimize now").unwrap().unwrap_err(),
+            "usage: /skill optimize"
         );
         assert_eq!(
             parse_skill_subcommand("publish").unwrap().unwrap(),

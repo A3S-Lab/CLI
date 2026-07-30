@@ -14,6 +14,25 @@ impl Model for App {
         cmds.push(pump_manifest(self.workspace_manifest_rx.clone()));
         cmds.push(self.refresh_agent_presence());
         cmds.push(agent_presence_tick());
+        let evolution_workspace = self.cwd.clone();
+        let evolution_memory = self.memory_dir.clone();
+        cmds.push(app_startup::after_first_frame(cmd::cmd(
+            move || async move {
+                let evolution = crate::evolution::WorkspaceEvolution::new(evolution_workspace);
+                let result = async {
+                    let observed = evolution.synchronize_memory_store(evolution_memory).await?;
+                    let pending_assets = evolution.pending_session_reload_count().await?;
+                    Ok((observed, pending_assets))
+                }
+                .await;
+                Msg::EvolutionStartupSynchronized(
+                    result.map_err(|error: anyhow::Error| error.to_string()),
+                )
+            },
+        )));
+        if let Some(command) = self.deferred_runtime_integrations.take() {
+            cmds.push(app_startup::after_first_frame(command));
+        }
         // Heartbeat for EVERY session (fresh or resumed). BannerTick self-gates
         // the mascot animation and drives idle maintenance; Ultracode uses its
         // own short-lived high-frame-rate tick.

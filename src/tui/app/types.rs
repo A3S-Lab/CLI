@@ -13,6 +13,12 @@ pub(super) type SharedActiveSession = Arc<std::sync::Mutex<Arc<AgentSession>>>;
 pub(super) type StreamJoin = tokio::task::JoinHandle<()>;
 pub(super) type HostToolAbort = tokio::task::AbortHandle;
 
+pub(super) struct RuntimeIntegrationsReady {
+    pub(super) use_registry: Option<crate::use_registry::UseRegistryHandle>,
+    pub(super) webview_binary: Option<PathBuf>,
+    pub(super) warnings: Vec<String>,
+}
+
 #[derive(Clone)]
 pub(super) struct LlmTurnUiCheckpoint {
     pub(super) turn: usize,
@@ -341,6 +347,7 @@ pub(super) enum Msg {
     },
     WorkspaceManifest(Box<LocalWorkspaceManifestSnapshot>),
     WorkspaceManifestStopped,
+    RuntimeIntegrationsReady(Box<RuntimeIntegrationsReady>),
     IdeIntelligenceCompleted {
         request_id: u64,
         result: Result<IdeIntelligenceResult, String>,
@@ -583,6 +590,9 @@ pub(super) enum Msg {
     MemoryForgotten(Result<(String, MemPanelData), String>),
     /// `/evolution` loaded the current memory-derived candidate catalog.
     EvolutionLoaded(Result<crate::evolution::EvolutionOverview, String>),
+    /// Post-first-frame memory synchronization completed. This maintenance
+    /// result never blocks terminal handoff.
+    EvolutionStartupSynchronized(Result<(usize, usize), String>),
     /// A candidate review/materialize/rollback action completed.
     EvolutionMutated(Result<panels::evolution::EvolutionUiMutation, String>),
     /// Post-turn check for automatically materialized session assets. This

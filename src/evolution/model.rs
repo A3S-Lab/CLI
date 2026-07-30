@@ -65,6 +65,7 @@ pub(crate) struct EvolutionEvidence {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum EvolutionAuditAction {
     Ready,
+    Optimized,
     Materialized,
     Updated,
     Rejected,
@@ -205,6 +206,7 @@ pub(crate) struct EvolutionOverview {
     pub(crate) updated_at: DateTime<Utc>,
     pub(crate) stats: EvolutionStats,
     pub(crate) candidates: Vec<EvolutionCandidate>,
+    pub(crate) optimizations: Vec<super::optimization::SkillOptimizationRunSummary>,
     pub(crate) policy: EvolutionPolicySummary,
 }
 

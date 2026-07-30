@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added approval-gated Skill optimization for Evolution-managed local Skills
+  in the Code TUI and Code Web. Runs use bounded instruction edits, isolated
+  task replay, a held-out strict-improvement gate, local audit records,
+  immutable adopted versions, and the existing rollback path.
+
+### Performance
+
+- Shortened interactive Code startup by moving the full memory-evolution scan
+  after the first frame, preparing optional Use/WebView integrations in the
+  background, and constructing the complete effort profile without a second
+  pre-render Session rebuild. `A3S_CODE_STARTUP_TRACE=1` reports phase timings.
+
 ### Changed
 
 - Converted this repository into a compatibility release endpoint after CLI

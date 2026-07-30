@@ -421,12 +421,14 @@ declare native CLI, standard MCP, and/or `SKILL.md` surfaces. A3S does not
 define an extension JSON-RPC protocol; `--json` remains a one-command CLI
 result.
 
-The Code TUI treats Use as a first-use component: before terminal takeover it
-reuses a healthy install or installs the verified release when networking and
-automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain
-strict no-mutation boundaries, and a failed setup does not prevent Code from
-starting. Code Web consumes an already-ready component without changing its
-lifecycle. Both surfaces keep one registry watcher for the process. Browser,
+The Code TUI treats Use as a first-use component: immediately after the first
+terminal frame it reuses a healthy install or prepares the verified release in
+the background when networking and automatic setup are allowed. WebView is
+resolved in the same post-frame task. Offline mode and
+`A3S_NO_AUTO_INSTALL=1` remain strict no-mutation boundaries, and a failed
+setup does not prevent Code from starting. Code Web consumes an already-ready
+component without changing its lifecycle. Both surfaces keep one registry
+watcher for the process. Browser,
 Office, OCR, and enabled external MCP/Skill surfaces are projected into every
 active Code session. Code registers a dedicated `use` worker that can
 invoke only `mcp__use_*` tools; workspace, shell, unrelated MCP, and recursive
@@ -631,6 +633,17 @@ asset without deleting its versions, so it can be restored later. Active
 preferences are injected into bounded system-prompt context and active Skills
 are loaded from the workspace Skill directory. TUI and Web keep an activation
 barrier until every affected live session has refreshed successfully.
+
+Evolution-managed Skills can also run an explicit task-replay optimization
+cycle. A3S reflects only on training cases, applies a bounded set of exact
+instruction edits, and compares the old and candidate Skill on held-out cases
+with blinded A/B scoring. A proposal is staged only for strict mean improvement
+with no held-out regression above the host guard. `/skill optimize` opens this
+flow in the TUI; Code Web exposes background run, status, adopt, and dismiss
+routes below `/api/v1/evolution`. Adoption is always manual, creates an
+immutable local Skill version, refreshes affected sessions, and retains the
+normal rollback path. See
+[A3S Code Skill Optimization](docs/skill-optimization.md).
 
 Code Web also exposes a VS Code-style package contribution boundary under
 `/api/v1/plugins`. Activity catalogs and HTML content come only from the live,
@@ -1681,7 +1694,7 @@ These commands are available outside the asset-specific flows:
 | `/ide` | Open the workspace file browser and editor. |
 | `/preview <path\|localhost-url>` | Open the target in Work's persistent Live Preview. `/preview status` reports the tracked window and `/preview stop` closes only the owned native window, leaving the shared Web service running. |
 | `/memory` | Browse durable memory as an event/entity graph with tiers, aliases, relations, conflicts, and forget candidates. |
-| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence, activation state, audit history, and immutable versions; save, reject, reconsider, restore a version, or return to the unmaterialized baseline. Mature conflict-free candidates may save locally automatically, but are never published. |
+| `/evolution` | Review LLM-authored reusable preferences, Skills, and OKF candidates; inspect evidence, activation state, audit history, immutable versions, and Skill optimization scores; save, reject, reconsider, optimize (`t`), adopt a staged proposal (`a`), restore a version, or return to the unmaterialized baseline. Mature conflict-free candidates may save locally automatically, but are never published. |
 | `/ctx <query>` | Search past ctx-indexed sessions. |
 | `/ctx <n>` | Attach a previous search result to the next message. |
 | `/ctx save <n>` | Promote a previous session hit into durable memory. |
@@ -1755,6 +1768,7 @@ the skill matcher for the current request.
 | `/skill list [query]` | Browse OS skill assets through the asset-scoped list panel. |
 | `/skill activity [query]` | Inspect related Function as a Service activity for the selected skill asset. |
 | `/skill review` | Review the selected local skill asset. If no skill is active, A3S Code opens the skill selection panel first and enters skill-development mode. |
+| `/skill optimize` | Open Evolution-managed Skills, run bounded train/held-out task replay with `t`, and explicitly adopt a gate-passing proposal with `a`. Optimization never publishes a Skill and does not add calls to ordinary turns. |
 | `/skill publish` | Publish the selected skill as an OS `skill` asset backed by Function as a Service, committing source plus `.a3s/asset.acl`. |
 | `/skill deploy` | Publish the selected skill, sync its serving Function as a Service runtime binding, then prefer an OS progressive shaped deployment ViewLink before falling back to the asset view. |
 | `/skill open` / `/skill status` | Inspect the OS skill asset or runtime-binding status without mutating the asset; open prefers progressive Function as a Service ViewLinks when available. |

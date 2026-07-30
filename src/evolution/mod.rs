@@ -1,6 +1,7 @@
 mod materialize;
 mod model;
 mod observer;
+mod optimization;
 mod runtime;
 mod store;
 
@@ -13,6 +14,10 @@ pub(crate) use model::{
     EvolutionCandidate, EvolutionKind, EvolutionMutationResult, EvolutionOverview, EvolutionState,
 };
 pub(crate) use observer::EvolutionMemoryObserver;
+pub(crate) use optimization::{
+    SkillOptimizationRequest, SkillOptimizationRun, SkillOptimizationRunSummary,
+    SkillOptimizationStatus,
+};
 
 use materialize::{materialize_candidate, rollback_candidate};
 use runtime::session_preference_prompt;
@@ -82,6 +87,86 @@ impl WorkspaceEvolution {
         tokio::task::spawn_blocking(move || materialize_candidate(&paths, &id, force, false))
             .await
             .context("evolution materialization task did not complete")?
+    }
+
+    pub(crate) async fn queue_skill_optimization(
+        &self,
+        candidate_id: impl Into<String>,
+        request: SkillOptimizationRequest,
+    ) -> anyhow::Result<SkillOptimizationRun> {
+        let paths = self.paths.clone();
+        let candidate_id = candidate_id.into();
+        tokio::task::spawn_blocking(move || {
+            optimization::queue_skill_optimization(&paths, &candidate_id, request)
+        })
+        .await
+        .context("skill optimization queue task did not complete")?
+    }
+
+    pub(crate) async fn execute_skill_optimization(
+        &self,
+        run_id: impl Into<String>,
+        client: std::sync::Arc<dyn a3s_code_core::LlmClient>,
+    ) -> anyhow::Result<SkillOptimizationRun> {
+        let run_id = run_id.into();
+        optimization::execute_skill_optimization(&self.paths, &run_id, client).await
+    }
+
+    pub(crate) async fn optimize_skill(
+        &self,
+        candidate_id: impl Into<String>,
+        request: SkillOptimizationRequest,
+        client: std::sync::Arc<dyn a3s_code_core::LlmClient>,
+    ) -> anyhow::Result<SkillOptimizationRun> {
+        let run = self.queue_skill_optimization(candidate_id, request).await?;
+        self.execute_skill_optimization(run.id, client).await
+    }
+
+    pub(crate) async fn skill_optimization(
+        &self,
+        run_id: impl Into<String>,
+    ) -> anyhow::Result<SkillOptimizationRun> {
+        let paths = self.paths.clone();
+        let run_id = run_id.into();
+        tokio::task::spawn_blocking(move || optimization::skill_optimization(&paths, &run_id))
+            .await
+            .context("skill optimization read task did not complete")?
+    }
+
+    pub(crate) async fn skill_optimizations(
+        &self,
+        candidate_id: Option<String>,
+    ) -> anyhow::Result<Vec<SkillOptimizationRun>> {
+        let paths = self.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            optimization::skill_optimizations(&paths, candidate_id.as_deref())
+        })
+        .await
+        .context("skill optimization list task did not complete")?
+    }
+
+    pub(crate) async fn adopt_skill_optimization(
+        &self,
+        run_id: impl Into<String>,
+    ) -> anyhow::Result<EvolutionMutationResult> {
+        let paths = self.paths.clone();
+        let run_id = run_id.into();
+        tokio::task::spawn_blocking(move || optimization::adopt_skill_optimization(&paths, &run_id))
+            .await
+            .context("skill optimization adoption task did not complete")?
+    }
+
+    pub(crate) async fn dismiss_skill_optimization(
+        &self,
+        run_id: impl Into<String>,
+    ) -> anyhow::Result<SkillOptimizationRun> {
+        let paths = self.paths.clone();
+        let run_id = run_id.into();
+        tokio::task::spawn_blocking(move || {
+            optimization::dismiss_skill_optimization(&paths, &run_id)
+        })
+        .await
+        .context("skill optimization dismissal task did not complete")?
     }
 
     pub(crate) async fn reject(
