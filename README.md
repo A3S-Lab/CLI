@@ -460,6 +460,17 @@ installation-state implementations. The Manager also carries the immutable
 offline policy into delegated planning and apply processes, so a nested
 lifecycle operation cannot silently regain network access.
 
+The host-owned `a3s.plugin-policy.v1` ACL contract now provides deterministic
+authorization for complete `a3s.use.plugin-operation-plan.v1` values. It
+normalizes exact registry, publisher, size, surface, workspace, filesystem,
+network, resource, execution, and UI ceilings into a stable policy digest.
+Configured `allow` downgrades to `ask` whenever a ceiling fails; agent secret
+grants are denied and `native-unconfined` cannot run unattended. Apply can
+re-evaluate stored authority and reject policy drift. See
+[Plugin Authorization Policy](docs/plugin-authorization-policy.md) for the
+schema and evaluation rules. Connecting this evaluator to the existing
+component-plan lifecycle is the next integration step.
+
 Install, upgrade, and uninstall always create a durable reviewed plan first.
 An interactive terminal prints that exact plan and asks for confirmation.
 Machine output and other non-interactive invocations require either `--dry-run`

@@ -8,6 +8,7 @@
 mod capability;
 mod catalog;
 mod operation;
+mod policy;
 mod process;
 
 #[cfg(test)]
@@ -28,6 +29,10 @@ pub use capability::{
 pub use catalog::{
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginMarketplaceSource,
     PluginMarketplaceSourceKind, PluginMarketplaceSourceMetadata,
+};
+pub use policy::{
+    PluginAuthorizationPolicy, PluginPolicyEvaluation, PluginPolicyViolation,
+    PluginPolicyViolationCode, PLUGIN_POLICY_SCHEMA,
 };
 pub use process::{
     PluginApplyRequest, PluginLifecycleAction, PluginPackageToggleRequest, PluginPlanRequest,
