@@ -15,6 +15,98 @@ use tuf_test_support::{
 };
 
 #[test]
+fn first_class_plugin_cli_applies_and_replays_one_reviewed_signed_plan() {
+    let temp = TempWorkspace::new("plugin-cli-signed-install");
+    let repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
+    let server = TestServer::start(repository.routes.clone());
+    let registry_url = localhost_url(&server);
+    let config = temp.path("config/config.acl");
+    let use_bin = temp.path("use-bin");
+    let install_log = temp.path("plugin-cli-install.log");
+    make_use_fixture(&use_bin, &install_log);
+    add_registry(
+        &temp,
+        &config,
+        &use_bin,
+        &registry_url,
+        &format!("sha256:{}", repository.root_sha256),
+    );
+
+    let plan = run(
+        &temp,
+        &config,
+        &use_bin,
+        &[
+            "plugin",
+            "install",
+            "a3s/science",
+            "--version",
+            PACKAGE_VERSION,
+            "--channel",
+            "stable",
+            "--dry-run",
+        ],
+    );
+    assert!(plan.status.success(), "{plan:?}");
+    let plan = json(&plan);
+    assert_eq!(plan["command"], "plugin.install");
+    assert_eq!(plan["data"]["dryRun"], true);
+    assert_eq!(
+        plan["data"]["capabilityState"]["status"], "unavailable",
+        "the fake Use fixture intentionally has no capability snapshot"
+    );
+    let operation_id = plan["data"]["operationId"].as_str().unwrap().to_string();
+    let plan_digest = plan["data"]["canonicalPlanDigest"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(plan_digest.starts_with("sha256:"));
+    assert!(
+        !install_log.exists(),
+        "planning must not invoke installation"
+    );
+
+    let applied = run(
+        &temp,
+        &config,
+        &use_bin,
+        &[
+            "plugin",
+            "apply",
+            &operation_id,
+            "--plan-digest",
+            &plan_digest,
+            "--yes",
+        ],
+    );
+    assert!(applied.status.success(), "{applied:?}");
+    let applied = json(&applied);
+    assert_eq!(applied["command"], "plugin.apply");
+    assert_eq!(applied["data"]["operationId"], operation_id);
+    assert_eq!(applied["data"]["canonicalPlanDigest"], plan_digest);
+    assert_eq!(applied["data"]["replayed"], false);
+    assert!(install_log.is_file());
+
+    let replayed = run(
+        &temp,
+        &config,
+        &use_bin,
+        &[
+            "plugin",
+            "apply",
+            &operation_id,
+            "--plan-digest",
+            &plan_digest,
+            "--yes",
+        ],
+    );
+    assert!(replayed.status.success(), "{replayed:?}");
+    let replayed = json(&replayed);
+    assert_eq!(replayed["data"]["operationId"], operation_id);
+    assert_eq!(replayed["data"]["replayed"], true);
+}
+
+#[test]
 fn signed_registry_plan_is_bound_before_delegating_to_use() {
     let temp = TempWorkspace::new("signed-registry-install");
     let version_one = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);

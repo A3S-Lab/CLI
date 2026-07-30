@@ -429,8 +429,7 @@ also serializes plan, apply, enable, and disable operations with the same
 timeout, output-size, component-ID, and reviewed-plan-digest checks for every
 adapter.
 
-The umbrella CLI exposes the read-only portion of that application service
-directly:
+The umbrella CLI exposes that application service directly:
 
 ```sh
 a3s plugin search science
@@ -438,6 +437,18 @@ a3s plugin search research --surface tool --channel stable --limit 20
 a3s plugin inspect a3s/science
 a3s plugin list
 a3s --offline plugin search science
+
+# Interactive lifecycle: print the exact plan, then ask before applying it.
+a3s plugin install a3s/science --channel stable
+a3s plugin upgrade a3s/science
+a3s plugin disable a3s/science
+a3s plugin enable a3s/science
+a3s plugin uninstall a3s/science
+
+# Non-interactive two-step lifecycle.
+a3s --output json plugin install a3s/science --dry-run
+a3s --output json plugin apply <operationId> \
+  --plan-digest <canonicalPlanDigest> --yes
 ```
 
 Search and inspect load verified catalog metadata only; they never download a
@@ -445,7 +456,18 @@ plugin archive. `--offline` reads only the last verified on-disk snapshot.
 `plugin list` reads A3S Use's immutable capability snapshot and reports an
 unavailable observation separately from a valid empty installation. Human and
 JSON output use the same shared manager result rather than separate catalog or
-installation-state implementations.
+installation-state implementations. The Manager also carries the immutable
+offline policy into delegated planning and apply processes, so a nested
+lifecycle operation cannot silently regain network access.
+
+Install, upgrade, and uninstall always create a durable reviewed plan first.
+An interactive terminal prints that exact plan and asks for confirmation.
+Machine output and other non-interactive invocations require either `--dry-run`
+or `--yes`; rejected invocations persist no plan or intent. The explicit
+`plugin apply` form consumes only the `operationId + canonicalPlanDigest`
+returned by a previous dry-run. Enable and disable change the desired state
+through the same Manager. Uninstall retains plugin-owned data and secret
+records; permanent data purge is intentionally not part of this command.
 
 Each dry-run receives a cryptographically random `operationId` and persists an
 immutable one-hour reviewed plan with the observed A3S Use capability

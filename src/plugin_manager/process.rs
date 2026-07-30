@@ -50,14 +50,21 @@ pub(super) struct A3sProcessAdapter {
     executable: PathBuf,
     config_path: PathBuf,
     workspace: PathBuf,
+    offline: bool,
 }
 
 impl A3sProcessAdapter {
-    pub(super) fn new(executable: PathBuf, config_path: PathBuf, workspace: PathBuf) -> Self {
+    pub(super) fn new(
+        executable: PathBuf,
+        config_path: PathBuf,
+        workspace: PathBuf,
+        offline: bool,
+    ) -> Self {
         Self {
             executable,
             config_path,
             workspace,
+            offline,
         }
     }
 
@@ -117,7 +124,11 @@ impl A3sProcessAdapter {
             .arg("--config")
             .arg(&self.config_path)
             .arg("--directory")
-            .arg(&self.workspace)
+            .arg(&self.workspace);
+        if self.offline {
+            command.arg("--offline");
+        }
+        command
             .args(json_invocation_args(output_owner, args))
             .current_dir(&self.workspace)
             .kill_on_drop(true);

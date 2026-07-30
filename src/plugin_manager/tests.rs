@@ -12,7 +12,10 @@ use super::process::{
     json_invocation_args, normalize_plan_request, plugin_operation_args, use_extension_toggle_args,
     JsonOutputOwner,
 };
-use super::{PluginApplyRequest, PluginLifecycleAction, PluginManager, PluginPlanRequest};
+use super::{
+    PluginApplyRequest, PluginLifecycleAction, PluginManager, PluginManagerPolicy,
+    PluginPlanRequest,
+};
 
 const COMPLETE_CATALOG_RECORD: &[u8] = include_bytes!("fixtures/complete-catalog-record-v1.json");
 
@@ -185,11 +188,12 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
     let executable = write_fake_a3s(temporary.path(), &calls_path);
     let mut component_paths = ComponentPaths::for_test(temporary.path());
     component_paths.current_exe = executable;
-    let manager = PluginManager::new(
+    let manager = PluginManager::new_with_policy(
         config_path,
         workspace,
         component_paths,
         RegistryStore::new(temporary.path().join("registries")),
+        PluginManagerPolicy { offline: true },
     );
     let plan_digest = "a".repeat(64);
     let plan = manager
@@ -235,10 +239,9 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
         replay.get("replayed").and_then(serde_json::Value::as_bool),
         Some(true)
     );
-    assert_eq!(
-        std::fs::read_to_string(calls_path).unwrap().lines().count(),
-        2
-    );
+    let calls = std::fs::read_to_string(calls_path).unwrap();
+    assert_eq!(calls.lines().count(), 2);
+    assert!(calls.lines().all(|call| call.contains("--offline")));
 }
 
 #[cfg(windows)]

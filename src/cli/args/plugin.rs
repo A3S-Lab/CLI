@@ -15,6 +15,18 @@ pub(crate) enum PluginCommand {
     Inspect(PluginInspectArgs),
     /// List plugins installed through A3S Use.
     List,
+    /// Plan and install one verified plugin package.
+    Install(PluginInstallArgs),
+    /// Plan and upgrade one installed plugin package.
+    Upgrade(PluginMutationArgs),
+    /// Apply a previously reviewed immutable plugin plan.
+    Apply(PluginApplyArgs),
+    /// Enable one installed plugin package.
+    Enable(PluginToggleArgs),
+    /// Disable one installed plugin package.
+    Disable(PluginToggleArgs),
+    /// Plan and uninstall one plugin package while retaining its data.
+    Uninstall(PluginMutationArgs),
 }
 
 #[derive(Clone, Debug, Args)]
@@ -53,6 +65,72 @@ pub(crate) struct PluginInspectArgs {
     /// Restrict the inspected release channel.
     #[arg(long, value_enum)]
     pub channel: Option<PluginChannelArg>,
+}
+
+#[derive(Clone, Debug, Args)]
+#[command(disable_version_flag = true)]
+pub(crate) struct PluginInstallArgs {
+    /// Canonical plugin package ID in publisher/name form.
+    #[arg(value_name = "PUBLISHER/NAME")]
+    pub package_id: String,
+
+    /// Install one exact canonical semantic version.
+    #[arg(long, value_name = "VERSION", value_parser = plugin_version)]
+    pub version: Option<String>,
+
+    /// Select one release channel.
+    #[arg(long, value_enum)]
+    pub channel: Option<PluginChannelArg>,
+
+    #[command(flatten)]
+    pub review: PluginReviewArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct PluginMutationArgs {
+    /// Canonical plugin package ID in publisher/name form.
+    #[arg(value_name = "PUBLISHER/NAME")]
+    pub package_id: String,
+
+    #[command(flatten)]
+    pub review: PluginReviewArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct PluginApplyArgs {
+    /// Operation ID returned by a previous plugin lifecycle dry-run.
+    #[arg(value_name = "OPERATION_ID", value_parser = plugin_operation_id)]
+    pub operation_id: String,
+
+    /// Canonical SHA-256 digest returned with the reviewed plan.
+    #[arg(long, value_name = "SHA256", value_parser = plugin_plan_digest)]
+    pub plan_digest: String,
+
+    /// Apply the exact reviewed plan without another prompt.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct PluginToggleArgs {
+    /// Canonical plugin package ID in publisher/name form.
+    #[arg(value_name = "PUBLISHER/NAME")]
+    pub package_id: String,
+
+    /// Change the desired package state without prompting.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct PluginReviewArgs {
+    /// Persist and print the immutable operation plan without mutation.
+    #[arg(long, conflicts_with = "yes")]
+    pub dry_run: bool,
+
+    /// Apply the newly resolved exact plan without prompting.
+    #[arg(long, conflicts_with = "dry_run")]
+    pub yes: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -101,6 +179,42 @@ fn plugin_result_limit(value: &str) -> Result<usize, String> {
     Ok(limit)
 }
 
+fn plugin_version(value: &str) -> Result<String, String> {
+    let version = semver::Version::parse(value)
+        .map_err(|error| format!("version must use semantic version syntax: {error}"))?;
+    if version.to_string() != value {
+        return Err("version must use canonical semantic version syntax".to_string());
+    }
+    Ok(value.to_string())
+}
+
+fn plugin_operation_id(value: &str) -> Result<String, String> {
+    let mut characters = value.chars();
+    let valid = value.len() <= 256
+        && matches!(characters.next(), Some(first) if first.is_ascii_alphanumeric())
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, '.' | '_' | ':' | '/' | '@' | '-')
+        });
+    if valid {
+        Ok(value.to_string())
+    } else {
+        Err("operation ID contains unsupported characters".to_string())
+    }
+}
+
+fn plugin_plan_digest(value: &str) -> Result<String, String> {
+    let digest = value.strip_prefix("sha256:").unwrap_or(value);
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("plan digest must be 64 lowercase hexadecimal characters".to_string());
+    }
+    Ok(value.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +225,23 @@ mod tests {
         assert_eq!(plugin_result_limit("100").unwrap(), 100);
         assert!(plugin_result_limit("0").is_err());
         assert!(plugin_result_limit("101").is_err());
+    }
+
+    #[test]
+    fn lifecycle_identifiers_are_canonical_and_bounded() {
+        assert_eq!(plugin_version("1.2.3").unwrap(), "1.2.3");
+        assert!(plugin_version("1.2").is_err());
+        assert_eq!(plugin_version("1.2.3+BUILD").unwrap(), "1.2.3+BUILD");
+
+        assert_eq!(
+            plugin_operation_id("plugin-install-a3").unwrap(),
+            "plugin-install-a3"
+        );
+        assert!(plugin_operation_id("../operation").is_err());
+
+        let digest = "a".repeat(64);
+        assert_eq!(plugin_plan_digest(&digest).unwrap(), digest);
+        assert!(plugin_plan_digest(&format!("sha256:{}", "b".repeat(64))).is_ok());
+        assert!(plugin_plan_digest(&"A".repeat(64)).is_err());
     }
 }

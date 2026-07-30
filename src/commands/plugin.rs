@@ -1,26 +1,47 @@
 use std::process::ExitCode;
 
 use a3s::plugin_manager::{
-    PluginInstallationIndex, PluginInstallationSnapshot, PluginManager, PluginManagerError,
+    PluginInstallationSnapshot, PluginManager, PluginManagerError, PluginManagerPolicy,
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginPackageReadiness,
 };
 use serde_json::json;
 
-use crate::cli::args::{PluginCommand, PluginInspectArgs, PluginSearchArgs};
+use crate::cli::args::{OutputMode, PluginCommand, PluginInspectArgs, PluginSearchArgs};
 use crate::cli::context::InvocationContext;
 use crate::cli::output;
+
+mod lifecycle;
 
 pub(crate) async fn run(
     command: PluginCommand,
     context: &InvocationContext,
 ) -> anyhow::Result<ExitCode> {
+    if context.output_mode() == OutputMode::Jsonl {
+        return Err(output::usage_error(
+            "`a3s plugin` commands do not support JSONL output",
+        ));
+    }
     let config_path = crate::commands::config::active_config_path(context)?;
-    let manager =
-        PluginManager::from_host(&config_path, &context.directory).map_err(manager_error)?;
+    let manager = PluginManager::from_host_with_policy(
+        &config_path,
+        &context.directory,
+        PluginManagerPolicy {
+            offline: context.network.offline,
+        },
+    )
+    .map_err(manager_error)?;
     match command {
         PluginCommand::Search(args) => search(&manager, args, context).await,
         PluginCommand::Inspect(args) => inspect(&manager, args, context).await,
         PluginCommand::List => list(&manager, context).await,
+        PluginCommand::Install(args) => lifecycle::install(&manager, args, context).await,
+        PluginCommand::Upgrade(args) => lifecycle::upgrade(&manager, args, context).await,
+        PluginCommand::Apply(args) => lifecycle::apply(&manager, args, context).await,
+        PluginCommand::Enable(args) => lifecycle::set_enabled(&manager, args, true, context).await,
+        PluginCommand::Disable(args) => {
+            lifecycle::set_enabled(&manager, args, false, context).await
+        }
+        PluginCommand::Uninstall(args) => lifecycle::uninstall(&manager, args, context).await,
     }
 }
 
@@ -34,7 +55,8 @@ async fn search(
         return Err(output::usage_error("plugin search query cannot be empty"));
     }
     let installed = manager.installation_snapshot().await;
-    let marketplace = marketplace(manager, &installed.index(), context)
+    let marketplace = manager
+        .marketplace(&installed.index())
         .await
         .map_err(manager_error)?;
     let mut items = marketplace
@@ -109,7 +131,8 @@ async fn inspect(
 ) -> anyhow::Result<ExitCode> {
     let package_id = normalize_package_id(&args.package_id)?;
     let installed = manager.installation_snapshot().await;
-    let marketplace = marketplace(manager, &installed.index(), context)
+    let marketplace = manager
+        .marketplace(&installed.index())
         .await
         .map_err(manager_error)?;
     let matches = marketplace
@@ -202,18 +225,6 @@ async fn list(manager: &PluginManager, context: &InvocationContext) -> anyhow::R
         },
     )?;
     Ok(ExitCode::SUCCESS)
-}
-
-async fn marketplace(
-    manager: &PluginManager,
-    installed: &PluginInstallationIndex,
-    context: &InvocationContext,
-) -> Result<PluginMarketplaceSnapshot, PluginManagerError> {
-    if context.network.offline {
-        manager.marketplace_cached(installed).await
-    } else {
-        manager.marketplace(installed).await
-    }
 }
 
 fn search_match(item: &PluginMarketplaceItem, args: &PluginSearchArgs) -> bool {
@@ -379,7 +390,7 @@ fn single_line(value: &str, max_chars: usize) -> String {
     let value = value
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if unsafe_terminal_character(character) {
                 ' '
             } else {
                 character
@@ -392,6 +403,18 @@ fn single_line(value: &str, max_chars: usize) -> String {
         output.push('\u{2026}');
     }
     output
+}
+
+fn unsafe_terminal_character(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+                | '\u{200e}'
+                | '\u{200f}'
+                | '\u{061c}'
+        )
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -423,7 +446,10 @@ mod tests {
 
     #[test]
     fn human_metadata_is_single_line_and_bounded() {
-        assert_eq!(single_line("hello\n\u{1b}[31mworld", 20), "hello [31mworld");
+        assert_eq!(
+            single_line("hello\n\u{1b}[31m\u{202e}world", 20),
+            "hello [31m world"
+        );
         assert_eq!(single_line("abcdef", 4), "abc\u{2026}");
     }
 }

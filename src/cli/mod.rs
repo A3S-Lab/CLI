@@ -248,6 +248,12 @@ fn root_command_name(command: &RootCommand) -> &'static str {
             PluginCommand::Search(_) => "plugin.search",
             PluginCommand::Inspect(_) => "plugin.inspect",
             PluginCommand::List => "plugin.list",
+            PluginCommand::Install(_) => "plugin.install",
+            PluginCommand::Upgrade(_) => "plugin.upgrade",
+            PluginCommand::Apply(_) => "plugin.apply",
+            PluginCommand::Enable(_) => "plugin.enable",
+            PluginCommand::Disable(_) => "plugin.disable",
+            PluginCommand::Uninstall(_) => "plugin.uninstall",
         },
         RootCommand::Auth(args) => match &args.command {
             AuthCommand::List => "auth.list",

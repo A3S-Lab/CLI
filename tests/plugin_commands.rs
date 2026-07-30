@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use support::{a3s_bin, configure_component_env, TempWorkspace};
 
 #[test]
-fn plugin_help_exposes_the_read_only_command_contract() {
+fn plugin_help_exposes_the_complete_command_contract() {
     let output = Command::new(a3s_bin())
         .args(["plugin", "--help"])
         .output()
@@ -15,7 +15,17 @@ fn plugin_help_exposes_the_read_only_command_contract() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for command in ["search", "inspect", "list"] {
+    for command in [
+        "search",
+        "inspect",
+        "list",
+        "install",
+        "upgrade",
+        "apply",
+        "enable",
+        "disable",
+        "uninstall",
+    ] {
         assert!(
             stdout
                 .lines()
@@ -23,6 +33,79 @@ fn plugin_help_exposes_the_read_only_command_contract() {
             "missing plugin command {command:?}:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn plugin_mutations_require_explicit_non_interactive_authority() {
+    let temp = TempWorkspace::new("plugin-mutation-authority");
+    let digest = "a".repeat(64);
+    let cases = [
+        (
+            vec!["--output", "json", "plugin", "install", "acme/research"],
+            "plugin.install",
+        ),
+        (
+            vec!["--output", "json", "plugin", "upgrade", "acme/research"],
+            "plugin.upgrade",
+        ),
+        (
+            vec![
+                "--output",
+                "json",
+                "plugin",
+                "apply",
+                "plugin-install-abc",
+                "--plan-digest",
+                &digest,
+            ],
+            "plugin.apply",
+        ),
+        (
+            vec!["--output", "json", "plugin", "enable", "acme/research"],
+            "plugin.enable",
+        ),
+        (
+            vec!["--output", "json", "plugin", "disable", "acme/research"],
+            "plugin.disable",
+        ),
+        (
+            vec!["--output", "json", "plugin", "uninstall", "acme/research"],
+            "plugin.uninstall",
+        ),
+    ];
+
+    for (args, expected_command) in cases {
+        let output = run_isolated(&temp, &args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let value = output_json(&output);
+        assert_eq!(value["command"], expected_command);
+        assert_eq!(value["error"]["code"], "usage.invalid");
+    }
+
+    assert!(
+        !temp.path("state/plugin-manager/operations").exists(),
+        "rejected mutations must not persist a plan or intent"
+    );
+}
+
+#[test]
+fn plugin_commands_reject_jsonl_before_observation_or_mutation() {
+    let temp = TempWorkspace::new("plugin-jsonl");
+    let output = run_isolated(&temp, &["--output", "jsonl", "plugin", "list"]);
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    let value = output_json(&output);
+    assert_eq!(value["command"], "plugin.list");
+    assert_eq!(value["type"], "error");
+    assert_eq!(value["error"]["code"], "usage.invalid");
 }
 
 #[test]
