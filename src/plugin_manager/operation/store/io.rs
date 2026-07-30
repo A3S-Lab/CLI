@@ -227,6 +227,67 @@ pub(super) fn write_new_record<T: Serialize>(
     }
 }
 
+pub(super) fn write_replace_record<T: Serialize>(
+    path: &Path,
+    record: &T,
+) -> PluginManagerResult<()> {
+    let parent = path.parent().ok_or_else(|| {
+        PluginManagerError::Infrastructure("plugin operation record path has no parent".to_string())
+    })?;
+    ensure_real_directory(parent)?;
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(PluginManagerError::Infrastructure(format!(
+                "plugin operation record '{}' must be a regular file",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(PluginManagerError::Infrastructure(format!(
+                "failed to inspect plugin operation record {}: {error}",
+                path.display()
+            )));
+        }
+    }
+    let bytes = serde_json::to_vec(record).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to encode plugin operation record: {error}"
+        ))
+    })?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_OPERATION_RECORD_BYTES {
+        return Err(PluginManagerError::Infrastructure(
+            "plugin operation record exceeds its size limit".to_string(),
+        ));
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to create temporary plugin operation record in {}: {error}",
+            parent.display()
+        ))
+    })?;
+    set_private_file(temporary.as_file())?;
+    temporary.write_all(&bytes).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to write plugin operation record: {error}"
+        ))
+    })?;
+    temporary.as_file().sync_all().map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to sync plugin operation record: {error}"
+        ))
+    })?;
+    temporary.persist(path).map_err(|error| {
+        PluginManagerError::Infrastructure(format!(
+            "failed to publish plugin operation record {}: {}",
+            path.display(),
+            error.error
+        ))
+    })?;
+    sync_parent(path)
+}
+
 fn set_private_file(file: &File) -> PluginManagerResult<()> {
     #[cfg(unix)]
     {

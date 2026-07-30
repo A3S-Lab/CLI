@@ -509,10 +509,24 @@ exists, recovery reuses that stored confirmation instead of stranding partial
 side effects after a later policy change.
 
 Existing component-only records remain readable and keep their previous digest
-semantics. The current umbrella component planner does not yet emit the full
-draft. The installation side of that integration now exposes verified
-receipt/catalog/surface evidence; joining it with the requested catalog
-transition and selected Runtime providers is the next integration step.
+semantics. The first live umbrella draft path is now enabled for registry
+catalog-v2 installs whose selected package contains only Skill/UI surfaces and
+no permission grant. The component plan retains the complete verified catalog
+record alongside the exact TUF target; the Manager requires those records to
+match, derives the install transition and impact, binds the observed capability
+generation, and emits the strict draft before host authorization.
+
+Planner state uses a private atomic
+`plugin-manager/operations/planner-state.json` record. Revision advancement is
+monotonic, bound to the exact operation and reviewed digest, and idempotent
+across recovery between child mutation and result persistence. Apply rejects
+state drift before intent and reports `stateRevisionAfter` after commit.
+
+This live slice deliberately fails closed for Tool/MCP surfaces or non-empty
+permission ceilings until explicit Runtime-provider selection and the durable
+grant saga are connected. Catalog-v1 packages retain the legacy component-plan
+path. Upgrade and uninstall draft emission still require a package-specific
+installed-receipt evidence interface.
 
 Install, upgrade, and uninstall always create a durable reviewed plan first.
 An interactive terminal prints that exact plan and asks for confirmation.

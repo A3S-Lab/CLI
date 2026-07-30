@@ -47,6 +47,7 @@ fn operation_result(plan: &StoredPluginPlan, completed_at_ms: u64) -> StoredOper
             "capabilityBefore": capability_before,
             "capabilityAfter": capability_after,
             "completedAtMs": completed_at_ms,
+            "stateRevisionAfter": 2,
             "resumed": false,
             "replayed": false,
         }),

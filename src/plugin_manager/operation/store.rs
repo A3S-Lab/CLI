@@ -13,10 +13,11 @@ use super::lock::PluginMutationLock;
 mod io;
 mod plan;
 mod record;
+mod state;
 
 use io::{
     ensure_store_directories, read_directory_records, read_optional_record, read_required_record,
-    remove_file_if_present, write_new_record, WriteDisposition,
+    remove_file_if_present, write_new_record, write_replace_record, WriteDisposition,
 };
 use record::{
     ensure_request_valid, new_operation_id, now_ms, record_file_name, validate_capability_evidence,

@@ -182,8 +182,11 @@ fn applied_output_separates_manager_and_upstream_plan_digests() {
             "operations": [],
         }),
         &plan,
-        &plan.capability_state,
-        &plan.capability_state,
+        AppliedStateEvidence {
+            capability_before: &plan.capability_state,
+            capability_after: &plan.capability_state,
+            state_revision_after: 4,
+        },
         plan.created_at_ms,
         false,
         false,
@@ -208,6 +211,7 @@ fn applied_output_separates_manager_and_upstream_plan_digests() {
         output["planDigest"].as_str(),
         Some(plan.upstream_plan_digest())
     );
+    assert_eq!(output["stateRevisionAfter"], 4);
 }
 
 fn full_plan_record(
@@ -230,6 +234,7 @@ fn full_plan_record(
         fixture.state,
     )
     .unwrap();
+    let state_revision = draft.state.state_revision;
     let capability_state = PluginCapabilityEvidence {
         status: PluginCapabilityEvidenceStatus::Verified,
         observed_at_ms: 1,
@@ -253,7 +258,10 @@ fn full_plan_record(
         &policy,
         &request,
         actor,
-        &capability_state,
+        plan_artifact::ObservedPlanState {
+            capability: &capability_state,
+            state_revision,
+        },
         &identity,
         "b".repeat(64),
         serde_json::json!({

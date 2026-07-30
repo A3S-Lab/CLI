@@ -4,6 +4,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use a3s_updater::{parse_version, ComponentReceipt, InstallProvenance};
+use a3s_use_core::VerifiedPluginCatalogRecord;
 use a3s_use_extension::{ReleaseBundlePackage, ResolvedRemotePackage};
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -172,6 +173,8 @@ pub(super) struct OperationPlan {
     resolved_release_bundles: BTreeMap<String, ReleaseBundlePackage>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     resolved_registry_packages: BTreeMap<String, ResolvedRemotePackage>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    verified_plugin_catalog_records: BTreeMap<String, VerifiedPluginCatalogRecord>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     prerequisites: BTreeMap<String, PlannedCurrentState>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -539,6 +542,7 @@ pub(super) async fn install_plan(
             .iter()
             .map(|(component, resolved)| (component.clone(), resolved.package.clone()))
             .collect(),
+        verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
         prerequisites,
         force: Some(request.force),
         allow_unsigned: Some(request.allow_unsigned),
@@ -615,6 +619,7 @@ pub(super) fn uninstall_plan(
         resolved_releases: BTreeMap::new(),
         resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
+        verified_plugin_catalog_records: BTreeMap::new(),
         prerequisites,
         force: None,
         allow_unsigned: None,
@@ -693,6 +698,7 @@ pub(super) async fn upgrade_plan(
         resolved_releases: resolved_releases.clone(),
         resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::new(),
+        verified_plugin_catalog_records: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(true),
         allow_unsigned: None,
@@ -771,6 +777,7 @@ async fn release_bundle_extension_upgrade_plan(
         resolved_releases: BTreeMap::new(),
         resolved_release_bundles: resolved_release_bundles.clone(),
         resolved_registry_packages: BTreeMap::new(),
+        verified_plugin_catalog_records: BTreeMap::new(),
         prerequisites: BTreeMap::new(),
         force: Some(mutates),
         allow_unsigned: Some(false),
@@ -854,6 +861,7 @@ async fn registry_extension_upgrade_plan(
         resolved_releases: BTreeMap::new(),
         resolved_release_bundles: BTreeMap::new(),
         resolved_registry_packages: BTreeMap::from([(id.to_string(), resolved.package.clone())]),
+        verified_plugin_catalog_records: planned_verified_catalogs(&resolved_registry_packages),
         prerequisites: BTreeMap::new(),
         force: Some(apply_force),
         allow_unsigned: Some(false),
@@ -910,6 +918,20 @@ async fn prepare_parent_release(
         );
     }
     Ok(())
+}
+
+fn planned_verified_catalogs(
+    packages: &BTreeMap<String, ResolvedRegistryPackage>,
+) -> BTreeMap<String, VerifiedPluginCatalogRecord> {
+    packages
+        .iter()
+        .filter_map(|(component, resolved)| {
+            resolved
+                .verified_catalog
+                .clone()
+                .map(|catalog| (component.clone(), catalog))
+        })
+        .collect()
 }
 
 fn planned_sources(
@@ -1199,6 +1221,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
         resolved_releases: &'a BTreeMap<String, ResolvedRelease>,
         resolved_release_bundles: &'a BTreeMap<String, ReleaseBundlePackage>,
         resolved_registry_packages: &'a BTreeMap<String, ResolvedRemotePackage>,
+        verified_plugin_catalog_records: &'a BTreeMap<String, VerifiedPluginCatalogRecord>,
         prerequisites: &'a BTreeMap<String, PlannedCurrentState>,
         force: Option<bool>,
         allow_unsigned: Option<bool>,
@@ -1230,6 +1253,7 @@ fn plan_digest(command: &'static str, plans: &[OperationPlan]) -> anyhow::Result
                 resolved_releases: &plan.resolved_releases,
                 resolved_release_bundles: &plan.resolved_release_bundles,
                 resolved_registry_packages: &plan.resolved_registry_packages,
+                verified_plugin_catalog_records: &plan.verified_plugin_catalog_records,
                 prerequisites: &plan.prerequisites,
                 force: plan.force,
                 allow_unsigned: plan.allow_unsigned,
@@ -1272,6 +1296,7 @@ mod tests {
             resolved_releases: BTreeMap::new(),
             resolved_release_bundles: BTreeMap::new(),
             resolved_registry_packages: BTreeMap::new(),
+            verified_plugin_catalog_records: BTreeMap::new(),
             prerequisites: BTreeMap::new(),
             force: Some(false),
             allow_unsigned: Some(false),

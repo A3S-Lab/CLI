@@ -185,6 +185,10 @@ pub(super) fn validate_result(
             .and_then(Value::as_str)
             != Some(canonical_plan_digest.as_str())
         || result.data.get("completedAtMs").and_then(Value::as_u64) != Some(result.completed_at_ms)
+        || result
+            .data
+            .get("stateRevisionAfter")
+            .is_some_and(|value| value.as_u64().is_none_or(|revision| revision == 0))
         || result.data.get("capabilityBefore") != Some(&capability_before)
         || result.data.get("capabilityAfter") != Some(&capability_after)
         || !result.data.get("operations").is_some_and(Value::is_array)

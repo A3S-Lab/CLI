@@ -603,6 +603,15 @@ fn validate_registry_resolution(
     {
         bail!("reviewed registry package provenance is internally inconsistent");
     }
+    if let Some(catalog) = resolved.verified_catalog.as_ref() {
+        catalog.validate().map_err(anyhow::Error::new)?;
+        let catalog_package =
+            a3s_use_extension::ResolvedRemotePackage::from_verified_catalog(catalog)
+                .map_err(anyhow::Error::new)?;
+        if catalog_package != resolved.package {
+            bail!("reviewed catalog evidence does not match the exact registry package");
+        }
+    }
     Ok(())
 }
 

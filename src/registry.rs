@@ -5,6 +5,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use a3s_acl::{Block, Document, Value};
+use a3s_use_core::VerifiedPluginCatalogRecord;
 use a3s_use_extension::{
     prepare_remote_package, refresh_remote_registry, ResolvedRemotePackage, TrustedRegistry,
     VerifiedRegistryMetadata,
@@ -72,6 +73,7 @@ pub struct RegistryEnrollment {
 pub struct ResolvedRegistryPackage {
     pub registry: RegistryRecord,
     pub package: ResolvedRemotePackage,
+    pub verified_catalog: Option<VerifiedPluginCatalogRecord>,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +253,7 @@ impl RegistryStore {
                 Ok(prepared) => matches.push(ResolvedRegistryPackage {
                     registry: record,
                     package: prepared.resolved().clone(),
+                    verified_catalog: prepared.verified_catalog().cloned(),
                 }),
                 Err(error) if error.code == "use.extension.registry_package_missing" => {}
                 Err(error) => return Err(registry_error(&record, error)),
@@ -336,6 +339,7 @@ impl RegistryStore {
         Ok(ResolvedRegistryPackage {
             registry: record,
             package: prepared.resolved().clone(),
+            verified_catalog: prepared.verified_catalog().cloned(),
         })
     }
 

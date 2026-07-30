@@ -22,11 +22,16 @@ pub(super) struct PreparedPlanArtifact {
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
 }
 
+pub(super) struct ObservedPlanState<'a> {
+    pub capability: &'a PluginCapabilityEvidence,
+    pub state_revision: u64,
+}
+
 pub(super) fn prepare(
     authorization: &PluginAuthorizationPolicy,
     request: &PluginPlanRequest,
     actor: PlanActor,
-    capability_state: &PluginCapabilityEvidence,
+    observed: ObservedPlanState<'_>,
     identity: &PluginPlanIdentity,
     upstream_plan_digest: String,
     mut raw_plan: Value,
@@ -60,7 +65,7 @@ pub(super) fn prepare(
         .map_err(|error| {
             upstream_error(format!("pluginOperationPlan cannot be host-bound: {error}"))
         })?;
-    validate_resolved_request(&plan, request, capability_state)?;
+    validate_resolved_request(&plan, request, observed)?;
     let evaluation = authorization.evaluate_plan(&plan)?;
     plan.authority = evaluation.authority();
     let envelope = PluginOperationPlanEnvelope::new(plan).map_err(|error| {
@@ -114,7 +119,7 @@ fn host_binding(
 fn validate_resolved_request(
     plan: &PluginOperationPlan,
     request: &PluginPlanRequest,
-    capability_state: &PluginCapabilityEvidence,
+    observed: ObservedPlanState<'_>,
 ) -> PluginManagerResult<()> {
     let expected_action = match request.action {
         PluginLifecycleAction::Install => PluginOperationAction::Install,
@@ -134,11 +139,13 @@ fn validate_resolved_request(
             "pluginOperationPlan action, package, or scope does not match the host request",
         ));
     }
-    if capability_state.status != PluginCapabilityEvidenceStatus::Verified
-        || capability_state.generation != Some(plan.state.capability_generation)
+    if observed.capability.status != PluginCapabilityEvidenceStatus::Verified
+        || observed.capability.generation != Some(plan.state.capability_generation)
+        || observed.state_revision == 0
+        || plan.state.state_revision != observed.state_revision
     {
         return Err(upstream_error(
-            "pluginOperationPlan does not match the verified capability generation",
+            "pluginOperationPlan does not match verified capability or durable state evidence",
         ));
     }
     let root = plan
@@ -214,6 +221,7 @@ mod tests {
     #[test]
     fn complete_draft_is_host_bound_authorized_and_redigested() {
         let draft = install_draft();
+        let state_revision = draft.state.state_revision;
         let capability = PluginCapabilityEvidence {
             status: PluginCapabilityEvidenceStatus::Verified,
             observed_at_ms: 1,
@@ -236,7 +244,10 @@ mod tests {
                 channel: Some("stable".to_string()),
             },
             PlanActor::User,
-            &capability,
+            ObservedPlanState {
+                capability: &capability,
+                state_revision,
+            },
             &identity,
             upstream_digest.clone(),
             serde_json::json!({
@@ -266,6 +277,7 @@ mod tests {
     #[test]
     fn draft_cannot_change_the_requested_package_or_capability_generation() {
         let draft = install_draft();
+        let state_revision = draft.state.state_revision;
         let capability = PluginCapabilityEvidence {
             status: PluginCapabilityEvidenceStatus::Verified,
             observed_at_ms: 1,
@@ -282,7 +294,49 @@ mod tests {
                 channel: Some("stable".to_string()),
             },
             PlanActor::User,
-            &capability,
+            ObservedPlanState {
+                capability: &capability,
+                state_revision,
+            },
+            &PluginPlanIdentity {
+                operation_id: "plugin-install-host".to_string(),
+                created_at_ms: 10,
+                expires_at_ms: 20,
+            },
+            "b".repeat(64),
+            serde_json::json!({
+                "dryRun": true,
+                "planDigest": "b".repeat(64),
+                "pluginOperationPlan": draft,
+            }),
+        );
+
+        assert!(matches!(result, Err(PluginManagerError::Upstream(_))));
+    }
+
+    #[test]
+    fn draft_cannot_change_the_durable_state_revision() {
+        let draft = install_draft();
+        let capability = PluginCapabilityEvidence {
+            status: PluginCapabilityEvidenceStatus::Verified,
+            observed_at_ms: 1,
+            generation: Some(draft.state.capability_generation),
+            revision: Some("a".repeat(64)),
+            error: None,
+        };
+        let result = prepare(
+            &PluginAuthorizationPolicy::default(),
+            &PluginPlanRequest {
+                action: PluginLifecycleAction::Install,
+                component_id: "use/acme/research".to_string(),
+                version: Some("2.0.0".to_string()),
+                channel: Some("stable".to_string()),
+            },
+            PlanActor::User,
+            ObservedPlanState {
+                capability: &capability,
+                state_revision: draft.state.state_revision + 1,
+            },
             &PluginPlanIdentity {
                 operation_id: "plugin-install-host".to_string(),
                 created_at_ms: 10,

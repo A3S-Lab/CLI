@@ -1,6 +1,8 @@
 use serde_json::{Map, Value};
 
-use super::capability::{observe, PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
+use super::capability::{
+    installation_snapshot, observe, PluginCapabilityEvidence, PluginCapabilityEvidenceStatus,
+};
 use super::process::{
     normalize_plan_digest, normalize_plan_request, PluginApplyRequest, PluginPackageToggleRequest,
     PluginPlanRequest,
@@ -9,6 +11,7 @@ use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
 mod lock;
 mod plan_artifact;
+mod planner;
 pub(super) mod store;
 
 use store::{
@@ -26,9 +29,12 @@ pub(super) async fn plan(
 ) -> PluginManagerResult<Value> {
     let _mutation_guard = manager.operation_store.acquire_mutation_lock().await?;
     let request = normalize_plan_request(request)?;
-    let capability_state = observe(manager).await;
+    let installation_state = installation_snapshot(manager).await;
+    let capability_state = installation_state.evidence();
     let raw_plan = manager.process.plan(&request).await?;
     let upstream_plan_digest = plan_digest_from_value(&raw_plan)?;
+    let state_revision = manager.operation_store.planner_state_revision().await?;
+    let raw_plan = planner::attach_draft(&request, &installation_state, state_revision, raw_plan)?;
     let identity = manager
         .operation_store
         .allocate_plan_identity(request.action)
@@ -37,7 +43,10 @@ pub(super) async fn plan(
         manager.authorization_policy(),
         &request,
         actor,
-        &capability_state,
+        plan_artifact::ObservedPlanState {
+            capability: &capability_state,
+            state_revision,
+        },
         &identity,
         upstream_plan_digest,
         raw_plan,
@@ -85,6 +94,10 @@ pub(super) async fn apply(
 
     let capability_before = observe(manager).await;
     ensure_capability_precondition(&plan.capability_state, &capability_before, intent_exists)?;
+    manager
+        .operation_store
+        .verify_planner_state(&plan, intent_exists)
+        .await?;
     let confirmation = if intent_exists {
         None
     } else {
@@ -101,12 +114,16 @@ pub(super) async fn apply(
         .await?;
     validate_apply_result(&raw_result, plan.upstream_plan_digest())?;
     let capability_after = observe(manager).await;
+    let state_revision_after = manager.operation_store.advance_planner_state(&plan).await?;
     let completed_at_ms = unix_time_millis()?;
     let data = applied_output(
         raw_result,
         &plan,
-        &capability_before,
-        &capability_after,
+        AppliedStateEvidence {
+            capability_before: &capability_before,
+            capability_after: &capability_after,
+            state_revision_after,
+        },
         completed_at_ms,
         resumed,
         false,
@@ -229,11 +246,16 @@ fn reviewed_plan_output(plan: &StoredPluginPlan) -> PluginManagerResult<Value> {
     Ok(output)
 }
 
+struct AppliedStateEvidence<'a> {
+    capability_before: &'a PluginCapabilityEvidence,
+    capability_after: &'a PluginCapabilityEvidence,
+    state_revision_after: u64,
+}
+
 fn applied_output(
     mut output: Value,
     plan: &StoredPluginPlan,
-    capability_before: &PluginCapabilityEvidence,
-    capability_after: &PluginCapabilityEvidence,
+    state: AppliedStateEvidence<'_>,
     completed_at_ms: u64,
     resumed: bool,
     replayed: bool,
@@ -257,12 +279,12 @@ fn applied_output(
     insert_manager_field(
         object,
         "capabilityBefore",
-        serde_json::to_value(capability_before).map_err(json_error)?,
+        serde_json::to_value(state.capability_before).map_err(json_error)?,
     );
     insert_manager_field(
         object,
         "capabilityAfter",
-        serde_json::to_value(capability_after).map_err(json_error)?,
+        serde_json::to_value(state.capability_after).map_err(json_error)?,
     );
     insert_manager_field(
         object,
@@ -271,6 +293,11 @@ fn applied_output(
     );
     insert_manager_field(object, "resumed", Value::Bool(resumed));
     insert_manager_field(object, "replayed", Value::Bool(replayed));
+    insert_manager_field(
+        object,
+        "stateRevisionAfter",
+        Value::Number(state.state_revision_after.into()),
+    );
     object.remove("pluginOperationPlanDigest");
     object.remove("authority");
     if let Some(operation_plan) = &plan.plugin_operation_plan {

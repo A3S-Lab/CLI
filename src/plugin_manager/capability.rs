@@ -152,7 +152,7 @@ impl PluginInstallationSnapshot {
         }
     }
 
-    fn evidence(&self) -> PluginCapabilityEvidence {
+    pub(super) fn evidence(&self) -> PluginCapabilityEvidence {
         if self.available {
             if let (Some(generation), Some(revision)) = (self.generation, self.revision.clone()) {
                 return PluginCapabilityEvidence::verified(

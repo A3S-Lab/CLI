@@ -147,6 +147,16 @@ evaluator, full-plan persistence boundary, and apply guard are implemented and
 independently tested. The Manager also strictly retains plan-ready installed
 package evidence from the A3S Use capability snapshot, including receipt,
 catalog-record, manifest, expanded-package, desired-state, and exact
-reconciliation-surface bindings. The umbrella component planner still needs to
-join that evidence with the requested catalog transition and selected Runtime
-providers before this path becomes the default lifecycle.
+reconciliation-surface bindings.
+
+The first live join now covers catalog-v2 registry installs with only
+permission-free Skill/UI surfaces. The umbrella component plan carries the
+complete verified catalog record and exact TUF target, and the Manager derives
+the transition, aggregate impact, capability generation, and durable planner
+state revision before host authorization. The private planner-state record
+advances atomically and idempotently after successful mutation.
+
+Tool/MCP or permission-bearing packages fail this complete-draft path until
+explicit Runtime-provider selection and durable workspace-grant changes are
+wired. Catalog-v1 packages remain on the legacy component-plan path. Upgrade
+and uninstall still require package-specific full installed-receipt evidence.
