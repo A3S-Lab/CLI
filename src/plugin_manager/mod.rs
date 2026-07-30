@@ -24,7 +24,7 @@ use crate::registry::RegistryStore;
 
 pub use capability::{
     PluginCapabilityEvidence, PluginCapabilityEvidenceStatus, PluginInstallationSnapshot,
-    PluginInstalledPackage, PluginPackageReadiness,
+    PluginInstalledPackage, PluginPackageReadiness, PluginPlannerEvidence,
 };
 pub use catalog::{
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginMarketplaceSource,

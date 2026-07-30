@@ -388,7 +388,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=f9c49a4b82f3ff6119d64945e1b0f79b875a8d5f#f9c49a4b82f3ff6119d64945e1b0f79b875a8d5f"
+source = "git+https://github.com/A3S-Lab/Use?rev=f19cab3c3113c94c969b56b95e666e6e90ff642e#f19cab3c3113c94c969b56b95e666e6e90ff642e"
 dependencies = [
  "olpc-cjson",
  "semver",
@@ -402,12 +402,13 @@ dependencies = [
 [[package]]
 name = "a3s-use-extension"
 version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=f9c49a4b82f3ff6119d64945e1b0f79b875a8d5f#f9c49a4b82f3ff6119d64945e1b0f79b875a8d5f"
+source = "git+https://github.com/A3S-Lab/Use?rev=f19cab3c3113c94c969b56b95e666e6e90ff642e#f19cab3c3113c94c969b56b95e666e6e90ff642e"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core 0.2.1",
  "flate2",
  "fs2",
+ "olpc-cjson",
  "reqwest 0.12.28",
  "semver",
  "serde",

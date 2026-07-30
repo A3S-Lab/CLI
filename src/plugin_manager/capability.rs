@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
+use a3s_use_core::{PluginSurfaceRef, MAX_PLUGIN_PLAN_ITEMS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
@@ -80,6 +81,19 @@ pub enum PluginPackageReadiness {
     Unknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginPlannerEvidence {
+    pub schema_version: u32,
+    pub package_id: String,
+    pub package_sha256: String,
+    pub manifest_sha256: String,
+    pub receipt_digest: String,
+    pub catalog_record_digest: String,
+    pub desired_enabled: bool,
+    pub selected_surfaces: Vec<PluginSurfaceRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInstalledPackage {
@@ -94,6 +108,8 @@ pub struct PluginInstalledPackage {
     pub readiness: PluginPackageReadiness,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconciliation: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planner_evidence: Option<PluginPlannerEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -260,6 +276,8 @@ struct RegistryCapability {
     readiness: PluginPackageReadiness,
     #[serde(default)]
     reconciliation: Option<Value>,
+    #[serde(default)]
+    planner_evidence: Option<PluginPlannerEvidence>,
 }
 
 fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallationSnapshot, String> {
@@ -290,6 +308,12 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
                 return Err("A3S Use returned duplicate installed plugins".to_string());
             }
             let enabled = desired_enabled(capability.enabled, capability.reconciliation.as_ref())?;
+            validate_planner_evidence(
+                capability.planner_evidence.as_ref(),
+                &package_id,
+                enabled,
+                capability.reconciliation.as_ref(),
+            )?;
             Ok(PluginInstalledPackage {
                 component_id: capability.id,
                 package_id,
@@ -299,6 +323,7 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallatio
                 callable: capability.enabled,
                 readiness: capability.readiness,
                 reconciliation: capability.reconciliation,
+                planner_evidence: capability.planner_evidence,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -347,6 +372,73 @@ fn desired_enabled(callable: bool, reconciliation: Option<&Value>) -> Result<boo
         Some("installed-disabled" | "absent") => Ok(false),
         _ => Err("A3S Use returned an invalid desired plugin state".to_string()),
     }
+}
+
+fn validate_planner_evidence(
+    evidence: Option<&PluginPlannerEvidence>,
+    package_id: &str,
+    desired_enabled: bool,
+    reconciliation: Option<&Value>,
+) -> Result<(), String> {
+    let Some(evidence) = evidence else {
+        return Ok(());
+    };
+    if evidence.schema_version != 1
+        || evidence.package_id != package_id
+        || evidence.desired_enabled != desired_enabled
+        || !valid_sha256_digest(&evidence.package_sha256)
+        || !valid_sha256_digest(&evidence.manifest_sha256)
+        || !valid_sha256_digest(&evidence.receipt_digest)
+        || !valid_sha256_digest(&evidence.catalog_record_digest)
+        || evidence.selected_surfaces.is_empty()
+        || evidence.selected_surfaces.len() > MAX_PLUGIN_PLAN_ITEMS
+        || !evidence.selected_surfaces.iter().all(valid_surface_ref)
+        || !strictly_sorted(&evidence.selected_surfaces)
+    {
+        return Err("A3S Use returned invalid plugin planner evidence".to_string());
+    }
+    let reconciliation = reconciliation
+        .ok_or_else(|| "A3S Use planner evidence omitted reconciliation state".to_string())?;
+    let surfaces = reconciliation
+        .get("surfaces")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "A3S Use planner evidence omitted its surface inventory".to_string())?;
+    if surfaces.len() > MAX_PLUGIN_PLAN_ITEMS {
+        return Err("A3S Use returned too many reconciled plugin surfaces".to_string());
+    }
+    let mut reconciled = surfaces
+        .iter()
+        .map(|surface| {
+            let surface = surface
+                .get("surface")
+                .ok_or_else(|| "A3S Use returned invalid reconciled plugin surfaces".to_string())?;
+            let reference = serde_json::from_value::<PluginSurfaceRef>(surface.clone())
+                .map_err(|_| "A3S Use returned invalid reconciled plugin surfaces".to_string())?;
+            if !valid_surface_ref(&reference) {
+                return Err("A3S Use returned invalid reconciled plugin surfaces".to_string());
+            }
+            Ok(reference)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    reconciled.sort();
+    if reconciled.windows(2).any(|pair| pair[0] == pair[1])
+        || reconciled != evidence.selected_surfaces
+    {
+        return Err("A3S Use planner evidence does not match reconciliation surfaces".to_string());
+    }
+    Ok(())
+}
+
+fn valid_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(valid_revision)
+}
+
+fn valid_surface_ref(reference: &PluginSurfaceRef) -> bool {
+    reference.id.len() <= 63 && valid_segment(&reference.id)
+}
+
+fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn valid_segment(value: &str) -> bool {
@@ -530,5 +622,96 @@ mod tests {
         .unwrap();
 
         assert!(parse_snapshot(&input, 42).is_err());
+    }
+
+    #[test]
+    fn installation_snapshot_retains_strict_plugin_planner_evidence() {
+        let input = plan_ready_snapshot();
+
+        let snapshot = parse_snapshot(&serde_json::to_vec(&input).unwrap(), 42).unwrap();
+        let evidence = snapshot.items[0].planner_evidence.as_ref().unwrap();
+
+        assert_eq!(evidence.package_id, "acme/research");
+        assert_eq!(
+            evidence.receipt_digest,
+            format!("sha256:{}", "d".repeat(64))
+        );
+        assert_eq!(
+            evidence.selected_surfaces,
+            vec![PluginSurfaceRef {
+                kind: a3s_use_core::PluginSurfaceKind::Skill,
+                id: "research".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn installation_snapshot_rejects_drifted_plugin_planner_evidence() {
+        let mut invalid_digest = plan_ready_snapshot();
+        invalid_digest["data"]["registry"]["capabilities"][0]["plannerEvidence"]["packageSha256"] =
+            Value::String("sha256:ABC".to_string());
+        assert!(parse_snapshot(&serde_json::to_vec(&invalid_digest).unwrap(), 42).is_err());
+
+        let mut invalid_desired = plan_ready_snapshot();
+        invalid_desired["data"]["registry"]["capabilities"][0]["plannerEvidence"]
+            ["desiredEnabled"] = Value::Bool(false);
+        assert!(parse_snapshot(&serde_json::to_vec(&invalid_desired).unwrap(), 42).is_err());
+
+        let mut drifted_surface = plan_ready_snapshot();
+        drifted_surface["data"]["registry"]["capabilities"][0]["plannerEvidence"]
+            ["selectedSurfaces"][0]["id"] = Value::String("other".to_string());
+        assert!(parse_snapshot(&serde_json::to_vec(&drifted_surface).unwrap(), 42).is_err());
+
+        let mut unknown_field = plan_ready_snapshot();
+        unknown_field["data"]["registry"]["capabilities"][0]["plannerEvidence"]["untrusted"] =
+            Value::Bool(true);
+        assert!(parse_snapshot(&serde_json::to_vec(&unknown_field).unwrap(), 42).is_err());
+    }
+
+    fn plan_ready_snapshot() -> Value {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "registry": {
+                    "schemaVersion": 1,
+                    "generation": 19,
+                    "revision": "e".repeat(64),
+                    "capabilities": [{
+                        "id": "use/acme/research",
+                        "route": "research",
+                        "version": "2.0.0",
+                        "origin": "extension",
+                        "enabled": true,
+                        "readiness": "ready",
+                        "reconciliation": {
+                            "schemaVersion": 1,
+                            "desired": "enabled",
+                            "observed": "ready",
+                            "capabilityReady": true,
+                            "surfaces": [{
+                                "surface": {
+                                    "kind": "skill",
+                                    "id": "research"
+                                }
+                            }]
+                        },
+                        "plannerEvidence": {
+                            "schemaVersion": 1,
+                            "packageId": "acme/research",
+                            "packageSha256": format!("sha256:{}", "a".repeat(64)),
+                            "manifestSha256": format!("sha256:{}", "b".repeat(64)),
+                            "receiptDigest": format!("sha256:{}", "d".repeat(64)),
+                            "catalogRecordDigest": format!("sha256:{}", "c".repeat(64)),
+                            "desiredEnabled": true,
+                            "selectedSurfaces": [{
+                                "kind": "skill",
+                                "id": "research"
+                            }]
+                        }
+                    }]
+                }
+            }
+        })
     }
 }

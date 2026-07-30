@@ -460,6 +460,13 @@ installation-state implementations. The Manager also carries the immutable
 offline policy into delegated planning and apply processes, so a nested
 lifecycle operation cannot silently regain network access.
 
+For plan-ready schema-v3 registry packages, the Manager also retains A3S Use's
+strict `plannerEvidence`. It validates the exact package, manifest, receipt,
+and catalog-record SHA-256 values, desired enabled state, canonical named
+surface order, and equality with reconciliation state. Missing evidence stays
+compatible for legacy/local packages; malformed or drifted claimed evidence
+invalidates the complete observation instead of being used for planning.
+
 CLI and management MCP entry paths load plugin authorization only from an
 explicit `--config`/`A3S_CONFIG_FILE` source or the existing user-level
 `~/.a3s/config.acl`, with the explicit source taking precedence. Automatically
@@ -503,7 +510,9 @@ side effects after a later policy change.
 
 Existing component-only records remain readable and keep their previous digest
 semantics. The current umbrella component planner does not yet emit the full
-draft; adding that A3S Use planner output is the next integration step.
+draft. The installation side of that integration now exposes verified
+receipt/catalog/surface evidence; joining it with the requested catalog
+transition and selected Runtime providers is the next integration step.
 
 Install, upgrade, and uninstall always create a durable reviewed plan first.
 An interactive terminal prints that exact plan and asks for confirmation.

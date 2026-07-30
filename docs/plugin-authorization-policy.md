@@ -144,5 +144,9 @@ can converge safely.
 
 Legacy component-only records remain compatible. The policy source, parser,
 evaluator, full-plan persistence boundary, and apply guard are implemented and
-independently tested. The umbrella component planner still needs to emit the
-full Use draft before this path becomes the default lifecycle.
+independently tested. The Manager also strictly retains plan-ready installed
+package evidence from the A3S Use capability snapshot, including receipt,
+catalog-record, manifest, expanded-package, desired-state, and exact
+reconciliation-surface bindings. The umbrella component planner still needs to
+join that evidence with the requested catalog transition and selected Runtime
+providers before this path becomes the default lifecycle.
