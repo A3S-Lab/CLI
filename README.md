@@ -429,6 +429,24 @@ also serializes plan, apply, enable, and disable operations with the same
 timeout, output-size, component-ID, and reviewed-plan-digest checks for every
 adapter.
 
+The umbrella CLI exposes the read-only portion of that application service
+directly:
+
+```sh
+a3s plugin search science
+a3s plugin search research --surface tool --channel stable --limit 20
+a3s plugin inspect a3s/science
+a3s plugin list
+a3s --offline plugin search science
+```
+
+Search and inspect load verified catalog metadata only; they never download a
+plugin archive. `--offline` reads only the last verified on-disk snapshot.
+`plugin list` reads A3S Use's immutable capability snapshot and reports an
+unavailable observation separately from a valid empty installation. Human and
+JSON output use the same shared manager result rather than separate catalog or
+installation-state implementations.
+
 Each dry-run receives a cryptographically random `operationId` and persists an
 immutable one-hour reviewed plan with the observed A3S Use capability
 generation/revision. Apply resolves that stored plan from

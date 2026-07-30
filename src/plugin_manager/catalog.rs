@@ -23,9 +23,16 @@ use super::{
 
 const RELEASE_BUNDLE_SOURCE_NAME: &str = "A3S \u{53d1}\u{884c}\u{5305}";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CatalogAccess {
+    Refresh,
+    Cached,
+}
+
 pub(super) async fn marketplace(
     manager: &PluginManager,
     installed: &PluginInstallationIndex,
+    access: CatalogAccess,
 ) -> PluginManagerResult<PluginMarketplaceSnapshot> {
     let records = manager
         .registry_store
@@ -75,7 +82,12 @@ pub(super) async fn marketplace(
             }
         };
         let refresh_timeout = Duration::from_secs(MARKETPLACE_REFRESH_TIMEOUT_SECONDS);
-        match timeout(refresh_timeout, browse_registry(&trusted, installed)).await {
+        match timeout(
+            refresh_timeout,
+            browse_registry(&trusted, installed, access),
+        )
+        .await
+        {
             Ok(Ok(catalog)) => {
                 items.extend(catalog.items.into_iter().filter(|item| {
                     !bundled_identities.contains(&(
@@ -138,6 +150,7 @@ struct BrowsedRegistry {
 async fn browse_registry(
     trusted: &TrustedRegistry,
     installed: &PluginInstallationIndex,
+    access: CatalogAccess,
 ) -> Result<BrowsedRegistry, a3s_use_core::UseError> {
     let host = PluginCatalogHost::current()?;
     let mut search = PluginCatalogSearch {
@@ -150,7 +163,10 @@ async fn browse_registry(
         cursor: None,
         limit: MAX_PLUGIN_CATALOG_PAGE_SIZE,
     };
-    let mut page = search_remote_plugins(trusted, &host, &search).await?;
+    let mut page = match access {
+        CatalogAccess::Refresh => search_remote_plugins(trusted, &host, &search).await?,
+        CatalogAccess::Cached => search_cached_plugins(trusted, &host, &search).await?,
+    };
     let snapshot = page.snapshot.clone();
     let snapshot_digest = snapshot.snapshot_digest.clone();
     let total_matches = page.total_matches;
@@ -198,7 +214,10 @@ async fn browse_registry(
         .into_iter()
         .map(|plugin| catalog_item(plugin, installed))
         .collect::<Result<Vec<_>, _>>()?;
-    if snapshot.catalog_records < snapshot.metadata.package_targets {
+    let mut source = verified_registry_source(trusted, &snapshot);
+    if snapshot.catalog_records < snapshot.metadata.package_targets
+        && access == CatalogAccess::Refresh
+    {
         let legacy = list_remote_packages(trusted).await?;
         if legacy.metadata != snapshot.metadata || legacy.host_target != snapshot.host_target {
             return Err(a3s_use_core::UseError::new(
@@ -221,13 +240,15 @@ async fn browse_registry(
             }
             items.push(legacy_registry_item(package, installed)?);
         }
+    } else if snapshot.catalog_records < snapshot.metadata.package_targets {
+        source.error = Some(format!(
+            "cached search omits {} legacy package target(s) without complete catalog records",
+            snapshot.metadata.package_targets - snapshot.catalog_records
+        ));
     }
     items = latest_registry_items(items)?;
 
-    Ok(BrowsedRegistry {
-        source: verified_registry_source(trusted, &snapshot),
-        items,
-    })
+    Ok(BrowsedRegistry { source, items })
 }
 
 pub(super) fn catalog_item(

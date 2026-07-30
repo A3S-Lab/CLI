@@ -31,6 +31,7 @@ fn root_help_exposes_only_the_canonical_taxonomy() {
         "bench",
         "search",
         "use",
+        "plugin",
         "auth",
         "model",
         "config",

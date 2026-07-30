@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -6,9 +7,10 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::{PluginManager, MAX_PLUGIN_COMMAND_OUTPUT};
+use super::{PluginInstallationIndex, PluginManager, MAX_PLUGIN_COMMAND_OUTPUT};
 
 const CAPABILITY_SNAPSHOT_TIMEOUT_SECONDS: u64 = 10;
+const MAX_INSTALLED_PLUGINS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -68,27 +70,116 @@ impl PluginCapabilityEvidence {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginPackageReadiness {
+    Ready,
+    Missing,
+    Broken,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstalledPackage {
+    pub component_id: String,
+    pub package_id: String,
+    pub route: String,
+    pub version: String,
+    /// Desired enabled state. This can be true while reconciliation continues.
+    pub enabled: bool,
+    /// Whether the exact binding is currently callable.
+    pub callable: bool,
+    pub readiness: PluginPackageReadiness,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginInstallationSnapshot {
+    pub schema_version: u32,
+    pub available: bool,
+    pub observed_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    pub items: Vec<PluginInstalledPackage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl PluginInstallationSnapshot {
+    pub fn index(&self) -> PluginInstallationIndex {
+        self.items
+            .iter()
+            .map(|item| (item.component_id.clone(), item.enabled))
+            .collect()
+    }
+
+    fn unavailable(observed_at_ms: u64, error: impl Into<String>) -> Self {
+        let error = concise_error(&error.into());
+        Self {
+            schema_version: 1,
+            available: false,
+            observed_at_ms,
+            generation: None,
+            revision: None,
+            items: Vec::new(),
+            error: Some(if error.is_empty() {
+                "capability observation unavailable".to_string()
+            } else {
+                error
+            }),
+        }
+    }
+
+    fn evidence(&self) -> PluginCapabilityEvidence {
+        if self.available {
+            if let (Some(generation), Some(revision)) = (self.generation, self.revision.clone()) {
+                return PluginCapabilityEvidence::verified(
+                    self.observed_at_ms,
+                    generation,
+                    revision,
+                );
+            }
+        }
+        PluginCapabilityEvidence::unavailable(
+            self.observed_at_ms,
+            self.error
+                .as_deref()
+                .unwrap_or("capability observation unavailable"),
+        )
+    }
+}
+
 pub(super) async fn observe(manager: &PluginManager) -> PluginCapabilityEvidence {
+    installation_snapshot(manager).await.evidence()
+}
+
+pub(super) async fn installation_snapshot(manager: &PluginManager) -> PluginInstallationSnapshot {
     let observed_at_ms = match unix_time_millis() {
         Ok(observed_at_ms) => observed_at_ms,
-        Err(error) => return PluginCapabilityEvidence::unavailable(1, error),
+        Err(error) => return PluginInstallationSnapshot::unavailable(1, error),
     };
     let executable =
         match crate::components::find_ready_executable_with("use", &manager.component_paths) {
             Ok(Some(executable)) => executable,
             Ok(None) => {
-                return PluginCapabilityEvidence::unavailable(
+                return PluginInstallationSnapshot::unavailable(
                     observed_at_ms,
                     "A3S Use is not installed and ready",
                 );
             }
             Err(error) => {
-                return PluginCapabilityEvidence::unavailable(observed_at_ms, error.to_string());
+                return PluginInstallationSnapshot::unavailable(observed_at_ms, error.to_string());
             }
         };
     match read_snapshot(&executable, manager.process.workspace(), observed_at_ms).await {
-        Ok(evidence) => evidence,
-        Err(error) => PluginCapabilityEvidence::unavailable(observed_at_ms, error),
+        Ok(snapshot) => snapshot,
+        Err(error) => PluginInstallationSnapshot::unavailable(observed_at_ms, error),
     }
 }
 
@@ -96,7 +187,7 @@ async fn read_snapshot(
     executable: &Path,
     workspace: &Path,
     observed_at_ms: u64,
-) -> Result<PluginCapabilityEvidence, String> {
+) -> Result<PluginInstallationSnapshot, String> {
     let mut command = Command::new(executable);
     command
         .args(["capability", "snapshot", "--json"])
@@ -147,10 +238,31 @@ struct RegistryEvidence {
     generation: u64,
     revision: String,
     #[serde(default)]
-    capabilities: Vec<Value>,
+    capabilities: Vec<RegistryCapability>,
 }
 
-fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginCapabilityEvidence, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CapabilityOrigin {
+    BuiltIn,
+    Extension,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegistryCapability {
+    id: String,
+    route: String,
+    version: String,
+    origin: CapabilityOrigin,
+    enabled: bool,
+    #[serde(default)]
+    readiness: PluginPackageReadiness,
+    #[serde(default)]
+    reconciliation: Option<Value>,
+}
+
+fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginInstallationSnapshot, String> {
     let envelope: SnapshotEnvelope = serde_json::from_slice(input)
         .map_err(|error| format!("A3S Use returned invalid capability JSON: {error}"))?;
     let registry = envelope.data.registry;
@@ -162,11 +274,87 @@ fn parse_snapshot(input: &[u8], observed_at_ms: u64) -> Result<PluginCapabilityE
     {
         return Err("A3S Use returned invalid capability registry evidence".to_string());
     }
-    Ok(PluginCapabilityEvidence::verified(
+    let mut identities = BTreeSet::new();
+    let mut items = registry
+        .capabilities
+        .into_iter()
+        .filter(|capability| capability.origin == CapabilityOrigin::Extension)
+        .map(|capability| {
+            let package_id = plugin_package_id(&capability.id)?;
+            if !valid_segment(&capability.route) {
+                return Err("A3S Use returned an invalid plugin route".to_string());
+            }
+            semver::Version::parse(&capability.version)
+                .map_err(|_| "A3S Use returned an invalid plugin version".to_string())?;
+            if !identities.insert(capability.id.clone()) {
+                return Err("A3S Use returned duplicate installed plugins".to_string());
+            }
+            let enabled = desired_enabled(capability.enabled, capability.reconciliation.as_ref())?;
+            Ok(PluginInstalledPackage {
+                component_id: capability.id,
+                package_id,
+                route: capability.route,
+                version: capability.version,
+                enabled,
+                callable: capability.enabled,
+                readiness: capability.readiness,
+                reconciliation: capability.reconciliation,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if items.len() > MAX_INSTALLED_PLUGINS {
+        return Err(format!(
+            "A3S Use returned more than {MAX_INSTALLED_PLUGINS} installed plugins"
+        ));
+    }
+    items.sort_by(|left, right| left.component_id.cmp(&right.component_id));
+    Ok(PluginInstallationSnapshot {
+        schema_version: 1,
+        available: true,
         observed_at_ms,
-        registry.generation,
-        registry.revision,
-    ))
+        generation: Some(registry.generation),
+        revision: Some(registry.revision),
+        items,
+        error: None,
+    })
+}
+
+fn plugin_package_id(component_id: &str) -> Result<String, String> {
+    let segments = component_id.split('/').collect::<Vec<_>>();
+    if segments.len() != 3
+        || segments[0] != "use"
+        || !segments[1..].iter().copied().all(valid_segment)
+    {
+        return Err("A3S Use returned an invalid plugin component ID".to_string());
+    }
+    Ok(format!("{}/{}", segments[1], segments[2]))
+}
+
+fn desired_enabled(callable: bool, reconciliation: Option<&Value>) -> Result<bool, String> {
+    let Some(reconciliation) = reconciliation else {
+        return Ok(callable);
+    };
+    if reconciliation.get("schemaVersion").and_then(Value::as_u64) != Some(1)
+        || !reconciliation
+            .get("capabilityReady")
+            .is_some_and(Value::is_boolean)
+        || !reconciliation.get("surfaces").is_some_and(Value::is_array)
+    {
+        return Err("A3S Use returned invalid plugin reconciliation evidence".to_string());
+    }
+    match reconciliation.get("desired").and_then(Value::as_str) {
+        Some("enabled") => Ok(true),
+        Some("installed-disabled" | "absent") => Ok(false),
+        _ => Err("A3S Use returned an invalid desired plugin state".to_string()),
+    }
+}
+
+fn valid_segment(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some(first) if first.is_ascii_lowercase())
+        && characters.all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
 }
 
 fn valid_revision(value: &str) -> bool {
@@ -224,7 +412,11 @@ mod tests {
                     "generation": 17,
                     "revision": revision,
                     "capabilities": [{
-                        "id": "use/acme/research",
+                        "id": "use/browser",
+                        "route": "browser",
+                        "version": "0.2.1",
+                        "origin": "built-in",
+                        "enabled": true,
                         "untrustedDescription": "not retained"
                     }]
                 }
@@ -232,13 +424,15 @@ mod tests {
         }))
         .unwrap();
 
-        let evidence = parse_snapshot(&input, 42).unwrap();
+        let snapshot = parse_snapshot(&input, 42).unwrap();
+        let evidence = snapshot.evidence();
 
         assert_eq!(evidence.status, PluginCapabilityEvidenceStatus::Verified);
         assert_eq!(evidence.observed_at_ms, 42);
         assert_eq!(evidence.generation, Some(17));
         assert_eq!(evidence.revision.as_deref(), Some(revision.as_str()));
         assert_eq!(evidence.error, None);
+        assert!(snapshot.items.is_empty());
     }
 
     #[test]
@@ -265,5 +459,76 @@ mod tests {
         let evidence = PluginCapabilityEvidence::unavailable(42, "x".repeat(600));
 
         assert_eq!(evidence.error.unwrap().chars().count(), 500);
+    }
+
+    #[test]
+    fn installation_snapshot_separates_desired_enabled_from_callable() {
+        let revision = "b".repeat(64);
+        let input = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "registry": {
+                    "schemaVersion": 1,
+                    "generation": 18,
+                    "revision": revision,
+                    "capabilities": [{
+                        "id": "use/acme/research",
+                        "route": "research",
+                        "version": "2.0.0",
+                        "origin": "extension",
+                        "enabled": false,
+                        "readiness": "unknown",
+                        "reconciliation": {
+                            "schemaVersion": 1,
+                            "desired": "enabled",
+                            "observed": "reconciling",
+                            "capabilityReady": false,
+                            "surfaces": []
+                        }
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        let snapshot = parse_snapshot(&input, 42).unwrap();
+
+        assert!(snapshot.available);
+        assert_eq!(snapshot.items.len(), 1);
+        assert!(snapshot.items[0].enabled);
+        assert!(!snapshot.items[0].callable);
+        assert_eq!(snapshot.index().get("use/acme/research"), Some(&true));
+    }
+
+    #[test]
+    fn installation_snapshot_rejects_invalid_reconciliation_evidence() {
+        let input = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "ok": true,
+            "data": {
+                "registry": {
+                    "schemaVersion": 1,
+                    "generation": 18,
+                    "revision": "c".repeat(64),
+                    "capabilities": [{
+                        "id": "use/acme/research",
+                        "route": "research",
+                        "version": "2.0.0",
+                        "origin": "extension",
+                        "enabled": false,
+                        "reconciliation": {
+                            "schemaVersion": 1,
+                            "desired": "unknown",
+                            "capabilityReady": false,
+                            "surfaces": []
+                        }
+                    }]
+                }
+            }
+        }))
+        .unwrap();
+
+        assert!(parse_snapshot(&input, 42).is_err());
     }
 }

@@ -21,7 +21,10 @@ use tokio::sync::Mutex;
 use crate::components::ComponentPaths;
 use crate::registry::RegistryStore;
 
-pub use capability::{PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
+pub use capability::{
+    PluginCapabilityEvidence, PluginCapabilityEvidenceStatus, PluginInstallationSnapshot,
+    PluginInstalledPackage, PluginPackageReadiness,
+};
 pub use catalog::{
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginMarketplaceSource,
     PluginMarketplaceSourceKind, PluginMarketplaceSourceMetadata,
@@ -110,7 +113,24 @@ impl PluginManager {
         &self,
         installed: &PluginInstallationIndex,
     ) -> PluginManagerResult<PluginMarketplaceSnapshot> {
-        catalog::marketplace(self, installed).await
+        catalog::marketplace(self, installed, catalog::CatalogAccess::Refresh).await
+    }
+
+    /// Browse only the last verified on-disk metadata snapshot. This performs
+    /// no registry network request and reports missing or expired caches per
+    /// source.
+    pub async fn marketplace_cached(
+        &self,
+        installed: &PluginInstallationIndex,
+    ) -> PluginManagerResult<PluginMarketplaceSnapshot> {
+        catalog::marketplace(self, installed, catalog::CatalogAccess::Cached).await
+    }
+
+    /// Observe installed A3S Use plugin receipts through the immutable
+    /// capability snapshot. Unavailable Use state remains explicit in the
+    /// returned snapshot instead of being confused with an empty installation.
+    pub async fn installation_snapshot(&self) -> PluginInstallationSnapshot {
+        capability::installation_snapshot(self).await
     }
 
     /// Resolve the existing umbrella component dry-run through the one shared
