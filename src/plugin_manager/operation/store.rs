@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use a3s_use_core::PlanActor;
+use a3s_use_core::{PlanActor, PluginOperationConfirmation, PluginOperationPlanEnvelope};
 
 use super::super::capability::PluginCapabilityEvidence;
 use super::super::process::{normalize_plan_request, PluginPlanRequest};
@@ -11,6 +11,7 @@ use super::super::{PluginManagerError, PluginManagerResult};
 use super::lock::PluginMutationLock;
 
 mod io;
+mod plan;
 mod record;
 
 use io::{
@@ -41,8 +42,20 @@ pub(super) struct StoredPluginPlan {
     #[serde(default = "default_plan_actor")]
     pub actor: PlanActor,
     pub plan_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_plan_digest: Option<String>,
     pub capability_state: PluginCapabilityEvidence,
     pub plan: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+}
+
+impl StoredPluginPlan {
+    pub(super) fn upstream_plan_digest(&self) -> &str {
+        self.upstream_plan_digest
+            .as_deref()
+            .unwrap_or(&self.plan_digest)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +65,15 @@ struct StoredApplyIntent {
     operation_id: String,
     plan_digest: String,
     started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirmation: Option<PluginOperationConfirmation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PluginPlanIdentity {
+    pub operation_id: String,
+    pub created_at_ms: u64,
+    pub expires_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,39 +102,6 @@ impl PluginOperationStore {
         PluginMutationLock::acquire(self.root.join("mutation.lock")).await
     }
 
-    #[cfg(test)]
-    pub(super) async fn create_plan(
-        &self,
-        request: PluginPlanRequest,
-        plan_digest: String,
-        capability_state: PluginCapabilityEvidence,
-        plan: Value,
-    ) -> PluginManagerResult<StoredPluginPlan> {
-        self.create_plan_for_actor(
-            request,
-            PlanActor::User,
-            plan_digest,
-            capability_state,
-            plan,
-        )
-        .await
-    }
-
-    pub(super) async fn create_plan_for_actor(
-        &self,
-        request: PluginPlanRequest,
-        actor: PlanActor,
-        plan_digest: String,
-        capability_state: PluginCapabilityEvidence,
-        plan: Value,
-    ) -> PluginManagerResult<StoredPluginPlan> {
-        let store = self.clone();
-        run_blocking("create reviewed plugin plan", move || {
-            store.create_plan_sync(request, actor, plan_digest, capability_state, plan)
-        })
-        .await
-    }
-
     pub(super) async fn resolve_plan(
         &self,
         operation_id: Option<String>,
@@ -135,14 +124,23 @@ impl PluginOperationStore {
         .await
     }
 
+    #[cfg(test)]
     pub(super) async fn persist_intent(
         &self,
         plan: &StoredPluginPlan,
     ) -> PluginManagerResult<bool> {
+        self.persist_intent_with_confirmation(plan, None).await
+    }
+
+    pub(super) async fn persist_intent_with_confirmation(
+        &self,
+        plan: &StoredPluginPlan,
+        confirmation: Option<PluginOperationConfirmation>,
+    ) -> PluginManagerResult<bool> {
         let store = self.clone();
         let plan = plan.clone();
         run_blocking("persist plugin apply intent", move || {
-            store.persist_intent_sync(&plan)
+            store.persist_intent_sync(&plan, confirmation)
         })
         .await
     }
@@ -168,45 +166,6 @@ impl PluginOperationStore {
             store.persist_result_sync(result)
         })
         .await
-    }
-
-    fn create_plan_sync(
-        &self,
-        request: PluginPlanRequest,
-        actor: PlanActor,
-        plan_digest: String,
-        capability_state: PluginCapabilityEvidence,
-        plan: Value,
-    ) -> PluginManagerResult<StoredPluginPlan> {
-        ensure_request_valid(&request)?;
-        validate_digest(&plan_digest)?;
-        validate_capability_evidence(&capability_state)?;
-        validate_plan_value(&plan, &plan_digest)?;
-        let now = now_ms()?;
-        self.prune_sync(now)?;
-        for _ in 0..4 {
-            let operation_id = new_operation_id(request.action)?;
-            let record = StoredPluginPlan {
-                schema: OPERATION_RECORD_SCHEMA.to_string(),
-                operation_id,
-                created_at_ms: now,
-                expires_at_ms: now.saturating_add(PLAN_LIFETIME_MS),
-                request: request.clone(),
-                actor,
-                plan_digest: plan_digest.clone(),
-                capability_state: capability_state.clone(),
-                plan: plan.clone(),
-            };
-            validate_plan_record(&record)?;
-            let path = self.plan_path(&record.operation_id);
-            match write_new_record(&path, &record)? {
-                WriteDisposition::Created => return Ok(record),
-                WriteDisposition::AlreadyExists => continue,
-            }
-        }
-        Err(PluginManagerError::Infrastructure(
-            "could not allocate a unique plugin operation ID".to_string(),
-        ))
     }
 
     fn resolve_plan_sync(
@@ -289,7 +248,11 @@ impl PluginOperationStore {
         Ok(true)
     }
 
-    fn persist_intent_sync(&self, plan: &StoredPluginPlan) -> PluginManagerResult<bool> {
+    fn persist_intent_sync(
+        &self,
+        plan: &StoredPluginPlan,
+        confirmation: Option<PluginOperationConfirmation>,
+    ) -> PluginManagerResult<bool> {
         validate_plan_record(plan)?;
         let path = self.intent_path(&plan.operation_id);
         if let Some(intent) = read_optional_record::<StoredApplyIntent>(&path)? {
@@ -307,7 +270,9 @@ impl PluginOperationStore {
             operation_id: plan.operation_id.clone(),
             plan_digest: plan.plan_digest.clone(),
             started_at_ms,
+            confirmation,
         };
+        validate_intent(&intent, plan)?;
         match write_new_record(&path, &intent)? {
             WriteDisposition::Created => Ok(false),
             WriteDisposition::AlreadyExists => {

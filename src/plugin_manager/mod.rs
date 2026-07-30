@@ -230,8 +230,25 @@ impl PluginManager {
         &self,
         request: &PluginApplyRequest,
     ) -> PluginManagerResult<serde_json::Value> {
+        self.apply_operation_with_confirmation(request, false).await
+    }
+
+    /// Apply a reviewed plan after a trusted user-facing adapter collected
+    /// exact confirmation for its operation ID and canonical digest.
+    pub async fn apply_confirmed_operation(
+        &self,
+        request: &PluginApplyRequest,
+    ) -> PluginManagerResult<serde_json::Value> {
+        self.apply_operation_with_confirmation(request, true).await
+    }
+
+    async fn apply_operation_with_confirmation(
+        &self,
+        request: &PluginApplyRequest,
+        confirmed: bool,
+    ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        operation::apply(self, request).await
+        operation::apply(self, request, confirmed).await
     }
 
     pub async fn set_package_enabled(

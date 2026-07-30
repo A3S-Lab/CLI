@@ -140,7 +140,7 @@ impl PluginsService {
         request: PluginApplyRequest,
     ) -> BootResult<Value> {
         self.manager
-            .apply_operation(&request)
+            .apply_confirmed_operation(&request)
             .await
             .map_err(manager_error)
     }

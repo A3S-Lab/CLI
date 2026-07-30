@@ -69,7 +69,7 @@ pub(super) async fn apply(
         .await?;
     }
     let result = manager
-        .apply_operation(&PluginApplyRequest {
+        .apply_confirmed_operation(&PluginApplyRequest {
             operation_id: Some(args.operation_id),
             action: None,
             component_id: None,
@@ -190,7 +190,7 @@ async fn plan_and_apply(
     }
 
     let result = manager
-        .apply_operation(&PluginApplyRequest {
+        .apply_confirmed_operation(&PluginApplyRequest {
             operation_id: Some(operation_id),
             action: None,
             component_id: None,

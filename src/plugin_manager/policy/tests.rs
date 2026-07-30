@@ -134,7 +134,7 @@ fn provider(
     }
 }
 
-fn install_plan() -> PluginOperationPlan {
+pub(crate) fn install_plan() -> PluginOperationPlan {
     let catalog = PluginCatalogRecord::from_json(CATALOG_RECORD).unwrap();
     let mut permissions = catalog.permission_ceiling.clone();
     permissions

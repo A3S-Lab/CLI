@@ -118,7 +118,28 @@ output, Skill instructions, and MCP arguments cannot select or downgrade that
 actor. Reviewed records persist the selected actor and the current fixed
 `user/current` lifecycle scope.
 
-The policy source, parser, evaluator, and Manager injection are implemented
-and independently tested. Lifecycle integration still requires the umbrella
-planner to persist the full Use operation plan and to invoke evaluation before
-storing and again before applying it.
+## Reviewed-plan binding
+
+When the delegated planner returns `pluginOperationPlan`, the Manager accepts
+it only as a draft. Host-owned operation identity, lifetime, actor, scope,
+requested release constraints, and verified capability generation are bound
+before structural validation. Policy evaluation then replaces draft authority
+and `PluginOperationPlanEnvelope` computes the canonical reviewed digest.
+
+The durable record keeps two distinct identities:
+
+- the complete Use plan digest exposed to users and accepted by Manager apply;
+- the upstream component digest passed only to the existing mutation child.
+
+For a new apply intent, current policy must reproduce the stored authority.
+`ask` additionally requires an exact
+`a3s.use.plugin-operation-confirmation.v1` created only by a trusted
+user-facing adapter. `deny`, missing confirmation, plan drift, policy drift,
+and capability drift fail before intent. After intent is durable, crash
+recovery validates and reuses the recorded confirmation so partial mutation
+can converge safely.
+
+Legacy component-only records remain compatible. The policy source, parser,
+evaluator, full-plan persistence boundary, and apply guard are implemented and
+independently tested. The umbrella component planner still needs to emit the
+full Use draft before this path becomes the default lifecycle.

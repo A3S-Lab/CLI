@@ -388,7 +388,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-core"
 version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=2a75c2a51b7698dd5be8aa843837e8c7c378c1f8#2a75c2a51b7698dd5be8aa843837e8c7c378c1f8"
+source = "git+https://github.com/A3S-Lab/Use?rev=dfee246a1b65a14b4753d3e79340cba246d6c77f#dfee246a1b65a14b4753d3e79340cba246d6c77f"
 dependencies = [
  "olpc-cjson",
  "semver",
@@ -402,7 +402,7 @@ dependencies = [
 [[package]]
 name = "a3s-use-extension"
 version = "0.2.1"
-source = "git+https://github.com/A3S-Lab/Use?rev=2a75c2a51b7698dd5be8aa843837e8c7c378c1f8#2a75c2a51b7698dd5be8aa843837e8c7c378c1f8"
+source = "git+https://github.com/A3S-Lab/Use?rev=dfee246a1b65a14b4753d3e79340cba246d6c77f#dfee246a1b65a14b4753d3e79340cba246d6c77f"
 dependencies = [
  "a3s-acl 0.2.2",
  "a3s-use-core 0.2.1",

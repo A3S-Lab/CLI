@@ -9,7 +9,7 @@ mod parse;
 mod parse_value;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 use a3s_use_core::{
     FilesystemAccess, HttpMethod, PlanActor, PlanAuthority, PlanPolicyDecision, PluginSurfaceKind,

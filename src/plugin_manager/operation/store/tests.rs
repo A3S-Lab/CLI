@@ -93,13 +93,20 @@ async fn reviewed_plan_persists_the_host_selected_actor() {
     let temporary = tempfile::tempdir().unwrap();
     let store = PluginOperationStore::new(temporary.path().join("operations"));
     let plan_digest = "6".repeat(64);
+    let identity = store
+        .allocate_plan_identity(PluginLifecycleAction::Install)
+        .await
+        .unwrap();
     let plan = store
         .create_plan_for_actor(
+            identity,
             request(),
             a3s_use_core::PlanActor::Agent,
             plan_digest.clone(),
+            None,
             evidence(7, 'b'),
             plan_value(&plan_digest),
+            None,
         )
         .await
         .unwrap();
@@ -226,8 +233,10 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         request: request(),
         actor: a3s_use_core::PlanActor::User,
         plan_digest: plan_digest.clone(),
+        upstream_plan_digest: None,
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),
+        plugin_operation_plan: None,
     };
     write_new_record(&store.plan_path(&plan.operation_id), &plan).unwrap();
 
@@ -274,6 +283,7 @@ async fn durable_result_cannot_complete_before_its_apply_intent() {
         operation_id: plan.operation_id.clone(),
         plan_digest: plan.plan_digest.clone(),
         started_at_ms: plan.created_at_ms + 10,
+        confirmation: None,
     };
     write_new_record(&store.intent_path(&plan.operation_id), &intent).unwrap();
     let result = operation_result(&plan, plan.created_at_ms + 5);

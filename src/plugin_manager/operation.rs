@@ -8,6 +8,7 @@ use super::process::{
 use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
 mod lock;
+mod plan_artifact;
 pub(super) mod store;
 
 use store::{
@@ -27,15 +28,31 @@ pub(super) async fn plan(
     let request = normalize_plan_request(request)?;
     let capability_state = observe(manager).await;
     let raw_plan = manager.process.plan(&request).await?;
-    let plan_digest = plan_digest_from_value(&raw_plan)?;
+    let upstream_plan_digest = plan_digest_from_value(&raw_plan)?;
+    let identity = manager
+        .operation_store
+        .allocate_plan_identity(request.action)
+        .await?;
+    let prepared = plan_artifact::prepare(
+        manager.authorization_policy(),
+        &request,
+        actor,
+        &capability_state,
+        &identity,
+        upstream_plan_digest,
+        raw_plan,
+    )?;
     let stored = manager
         .operation_store
         .create_plan_for_actor(
+            identity,
             request,
             actor,
-            plan_digest.clone(),
+            prepared.plan_digest,
+            prepared.upstream_plan_digest,
             capability_state,
-            raw_plan,
+            prepared.plan,
+            prepared.plugin_operation_plan,
         )
         .await?;
     reviewed_plan_output(&stored)
@@ -44,6 +61,7 @@ pub(super) async fn plan(
 pub(super) async fn apply(
     manager: &PluginManager,
     request: &PluginApplyRequest,
+    confirmed: bool,
 ) -> PluginManagerResult<Value> {
     let plan_digest = normalize_plan_digest(&request.plan_digest)?;
     let (operation_id, legacy_request) = apply_identity(request)?;
@@ -58,7 +76,8 @@ pub(super) async fn apply(
     }
 
     let intent_exists = manager.operation_store.has_intent(&plan).await?;
-    if !intent_exists && unix_time_millis()? > plan.expires_at_ms {
+    let apply_started_at_ms = unix_time_millis()?;
+    if !intent_exists && apply_started_at_ms > plan.expires_at_ms {
         return Err(PluginManagerError::OperationFailed(
             "the reviewed plugin plan expired; create and review a new plan".to_string(),
         ));
@@ -66,13 +85,21 @@ pub(super) async fn apply(
 
     let capability_before = observe(manager).await;
     ensure_capability_precondition(&plan.capability_state, &capability_before, intent_exists)?;
-    let resumed = manager.operation_store.persist_intent(&plan).await?;
+    let confirmation = if intent_exists {
+        None
+    } else {
+        verify_new_apply_authority(manager, &plan, confirmed, apply_started_at_ms)?
+    };
+    let resumed = manager
+        .operation_store
+        .persist_intent_with_confirmation(&plan, confirmation)
+        .await?;
 
     let raw_result = manager
         .process
-        .apply(&plan.request, &plan.plan_digest)
+        .apply(&plan.request, plan.upstream_plan_digest())
         .await?;
-    validate_apply_result(&raw_result, &plan.plan_digest)?;
+    validate_apply_result(&raw_result, plan.upstream_plan_digest())?;
     let capability_after = observe(manager).await;
     let completed_at_ms = unix_time_millis()?;
     let data = applied_output(
@@ -99,6 +126,40 @@ pub(super) async fn apply(
     } else {
         replayed_result(durable)
     }
+}
+
+fn verify_new_apply_authority(
+    manager: &PluginManager,
+    plan: &StoredPluginPlan,
+    confirmed: bool,
+    now_ms: u64,
+) -> PluginManagerResult<Option<a3s_use_core::PluginOperationConfirmation>> {
+    let Some(operation_plan) = &plan.plugin_operation_plan else {
+        return Ok(None);
+    };
+    let evaluation = manager.verify_plan_authority(&operation_plan.plan)?;
+    let confirmation = match evaluation.decision {
+        a3s_use_core::PlanPolicyDecision::Allow => None,
+        a3s_use_core::PlanPolicyDecision::Ask if confirmed => {
+            Some(a3s_use_core::PluginOperationConfirmation {
+                schema: a3s_use_core::PLUGIN_OPERATION_CONFIRMATION_SCHEMA.to_string(),
+                operation_id: plan.operation_id.clone(),
+                plan_digest: operation_plan.plan_digest.clone(),
+                confirmed_by: a3s_use_core::PlanActor::User,
+                confirmed_at_ms: now_ms,
+            })
+        }
+        a3s_use_core::PlanPolicyDecision::Ask | a3s_use_core::PlanPolicyDecision::Deny => None,
+    };
+    operation_plan
+        .verify_confirmed_apply(
+            &plan.operation_id,
+            &operation_plan.plan_digest,
+            confirmation.as_ref(),
+            now_ms,
+        )
+        .map_err(|error| PluginManagerError::OperationFailed(error.to_string()))?;
+    Ok(confirmation)
 }
 
 pub(super) async fn set_enabled(
@@ -180,6 +241,11 @@ fn applied_output(
     let object = result_object(&mut output)?;
     insert_manager_field(
         object,
+        "planDigest",
+        Value::String(plan.plan_digest.clone()),
+    );
+    insert_manager_field(
+        object,
         "operationId",
         Value::String(plan.operation_id.clone()),
     );
@@ -205,6 +271,20 @@ fn applied_output(
     );
     insert_manager_field(object, "resumed", Value::Bool(resumed));
     insert_manager_field(object, "replayed", Value::Bool(replayed));
+    object.remove("pluginOperationPlanDigest");
+    object.remove("authority");
+    if let Some(operation_plan) = &plan.plugin_operation_plan {
+        insert_manager_field(
+            object,
+            "pluginOperationPlanDigest",
+            Value::String(operation_plan.plan_digest.clone()),
+        );
+        insert_manager_field(
+            object,
+            "authority",
+            serde_json::to_value(&operation_plan.plan.authority).map_err(json_error)?,
+        );
+    }
     Ok(output)
 }
 
@@ -330,78 +410,4 @@ fn json_error(error: serde_json::Error) -> PluginManagerError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::plugin_manager::process::PluginLifecycleAction;
-
-    #[test]
-    fn operation_id_apply_rejects_legacy_identity_fields() {
-        let request = PluginApplyRequest {
-            operation_id: Some("plugin-install-abc".to_string()),
-            action: Some(PluginLifecycleAction::Install),
-            component_id: None,
-            version: None,
-            channel: None,
-            plan_digest: "a".repeat(64),
-        };
-
-        assert!(apply_identity(&request).is_err());
-    }
-
-    #[test]
-    fn verified_capability_drift_fails_before_mutation() {
-        let planned = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Verified,
-            observed_at_ms: 1,
-            generation: Some(7),
-            revision: Some("a".repeat(64)),
-            error: None,
-        };
-        let current = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Verified,
-            observed_at_ms: 2,
-            generation: Some(8),
-            revision: Some("b".repeat(64)),
-            error: None,
-        };
-
-        assert!(ensure_capability_state_unchanged(&planned, &current).is_err());
-        assert!(ensure_capability_precondition(&planned, &current, true).is_ok());
-    }
-
-    #[test]
-    fn newly_available_capability_state_requires_a_new_plan() {
-        let planned = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Unavailable,
-            observed_at_ms: 1,
-            generation: None,
-            revision: None,
-            error: Some("A3S Use is not ready".to_string()),
-        };
-        let current = PluginCapabilityEvidence {
-            status: PluginCapabilityEvidenceStatus::Verified,
-            observed_at_ms: 2,
-            generation: Some(1),
-            revision: Some("a".repeat(64)),
-            error: None,
-        };
-
-        assert!(ensure_capability_state_unchanged(&planned, &current).is_err());
-    }
-
-    #[test]
-    fn operation_id_apply_accepts_a_canonical_prefixed_digest() {
-        let digest = "c".repeat(64);
-        let request: PluginApplyRequest = serde_json::from_value(serde_json::json!({
-            "operationId": "plugin-install-abc",
-            "planDigest": format!("sha256:{digest}"),
-        }))
-        .unwrap();
-
-        let (operation_id, legacy_request) = apply_identity(&request).unwrap();
-
-        assert_eq!(operation_id.as_deref(), Some("plugin-install-abc"));
-        assert!(legacy_request.is_none());
-        assert_eq!(normalize_plan_digest(&request.plan_digest).unwrap(), digest);
-    }
-}
+mod tests;

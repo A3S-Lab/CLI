@@ -20,9 +20,11 @@ pub(super) fn validate_plan_record(record: &StoredPluginPlan) -> PluginManagerRe
     }
     validate_operation_id(&record.operation_id)?;
     validate_digest(&record.plan_digest)?;
+    validate_digest(record.upstream_plan_digest())?;
     ensure_request_valid(&record.request)?;
     validate_capability_evidence(&record.capability_state)?;
     validate_plan_value(&record.plan, &record.plan_digest)?;
+    validate_plugin_operation_plan(record)?;
     if record.created_at_ms == 0
         || record.expires_at_ms <= record.created_at_ms
         || record.expires_at_ms - record.created_at_ms > PLAN_LIFETIME_MS
@@ -44,6 +46,89 @@ pub(super) fn validate_intent(
     {
         return Err(invalid_store("plugin apply intent is invalid"));
     }
+    match &plan.plugin_operation_plan {
+        Some(operation_plan) => operation_plan
+            .verify_confirmed_apply(
+                &plan.operation_id,
+                &operation_plan.plan_digest,
+                intent.confirmation.as_ref(),
+                intent.started_at_ms,
+            )
+            .map_err(|error| {
+                invalid_store(format!("plugin apply intent authority is invalid: {error}"))
+            })?,
+        None if intent.confirmation.is_some() => {
+            return Err(invalid_store(
+                "legacy plugin apply intent contains unrelated confirmation",
+            ));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerResult<()> {
+    let Some(envelope) = &record.plugin_operation_plan else {
+        if record.plan.get("pluginOperationPlan").is_some()
+            || record.plan.get("pluginOperationPlanDigest").is_some()
+        {
+            return Err(invalid_store(
+                "reviewed plan payload contains an unbound plugin operation plan",
+            ));
+        }
+        return Ok(());
+    };
+    envelope
+        .validate()
+        .map_err(|error| invalid_store(format!("plugin operation plan is invalid: {error}")))?;
+    let envelope_digest = envelope
+        .plan_digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&envelope.plan_digest);
+    if validate_digest(envelope_digest).is_err() {
+        return Err(invalid_store(
+            "plugin operation plan digest is not canonical",
+        ));
+    }
+    let expected_action = match record.request.action {
+        PluginLifecycleAction::Install => a3s_use_core::PluginOperationAction::Install,
+        PluginLifecycleAction::Upgrade => a3s_use_core::PluginOperationAction::Upgrade,
+        PluginLifecycleAction::Uninstall => a3s_use_core::PluginOperationAction::Uninstall,
+    };
+    let expected_package_id = record
+        .request
+        .component_id
+        .strip_prefix("use/")
+        .unwrap_or_default();
+    let serialized_plan = serde_json::to_value(&envelope.plan).map_err(|error| {
+        invalid_store(format!(
+            "plugin operation plan could not be encoded: {error}"
+        ))
+    })?;
+    if record.upstream_plan_digest.is_none()
+        || envelope_digest != record.plan_digest
+        || envelope.plan.operation_id != record.operation_id
+        || envelope.plan.created_at_ms != record.created_at_ms
+        || envelope.plan.expires_at_ms != record.expires_at_ms
+        || envelope.plan.action != expected_action
+        || envelope.plan.package_id != expected_package_id
+        || envelope.plan.authority.actor != record.actor
+        || envelope.plan.scope.kind != a3s_use_core::PlanScopeKind::User
+        || envelope.plan.scope.id != "current"
+        || record.capability_state.status != PluginCapabilityEvidenceStatus::Verified
+        || envelope.plan.state.capability_generation
+            != record.capability_state.generation.unwrap_or(0)
+        || record.plan.get("pluginOperationPlan") != Some(&serialized_plan)
+        || record
+            .plan
+            .get("pluginOperationPlanDigest")
+            .and_then(Value::as_str)
+            != Some(envelope.plan_digest.as_str())
+    {
+        return Err(invalid_store(
+            "plugin operation plan does not match its reviewed Manager record",
+        ));
+    }
     Ok(())
 }
 
@@ -64,6 +149,26 @@ pub(super) fn validate_result(
             "failed to validate plugin capability evidence: {error}"
         ))
     })?;
+    let operation_binding_valid = match &plan.plugin_operation_plan {
+        Some(operation_plan) => {
+            let authority =
+                serde_json::to_value(&operation_plan.plan.authority).map_err(|error| {
+                    PluginManagerError::Infrastructure(format!(
+                        "failed to validate plugin plan authority: {error}"
+                    ))
+                })?;
+            result
+                .data
+                .get("pluginOperationPlanDigest")
+                .and_then(Value::as_str)
+                == Some(operation_plan.plan_digest.as_str())
+                && result.data.get("authority") == Some(&authority)
+        }
+        None => {
+            result.data.get("pluginOperationPlanDigest").is_none()
+                && result.data.get("authority").is_none()
+        }
+    };
     let canonical_plan_digest = format!("sha256:{}", result.plan_digest);
     if result.schema != OPERATION_RECORD_SCHEMA
         || result.operation_id != plan.operation_id
@@ -85,6 +190,7 @@ pub(super) fn validate_result(
         || !result.data.get("operations").is_some_and(Value::is_array)
         || !result.data.get("resumed").is_some_and(Value::is_boolean)
         || result.data.get("replayed").and_then(Value::as_bool) != Some(false)
+        || !operation_binding_valid
     {
         return Err(invalid_store("durable plugin operation result is invalid"));
     }
