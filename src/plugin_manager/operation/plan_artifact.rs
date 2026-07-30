@@ -1,6 +1,7 @@
 use a3s_use_core::{
     PlanActor, PlanAuthority, PlanPackageRole, PlanPolicyDecision, PlanScopeKind,
-    PluginOperationAction, PluginOperationPlan, PluginOperationPlanEnvelope, PluginReleaseChannel,
+    PluginOperationAction, PluginOperationPlan, PluginOperationPlanBinding,
+    PluginOperationPlanDraft, PluginOperationPlanEnvelope, PluginReleaseChannel,
 };
 use serde_json::Value;
 
@@ -52,9 +53,13 @@ pub(super) fn prepare(
         ));
     }
 
-    let mut plan: PluginOperationPlan = serde_json::from_value(draft_value)
+    let draft: PluginOperationPlanDraft = serde_json::from_value(draft_value)
         .map_err(|error| upstream_error(format!("pluginOperationPlan is invalid: {error}")))?;
-    bind_host_identity(&mut plan, actor, identity, authorization)?;
+    let mut plan = draft
+        .bind(host_binding(actor, identity, authorization)?)
+        .map_err(|error| {
+            upstream_error(format!("pluginOperationPlan cannot be host-bound: {error}"))
+        })?;
     validate_resolved_request(&plan, request, capability_state)?;
     let evaluation = authorization.evaluate_plan(&plan)?;
     plan.authority = evaluation.authority();
@@ -84,22 +89,26 @@ pub(super) fn prepare(
     })
 }
 
-fn bind_host_identity(
-    plan: &mut PluginOperationPlan,
+fn host_binding(
     actor: PlanActor,
     identity: &PluginPlanIdentity,
     authorization: &PluginAuthorizationPolicy,
-) -> PluginManagerResult<()> {
-    plan.operation_id = identity.operation_id.clone();
-    plan.created_at_ms = identity.created_at_ms;
-    plan.expires_at_ms = identity.expires_at_ms;
-    plan.authority = PlanAuthority {
-        actor,
-        decision: PlanPolicyDecision::Ask,
-        policy_digest: authorization.descriptor_digest()?,
-        confirmation_required: true,
-    };
-    Ok(())
+) -> PluginManagerResult<PluginOperationPlanBinding> {
+    Ok(PluginOperationPlanBinding {
+        operation_id: identity.operation_id.clone(),
+        created_at_ms: identity.created_at_ms,
+        expires_at_ms: identity.expires_at_ms,
+        scope: a3s_use_core::PlanScope {
+            kind: PlanScopeKind::User,
+            id: "current".to_string(),
+        },
+        authority: PlanAuthority {
+            actor,
+            decision: PlanPolicyDecision::Ask,
+            policy_digest: authorization.descriptor_digest()?,
+            confirmation_required: true,
+        },
+    })
 }
 
 fn validate_resolved_request(
@@ -186,12 +195,25 @@ mod tests {
     use super::*;
     use crate::plugin_manager::policy::tests::install_plan;
 
+    fn install_draft() -> PluginOperationPlanDraft {
+        let mut plan = install_plan();
+        plan.workspace_impacts.clear();
+        PluginOperationPlanDraft::new(
+            plan.action,
+            plan.package_id,
+            plan.component_id,
+            plan.packages,
+            plan.providers,
+            plan.workspace_impacts,
+            plan.impact,
+            plan.state,
+        )
+        .unwrap()
+    }
+
     #[test]
     fn complete_draft_is_host_bound_authorized_and_redigested() {
-        let mut draft = install_plan();
-        draft.scope.kind = PlanScopeKind::User;
-        draft.scope.id = "current".to_string();
-        draft.workspace_impacts.clear();
+        let draft = install_draft();
         let capability = PluginCapabilityEvidence {
             status: PluginCapabilityEvidenceStatus::Verified,
             observed_at_ms: 1,
@@ -243,10 +265,7 @@ mod tests {
 
     #[test]
     fn draft_cannot_change_the_requested_package_or_capability_generation() {
-        let mut draft = install_plan();
-        draft.scope.kind = PlanScopeKind::User;
-        draft.scope.id = "current".to_string();
-        draft.workspace_impacts.clear();
+        let draft = install_draft();
         let capability = PluginCapabilityEvidence {
             status: PluginCapabilityEvidenceStatus::Verified,
             observed_at_ms: 1,

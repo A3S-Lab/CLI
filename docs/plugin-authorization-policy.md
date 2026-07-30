@@ -121,10 +121,13 @@ actor. Reviewed records persist the selected actor and the current fixed
 ## Reviewed-plan binding
 
 When the delegated planner returns `pluginOperationPlan`, the Manager accepts
-it only as a draft. Host-owned operation identity, lifetime, actor, scope,
-requested release constraints, and verified capability generation are bound
-before structural validation. Policy evaluation then replaces draft authority
-and `PluginOperationPlanEnvelope` computes the canonical reviewed digest.
+only the strict `a3s.use.plugin-operation-plan-draft.v1` contract. That
+contract has no fields for operation identity, lifetime, actor, scope, policy,
+confirmation requirements, or derived secret changes, and unknown fields fail
+closed. The Manager binds host authority and scope, verifies requested release
+constraints and capability generation, and validates the resulting final
+plan. Policy evaluation then supplies final authority and
+`PluginOperationPlanEnvelope` computes the canonical reviewed digest.
 
 The durable record keeps two distinct identities:
 

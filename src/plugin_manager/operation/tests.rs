@@ -216,14 +216,24 @@ fn full_plan_record(
 ) -> (tempfile::TempDir, PluginManager, StoredPluginPlan) {
     let temporary = tempfile::tempdir().unwrap();
     let manager = manager(temporary.path(), policy.clone());
-    let mut draft = install_plan();
-    draft.scope.kind = a3s_use_core::PlanScopeKind::User;
-    draft.scope.id = "current".to_string();
-    draft.workspace_impacts.clear();
+    let mut fixture = install_plan();
+    fixture.workspace_impacts.clear();
+    let capability_generation = fixture.state.capability_generation;
+    let draft = a3s_use_core::PluginOperationPlanDraft::new(
+        fixture.action,
+        fixture.package_id,
+        fixture.component_id,
+        fixture.packages,
+        fixture.providers,
+        fixture.workspace_impacts,
+        fixture.impact,
+        fixture.state,
+    )
+    .unwrap();
     let capability_state = PluginCapabilityEvidence {
         status: PluginCapabilityEvidenceStatus::Verified,
         observed_at_ms: 1,
-        generation: Some(draft.state.capability_generation),
+        generation: Some(capability_generation),
         revision: Some("a".repeat(64)),
         error: None,
     };

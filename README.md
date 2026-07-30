@@ -487,16 +487,19 @@ schema and evaluation rules. The shared Manager now owns this immutable policy
 and exposes the same complete-plan evaluation and apply-time verification API
 to every adapter.
 
-The delegated planner may now return a `pluginOperationPlan` draft beside its
-umbrella component plan. The Manager treats that draft as untrusted: it binds
-the host operation ID, lifetime, actor, fixed scope, requested release, and
-verified capability generation; evaluates policy; persists the resulting
-`PluginOperationPlanEnvelope`; and makes its canonical digest the reviewed
-identity. The upstream component digest is retained separately and is used
-only when invoking the existing mutation child. Initial apply rechecks policy
-and requires an exact `a3s.use.plugin-operation-confirmation.v1` for `ask`.
-Once durable intent exists, recovery reuses that stored confirmation instead
-of stranding partial side effects after a later policy change.
+The delegated planner may now return an
+`a3s.use.plugin-operation-plan-draft.v1` value in `pluginOperationPlan`
+beside its umbrella component plan. Its strict shape cannot contain operation
+identity, lifetime, scope, actor, policy, confirmation requirements, or
+derived secret changes. The Manager binds those host-owned fields, verifies
+the requested release and capability generation, evaluates policy, persists
+the resulting `PluginOperationPlanEnvelope`, and makes its canonical digest
+the reviewed identity. The upstream component digest is retained separately
+and is used only when invoking the existing mutation child. Initial apply
+rechecks policy and requires an exact
+`a3s.use.plugin-operation-confirmation.v1` for `ask`. Once durable intent
+exists, recovery reuses that stored confirmation instead of stranding partial
+side effects after a later policy change.
 
 Existing component-only records remain readable and keep their previous digest
 semantics. The current umbrella component planner does not yet emit the full
