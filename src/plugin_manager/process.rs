@@ -19,7 +19,7 @@ pub enum PluginLifecycleAction {
     Uninstall,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginPlanRequest {
     pub action: PluginLifecycleAction,
@@ -31,8 +31,9 @@ pub struct PluginPlanRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginApplyRequest {
-    pub action: PluginLifecycleAction,
-    pub component_id: String,
+    pub operation_id: Option<String>,
+    pub action: Option<PluginLifecycleAction>,
+    pub component_id: Option<String>,
     pub version: Option<String>,
     pub channel: Option<String>,
     pub plan_digest: String,
@@ -71,14 +72,18 @@ impl A3sProcessAdapter {
         self.run_json(args, JsonOutputOwner::Root).await
     }
 
-    pub(super) async fn apply(&self, request: &PluginApplyRequest) -> PluginManagerResult<Value> {
-        validate_plan_digest(&request.plan_digest)?;
+    pub(super) async fn apply(
+        &self,
+        request: &PluginPlanRequest,
+        plan_digest: &str,
+    ) -> PluginManagerResult<Value> {
+        let plan_digest = normalize_plan_digest(plan_digest)?;
         let args = plugin_operation_args(
             request.action,
             &request.component_id,
             request.version.as_deref(),
             request.channel.as_deref(),
-            Some(&request.plan_digest),
+            Some(&plan_digest),
         )?;
         self.run_json(args, JsonOutputOwner::Root).await
     }
@@ -96,6 +101,10 @@ impl A3sProcessAdapter {
             JsonOutputOwner::UseProxy,
         )
         .await
+    }
+
+    pub(super) fn workspace(&self) -> &std::path::Path {
+        &self.workspace
     }
 
     async fn run_json(
@@ -185,45 +194,36 @@ pub(super) fn plugin_operation_args(
     channel: Option<&str>,
     plan_digest: Option<&str>,
 ) -> PluginManagerResult<Vec<String>> {
-    let component_id = normalize_component_id(component_id)?;
-    let mut args = match action {
-        PluginLifecycleAction::Install => vec!["install".to_string(), component_id],
-        PluginLifecycleAction::Upgrade => vec!["upgrade".to_string(), component_id],
-        PluginLifecycleAction::Uninstall => vec!["uninstall".to_string(), component_id],
+    let request = normalize_plan_request(&PluginPlanRequest {
+        action,
+        component_id: component_id.to_string(),
+        version: version.map(str::to_string),
+        channel: channel.map(str::to_string),
+    })?;
+    let mut args = match request.action {
+        PluginLifecycleAction::Install => {
+            vec!["install".to_string(), request.component_id.clone()]
+        }
+        PluginLifecycleAction::Upgrade => {
+            vec!["upgrade".to_string(), request.component_id.clone()]
+        }
+        PluginLifecycleAction::Uninstall => {
+            vec!["uninstall".to_string(), request.component_id.clone()]
+        }
     };
-    if action == PluginLifecycleAction::Install {
-        if let Some(version) = normalize_optional_value(version, "version", 64)? {
-            let parsed = semver::Version::parse(&version).map_err(|error| {
-                PluginManagerError::InvalidRequest(format!(
-                    "plugin version must be canonical semantic version syntax: {error}"
-                ))
-            })?;
-            if parsed.to_string() != version {
-                return Err(PluginManagerError::InvalidRequest(
-                    "plugin version must use canonical semantic version syntax".to_string(),
-                ));
-            }
+    if request.action == PluginLifecycleAction::Install {
+        if let Some(version) = request.version {
             args.extend(["--version".to_string(), version]);
         }
-        if let Some(channel) = normalize_optional_value(channel, "channel", 16)? {
-            if !matches!(channel.as_str(), "stable" | "beta" | "nightly") {
-                return Err(PluginManagerError::InvalidRequest(
-                    "channel must be stable, beta, or nightly".to_string(),
-                ));
-            }
+        if let Some(channel) = request.channel {
             args.extend(["--channel".to_string(), channel]);
         }
-    } else if version.is_some() || channel.is_some() {
-        return Err(PluginManagerError::InvalidRequest(format!(
-            "{} does not accept version or channel",
-            action.as_str()
-        )));
     }
     if let Some(plan_digest) = plan_digest {
-        validate_plan_digest(plan_digest)?;
+        let plan_digest = normalize_plan_digest(plan_digest)?;
         args.extend([
             "--plan-digest".to_string(),
-            plan_digest.to_string(),
+            plan_digest,
             "--yes".to_string(),
         ]);
     } else {
@@ -232,8 +232,53 @@ pub(super) fn plugin_operation_args(
     Ok(args)
 }
 
+pub(super) fn normalize_plan_request(
+    request: &PluginPlanRequest,
+) -> PluginManagerResult<PluginPlanRequest> {
+    let component_id = normalize_component_id(&request.component_id)?;
+    let (version, channel) = if request.action == PluginLifecycleAction::Install {
+        let version = normalize_optional_value(request.version.as_deref(), "version", 64)?;
+        if let Some(version) = &version {
+            let parsed = semver::Version::parse(version).map_err(|error| {
+                PluginManagerError::InvalidRequest(format!(
+                    "plugin version must be canonical semantic version syntax: {error}"
+                ))
+            })?;
+            if parsed.to_string() != *version {
+                return Err(PluginManagerError::InvalidRequest(
+                    "plugin version must use canonical semantic version syntax".to_string(),
+                ));
+            }
+        }
+        let channel = normalize_optional_value(request.channel.as_deref(), "channel", 16)?;
+        if channel
+            .as_deref()
+            .is_some_and(|channel| !matches!(channel, "stable" | "beta" | "nightly"))
+        {
+            return Err(PluginManagerError::InvalidRequest(
+                "channel must be stable, beta, or nightly".to_string(),
+            ));
+        }
+        (version, channel)
+    } else {
+        if request.version.is_some() || request.channel.is_some() {
+            return Err(PluginManagerError::InvalidRequest(format!(
+                "{} does not accept version or channel",
+                request.action.as_str()
+            )));
+        }
+        (None, None)
+    };
+    Ok(PluginPlanRequest {
+        action: request.action,
+        component_id,
+        version,
+        channel,
+    })
+}
+
 impl PluginLifecycleAction {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Install => "install",
             Self::Upgrade => "upgrade",
@@ -284,7 +329,8 @@ fn normalize_optional_value(
         .transpose()
 }
 
-fn validate_plan_digest(value: &str) -> PluginManagerResult<()> {
+pub(super) fn normalize_plan_digest(value: &str) -> PluginManagerResult<String> {
+    let value = value.strip_prefix("sha256:").unwrap_or(value);
     if value.len() != 64
         || !value
             .bytes()
@@ -294,7 +340,7 @@ fn validate_plan_digest(value: &str) -> PluginManagerResult<()> {
             "planDigest must contain 64 lowercase hexadecimal characters".to_string(),
         ));
     }
-    Ok(())
+    Ok(value.to_string())
 }
 
 fn concise_error(value: &str) -> String {

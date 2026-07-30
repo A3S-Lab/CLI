@@ -429,6 +429,16 @@ also serializes plan, apply, enable, and disable operations with the same
 timeout, output-size, component-ID, and reviewed-plan-digest checks for every
 adapter.
 
+Each dry-run receives a cryptographically random `operationId` and persists an
+immutable one-hour reviewed plan with the observed A3S Use capability
+generation/revision. Apply resolves that stored plan from
+`operationId + planDigest`, records append-only intent before invoking the
+umbrella component lifecycle, and retains a successful result for seven-day
+idempotent replay. A process-local guard and a cross-process manager lock give
+CLI, Web, and future management MCP adapters one mutation order. The manager
+record owns plan identity and replay only; the existing component batch journal
+remains the sole checkpoint journal for package and delegated Use side effects.
+
 The Code TUI treats Use as a first-use component: before terminal takeover it
 reuses a healthy install or installs the verified release when networking and
 automatic setup are allowed. Offline mode and `A3S_NO_AUTO_INSTALL=1` remain

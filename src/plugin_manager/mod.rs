@@ -5,7 +5,9 @@
 //! Registry trust and authorization remain owned by the umbrella A3S host;
 //! package verification and mutation remain delegated to A3S Use.
 
+mod capability;
 mod catalog;
+mod operation;
 mod process;
 
 #[cfg(test)]
@@ -19,6 +21,7 @@ use tokio::sync::Mutex;
 use crate::components::ComponentPaths;
 use crate::registry::RegistryStore;
 
+pub use capability::{PluginCapabilityEvidence, PluginCapabilityEvidenceStatus};
 pub use catalog::{
     PluginMarketplaceItem, PluginMarketplaceSnapshot, PluginMarketplaceSource,
     PluginMarketplaceSourceKind, PluginMarketplaceSourceMetadata,
@@ -50,14 +53,16 @@ pub enum PluginManagerError {
     Infrastructure(String),
 }
 
-/// One process-local manager instance and its serialization boundary.
+/// One process-local manager instance and its serialization boundaries.
 ///
-/// The operation lock is shared by every adapter holding this manager. Read
-/// operations do not take it; lifecycle mutations and their reviewed plans do.
+/// The Tokio lock is shared by every adapter holding this manager. A separate
+/// file lock serializes reviewed plans and lifecycle mutations with other host
+/// processes. Marketplace reads take neither lock.
 pub struct PluginManager {
     pub(super) component_paths: ComponentPaths,
     pub(super) registry_store: RegistryStore,
     process: process::A3sProcessAdapter,
+    operation_store: operation::store::PluginOperationStore,
     operation_lock: Mutex<()>,
 }
 
@@ -84,6 +89,7 @@ impl PluginManager {
         component_paths: ComponentPaths,
         registry_store: RegistryStore,
     ) -> Self {
+        let operation_store = operation::store(&component_paths.state_root);
         let process = process::A3sProcessAdapter::new(
             component_paths.current_exe.clone(),
             config_path,
@@ -93,6 +99,7 @@ impl PluginManager {
             component_paths,
             registry_store,
             process,
+            operation_store,
             operation_lock: Mutex::new(()),
         }
     }
@@ -113,7 +120,7 @@ impl PluginManager {
         request: &PluginPlanRequest,
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        self.process.plan(request).await
+        operation::plan(self, request).await
     }
 
     /// Apply an already reviewed umbrella component plan through the same
@@ -123,7 +130,7 @@ impl PluginManager {
         request: &PluginApplyRequest,
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        self.process.apply(request).await
+        operation::apply(self, request).await
     }
 
     pub async fn set_package_enabled(
@@ -131,6 +138,6 @@ impl PluginManager {
         request: &PluginPackageToggleRequest,
     ) -> PluginManagerResult<serde_json::Value> {
         let _guard = self.operation_lock.lock().await;
-        self.process.set_enabled(request).await
+        operation::set_enabled(self, request).await
     }
 }

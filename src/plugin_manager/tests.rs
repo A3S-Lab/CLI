@@ -3,12 +3,16 @@ use std::collections::BTreeMap;
 use a3s_use_core::{PluginCatalogRecord, VerifiedCatalogProvenance, VerifiedPluginCatalogRecord};
 use a3s_use_extension::PluginCatalogHost;
 
+use crate::components::ComponentPaths;
+use crate::registry::RegistryStore;
+
 use super::catalog::catalog_item;
 use super::catalog::package_display_name;
 use super::process::{
-    json_invocation_args, plugin_operation_args, use_extension_toggle_args, JsonOutputOwner,
+    json_invocation_args, normalize_plan_request, plugin_operation_args, use_extension_toggle_args,
+    JsonOutputOwner,
 };
-use super::{PluginLifecycleAction, PluginManager};
+use super::{PluginApplyRequest, PluginLifecycleAction, PluginManager, PluginPlanRequest};
 
 const COMPLETE_CATALOG_RECORD: &[u8] = include_bytes!("fixtures/complete-catalog-record-v1.json");
 
@@ -70,6 +74,21 @@ fn lifecycle_arguments_require_reviewed_digest_and_use_namespace() {
         None
     )
     .is_err());
+}
+
+#[test]
+fn reviewed_plan_requests_are_stored_in_canonical_form() {
+    let normalized = normalize_plan_request(&PluginPlanRequest {
+        action: PluginLifecycleAction::Install,
+        component_id: "  use/acme/research  ".to_string(),
+        version: Some(" 2.0.0 ".to_string()),
+        channel: Some(" stable ".to_string()),
+    })
+    .unwrap();
+
+    assert_eq!(normalized.component_id, "use/acme/research");
+    assert_eq!(normalized.version.as_deref(), Some("2.0.0"));
+    assert_eq!(normalized.channel.as_deref(), Some("stable"));
 }
 
 #[test]
@@ -153,4 +172,116 @@ fn complete_catalog_record_preserves_surfaces_permissions_and_provenance() {
     }));
     assert!(item.installed);
     assert!(item.enabled);
+}
+
+#[tokio::test]
+async fn reviewed_operation_replays_without_a_second_child_mutation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let config_path = temporary.path().join("config/a3s.acl");
+    let calls_path = temporary.path().join("child-calls.log");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    let executable = write_fake_a3s(temporary.path(), &calls_path);
+    let mut component_paths = ComponentPaths::for_test(temporary.path());
+    component_paths.current_exe = executable;
+    let manager = PluginManager::new(
+        config_path,
+        workspace,
+        component_paths,
+        RegistryStore::new(temporary.path().join("registries")),
+    );
+    let plan_digest = "a".repeat(64);
+    let plan = manager
+        .plan_operation(&PluginPlanRequest {
+            action: PluginLifecycleAction::Install,
+            component_id: "use/acme/research".to_string(),
+            version: Some("2.0.0".to_string()),
+            channel: Some("stable".to_string()),
+        })
+        .await
+        .unwrap();
+    let operation_id = plan
+        .get("operationId")
+        .and_then(serde_json::Value::as_str)
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        plan.pointer("/capabilityState/status")
+            .and_then(serde_json::Value::as_str),
+        Some("unavailable")
+    );
+    let request = PluginApplyRequest {
+        operation_id: Some(operation_id.clone()),
+        action: None,
+        component_id: None,
+        version: None,
+        channel: None,
+        plan_digest: format!("sha256:{plan_digest}"),
+    };
+
+    let first = manager.apply_operation(&request).await.unwrap();
+    let replay = manager.apply_operation(&request).await.unwrap();
+
+    assert_eq!(
+        first.get("operationId").and_then(serde_json::Value::as_str),
+        Some(operation_id.as_str())
+    );
+    assert_eq!(
+        first.get("replayed").and_then(serde_json::Value::as_bool),
+        Some(false)
+    );
+    assert_eq!(
+        replay.get("replayed").and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        std::fs::read_to_string(calls_path).unwrap().lines().count(),
+        2
+    );
+}
+
+#[cfg(windows)]
+fn write_fake_a3s(root: &std::path::Path, calls_path: &std::path::Path) -> std::path::PathBuf {
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join("a3s.cmd");
+    let script = format!(
+        "@echo off\r\n\
+         echo %*>>\"{}\"\r\n\
+         echo %* | %SystemRoot%\\System32\\findstr.exe /C:\"--dry-run\" >nul\r\n\
+         if not errorlevel 1 goto plan\r\n\
+         echo {{\"ok\":true,\"data\":{{\"planDigest\":\"{}\",\"operations\":[]}}}}\r\n\
+         exit /b 0\r\n\
+         :plan\r\n\
+         echo {{\"ok\":true,\"data\":{{\"dryRun\":true,\"planSchemaVersion\":1,\"planCommand\":\"install\",\"planDigest\":\"{}\",\"plans\":[]}}}}\r\n",
+        calls_path.display(),
+        "a".repeat(64),
+        "a".repeat(64),
+    );
+    std::fs::write(&executable, script).unwrap();
+    executable
+}
+
+#[cfg(unix)]
+fn write_fake_a3s(root: &std::path::Path, calls_path: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let executable = bin.join("a3s");
+    let calls_path = calls_path.display().to_string().replace('\'', "'\"'\"'");
+    let script = format!(
+        "#!/bin/sh\n\
+         printf '%s\\n' \"$*\" >> '{calls_path}'\n\
+         case \" $* \" in\n\
+           *' --dry-run '*) printf '%s\\n' '{{\"ok\":true,\"data\":{{\"dryRun\":true,\"planSchemaVersion\":1,\"planCommand\":\"install\",\"planDigest\":\"{}\",\"plans\":[]}}}}' ;;\n\
+           *) printf '%s\\n' '{{\"ok\":true,\"data\":{{\"planDigest\":\"{}\",\"operations\":[]}}}}' ;;\n\
+         esac\n",
+        "a".repeat(64),
+        "a".repeat(64),
+    );
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    executable
 }
