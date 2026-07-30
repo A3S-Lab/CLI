@@ -26,8 +26,8 @@ a3s-tui = "=0.1.14"
 a3s-search = { version = "=2.1.0", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "71c2039d2256af9ef04617ea3879359d00e85fdd" }
-a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "71c2039d2256af9ef04617ea3879359d00e85fdd" }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "2f257e1e2cc8f57c53dc423cf5bd597e7e6953cf" }
+a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "2f257e1e2cc8f57c53dc423cf5bd597e7e6953cf" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"

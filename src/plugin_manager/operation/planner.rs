@@ -1,7 +1,8 @@
 use a3s_use_core::{
     InstalledPluginPlanEvidence, PlanPackageRole, PlannedOperationImpact, PlannedStateEvidence,
-    PluginCatalogRecord, PluginOperationAction, PluginOperationPlanDraft, PluginSurfaceKind,
-    VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2,
+    PluginCatalogRecord, PluginOperationAction, PluginOperationPlanDraft, PluginPlanningBundle,
+    PluginSurfaceKind, VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2,
+    PLUGIN_CATALOG_SCHEMA_V3,
 };
 use a3s_use_extension::ResolvedRemotePackage;
 use serde_json::Value;
@@ -264,9 +265,12 @@ fn verified_candidate_catalog(
     catalog
         .validate()
         .map_err(|error| planner_error(error.to_string()))?;
-    if catalog.record.schema != PLUGIN_CATALOG_SCHEMA_V2 {
+    if !matches!(
+        catalog.record.schema.as_str(),
+        PLUGIN_CATALOG_SCHEMA_V2 | PLUGIN_CATALOG_SCHEMA_V3
+    ) {
         return Err(planner_error(
-            "only catalog-v2 packages can produce a complete lifecycle draft",
+            "only catalog-v2 or catalog-v3 packages can produce a complete lifecycle draft",
         ));
     }
     let package_id = request
@@ -296,7 +300,37 @@ fn verified_candidate_catalog(
             "verified catalog does not match the exact umbrella registry target",
         ));
     }
+    validate_planning_bundle(plan, request, &catalog)?;
     Ok(Some(catalog))
+}
+
+fn validate_planning_bundle(
+    plan: &serde_json::Map<String, Value>,
+    request: &PluginPlanRequest,
+    catalog: &VerifiedPluginCatalogRecord,
+) -> PluginManagerResult<()> {
+    let bundles = plan
+        .get("verifiedPluginPlanningBundles")
+        .and_then(Value::as_object);
+    if catalog.record.schema == PLUGIN_CATALOG_SCHEMA_V2 {
+        if bundles.is_some_and(|bundles| bundles.contains_key(&request.component_id)) {
+            return Err(planner_error(
+                "catalog-v2 evidence must not acquire an executable planning bundle",
+            ));
+        }
+        return Ok(());
+    }
+
+    let bundle_value = bundles
+        .and_then(|bundles| bundles.get(&request.component_id))
+        .ok_or_else(|| {
+            planner_error("catalog-v3 evidence omitted its verified executable planning bundle")
+        })?;
+    let bundle: PluginPlanningBundle = serde_json::from_value(bundle_value.clone())
+        .map_err(|error| planner_error(format!("plugin planning bundle is invalid: {error}")))?;
+    bundle
+        .validate_catalog_binding(catalog)
+        .map_err(|error| planner_error(error.to_string()))
 }
 
 fn validate_installed_evidence(
@@ -476,9 +510,10 @@ fn planner_error(message: impl Into<String>) -> PluginManagerError {
 #[cfg(test)]
 mod tests {
     use a3s_use_core::{
-        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogSurface, PluginCatalogRecord,
-        PluginOperationPlanDraft, PluginPermissionCeiling, PluginReleaseChannel, PluginSurfaceKind,
-        VerifiedCatalogProvenance, VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2,
+        CatalogArchive, CatalogAvailability, CatalogPackage, CatalogPlanningTarget, CatalogSurface,
+        PluginCatalogRecord, PluginOperationPlanDraft, PluginPermissionCeiling,
+        PluginReleaseChannel, PluginSurfaceKind, VerifiedCatalogProvenance,
+        VerifiedPluginCatalogRecord, PLUGIN_CATALOG_SCHEMA_V2, PLUGIN_CATALOG_SCHEMA_V3,
         PLUGIN_PERMISSION_SCHEMA,
     };
 
@@ -537,6 +572,39 @@ mod tests {
         assert!(error
             .to_string()
             .contains("explicit live Runtime provider assignment"));
+    }
+
+    #[test]
+    fn catalog_v3_requires_its_verified_planning_bundle() {
+        let mut record = skill_catalog().record;
+        record.schema = PLUGIN_CATALOG_SCHEMA_V3.to_string();
+        record.planning = Some(CatalogPlanningTarget {
+            target_name: "extensions/acme/guide/1.0.0/stable/any/planning-v1.json".to_string(),
+            length: 123,
+            sha256: format!("sha256:{}", "9".repeat(64)),
+        });
+        let catalog = VerifiedPluginCatalogRecord::new(
+            record.clone(),
+            VerifiedCatalogProvenance {
+                catalog_record_digest: record.descriptor_digest().unwrap(),
+                ..skill_catalog().provenance
+            },
+        )
+        .unwrap();
+        let resolved = ResolvedRemotePackage::from_verified_catalog(&catalog).unwrap();
+
+        let error = attach_draft(
+            &request(),
+            &installation(),
+            None,
+            3,
+            umbrella_plan(&catalog, &resolved),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("omitted its verified executable planning bundle"));
     }
 
     #[test]
@@ -826,6 +894,7 @@ mod tests {
             }],
             permission_ceiling_digest: permissions.descriptor_digest().unwrap(),
             permission_ceiling: permissions,
+            planning: None,
             archive: CatalogArchive {
                 target_name: "extensions/acme/guide/1.0.0/stable/any/guide-1.0.0-any.tar.gz"
                     .to_string(),
