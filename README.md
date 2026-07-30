@@ -460,6 +460,15 @@ installation-state implementations. The Manager also carries the immutable
 offline policy into delegated planning and apply processes, so a nested
 lifecycle operation cannot silently regain network access.
 
+CLI and management MCP entry paths load plugin authorization only from an
+explicit `--config`/`A3S_CONFIG_FILE` source or the existing user-level
+`~/.a3s/config.acl`, with the explicit source taking precedence. Automatically
+discovered workspace configuration is never a pre-authorization source, so a
+repository cannot authorize its own plugin mutation. Policy files are read
+through a fixed size bound and malformed input fails closed. Web currently
+uses the Manager's conservative default-`ask` policy until it receives an
+equally trusted host policy source.
+
 The host-owned `a3s.plugin-policy.v1` ACL contract now provides deterministic
 authorization for complete `a3s.use.plugin-operation-plan.v1` values. It
 normalizes exact registry, publisher, size, surface, workspace, filesystem,
@@ -468,8 +477,11 @@ Configured `allow` downgrades to `ask` whenever a ceiling fails; agent secret
 grants are denied and `native-unconfined` cannot run unattended. Apply can
 re-evaluate stored authority and reject policy drift. See
 [Plugin Authorization Policy](docs/plugin-authorization-policy.md) for the
-schema and evaluation rules. Connecting this evaluator to the existing
-component-plan lifecycle is the next integration step.
+schema and evaluation rules. The shared Manager now owns this immutable policy
+and exposes the same complete-plan evaluation and apply-time verification API
+to every adapter. Persisting a full Use plan instead of the current umbrella
+component plan, then invoking these APIs on the live lifecycle path, remains
+the next integration step.
 
 Install, upgrade, and uninstall always create a durable reviewed plan first.
 An interactive terminal prints that exact plan and asks for confirmation.

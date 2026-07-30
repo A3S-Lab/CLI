@@ -11,6 +11,7 @@ use crate::cli::context::InvocationContext;
 use crate::cli::output;
 
 mod lifecycle;
+mod policy;
 
 pub(crate) async fn run(
     command: PluginCommand,
@@ -22,11 +23,13 @@ pub(crate) async fn run(
         ));
     }
     let config_path = crate::commands::config::active_config_path(context)?;
+    let authorization = policy::load_host_authorization(context).await?;
     let manager = PluginManager::from_host_with_policy(
         &config_path,
         &context.directory,
         PluginManagerPolicy {
             offline: context.network.offline,
+            authorization,
         },
     )
     .map_err(manager_error)?;

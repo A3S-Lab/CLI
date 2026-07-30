@@ -96,7 +96,23 @@ The normalized policy digest and decision are copied into
 the current policy; any digest or decision drift requires a new plan and
 review.
 
-The policy contract and evaluator are implemented and independently tested.
-Lifecycle integration still requires the umbrella planner to persist the full
-Use operation plan and to invoke evaluation before storing and again before
-applying it.
+## Trusted policy sources
+
+The CLI and management MCP load authorization from an explicit
+`--config`/`A3S_CONFIG_FILE` path when present, otherwise from the existing
+user-level `~/.a3s/config.acl`. An automatically discovered workspace
+`.a3s/config.acl` is not an authorization source: repository content cannot
+pre-authorize its own mutation. Reads are bounded to 256 KiB, invalid UTF-8 or
+ACL fails closed, and an absent or empty configuration produces the default
+`ask` policy.
+
+The shared Plugin Manager stores this policy immutably and exposes one
+complete-plan evaluation and apply-time verification API to CLI, Web, and
+management MCP adapters. Web currently constructs the Manager with the
+default `ask` policy until a trusted host source is explicitly carried into
+that adapter.
+
+The policy source, parser, evaluator, and Manager injection are implemented
+and independently tested. Lifecycle integration still requires the umbrella
+planner to persist the full Use operation plan and to invoke evaluation before
+storing and again before applying it.

@@ -8,7 +8,9 @@ use a3s_use_core::{
     VerifiedCatalogProvenance, PLUGIN_OPERATION_PLAN_SCHEMA,
 };
 
-use super::{PluginAuthorizationPolicy, PluginPolicyViolationCode, PLUGIN_POLICY_SCHEMA};
+use super::{
+    PluginAuthorizationPolicy, PluginPolicyViolationCode, MAX_POLICY_BYTES, PLUGIN_POLICY_SCHEMA,
+};
 
 const CATALOG_RECORD: &[u8] = include_bytes!("../fixtures/complete-catalog-record-v1.json");
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -72,6 +74,38 @@ plugins {
 fn authorization_policy_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<PluginAuthorizationPolicy>();
+}
+
+#[tokio::test]
+async fn bounded_acl_file_loader_matches_in_memory_parsing() {
+    let temporary = tempfile::tempdir().unwrap();
+    let path = temporary.path().join("config.acl");
+    tokio::fs::write(&path, ALLOW_POLICY).await.unwrap();
+
+    assert_eq!(
+        PluginAuthorizationPolicy::from_acl_file(&path)
+            .await
+            .unwrap(),
+        PluginAuthorizationPolicy::from_acl(ALLOW_POLICY).unwrap()
+    );
+
+    tokio::fs::write(&path, " \n\t").await.unwrap();
+    assert_eq!(
+        PluginAuthorizationPolicy::from_acl_file(&path)
+            .await
+            .unwrap(),
+        PluginAuthorizationPolicy::default()
+    );
+
+    let oversized = temporary.path().join("oversized.acl");
+    tokio::fs::write(&oversized, vec![b' '; MAX_POLICY_BYTES + 1])
+        .await
+        .unwrap();
+    assert!(PluginAuthorizationPolicy::from_acl_file(&oversized)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("must not exceed"));
 }
 
 fn qualified(kind: PluginSurfaceKind, id: &str) -> PlanQualifiedSurfaceRef {
@@ -273,6 +307,30 @@ fn exact_plan_within_every_ceiling_is_allowed() {
     plan.authority = evaluation.authority();
     plan.validate().unwrap();
     assert_eq!(policy.verify_plan_authority(&plan).unwrap(), evaluation);
+}
+
+#[test]
+fn manager_exposes_one_immutable_policy_to_every_adapter() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspace = temporary.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let policy = PluginAuthorizationPolicy::from_acl(ALLOW_POLICY).unwrap();
+    let manager = crate::plugin_manager::PluginManager::new_with_policy(
+        temporary.path().join("config.acl"),
+        workspace,
+        crate::components::ComponentPaths::for_test(temporary.path()),
+        crate::registry::RegistryStore::new(temporary.path().join("registries")),
+        crate::plugin_manager::PluginManagerPolicy {
+            offline: true,
+            authorization: policy.clone(),
+        },
+    );
+    let mut plan = install_plan();
+    let evaluation = manager.evaluate_plan_authority(&plan).unwrap();
+    plan.authority = evaluation.authority();
+
+    assert_eq!(manager.authorization_policy(), &policy);
+    assert_eq!(manager.verify_plan_authority(&plan).unwrap(), evaluation);
 }
 
 #[test]

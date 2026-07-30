@@ -42,10 +42,12 @@ pub type PluginInstallationIndex = BTreeMap<String, bool>;
 pub type PluginManagerResult<T> = Result<T, PluginManagerError>;
 
 /// Immutable host policy shared by every Plugin Manager adapter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginManagerPolicy {
     /// Restrict catalog access and delegated lifecycle work to local state.
     pub offline: bool,
+    /// Evaluate complete immutable plans independently of plugin content.
+    pub authorization: PluginAuthorizationPolicy,
 }
 
 const PLUGIN_OPERATION_TIMEOUT_SECONDS: u64 = 180;
@@ -176,6 +178,27 @@ impl PluginManager {
     /// returned snapshot instead of being confused with an empty installation.
     pub async fn installation_snapshot(&self) -> PluginInstallationSnapshot {
         capability::installation_snapshot(self).await
+    }
+
+    /// Evaluate one complete Use operation plan through the immutable policy
+    /// shared by CLI, Web, and management MCP adapters.
+    pub fn evaluate_plan_authority(
+        &self,
+        plan: &a3s_use_core::PluginOperationPlan,
+    ) -> PluginManagerResult<PluginPolicyEvaluation> {
+        self.policy.authorization.evaluate_plan(plan)
+    }
+
+    /// Re-evaluate a stored plan at apply and reject policy or decision drift.
+    pub fn verify_plan_authority(
+        &self,
+        plan: &a3s_use_core::PluginOperationPlan,
+    ) -> PluginManagerResult<PluginPolicyEvaluation> {
+        self.policy.authorization.verify_plan_authority(plan)
+    }
+
+    pub fn authorization_policy(&self) -> &PluginAuthorizationPolicy {
+        &self.policy.authorization
     }
 
     /// Resolve the existing umbrella component dry-run through the one shared

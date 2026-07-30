@@ -1,4 +1,5 @@
 use a3s_acl::Block;
+use tokio::io::AsyncReadExt;
 
 use super::parse_value::{
     access, boolean, decision, http_method_list, machine_id_list, port_list,
@@ -57,10 +58,13 @@ impl PluginAuthorizationPolicy {
     /// Other top-level blocks belong to the normal A3S configuration and are
     /// intentionally ignored. The selected `plugins` block is strict.
     pub fn from_acl(source: &str) -> PluginManagerResult<Self> {
-        if source.is_empty() || source.len() > MAX_POLICY_BYTES {
+        if source.len() > MAX_POLICY_BYTES {
             return Err(policy_error(format!(
-                "ACL input must contain between 1 and {MAX_POLICY_BYTES} bytes"
+                "ACL input must not exceed {MAX_POLICY_BYTES} bytes"
             )));
+        }
+        if source.trim().is_empty() {
+            return Ok(Self::default());
         }
         let document = a3s_acl::parse_acl(source)
             .map_err(|error| policy_error(format!("ACL parsing failed: {error}")))?;
@@ -76,6 +80,35 @@ impl PluginAuthorizationPolicy {
                 "the A3S ACL document contains more than one `plugins` block",
             )),
         }
+    }
+
+    /// Read one host-owned ACL file through a fixed input bound.
+    pub async fn from_acl_file(path: &std::path::Path) -> PluginManagerResult<Self> {
+        let file = tokio::fs::File::open(path).await.map_err(|error| {
+            crate::plugin_manager::PluginManagerError::Infrastructure(format!(
+                "could not open plugin policy source {}: {error}",
+                path.display()
+            ))
+        })?;
+        let mut bytes = Vec::new();
+        file.take((MAX_POLICY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| {
+                crate::plugin_manager::PluginManagerError::Infrastructure(format!(
+                    "could not read plugin policy source {}: {error}",
+                    path.display()
+                ))
+            })?;
+        if bytes.len() > MAX_POLICY_BYTES {
+            return Err(policy_error(format!(
+                "ACL input must not exceed {MAX_POLICY_BYTES} bytes"
+            )));
+        }
+        let source = std::str::from_utf8(&bytes).map_err(|_| {
+            policy_error(format!("ACL input {} must be valid UTF-8", path.display()))
+        })?;
+        Self::from_acl(source)
     }
 }
 

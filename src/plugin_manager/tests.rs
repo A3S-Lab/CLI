@@ -193,7 +193,10 @@ async fn reviewed_operation_replays_without_a_second_child_mutation() {
         workspace,
         component_paths,
         RegistryStore::new(temporary.path().join("registries")),
-        PluginManagerPolicy { offline: true },
+        PluginManagerPolicy {
+            offline: true,
+            authorization: super::PluginAuthorizationPolicy::default(),
+        },
     );
     let plan_digest = "a".repeat(64);
     let plan = manager
