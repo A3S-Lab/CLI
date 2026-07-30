@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use a3s_use_core::InstalledPluginPlanEvidence;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
@@ -110,6 +111,37 @@ impl A3sProcessAdapter {
         .await
     }
 
+    pub(super) async fn installed_planning_evidence(
+        &self,
+        component_id: &str,
+    ) -> PluginManagerResult<InstalledPluginPlanEvidence> {
+        let component_id = normalize_component_id(component_id)?;
+        let package_id = component_id.strip_prefix("use/").ok_or_else(|| {
+            PluginManagerError::InvalidRequest("invalid Use package ID".to_string())
+        })?;
+        let value = self
+            .run_json(
+                use_extension_planning_evidence_args(package_id),
+                JsonOutputOwner::UseProxy,
+            )
+            .await?;
+        let evidence = value.get("planningEvidence").ok_or_else(|| {
+            PluginManagerError::Upstream(
+                "A3S Use planning response omitted planningEvidence".to_string(),
+            )
+        })?;
+        let bytes = serde_json::to_vec(evidence).map_err(|error| {
+            PluginManagerError::Upstream(format!(
+                "failed to normalize A3S Use planning evidence: {error}"
+            ))
+        })?;
+        InstalledPluginPlanEvidence::from_json(&bytes).map_err(|error| {
+            PluginManagerError::Upstream(format!(
+                "A3S Use returned invalid installed plugin planning evidence: {error}"
+            ))
+        })
+    }
+
     pub(super) fn workspace(&self) -> &std::path::Path {
         &self.workspace
     }
@@ -193,6 +225,16 @@ pub(super) fn use_extension_toggle_args(package_id: &str, enabled: bool) -> Vec<
         "use".to_string(),
         "extension".to_string(),
         if enabled { "enable" } else { "disable" }.to_string(),
+        package_id.to_string(),
+        "--json".to_string(),
+    ]
+}
+
+pub(super) fn use_extension_planning_evidence_args(package_id: &str) -> Vec<String> {
+    vec![
+        "use".to_string(),
+        "extension".to_string(),
+        "planning-evidence".to_string(),
         package_id.to_string(),
         "--json".to_string(),
     ]
@@ -369,5 +411,24 @@ fn stderr_suffix(stderr: &[u8]) -> String {
         String::new()
     } else {
         format!(": {stderr}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn installed_planning_evidence_uses_the_bounded_use_proxy_command() {
+        assert_eq!(
+            use_extension_planning_evidence_args("acme/guide"),
+            vec![
+                "use",
+                "extension",
+                "planning-evidence",
+                "acme/guide",
+                "--json"
+            ]
+        );
     }
 }

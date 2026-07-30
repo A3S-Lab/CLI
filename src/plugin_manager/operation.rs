@@ -4,8 +4,8 @@ use super::capability::{
     installation_snapshot, observe, PluginCapabilityEvidence, PluginCapabilityEvidenceStatus,
 };
 use super::process::{
-    normalize_plan_digest, normalize_plan_request, PluginApplyRequest, PluginPackageToggleRequest,
-    PluginPlanRequest,
+    normalize_plan_digest, normalize_plan_request, PluginApplyRequest, PluginLifecycleAction,
+    PluginPackageToggleRequest, PluginPlanRequest,
 };
 use super::{PluginManager, PluginManagerError, PluginManagerResult};
 
@@ -31,10 +31,29 @@ pub(super) async fn plan(
     let request = normalize_plan_request(request)?;
     let installation_state = installation_snapshot(manager).await;
     let capability_state = installation_state.evidence();
+    let installed_planning_evidence = if request.action != PluginLifecycleAction::Install
+        && installation_state.items.iter().any(|item| {
+            item.component_id == request.component_id && item.planner_evidence.is_some()
+        }) {
+        Some(
+            manager
+                .process
+                .installed_planning_evidence(&request.component_id)
+                .await?,
+        )
+    } else {
+        None
+    };
     let raw_plan = manager.process.plan(&request).await?;
     let upstream_plan_digest = plan_digest_from_value(&raw_plan)?;
     let state_revision = manager.operation_store.planner_state_revision().await?;
-    let raw_plan = planner::attach_draft(&request, &installation_state, state_revision, raw_plan)?;
+    let raw_plan = planner::attach_draft(
+        &request,
+        &installation_state,
+        installed_planning_evidence.as_ref(),
+        state_revision,
+        raw_plan,
+    )?;
     let identity = manager
         .operation_store
         .allocate_plan_identity(request.action)

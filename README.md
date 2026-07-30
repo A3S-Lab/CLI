@@ -509,12 +509,22 @@ exists, recovery reuses that stored confirmation instead of stranding partial
 side effects after a later policy change.
 
 Existing component-only records remain readable and keep their previous digest
-semantics. The first live umbrella draft path is now enabled for registry
-catalog-v2 installs whose selected package contains only Skill/UI surfaces and
-no permission grant. The component plan retains the complete verified catalog
-record alongside the exact TUF target; the Manager requires those records to
-match, derives the install transition and impact, binds the observed capability
-generation, and emits the strict draft before host authorization.
+semantics. The first live umbrella lifecycle slice is now enabled for
+catalog-v2 install, registry upgrade, and uninstall when the package contains
+only Skill/UI surfaces and no permission grant. Install and upgrade component
+plans retain the complete verified candidate catalog alongside the exact TUF
+target. The Manager requires those records to match before deriving the
+transition and impact.
+
+Upgrade and uninstall additionally call A3S Use's package-specific
+`a3s.use.installed-plugin-plan-evidence.v1` interface. The Manager strictly
+joins its full installed catalog and receipt digest to the compact capability
+record, exact generation and revision, desired state, dependency-closed
+surface set, requested component, and umbrella `current` version. Upgrade
+derives an exact replace transition; uninstall derives an exact remove
+transition and records retained user data. Catalog-v2 upgrade cannot fall back
+to a component-only mutation when this installed evidence is missing or
+drifted.
 
 Planner state uses a private atomic
 `plugin-manager/operations/planner-state.json` record. Revision advancement is
@@ -524,9 +534,8 @@ state drift before intent and reports `stateRevisionAfter` after commit.
 
 This live slice deliberately fails closed for Tool/MCP surfaces or non-empty
 permission ceilings until explicit Runtime-provider selection and the durable
-grant saga are connected. Catalog-v1 packages retain the legacy component-plan
-path. Upgrade and uninstall draft emission still require a package-specific
-installed-receipt evidence interface.
+grant saga are connected. Catalog-v1 packages and registry no-op upgrades
+retain the legacy component-plan path.
 
 Install, upgrade, and uninstall always create a durable reviewed plan first.
 An interactive terminal prints that exact plan and asks for confirmation.
