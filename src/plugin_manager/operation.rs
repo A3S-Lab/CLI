@@ -15,7 +15,8 @@ mod planner;
 pub(super) mod store;
 
 use store::{
-    PluginOperationStore, StoredOperationResult, StoredPluginPlan, OPERATION_RECORD_SCHEMA,
+    PluginOperationStore, StoredOperationResult, StoredPluginLifecycle, StoredPluginPlan,
+    OPERATION_RECORD_SCHEMA,
 };
 
 pub(super) fn store(state_root: &std::path::Path) -> PluginOperationStore {
@@ -122,9 +123,13 @@ pub(super) async fn apply(
     } else {
         verify_new_apply_authority(manager, &plan, confirmed, apply_started_at_ms)?
     };
-    let resumed = manager
+    let intent = manager
         .operation_store
         .persist_intent_with_confirmation(&plan, confirmation)
+        .await?;
+    manager
+        .operation_store
+        .begin_lifecycle(&plan, intent.started_at_ms)
         .await?;
 
     let raw_result = manager
@@ -133,8 +138,22 @@ pub(super) async fn apply(
         .await?;
     validate_apply_result(&raw_result, plan.upstream_plan_digest())?;
     let capability_after = observe(manager).await;
+    manager
+        .operation_store
+        .verify_lifecycle_observation(&plan, &capability_after)
+        .await?;
     let state_revision_after = manager.operation_store.advance_planner_state(&plan).await?;
-    let completed_at_ms = unix_time_millis()?;
+    let observed_completed_at_ms = unix_time_millis()?;
+    let lifecycle = manager
+        .operation_store
+        .complete_lifecycle(
+            &plan,
+            &capability_after,
+            state_revision_after,
+            observed_completed_at_ms,
+        )
+        .await?;
+    let completed_at_ms = lifecycle_completed_at_ms(lifecycle.as_ref(), observed_completed_at_ms)?;
     let data = applied_output(
         raw_result,
         &plan,
@@ -142,9 +161,10 @@ pub(super) async fn apply(
             capability_before: &capability_before,
             capability_after: &capability_after,
             state_revision_after,
+            lifecycle: lifecycle.as_ref(),
         },
         completed_at_ms,
-        resumed,
+        intent.resumed,
         false,
     )?;
     let result = StoredOperationResult {
@@ -269,6 +289,7 @@ struct AppliedStateEvidence<'a> {
     capability_before: &'a PluginCapabilityEvidence,
     capability_after: &'a PluginCapabilityEvidence,
     state_revision_after: u64,
+    lifecycle: Option<&'a StoredPluginLifecycle>,
 }
 
 fn applied_output(
@@ -317,6 +338,28 @@ fn applied_output(
         "stateRevisionAfter",
         Value::Number(state.state_revision_after.into()),
     );
+    if let Some(lifecycle) = state.lifecycle {
+        let cutover = lifecycle.cutover.as_ref().ok_or_else(|| {
+            PluginManagerError::Infrastructure(
+                "completed plugin lifecycle evidence has no capability cutover".to_string(),
+            )
+        })?;
+        insert_manager_field(
+            object,
+            "lifecycleBindingDigest",
+            Value::String(lifecycle.binding.binding_digest().to_string()),
+        );
+        insert_manager_field(
+            object,
+            "lifecycleCutoverDigest",
+            Value::String(cutover.cutover_digest().to_string()),
+        );
+        insert_manager_field(
+            object,
+            "capabilitySnapshotDigest",
+            Value::String(cutover.capability_snapshot_digest().to_string()),
+        );
+    }
     object.remove("pluginOperationPlanDigest");
     object.remove("authority");
     if let Some(operation_plan) = &plan.plugin_operation_plan {
@@ -332,6 +375,26 @@ fn applied_output(
         );
     }
     Ok(output)
+}
+
+fn lifecycle_completed_at_ms(
+    lifecycle: Option<&StoredPluginLifecycle>,
+    observed_completed_at_ms: u64,
+) -> PluginManagerResult<u64> {
+    lifecycle
+        .map(|record| {
+            record
+                .cutover
+                .as_ref()
+                .map(|cutover| cutover.committed_at_ms())
+                .ok_or_else(|| {
+                    PluginManagerError::Infrastructure(
+                        "completed plugin lifecycle evidence has no capability cutover".to_string(),
+                    )
+                })
+        })
+        .transpose()
+        .map(|completed_at_ms| completed_at_ms.unwrap_or(observed_completed_at_ms))
 }
 
 fn replayed_result(result: StoredOperationResult) -> PluginManagerResult<Value> {

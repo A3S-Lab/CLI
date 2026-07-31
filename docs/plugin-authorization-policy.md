@@ -162,7 +162,12 @@ cannot silently fall back when this evidence is absent or drifted.
 Every complete draft carries aggregate impact, capability generation, and the
 durable planner-state revision before host authorization. The private
 planner-state record advances atomically and idempotently after successful
-mutation.
+mutation. For the current permission-free Skill/UI slice, apply first persists
+the exact A3S Use parent lifecycle binding with an empty child set. It then
+requires the verified next capability generation before planner-state advance
+and persists the parent capability cutover. Result replay validates the
+binding, cutover, capability snapshot, and state revision together; missing or
+drifted post-mutation evidence cannot become a completed result.
 
 Tool/MCP or permission-bearing packages fail this complete-draft path until
 explicit Runtime-provider selection and durable workspace-grant changes are

@@ -532,6 +532,16 @@ monotonic, bound to the exact operation and reviewed digest, and idempotent
 across recovery between child mutation and result persistence. Apply rejects
 state drift before intent and reports `stateRevisionAfter` after commit.
 
+For this permission-free Skill/UI slice, apply now also persists A3S Use's
+canonical `PluginLifecycleOperationBinding` before package mutation. The
+binding proves that the reviewed plan has no omitted grant or Runtime child
+intent. After mutation, the Manager requires the exact next capability
+generation and a verified snapshot revision before advancing planner state,
+then durably records `PluginLifecycleCutoverEvidence`. Successful results
+return the parent binding, cutover, and capability-snapshot digests; a crash
+replays the same evidence, while an unavailable or drifted snapshot leaves the
+cutover pending instead of reporting an unbound success.
+
 This live slice deliberately fails closed for Tool/MCP surfaces or non-empty
 permission ceilings until explicit Runtime-provider selection and the durable
 grant saga are connected. Catalog-v1 packages and registry no-op upgrades
@@ -553,8 +563,10 @@ generation/revision. Apply resolves that stored plan from
 umbrella component lifecycle, and retains a successful result for seven-day
 idempotent replay. A process-local guard and a cross-process manager lock give
 CLI, Web, and the management MCP adapter one operation order. The manager
-record owns plan identity and replay only; the existing component batch journal
-remains the sole checkpoint journal for package and delegated Use side effects.
+record owns plan identity, parent lifecycle binding/cutover, and replay; the
+existing component batch journal remains the sole checkpoint journal for
+package and delegated Use side effects. Grant and Runtime child journals stay
+owned by A3S Use and are not fabricated by the Manager.
 
 Code TUI and Code Web attach a host-owned standard MCP server named
 `use_plugin_manager` to the dedicated Use worker. Its M4 inventory is limited

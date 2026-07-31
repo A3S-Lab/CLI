@@ -11,6 +11,7 @@ use super::super::{PluginManagerError, PluginManagerResult};
 use super::lock::PluginMutationLock;
 
 mod io;
+mod lifecycle;
 mod plan;
 mod record;
 mod state;
@@ -49,6 +50,8 @@ pub(super) struct StoredPluginPlan {
     pub plan: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_operation_plan: Option<PluginOperationPlanEnvelope>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lifecycle_required: bool,
 }
 
 impl StoredPluginPlan {
@@ -68,6 +71,23 @@ struct StoredApplyIntent {
     started_at_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     confirmation: Option<PluginOperationConfirmation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PersistedApplyIntent {
+    pub started_at_ms: u64,
+    pub resumed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct StoredPluginLifecycle {
+    pub schema: String,
+    pub operation_id: String,
+    pub plan_digest: String,
+    pub binding: a3s_use::plugin_lifecycle::PluginLifecycleOperationBinding,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cutover: Option<a3s_use::plugin_lifecycle::PluginLifecycleCutoverEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +149,7 @@ impl PluginOperationStore {
     pub(super) async fn persist_intent(
         &self,
         plan: &StoredPluginPlan,
-    ) -> PluginManagerResult<bool> {
+    ) -> PluginManagerResult<PersistedApplyIntent> {
         self.persist_intent_with_confirmation(plan, None).await
     }
 
@@ -137,7 +157,7 @@ impl PluginOperationStore {
         &self,
         plan: &StoredPluginPlan,
         confirmation: Option<PluginOperationConfirmation>,
-    ) -> PluginManagerResult<bool> {
+    ) -> PluginManagerResult<PersistedApplyIntent> {
         let store = self.clone();
         let plan = plan.clone();
         run_blocking("persist plugin apply intent", move || {
@@ -253,12 +273,15 @@ impl PluginOperationStore {
         &self,
         plan: &StoredPluginPlan,
         confirmation: Option<PluginOperationConfirmation>,
-    ) -> PluginManagerResult<bool> {
+    ) -> PluginManagerResult<PersistedApplyIntent> {
         validate_plan_record(plan)?;
         let path = self.intent_path(&plan.operation_id);
         if let Some(intent) = read_optional_record::<StoredApplyIntent>(&path)? {
             validate_intent(&intent, plan)?;
-            return Ok(true);
+            return Ok(PersistedApplyIntent {
+                started_at_ms: intent.started_at_ms,
+                resumed: true,
+            });
         }
         let started_at_ms = now_ms()?;
         if started_at_ms > plan.expires_at_ms {
@@ -275,11 +298,17 @@ impl PluginOperationStore {
         };
         validate_intent(&intent, plan)?;
         match write_new_record(&path, &intent)? {
-            WriteDisposition::Created => Ok(false),
+            WriteDisposition::Created => Ok(PersistedApplyIntent {
+                started_at_ms,
+                resumed: false,
+            }),
             WriteDisposition::AlreadyExists => {
                 let intent = read_required_record::<StoredApplyIntent>(&path)?;
                 validate_intent(&intent, plan)?;
-                Ok(true)
+                Ok(PersistedApplyIntent {
+                    started_at_ms: intent.started_at_ms,
+                    resumed: true,
+                })
             }
         }
     }
@@ -298,6 +327,7 @@ impl PluginOperationStore {
             read_required_record::<StoredApplyIntent>(&self.intent_path(&plan.operation_id))?;
         validate_intent(&intent, plan)?;
         validate_result(&result, plan, &intent)?;
+        self.validate_lifecycle_result_sync(plan, &result)?;
         Ok(Some(result))
     }
 
@@ -311,9 +341,11 @@ impl PluginOperationStore {
             read_required_record::<StoredApplyIntent>(&self.intent_path(&result.operation_id))?;
         validate_intent(&intent, &plan)?;
         validate_result(&result, &plan, &intent)?;
+        self.validate_lifecycle_result_sync(&plan, &result)?;
         let path = self.result_path(&result.operation_id);
         if let Some(existing) = read_optional_record::<StoredOperationResult>(&path)? {
             validate_result(&existing, &plan, &intent)?;
+            self.validate_lifecycle_result_sync(&plan, &existing)?;
             return Ok((existing, false));
         }
         match write_new_record(&path, &result)? {
@@ -321,6 +353,7 @@ impl PluginOperationStore {
             WriteDisposition::AlreadyExists => {
                 let existing = read_required_record::<StoredOperationResult>(&path)?;
                 validate_result(&existing, &plan, &intent)?;
+                self.validate_lifecycle_result_sync(&plan, &existing)?;
                 Ok((existing, false))
             }
         }
@@ -335,6 +368,7 @@ impl PluginOperationStore {
             validate_record_path(&path, &plan.operation_id)?;
             let intent_path = self.intent_path(&plan.operation_id);
             let result_path = self.result_path(&plan.operation_id);
+            let lifecycle_path = self.lifecycle_path(&plan.operation_id);
             let intent = read_optional_record::<StoredApplyIntent>(&intent_path)?;
             if let Some(intent) = &intent {
                 validate_intent(intent, &plan)?;
@@ -345,6 +379,7 @@ impl PluginOperationStore {
                     invalid_store("durable plugin operation result has no apply intent")
                 })?;
                 validate_result(result, &plan, intent)?;
+                self.validate_lifecycle_result_sync(&plan, result)?;
             }
             let expired = now > plan.expires_at_ms;
             let completed_retention_elapsed = result.as_ref().is_some_and(|result| {
@@ -354,11 +389,13 @@ impl PluginOperationStore {
             });
             if expired && completed_retention_elapsed {
                 remove_file_if_present(&result_path)?;
+                remove_file_if_present(&lifecycle_path)?;
                 remove_file_if_present(&intent_path)?;
                 remove_file_if_present(&self.plan_path(&plan.operation_id))?;
                 continue;
             }
             if expired && result.is_none() && intent.is_none() {
+                remove_file_if_present(&lifecycle_path)?;
                 remove_file_if_present(&self.plan_path(&plan.operation_id))?;
                 continue;
             }
@@ -384,6 +421,10 @@ impl PluginOperationStore {
         self.root.join("results")
     }
 
+    fn lifecycles_root(&self) -> PathBuf {
+        self.root.join("lifecycles")
+    }
+
     fn plan_path(&self, operation_id: &str) -> PathBuf {
         self.plans_root().join(record_file_name(operation_id))
     }
@@ -395,10 +436,18 @@ impl PluginOperationStore {
     fn result_path(&self, operation_id: &str) -> PathBuf {
         self.results_root().join(record_file_name(operation_id))
     }
+
+    fn lifecycle_path(&self, operation_id: &str) -> PathBuf {
+        self.lifecycles_root().join(record_file_name(operation_id))
+    }
 }
 
 fn default_plan_actor() -> PlanActor {
     PlanActor::User
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 async fn run_blocking<T: Send + 'static>(

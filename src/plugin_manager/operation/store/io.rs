@@ -12,6 +12,7 @@ pub(super) fn ensure_store_directories(store: &PluginOperationStore) -> PluginMa
     ensure_real_directory(&store.root)?;
     ensure_real_directory(&store.plans_root())?;
     ensure_real_directory(&store.intents_root())?;
+    ensure_real_directory(&store.lifecycles_root())?;
     ensure_real_directory(&store.results_root())
 }
 

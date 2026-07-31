@@ -162,12 +162,136 @@ async fn durable_intent_requires_and_preserves_exact_confirmation() {
         .await
         .is_err());
     assert!(!manager.operation_store.has_intent(&plan).await.unwrap());
-    assert!(!manager
+    assert!(
+        !manager
+            .operation_store
+            .persist_intent_with_confirmation(&plan, Some(confirmation))
+            .await
+            .unwrap()
+            .resumed
+    );
+    assert!(manager.operation_store.has_intent(&plan).await.unwrap());
+}
+
+#[tokio::test]
+async fn safe_plan_parent_lifecycle_is_durable_and_replayable() {
+    let (_temporary, manager, plan) = full_plan_record(
+        PluginAuthorizationPolicy::default(),
+        a3s_use_core::PlanActor::User,
+    );
+    let confirmation = verify_new_apply_authority(&manager, &plan, true, plan.created_at_ms)
+        .unwrap()
+        .unwrap();
+    let intent = manager
         .operation_store
         .persist_intent_with_confirmation(&plan, Some(confirmation))
         .await
-        .unwrap());
-    assert!(manager.operation_store.has_intent(&plan).await.unwrap());
+        .unwrap();
+    let first = manager
+        .operation_store
+        .begin_lifecycle(&plan, intent.started_at_ms)
+        .await
+        .unwrap()
+        .unwrap();
+    let replay = manager
+        .operation_store
+        .begin_lifecycle(&plan, intent.started_at_ms)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(first, replay);
+    assert!(first.cutover.is_none());
+    let capability_after = PluginCapabilityEvidence {
+        status: PluginCapabilityEvidenceStatus::Verified,
+        observed_at_ms: intent.started_at_ms + 1,
+        generation: Some(first.binding.capability_generation_after()),
+        revision: Some("c".repeat(64)),
+        error: None,
+    };
+    let completed = manager
+        .operation_store
+        .complete_lifecycle(
+            &plan,
+            &capability_after,
+            first.binding.state_revision_after(),
+            intent.started_at_ms + 2,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let completed_replay = manager
+        .operation_store
+        .complete_lifecycle(
+            &plan,
+            &capability_after,
+            first.binding.state_revision_after(),
+            intent.started_at_ms + 3,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(completed, completed_replay);
+    assert_eq!(
+        lifecycle_completed_at_ms(Some(&completed_replay), intent.started_at_ms + 3,).unwrap(),
+        intent.started_at_ms + 2
+    );
+    assert_eq!(
+        completed
+            .cutover
+            .as_ref()
+            .unwrap()
+            .capability_snapshot_digest(),
+        format!("sha256:{}", "c".repeat(64))
+    );
+    let completed_at_ms = intent.started_at_ms + 2;
+    let data = applied_output(
+        serde_json::json!({
+            "planDigest": plan.upstream_plan_digest(),
+            "operations": [],
+        }),
+        &plan,
+        AppliedStateEvidence {
+            capability_before: &plan.capability_state,
+            capability_after: &capability_after,
+            state_revision_after: first.binding.state_revision_after(),
+            lifecycle: Some(&completed),
+        },
+        completed_at_ms,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        data["lifecycleBindingDigest"],
+        completed.binding.binding_digest()
+    );
+    assert_eq!(
+        data["lifecycleCutoverDigest"],
+        completed.cutover.as_ref().unwrap().cutover_digest()
+    );
+    let result = StoredOperationResult {
+        schema: OPERATION_RECORD_SCHEMA.to_string(),
+        operation_id: plan.operation_id.clone(),
+        plan_digest: plan.plan_digest.clone(),
+        completed_at_ms,
+        capability_before: plan.capability_state.clone(),
+        capability_after,
+        data,
+    };
+    manager
+        .operation_store
+        .validate_lifecycle_result_sync(&plan, &result)
+        .unwrap();
+
+    let mut drifted = result;
+    drifted.data["capabilitySnapshotDigest"] =
+        serde_json::Value::String(format!("sha256:{}", "d".repeat(64)));
+    assert!(manager
+        .operation_store
+        .validate_lifecycle_result_sync(&plan, &drifted)
+        .is_err());
 }
 
 #[test]
@@ -186,6 +310,7 @@ fn applied_output_separates_manager_and_upstream_plan_digests() {
             capability_before: &plan.capability_state,
             capability_after: &plan.capability_state,
             state_revision_after: 4,
+            lifecycle: None,
         },
         plan.created_at_ms,
         false,
@@ -221,7 +346,23 @@ fn full_plan_record(
     let temporary = tempfile::tempdir().unwrap();
     let manager = manager(temporary.path(), policy.clone());
     let mut fixture = install_plan();
+    fixture.providers.clear();
     fixture.workspace_impacts.clear();
+    fixture.secret_changes.clear();
+    for package in &mut fixture.packages {
+        package
+            .surfaces
+            .retain(|surface| surface.surface.kind == a3s_use_core::PluginSurfaceKind::Skill);
+        if let Some(after) = package.after.as_mut() {
+            after
+                .release
+                .surfaces
+                .retain(|surface| surface.kind == a3s_use_core::PluginSurfaceKind::Skill);
+            after.permissions.surfaces.clear();
+            after.release.permission_ceiling_digest =
+                after.permissions.descriptor_digest().unwrap();
+        }
+    }
     let capability_generation = fixture.state.capability_generation;
     let draft = a3s_use_core::PluginOperationPlanDraft::new(
         fixture.action,
@@ -283,6 +424,7 @@ fn full_plan_record(
         capability_state,
         plan: prepared.plan,
         plugin_operation_plan: prepared.plugin_operation_plan,
+        lifecycle_required: true,
     };
     (temporary, manager, plan)
 }

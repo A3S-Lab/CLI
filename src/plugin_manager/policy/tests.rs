@@ -209,19 +209,19 @@ pub(crate) fn install_plan() -> PluginOperationPlan {
             provider(
                 PluginSurfaceKind::Mcp,
                 "library",
-                "runtime:mcp-http",
+                "runtime-mcp-http",
                 PlanEnforcementProfile::Container,
             ),
             provider(
                 PluginSurfaceKind::Tool,
                 "convert",
-                "runtime:tool-task",
+                "runtime-tool-task",
                 PlanEnforcementProfile::Sandbox,
             ),
             provider(
                 PluginSurfaceKind::Tool,
                 "index",
-                "runtime:tool-service",
+                "runtime-tool-service",
                 PlanEnforcementProfile::Container,
             ),
         ],

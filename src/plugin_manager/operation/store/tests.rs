@@ -74,8 +74,8 @@ async fn durable_plan_intent_and_result_are_append_only_and_replayable() {
         .await
         .unwrap();
     assert_eq!(resolved, plan);
-    assert!(!store.persist_intent(&plan).await.unwrap());
-    assert!(store.persist_intent(&plan).await.unwrap());
+    assert!(!store.persist_intent(&plan).await.unwrap().resumed);
+    assert!(store.persist_intent(&plan).await.unwrap().resumed);
     let intent =
         read_required_record::<StoredApplyIntent>(&store.intent_path(&plan.operation_id)).unwrap();
     let result = operation_result(&plan, intent.started_at_ms);
@@ -238,6 +238,7 @@ async fn expired_plan_cannot_publish_a_new_apply_intent() {
         capability_state: evidence(1, 'a'),
         plan: plan_value(&plan_digest),
         plugin_operation_plan: None,
+        lifecycle_required: false,
     };
     write_new_record(&store.plan_path(&plan.operation_id), &plan).unwrap();
 

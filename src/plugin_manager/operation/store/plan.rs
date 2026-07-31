@@ -86,6 +86,7 @@ impl PluginOperationStore {
         validate_digest(&plan_digest)?;
         validate_capability_evidence(&capability_state)?;
         validate_plan_value(&plan, &plan_digest)?;
+        let lifecycle_required = plugin_operation_plan.is_some();
         let record = StoredPluginPlan {
             schema: OPERATION_RECORD_SCHEMA.to_string(),
             operation_id: identity.operation_id,
@@ -98,6 +99,7 @@ impl PluginOperationStore {
             capability_state,
             plan,
             plugin_operation_plan,
+            lifecycle_required,
         };
         validate_plan_record(&record)?;
         let path = self.plan_path(&record.operation_id);

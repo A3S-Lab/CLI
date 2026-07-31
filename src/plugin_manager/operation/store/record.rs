@@ -69,6 +69,11 @@ pub(super) fn validate_intent(
 
 fn validate_plugin_operation_plan(record: &StoredPluginPlan) -> PluginManagerResult<()> {
     let Some(envelope) = &record.plugin_operation_plan else {
+        if record.lifecycle_required {
+            return Err(invalid_store(
+                "reviewed plan requires lifecycle evidence but omits its canonical operation plan",
+            ));
+        }
         if record.plan.get("pluginOperationPlan").is_some()
             || record.plan.get("pluginOperationPlanDigest").is_some()
         {
