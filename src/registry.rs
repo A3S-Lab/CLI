@@ -5,9 +5,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use a3s_acl::{Block, Document, Value};
+use a3s_use::cognitive_package::{cognitive_package_host_target, COGNITIVE_PACKAGE_HOST_VERSION};
+use a3s_use_core::{
+    PluginPackageLock, PluginPackageLockHost, PluginPlanningBundle, VerifiedPluginCatalogRecord,
+    PLUGIN_CATALOG_SCHEMA_V3,
+};
 use a3s_use_extension::{
-    prepare_remote_package, refresh_remote_registry, ResolvedRemotePackage, TrustedRegistry,
-    VerifiedRegistryMetadata,
+    prepare_remote_package, refresh_remote_registry, resolve_remote_package_lock,
+    ResolvedRemotePackage, TrustedRegistry, VerifiedRegistryMetadata,
 };
 use anyhow::{bail, Context};
 use serde::Serialize;
@@ -72,6 +77,8 @@ pub struct RegistryEnrollment {
 pub struct ResolvedRegistryPackage {
     pub registry: RegistryRecord,
     pub package: ResolvedRemotePackage,
+    pub verified_catalog: Option<VerifiedPluginCatalogRecord>,
+    pub planning_bundle: Option<PluginPlanningBundle>,
 }
 
 #[derive(Clone, Debug)]
@@ -248,10 +255,18 @@ impl RegistryStore {
         for record in registries {
             let registry = record.trusted_registry(state_root)?;
             match prepare_remote_package(&registry, package_id, version, channel, None).await {
-                Ok(prepared) => matches.push(ResolvedRegistryPackage {
-                    registry: record,
-                    package: prepared.resolved().clone(),
-                }),
+                Ok(prepared) => {
+                    let planning_bundle = prepared
+                        .load_planning_bundle()
+                        .await
+                        .map_err(|error| registry_error(&record, error))?;
+                    matches.push(ResolvedRegistryPackage {
+                        registry: record,
+                        package: prepared.resolved().clone(),
+                        verified_catalog: prepared.verified_catalog().cloned(),
+                        planning_bundle,
+                    });
+                }
                 Err(error) if error.code == "use.extension.registry_package_missing" => {}
                 Err(error) => return Err(registry_error(&record, error)),
             }
@@ -278,6 +293,53 @@ impl RegistryStore {
                 )
             }
         }
+    }
+
+    /// Resolve the complete schema-v3 dependency closure from the host's
+    /// replaceable Registry set. Schema-v1/v2 packages keep their established
+    /// single-package path and return no cognitive-package lock.
+    pub async fn resolve_cognitive_package_lock(
+        &self,
+        state_root: &Path,
+        resolved: &ResolvedRegistryPackage,
+    ) -> anyhow::Result<Option<PluginPackageLock>> {
+        let Some(catalog) = resolved.verified_catalog.as_ref() else {
+            return Ok(None);
+        };
+        if catalog.record.schema != PLUGIN_CATALOG_SCHEMA_V3 {
+            return Ok(None);
+        }
+        let root = resolved.registry.trusted_registry(state_root)?;
+        let dependencies = self
+            .configured_registries()?
+            .into_iter()
+            .filter(|record| record.name != resolved.registry.name)
+            .map(|record| record.trusted_registry(state_root))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let channel = catalog.record.channel;
+        let lock = resolve_remote_package_lock(
+            &root,
+            &dependencies,
+            &catalog.record.package_id,
+            Some(&catalog.record.version),
+            channel,
+            PluginPackageLockHost::new(
+                cognitive_package_host_target().map_err(anyhow::Error::new)?,
+                COGNITIVE_PACKAGE_HOST_VERSION,
+            )
+            .map_err(anyhow::Error::new)?,
+        )
+        .await
+        .map_err(|error| registry_error(&resolved.registry, error))?;
+        let selected = lock
+            .packages
+            .iter()
+            .find(|package| package.package_id() == catalog.record.package_id)
+            .context("cognitive-package lock omitted its requested root")?;
+        if selected.catalog != *catalog {
+            bail!("cognitive-package lock root does not match the reviewed Registry catalog");
+        }
+        Ok(Some(lock))
     }
 
     pub fn require_configured_registry(&self) -> anyhow::Result<()> {
@@ -333,9 +395,15 @@ impl RegistryStore {
         )
         .await
         .map_err(|error| registry_error(&record, error))?;
+        let planning_bundle = prepared
+            .load_planning_bundle()
+            .await
+            .map_err(|error| registry_error(&record, error))?;
         Ok(ResolvedRegistryPackage {
             registry: record,
             package: prepared.resolved().clone(),
+            verified_catalog: prepared.verified_catalog().cloned(),
+            planning_bundle,
         })
     }
 
@@ -573,15 +641,11 @@ fn registry_error(
 }
 
 #[cfg(test)]
-#[path = "../tests/support/tuf_test_support.rs"]
-mod tuf_test_support;
-
-#[cfg(test)]
 mod tests {
-    use super::tuf_test_support::{
+    use super::*;
+    use crate::tuf_test_support::{
         extension_archive, TestRepository, TestServer, FUTURE, PACKAGE_VERSION,
     };
-    use super::*;
 
     #[tokio::test]
     async fn duplicate_package_sources_are_rejected_as_ambiguous() {

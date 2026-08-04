@@ -3,6 +3,7 @@
 use super::*;
 use crate::cli::args::ColorMode;
 use crate::cli::context::InvocationContext;
+use anyhow::Context as _;
 
 const CODE_INTELLIGENCE_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const CODE_INTELLIGENCE_SHUTDOWN_SETTLE: Duration = Duration::from_secs(1);
@@ -857,6 +858,24 @@ pub(crate) async fn run_in(
     // offline/A3S_NO_AUTO_INSTALL as strict no-mutation policies. Setup failure
     // is non-fatal to Code and remains diagnosable through `/use`.
     let use_resolution = resolve_code_use(context).await;
+    let plugin_management = (|| -> anyhow::Result<_> {
+        Ok(crate::use_registry::PluginManagementMcpLaunch::new(
+            std::env::current_exe().context("failed to resolve the A3S executable")?,
+            crate::commands::config::active_config_path(context)?,
+            context.network.offline,
+        ))
+    })();
+    let plugin_management = match plugin_management {
+        Ok(launch) => Some(launch),
+        Err(error) => {
+            initial_messages.push(TranscriptEntry::preformatted(
+                Style::new().fg(TN_YELLOW).render(&format!(
+                    "  warning: Plugin Manager MCP is unavailable: {error}"
+                )),
+            ));
+            None
+        }
+    };
     let (use_registry, registry_warning) = match use_resolution.executable {
         Some(executable) => {
             let (handle, warning) = crate::use_registry::start(
@@ -864,6 +883,7 @@ pub(crate) async fn run_in(
                 context.directory.clone(),
                 context.cancellation.child_token(),
                 Arc::clone(&session),
+                plugin_management,
             )
             .await;
             (Some(handle), warning)

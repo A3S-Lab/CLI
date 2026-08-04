@@ -92,19 +92,14 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
                 );
             }
         }
-        if !binding.activity_bar.is_empty() {
-            if binding.skills.is_empty() {
-                bail!(
-                    "A3S Use capability '{}' projects Activity Bar entries without a Skill",
-                    binding.id
-                );
-            }
-            if binding.package_root.as_os_str().is_empty() || !binding.package_root.is_absolute() {
-                bail!(
-                    "A3S Use capability '{}' has Activity Bar entries without an absolute package root",
-                    binding.id
-                );
-            }
+        super::flow::validate_projected_flows(binding)?;
+        if !binding.activity_bar.is_empty()
+            && (binding.package_root.as_os_str().is_empty() || !binding.package_root.is_absolute())
+        {
+            bail!(
+                "A3S Use capability '{}' has Activity Bar entries without an absolute package root",
+                binding.id
+            );
         }
         let mut activity_ids = std::collections::BTreeSet::new();
         for activity in &binding.activity_bar {
@@ -117,7 +112,10 @@ pub(super) fn validate_snapshot(snapshot: &RegistrySnapshot) -> anyhow::Result<(
             }
             if !valid_segment(&activity.id)
                 || !valid_segment(&activity.icon)
-                || !valid_segment(&activity.skill)
+                || activity
+                    .skill
+                    .as_deref()
+                    .is_some_and(|skill| !valid_segment(skill))
             {
                 bail!(
                     "A3S Use capability '{}' projects invalid Activity Bar identifiers",

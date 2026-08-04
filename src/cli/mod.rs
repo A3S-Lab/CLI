@@ -17,7 +17,13 @@ use self::args::{
 use self::context::InvocationContext;
 
 pub(crate) async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
-    let args = args.into_iter().collect::<Vec<_>>();
+    let mut args = args.into_iter().collect::<Vec<_>>();
+    // Keep generated usage stable across executable suffixes and launch paths.
+    // In particular, `a3s <command> --help` and `a3s help <command>` must
+    // describe the same canonical command on Windows as well as Unix.
+    if let Some(binary_name) = args.first_mut() {
+        *binary_name = OsString::from("a3s");
+    }
     let requested_output = preparse_output_mode(&args);
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
@@ -122,7 +128,7 @@ fn root_command_name(command: &RootCommand) -> &'static str {
     use self::args::{
         AgentCommand, AuthCommand, CacheCommand, CodeCommand, CodeSessionCommand, ConfigCommand,
         ContextCommand, ContextShowCommand, FlowCommand, KbCommand, McpCommand, MemoryCommand,
-        ModelCommand, OkfCommand, RegistryCommand, SkillCommand, WebCommand,
+        ModelCommand, OkfCommand, PluginCommand, RegistryCommand, SkillCommand, WebCommand,
     };
 
     match command {
@@ -238,6 +244,18 @@ fn root_command_name(command: &RootCommand) -> &'static str {
         RootCommand::Bench(_) => "bench",
         RootCommand::Search(_) => "search",
         RootCommand::Use(_) => "use",
+        RootCommand::Plugin(args) => match &args.command {
+            PluginCommand::Search(_) => "plugin.search",
+            PluginCommand::Inspect(_) => "plugin.inspect",
+            PluginCommand::List => "plugin.list",
+            PluginCommand::Install(_) => "plugin.install",
+            PluginCommand::Upgrade(_) => "plugin.upgrade",
+            PluginCommand::Apply(_) => "plugin.apply",
+            PluginCommand::Enable(_) => "plugin.enable",
+            PluginCommand::Disable(_) => "plugin.disable",
+            PluginCommand::Uninstall(_) => "plugin.uninstall",
+            PluginCommand::McpServe => "plugin.mcp-serve",
+        },
         RootCommand::Auth(args) => match &args.command {
             AuthCommand::List => "auth.list",
             AuthCommand::Status(_) => "auth.status",
@@ -309,6 +327,7 @@ async fn dispatch(command: RootCommand, context: &InvocationContext) -> anyhow::
         RootCommand::Bench(args) => run_proxy("bench", args.args, context).await,
         RootCommand::Search(args) => run_proxy("search", args.args, context).await,
         RootCommand::Use(args) => run_use_proxy(args.args, context).await,
+        RootCommand::Plugin(args) => crate::commands::plugin::run(args.command, context).await,
         RootCommand::Auth(args) => {
             crate::commands::auth::run(args, context).await?;
             Ok(ExitCode::SUCCESS)

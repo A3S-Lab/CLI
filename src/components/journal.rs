@@ -46,6 +46,8 @@ struct JournalOperation {
     provenance: Option<InstallProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    package_graph: Option<serde_json::Value>,
     message: String,
 }
 
@@ -58,6 +60,7 @@ impl JournalOperation {
             version: operation.version.clone(),
             provenance: operation.provenance,
             path: operation.path.clone(),
+            package_graph: operation.package_graph.clone(),
             message: operation.message.clone(),
         }
     }
@@ -78,6 +81,7 @@ impl JournalOperation {
             version: self.version.clone(),
             provenance: self.provenance,
             path: self.path.clone(),
+            package_graph: self.package_graph.clone(),
             message: if self.message.starts_with(RECOVERED_MESSAGE_PREFIX) {
                 self.message.clone()
             } else {
@@ -555,6 +559,7 @@ mod tests {
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
             provenance: Some(InstallProvenance::Bundled),
             path: Some(paths.current_exe.clone()),
+            package_graph: None,
             message: "Code is bundled with a3s.".to_string(),
         }
     }
@@ -617,7 +622,11 @@ mod tests {
             std::slice::from_ref(&component),
         )
         .unwrap();
-        first.record_success(&bundled_operation(&paths)).unwrap();
+        let mut checkpoint = bundled_operation(&paths);
+        checkpoint.package_graph = Some(serde_json::json!({
+            "packageLock": {"rootPackageId": "acme/root"}
+        }));
+        first.record_success(&checkpoint).unwrap();
         drop(first);
 
         let mut resumed = BatchJournal::begin(
@@ -630,6 +639,10 @@ mod tests {
         .unwrap();
         let operation = resumed.take_recovered(&component).unwrap();
         assert!(operation.recovered);
+        assert_eq!(
+            operation.package_graph.as_ref().unwrap()["packageLock"]["rootPackageId"],
+            "acme/root"
+        );
         assert!(operation
             .message
             .starts_with("Recovered completed checkpoint:"));

@@ -8,6 +8,8 @@ mod code;
 pub(crate) use code::*;
 mod admin;
 pub(crate) use admin::*;
+mod plugin;
+pub(crate) use plugin::*;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -114,6 +116,8 @@ pub(crate) enum RootCommand {
     Search(ProxyArgs),
     /// Use Browser, Office, or an installed A3S Use extension.
     Use(ProxyArgs),
+    /// Search, inspect, and manage A3S plugins.
+    Plugin(PluginArgs),
     /// Manage account authentication.
     Auth(AuthArgs),
     /// Discover and select runtime models.

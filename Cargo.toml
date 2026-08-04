@@ -26,7 +26,10 @@ a3s-tui = "=0.1.14"
 a3s-search = { version = "=2.1.0", features = ["lightpanda"] }
 a3s-acl = "=0.2.2"
 a3s-updater = "=0.3.0"
-a3s-use-extension = "=0.2.0"
+a3s-use = { git = "https://github.com/A3S-Lab/Use", rev = "23fa3973dd18184ef433518b5bebba435760ad85", default-features = false, features = ["extensions"] }
+a3s-use-core = { git = "https://github.com/A3S-Lab/Use", rev = "23fa3973dd18184ef433518b5bebba435760ad85" }
+a3s-use-extension = { git = "https://github.com/A3S-Lab/Use", rev = "23fa3973dd18184ef433518b5bebba435760ad85" }
+a3s-runtime = { git = "https://github.com/A3S-Lab/Runtime", rev = "cfaac63af6f76beebdc64a1ec228cedc42bb98ec" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "io-util", "io-std", "net", "fs", "signal"] }
 anyhow = "1"
 libc = "0.2"
@@ -34,6 +37,7 @@ clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 chrono = { version = "0.4", features = ["serde"] }
 similar = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
@@ -48,6 +52,7 @@ httpdate = "1"
 rand = "0.8"
 regex = "1"
 reqwest = { version = "0.11", default-features = false, features = ["cookies", "json", "rustls-tls", "socks", "stream"] }
+rmcp = { version = "=0.8.5", default-features = false, features = ["base64", "macros", "server", "transport-io"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"
@@ -95,7 +100,6 @@ strip = true
 # Monorepo development builds should exercise the local A3S crates instead of
 # waiting for every submodule change to be published to crates.io.
 a3s-code-core = { path = "../code/core" }
-a3s-deep-research = { path = "../deep-research" }
 a3s-acl = { path = "../acl" }
 a3s-boot = { path = "../boot" }
 a3s-common = { path = "../common" }
@@ -104,4 +108,3 @@ a3s-memory = { path = "../memory" }
 a3s-search = { path = "../search" }
 a3s-tui = { path = "../tui" }
 a3s-updater = { path = "../updater" }
-a3s-use-extension = { path = "../use/crates/extension" }

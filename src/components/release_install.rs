@@ -166,6 +166,7 @@ pub async fn install_release(
         version: Some(resolved.version),
         provenance: Some(InstallProvenance::GithubRelease),
         path: Some(executable),
+        package_graph: None,
         message: format!(
             "Completed {} for component '{}' from its verified release.",
             request.intent.action(),

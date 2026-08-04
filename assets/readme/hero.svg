@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">A3S — one CLI for Code, Web, and live cognitive packages</title>
+  <desc id="desc">A3S Code TUI and Web share one reviewed Plugin Manager and one exact-generation A3S Use capability watch. Tool, MCP, OKF, A3S Flow, Skill, and UI contributions publish together while unavailable host adapters fail closed.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d1118"/>
+      <stop offset="1" stop-color="#07090d"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f0b65b"/>
+      <stop offset="0.72" stop-color="#55dda2"/>
+      <stop offset="1" stop-color="#55dda2" stop-opacity="0.08"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M1 1 9 5 1 9" fill="none" stroke="#7d8796" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="520" rx="26" fill="url(#background)"/>
+  <rect x="1" y="1" width="1198" height="518" rx="25" fill="none" stroke="#252c37"/>
+
+  <g id="identity" transform="translate(54 42)">
+    <rect width="46" height="46" rx="10" fill="#f0b65b"/>
+    <path d="m11 33 11-20h3.6L37 33h-6.2l-1.9-3.7H18.2L16.3 33Zm10-9.3h5.2l-2.6-5Z" fill="#080b10"/>
+    <text x="64" y="22" fill="#f4f7fb" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="22" font-weight="750" letter-spacing="3">A3S</text>
+    <text x="64" y="45" fill="#929dad" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" letter-spacing="1.2">UMBRELLA CLI · CODE HOST</text>
+  </g>
+
+  <g id="platforms" transform="translate(820 48)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">
+    <circle cx="7" cy="7" r="5" fill="#55dda2"/>
+    <text x="22" y="13" fill="#c7cfda">LINUX · MACOS</text>
+    <circle cx="194" cy="7" r="5" fill="#f0b65b"/>
+    <text x="209" y="13" fill="#c7cfda">WINDOWS PREVIEW</text>
+  </g>
+
+  <g id="headline" transform="translate(54 142)">
+    <text fill="#f4f7fb" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="54" font-weight="780" letter-spacing="-1.8">ONE CLI FOR CODE, WEB,</text>
+    <text y="61" fill="#f4f7fb" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="54" font-weight="780" letter-spacing="-1.8">AND </text>
+    <text x="118" y="61" fill="#f0b65b" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="54" font-weight="780" letter-spacing="-1.8">LIVE COGNITIVE PACKAGES.</text>
+    <rect y="86" width="1092" height="2" fill="url(#rule)"/>
+    <text y="119" fill="#aeb7c4" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20">Review once. Publish one capability generation. Let resident TUI and Web sessions converge without restarting.</text>
+  </g>
+
+  <g id="proof" transform="translate(54 300)">
+    <rect width="1092" height="158" rx="18" fill="#0c1016" stroke="#3a424f" stroke-width="1.5"/>
+
+    <g id="terminal" transform="translate(24 20)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+      <text fill="#929dad" font-size="16" font-weight="700" letter-spacing="1.1">SAME HOST · SAME WATCH</text>
+      <text y="38" fill="#55dda2" font-size="20">$</text>
+      <text x="24" y="38" fill="#f4f7fb" font-size="20" font-weight="650">a3s code</text>
+      <text x="216" y="38" fill="#9bc1ff" font-size="18">TUI</text>
+      <text y="72" fill="#55dda2" font-size="20">$</text>
+      <text x="24" y="72" fill="#f4f7fb" font-size="20" font-weight="650">a3s web -d</text>
+      <text x="216" y="72" fill="#9bc1ff" font-size="18">WEB</text>
+      <text y="106" fill="#f0b65b" font-size="20">$</text>
+      <text x="24" y="106" fill="#f4f7fb" font-size="20" font-weight="650">a3s plugin install …</text>
+      <text x="250" y="106" fill="#f5d49d" font-size="18">REVIEW</text>
+    </g>
+
+    <path d="M356 79 H408" fill="none" stroke="#7d8796" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <g id="generation" transform="translate(424 20)">
+      <text fill="#929dad" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="700" letter-spacing="1.1">EXACT-GENERATION CUTOVER</text>
+      <rect y="26" width="214" height="74" rx="13" fill="#132019" stroke="#55dda2" stroke-width="1.5"/>
+      <circle cx="27" cy="50" r="7" fill="#55dda2"/>
+      <text x="46" y="55" fill="#dff9ed" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="20" font-weight="750">A3S USE</text>
+      <text x="27" y="84" fill="#8ce9bd" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18">GEN 42 → GEN 43</text>
+      <text y="128" fill="#929dad" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="18">install · upgrade · uninstall</text>
+    </g>
+
+    <path d="M660 79 H706" fill="none" stroke="#7d8796" stroke-width="1.8" marker-end="url(#arrow)"/>
+
+    <g id="surfaces" transform="translate(722 20)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700">
+      <text fill="#929dad" font-size="16" letter-spacing="1.1">ONE PACKAGE · SIX SURFACES</text>
+      <g transform="translate(0 26)">
+        <rect width="102" height="42" rx="9" fill="#5794ff" fill-opacity="0.12" stroke="#5794ff"/>
+        <text x="51" y="27" text-anchor="middle" fill="#9bc1ff">TOOL</text>
+      </g>
+      <g transform="translate(116 26)">
+        <rect width="102" height="42" rx="9" fill="#55dda2" fill-opacity="0.1" stroke="#55dda2"/>
+        <text x="51" y="27" text-anchor="middle" fill="#8ce9bd">MCP</text>
+      </g>
+      <g transform="translate(232 26)">
+        <rect width="102" height="42" rx="9" fill="#f0b65b" fill-opacity="0.1" stroke="#f0b65b"/>
+        <text x="51" y="27" text-anchor="middle" fill="#f5d49d">OKF</text>
+      </g>
+      <g transform="translate(0 82)">
+        <rect width="144" height="42" rx="9" fill="#b982ff" fill-opacity="0.12" stroke="#b982ff"/>
+        <text x="72" y="27" text-anchor="middle" fill="#d5b5ff">A3S FLOW</text>
+      </g>
+      <g transform="translate(158 82)">
+        <rect width="102" height="42" rx="9" fill="#f0b65b" fill-opacity="0.1" stroke="#f0b65b"/>
+        <text x="51" y="27" text-anchor="middle" fill="#f5d49d">SKILL</text>
+      </g>
+      <g transform="translate(274 82)">
+        <rect width="64" height="42" rx="9" fill="#f4f7fb" fill-opacity="0.06" stroke="#aab4c2"/>
+        <text x="32" y="27" text-anchor="middle" fill="#e4e9f0">UI</text>
+      </g>
+    </g>
+  </g>
+
+  <g transform="translate(54 492)" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" font-weight="650">
+    <text fill="#55dda2">READY EVIDENCE PUBLISHES</text>
+    <text x="254" fill="#4c5665">|</text>
+    <text x="282" fill="#f0b65b">MISSING ADAPTERS FAIL CLOSED</text>
+    <text x="1092" text-anchor="end" fill="#929dad">A3S-LAB / CLI</text>
+  </g>
+</svg>
