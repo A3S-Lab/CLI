@@ -40,6 +40,7 @@ pub struct PluginMarketplaceSource {
     pub url: String,
     pub source_kind: PluginMarketplaceSourceKind,
     pub configured: bool,
+    pub enabled: bool,
     pub verified: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_target: Option<String>,

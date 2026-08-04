@@ -685,6 +685,87 @@ fn registry_refresh_rejects_wrong_roots_and_expired_metadata() {
 }
 
 #[test]
+fn registry_disable_and_stable_name_replace_control_network_resolution() {
+    let temp = TempWorkspace::new("registry-source-controls");
+    let first_repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 1, FUTURE);
+    let first_server = TestServer::start(first_repository.routes.clone());
+    let first_url = localhost_url(&first_server);
+    let second_repository = TestRepository::new(extension_archive(PACKAGE_VERSION), 2, FUTURE);
+    let second_server = TestServer::start(second_repository.routes.clone());
+    let second_url = localhost_url(&second_server);
+    let config = temp.path("config/config.acl");
+    let use_bin = temp.path("use-bin");
+    make_use_fixture(&use_bin, &temp.path("unused.log"));
+    add_registry(
+        &temp,
+        &config,
+        &use_bin,
+        &first_url,
+        &format!("sha256:{}", first_repository.root_sha256),
+    );
+
+    let disabled = run(
+        &temp,
+        &config,
+        &use_bin,
+        &["registry", "disable", "localhost", "--yes"],
+    );
+    assert!(disabled.status.success(), "{disabled:?}");
+    assert_eq!(json(&disabled)["data"]["registry"]["enabled"], false);
+    first_server.clear_requests();
+    let rejected = run(
+        &temp,
+        &config,
+        &use_bin,
+        &["install", "use/a3s/science", "--dry-run"],
+    );
+    assert!(!rejected.status.success(), "{rejected:?}");
+    assert!(json(&rejected)["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("no enabled package registry")));
+    assert!(first_server.requests().is_empty());
+
+    let enabled = run(
+        &temp,
+        &config,
+        &use_bin,
+        &["registry", "enable", "localhost", "--yes"],
+    );
+    assert!(enabled.status.success(), "{enabled:?}");
+    let replaced = run(
+        &temp,
+        &config,
+        &use_bin,
+        &[
+            "registry",
+            "replace",
+            "localhost",
+            &second_url,
+            "--trust-root",
+            &format!("sha256:{}", second_repository.root_sha256),
+            "--yes",
+        ],
+    );
+    assert!(replaced.status.success(), "{replaced:?}");
+    let replaced = json(&replaced);
+    assert_eq!(replaced["data"]["registry"]["name"], "localhost");
+    assert_eq!(replaced["data"]["registry"]["url"], second_url);
+    first_server.clear_requests();
+    second_server.clear_requests();
+
+    let refreshed = run(
+        &temp,
+        &config,
+        &use_bin,
+        &["registry", "refresh", "localhost"],
+    );
+    assert!(refreshed.status.success(), "{refreshed:?}");
+    assert!(first_server.requests().is_empty());
+    assert!(!second_server.requests().is_empty());
+    assert_no_target_request(&second_server);
+}
+
+#[test]
 #[ignore = "requires A3S_USE_E2E_BIN pointing to a real a3s-use binary"]
 fn full_stack_registry_install_and_upgrade_activate_only_reviewed_targets() {
     const NEXT_VERSION: &str = "0.2.0";

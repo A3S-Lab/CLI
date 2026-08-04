@@ -34,6 +34,12 @@ pub(crate) enum RegistryCommand {
     Show(RegistryNameArgs),
     /// Trust and add a registry URL.
     Add(RegistryAddArgs),
+    /// Atomically replace one registry URL and trust root without changing its name.
+    Replace(RegistryReplaceArgs),
+    /// Enable an explicitly added registry.
+    Enable(RegistryMutationArgs),
+    /// Disable an explicitly added registry without deleting its trust configuration.
+    Disable(RegistryMutationArgs),
     /// Remove an explicitly added registry.
     Remove(RegistryRemoveArgs),
     /// Check registry reachability and metadata freshness.
@@ -54,6 +60,29 @@ pub(crate) struct RegistryAddArgs {
     #[arg(long, value_name = "FILE_OR_DIGEST")]
     pub trust_root: String,
     /// Accept the explicit trust operation without prompting.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct RegistryReplaceArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    #[arg(value_name = "URL")]
+    pub url: String,
+    /// Replacement TUF root file or sha256 digest establishing trust.
+    #[arg(long, value_name = "FILE_OR_DIGEST")]
+    pub trust_root: String,
+    /// Accept the explicit trust replacement without prompting.
+    #[arg(long)]
+    pub yes: bool,
+}
+
+#[derive(Clone, Debug, Args)]
+pub(crate) struct RegistryMutationArgs {
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Accept the source-state mutation without prompting.
     #[arg(long)]
     pub yes: bool,
 }

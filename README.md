@@ -186,6 +186,11 @@ a3s registry add https://packages.example.org/a3s/ \
   --trust-root ./root.json \
   --yes
 a3s registry refresh packages
+a3s registry disable packages --yes
+a3s registry replace packages https://mirror.example.org/a3s/ \
+  --trust-root ./mirror-root.json \
+  --yes
+a3s registry enable packages --yes
 ```
 
 Dependency declarations contain only package IDs and SemVer requirements. The
@@ -194,6 +199,14 @@ metadata versions, target, archive digest, manifest digest, and dependency
 edge. An installed receipt remains pinned to that Registry identity; changing
 or removing it blocks upgrades until the source is restored or the package is
 explicitly migrated or reinstalled.
+
+`disable` removes a source from Marketplace browsing, root/dependency
+resolution, and refresh without deleting its ACL or trust material. `replace`
+keeps the stable Registry name and current enabled state while atomically
+switching URL and trust identity. File-backed TUF roots are copied into a
+content-addressed, symlink-safe host directory before the ACL cutover. Neither
+operation rewrites package receipts, so an installed package whose recorded
+source no longer matches continues to fail closed on upgrade.
 
 ### One A3S Flow model
 

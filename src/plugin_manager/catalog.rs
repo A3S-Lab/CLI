@@ -57,12 +57,27 @@ pub(super) async fn marketplace(
     .await;
 
     for record in records {
+        if !record.enabled {
+            registries.push(PluginMarketplaceSource {
+                name: record.name,
+                url: record.url,
+                source_kind: PluginMarketplaceSourceKind::Registry,
+                configured: record.configured,
+                enabled: false,
+                verified: false,
+                host_target: None,
+                metadata: None,
+                error: None,
+            });
+            continue;
+        }
         if !record.configured {
             registries.push(PluginMarketplaceSource {
                 name: record.name,
                 url: record.url,
                 source_kind: PluginMarketplaceSourceKind::Registry,
                 configured: false,
+                enabled: true,
                 verified: false,
                 host_target: None,
                 metadata: None,
@@ -387,6 +402,7 @@ async fn add_release_bundles(
                     url: "a3s-use://release-bundles".to_string(),
                     source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
                     configured: true,
+                    enabled: true,
                     verified: false,
                     host_target: None,
                     metadata: None,
@@ -443,6 +459,7 @@ async fn add_release_bundles(
                 url: "a3s-use://release-bundles".to_string(),
                 source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
                 configured: true,
+                enabled: true,
                 verified: true,
                 host_target: Some(format!(
                     "{}-{}",
@@ -469,6 +486,7 @@ async fn add_release_bundles(
             url: "a3s-use://release-bundles".to_string(),
             source_kind: PluginMarketplaceSourceKind::ReleaseBundle,
             configured: true,
+            enabled: true,
             verified: false,
             host_target: None,
             metadata: None,
@@ -486,6 +504,7 @@ fn verified_registry_source(
         url: trusted.base_url().to_string(),
         source_kind: PluginMarketplaceSourceKind::Registry,
         configured: true,
+        enabled: true,
         verified: true,
         host_target: Some(snapshot.host_target.clone()),
         metadata: Some(PluginMarketplaceSourceMetadata {
@@ -509,6 +528,7 @@ fn failed_registry_source(name: String, url: String, error: String) -> PluginMar
         url,
         source_kind: PluginMarketplaceSourceKind::Registry,
         configured: true,
+        enabled: true,
         verified: false,
         host_target: None,
         metadata: None,

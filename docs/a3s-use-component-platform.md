@@ -177,6 +177,11 @@ a3s registry add https://packages.example.org/a3s/ \
   --trust-root ./root.json \
   --yes
 a3s registry refresh packages
+a3s registry disable packages --yes
+a3s registry replace packages https://mirror.example.org/a3s/ \
+  --trust-root ./mirror-root.json \
+  --yes
+a3s registry enable packages --yes
 ```
 
 The package engine accepts a root Registry plus a bounded set of dependency
@@ -193,14 +198,17 @@ The canonical lock freezes, per package:
 - expanded package and manifest digests; and
 - host target and A3S Use compatibility.
 
-An installed receipt remains bound to the selected Registry identity. Removing
-or changing that source blocks upgrade. The operator must restore the source or
-perform an explicit migration/reinstall; Use never searches another Registry
-implicitly.
+An installed receipt remains bound to the selected Registry identity. Removing,
+disabling, or replacing that source blocks upgrade. The operator must restore
+and enable the exact source or perform an explicit migration/reinstall; Use
+never searches another Registry implicitly.
 
-The umbrella CLI currently supports named add, remove, list, and refresh.
-Stable-name in-place replace and enable/disable require a separate command and
-are not described as shipped behavior.
+The umbrella CLI supports named add, remove, list, show, refresh, stable-name
+replace, and enable/disable. Disabled sources remain visible to inspection and
+Marketplace source status but are never browsed or admitted into resolution.
+Replacement writes a content-addressed managed root before atomically switching
+the Registry ACL, preserves the source enabled state, and never mutates package
+receipt provenance.
 
 ## 7. One A3S Flow model
 
